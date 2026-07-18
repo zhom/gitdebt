@@ -1,0 +1,162 @@
+---
+import { Menu, X } from "lucide-react";
+import Brand from "@/components/Brand.astro";
+
+const navLinks = [
+  { label: "How it works", href: "/#how-it-works" },
+  { label: "Compare", href: "/compare" },
+  { label: "Categories", href: "/compare#categories" },
+  { label: "Leaderboard", href: "/leaderboard" },
+  { label: "Badges", href: "/badges" },
+  { label: "Extension", href: "/#extension" },
+];
+---
+
+<a
+  href="#main-content"
+  class="fixed top-3 left-3 z-999 -translate-y-20 rounded-md bg-primary px-3 py-2 text-sm font-medium text-primary-foreground focus:translate-y-0 focus-visible:outline-2 focus-visible:outline-offset-2 focus-visible:outline-ring"
+>
+  Skip to content
+</a>
+
+<header
+  class="sticky top-0 z-50 border-b border-border bg-background/80 backdrop-blur-md"
+>
+  <div class="mx-auto grid h-16 max-w-6xl grid-cols-[1fr_auto_1fr] items-center px-6">
+    <a
+      href="/"
+      aria-label="gitdebt homepage"
+      class="inline-flex items-center rounded-md focus-visible:outline-2 focus-visible:outline-offset-4 focus-visible:outline-ring"
+    >
+      <Brand />
+    </a>
+
+    <nav class="hidden items-center gap-1 lg:flex">
+      {
+        navLinks.map((link) => (
+          <a
+            href={link.href}
+            class="rounded-md px-3 py-2 text-sm text-muted-foreground hover:bg-accent hover:text-accent-foreground focus-visible:outline-2 focus-visible:outline-offset-2 focus-visible:outline-ring"
+          >
+            {link.label}
+          </a>
+        ))
+      }
+    </nav>
+
+    <div class="flex items-center justify-self-end">
+      <details class="relative lg:hidden" data-mobile-menu data-state="closed">
+        <summary
+          class="grid size-12 cursor-pointer list-none place-items-center rounded-md text-foreground hover:bg-accent focus-visible:outline-2 focus-visible:outline-offset-2 focus-visible:outline-ring [&::-webkit-details-marker]:hidden"
+          aria-label="Toggle menu"
+          aria-controls="mobile-navigation"
+          aria-expanded="false"
+        >
+          <Menu
+            className="mobile-nav-icon mobile-nav-icon-menu size-6"
+            strokeWidth={1.75}
+          />
+          <X
+            className="mobile-nav-icon mobile-nav-icon-close size-6"
+            strokeWidth={1.75}
+          />
+        </summary>
+        <div
+          class="mobile-nav-panel absolute right-0 mt-2 w-56 origin-top-right rounded-lg border border-border bg-popover p-2 text-popover-foreground shadow-lg shadow-black/5 dark:shadow-black/40"
+          data-mobile-menu-panel
+        >
+          <nav id="mobile-navigation" class="flex flex-col">
+            {
+              navLinks.map((link) => (
+                <a
+                  href={link.href}
+                  class="rounded-md px-3 py-2 text-base text-muted-foreground hover:bg-accent hover:text-accent-foreground focus-visible:outline-2 focus-visible:-outline-offset-2 focus-visible:outline-ring"
+                >
+                  {link.label}
+                </a>
+              ))
+            }
+          </nav>
+        </div>
+      </details>
+    </div>
+  </div>
+</header>
+
+<script>
+  const CLOSE_MS = 140;
+
+  function installMobileMenu(details: HTMLDetailsElement) {
+    const summary = details.querySelector("summary");
+    const panel = details.querySelector<HTMLElement>("[data-mobile-menu-panel]");
+    if (!summary || !panel) return;
+    const trigger = summary;
+
+    let closeTimer: ReturnType<typeof setTimeout> | null = null;
+    let openFrame: number | null = null;
+    let settleFrame: number | null = null;
+
+    function cancelOpenFrames() {
+      if (openFrame !== null) cancelAnimationFrame(openFrame);
+      if (settleFrame !== null) cancelAnimationFrame(settleFrame);
+      openFrame = null;
+      settleFrame = null;
+    }
+
+    function openMenu() {
+      if (closeTimer) clearTimeout(closeTimer);
+      closeTimer = null;
+      cancelOpenFrames();
+      details.open = true;
+      details.dataset.state = "closed";
+      trigger.setAttribute("aria-expanded", "true");
+      openFrame = requestAnimationFrame(() => {
+        openFrame = null;
+        settleFrame = requestAnimationFrame(() => {
+          settleFrame = null;
+          if (trigger.getAttribute("aria-expanded") === "true") {
+            details.dataset.state = "open";
+          }
+        });
+      });
+    }
+
+    function closeMenu(returnFocus = false) {
+      if (!details.open) return;
+      if (closeTimer) clearTimeout(closeTimer);
+      cancelOpenFrames();
+      details.dataset.state = "closed";
+      trigger.setAttribute("aria-expanded", "false");
+      closeTimer = setTimeout(() => {
+        details.open = false;
+        closeTimer = null;
+        if (returnFocus) trigger.focus();
+      }, CLOSE_MS);
+    }
+
+    trigger.addEventListener("click", (event) => {
+      event.preventDefault();
+      if (trigger.getAttribute("aria-expanded") === "true") closeMenu();
+      else openMenu();
+    });
+
+    document.addEventListener("pointerdown", (event) => {
+      if (!details.contains(event.target as Node)) closeMenu();
+    });
+
+    document.addEventListener("keydown", (event) => {
+      if (event.key === "Escape" && details.open) {
+        event.preventDefault();
+        closeMenu(true);
+      }
+    });
+
+    panel.addEventListener("click", (event) => {
+      if ((event.target as Element).closest("a")) closeMenu();
+    });
+  }
+
+  document
+    .querySelectorAll<HTMLDetailsElement>("[data-mobile-menu]")
+    .forEach(installMobileMenu);
+</script>

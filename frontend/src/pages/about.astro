@@ -1,0 +1,152 @@
+---
+export const prerender = true;
+
+import "@/styles/globals.css";
+import BaseHead from "@/components/BaseHead.astro";
+import Seo from "@/components/Seo.astro";
+import SiteHeader from "@/components/SiteHeader.astro";
+import SiteFooter from "@/components/SiteFooter.astro";
+import { staticApiBase } from "@/lib/static-api-base";
+
+const apiBase = staticApiBase();
+
+const title = "About & methodology · gitdebt";
+const description =
+  "How gitdebt builds GitHub star-history charts and computes repo health from public git history, including churn, bug magnets, contributors, and TODO trends.";
+const ogImage = `${apiBase}/api/og.png`;
+
+const stats = [
+  {
+    term: "Star history",
+    desc: "We page through a repo's stargazers and keep only the timestamp of each star, then plot the cumulative count over time. You can view it against calendar dates or aligned to days-since-first-star to compare growth shapes. Several repos can be overlaid on shared axes, and the chart embeds in a README.",
+  },
+  {
+    term: "Bug-magnet files",
+    desc: "From the commit history we count how often each file appears in fix-type commits (commits whose message signals a bug fix). Files at the top of that list are the parts of the codebase that keep breaking.",
+  },
+  {
+    term: "Churn — most-changed files",
+    desc: "A straight count of how many commits have touched each file across the project's life. High-churn files are where the weight and instability concentrate.",
+  },
+  {
+    term: "Contributors",
+    desc: "Everyone who has authored commits, aggregated from the git log so it reflects actual shipped code rather than profile metadata.",
+  },
+  {
+    term: "Language lines",
+    desc: "A per-language lines-of-code breakdown of the current HEAD, measured with tokei over a materialized checkout — so you can see where the codebase's mass sits.",
+  },
+  {
+    term: "Commit heatmap",
+    desc: "The last 52 weeks of commit activity, bucketed by day, to show how steadily (or sporadically) the project moves.",
+  },
+  {
+    term: "TODO / FIXME trend",
+    desc: "A running count of debt markers (TODO, FIXME, and similar) in source over time, so you can tell whether the backlog of loose ends is growing or shrinking.",
+  },
+];
+
+const jsonLd = {
+  "@context": "https://schema.org",
+  "@type": "AboutPage",
+  name: "About gitdebt",
+  url: `${(Astro.site ?? new URL("https://gitdebt.com")).href.replace(/\/$/, "")}/about`,
+  description,
+};
+---
+
+<!doctype html>
+<html lang="en">
+  <head>
+    <BaseHead />
+    <Seo
+      title={title}
+      description={description}
+      canonicalPath="/about"
+      ogImage={ogImage}
+      jsonLd={jsonLd}
+    />
+  </head>
+  <body>
+    <div class="isolate flex min-h-dvh flex-col">
+      <SiteHeader />
+
+      <main id="main-content" class="mx-auto flex w-full max-w-3xl flex-1 flex-col gap-10 px-6 py-12">
+        <nav aria-label="Breadcrumb" class="font-mono text-xs text-muted-foreground">
+          <a href="/" class="hover:text-foreground">gitdebt</a>
+          <span class="px-1.5 text-border" aria-hidden="true">/</span>
+          <span class="text-foreground">about</span>
+        </nav>
+
+        <header class="space-y-3">
+          <p class="font-mono text-xs tracking-wide text-muted-foreground uppercase">
+            About
+          </p>
+          <h1 class="text-3xl font-semibold tracking-tight text-balance sm:text-4xl">
+            How gitdebt works
+          </h1>
+          <p class="max-w-[60ch] text-lg text-pretty text-muted-foreground">
+            gitdebt is a faster, sharper alternative to star-history.com — it
+            charts any repo's star growth and adds repo-debt analytics read
+            from the codebase itself, not just the star count.
+          </p>
+        </header>
+
+        <section class="space-y-4">
+          <h2 class="text-xl font-semibold tracking-tight">What we compute</h2>
+          <p class="max-w-[60ch] text-base text-pretty text-muted-foreground sm:text-sm">
+            Star history comes from GitHub's API; the repo-debt stats come from
+            a shallow git clone analyzed on our side. Each signal is a pure,
+            unit-tested function over that data.
+          </p>
+          <dl class="space-y-6">
+            {
+              stats.map((item) => (
+                <div class="space-y-1.5">
+                  <dt class="text-base font-medium">{item.term}</dt>
+                  <dd class="max-w-[68ch] text-base text-pretty text-muted-foreground sm:text-sm">
+                    {item.desc}
+                  </dd>
+                </div>
+              ))
+            }
+          </dl>
+        </section>
+
+        <section class="space-y-4">
+          <h2 class="text-xl font-semibold tracking-tight">Freshness & caching</h2>
+          <p class="max-w-[68ch] text-base text-pretty text-muted-foreground sm:text-sm">
+            The first time a repo is requested it's cold: star pages are queued
+            and drained by background workers under strict GitHub rate-limit
+            discipline, and the git clone is analyzed to fill the repo-debt
+            charts. Because of that, a brand-new repo's stat charts show a
+            "gathering" state for a few moments and then fill in on their own —
+            no reload needed.
+          </p>
+          <p class="max-w-[68ch] text-base text-pretty text-muted-foreground sm:text-sm">
+            Once analyzed, results are cached and served from the edge, so
+            repeat views are near-instant. Popular repos refresh more often;
+            our browser extension reports the repos people are actively viewing
+            so their data stays current. Very large repos keep backfilling their
+            full history in the background — their numbers climb until the
+            backfill settles.
+          </p>
+        </section>
+
+        <section class="space-y-4">
+          <h2 class="text-xl font-semibold tracking-tight">
+            What gitdebt does not do
+          </h2>
+          <p class="max-w-[68ch] text-base text-pretty text-muted-foreground sm:text-sm">
+            gitdebt does not flag stars as fake, real, or suspicious, and it
+            doesn't score individual accounts. That can't be done correctly
+            without privileged access to GitHub's full dataset, so we don't
+            pretend to. For star history we only ever use stargazer timestamps.
+          </p>
+        </section>
+      </main>
+
+      <SiteFooter />
+    </div>
+  </body>
+</html>

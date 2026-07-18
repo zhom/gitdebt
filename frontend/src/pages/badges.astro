@@ -1,0 +1,98 @@
+---
+export const prerender = true;
+
+import "@/styles/globals.css";
+import BaseHead from "@/components/BaseHead.astro";
+import Seo from "@/components/Seo.astro";
+import SiteHeader from "@/components/SiteHeader.astro";
+import SiteFooter from "@/components/SiteFooter.astro";
+import { BadgeStudio } from "@/components/BadgeStudio";
+import { buttonVariants } from "@/components/ui/button";
+import { staticApiBase } from "@/lib/static-api-base";
+
+const apiBase = staticApiBase();
+
+const site = (Astro.site ?? new URL("https://gitdebt.com")).href.replace(/\/$/, "");
+
+const exampleOwner = "facebook";
+const exampleRepo = "react";
+
+const title = "GitHub README badges · gitdebt";
+const description =
+  "Build a GitHub README badge with stars, forks, and package downloads. Choose flat, modern, glass, or terminal styles in light or dark.";
+const ogImage = `${apiBase}/api/og.png`;
+
+const jsonLd = {
+  "@context": "https://schema.org",
+  "@type": "WebPage",
+  name: "GitHub README badges",
+  url: `${site}/badges`,
+  description,
+};
+---
+
+<!doctype html>
+<html lang="en">
+  <head>
+    <BaseHead />
+    <Seo
+      title={title}
+      description={description}
+      canonicalPath="/badges"
+      ogImage={ogImage}
+      jsonLd={jsonLd}
+    />
+  </head>
+  <body>
+    <div class="isolate flex min-h-dvh flex-col">
+      <SiteHeader />
+
+      <main id="main-content" class="mx-auto flex w-full max-w-5xl flex-1 flex-col gap-10 px-6 py-12">
+        <nav aria-label="Breadcrumb" class="font-mono text-xs text-muted-foreground">
+          <a href="/" class="hover:text-foreground">gitdebt</a>
+          <span class="px-1.5 text-border" aria-hidden="true">/</span>
+          <span class="text-foreground">badges</span>
+        </nav>
+
+        <header class="space-y-2">
+          <p class="font-mono text-xs tracking-wide text-muted-foreground uppercase">
+            README badges
+          </p>
+          <h1 class="text-3xl font-semibold tracking-tight text-balance sm:text-4xl">
+            Build a stats badge
+          </h1>
+          <p class="max-w-[60ch] text-lg text-pretty text-muted-foreground">
+            Stars, forks, and package downloads in one compact badge. Pick a
+            style, toggle animation, and copy a snippet for your README. This
+            demo points at <span class="font-mono">{exampleOwner}/{exampleRepo}</span> —
+            open any repo to build its own.
+          </p>
+        </header>
+
+        <BadgeStudio
+          client:load
+          owner={exampleOwner}
+          repo={exampleRepo}
+          apiBase={apiBase}
+        />
+
+        <div class="rounded-xl border border-border bg-muted/30 p-6">
+          <p class="text-base text-pretty text-muted-foreground sm:text-sm">
+            Want a badge for a different repo? Open its page and scroll to the
+            Badges section — the studio is wired to that repo.
+          </p>
+          <div class="mt-4">
+            <a
+              href={`/${exampleOwner}/${exampleRepo}`}
+              class={buttonVariants({ variant: "outline", size: "lg" })}
+            >
+              View {exampleOwner}/{exampleRepo}
+            </a>
+          </div>
+        </div>
+      </main>
+
+      <SiteFooter />
+    </div>
+  </body>
+</html>

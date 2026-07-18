@@ -1,0 +1,408 @@
+---
+import "@/styles/globals.css";
+import { staticCatalogRequired } from "@/lib/build-catalog";
+import { staticApiBase } from "@/lib/static-api-base";
+import BaseHead from "@/components/BaseHead.astro";
+import Seo from "@/components/Seo.astro";
+import SiteHeader from "@/components/SiteHeader.astro";
+import SiteFooter from "@/components/SiteFooter.astro";
+import { CATEGORIES } from "@/data/categories";
+import { formatCompact } from "@/lib/star-insights";
+
+const apiBase = staticApiBase();
+const site = (Astro.site ?? new URL("https://gitdebt.com")).href.replace(/\/$/, "");
+
+type LeaderboardRow = {
+  rank: number;
+  repo: string;
+  stars: number;
+  velocity: number;
+};
+type LeaderboardResponse = {
+  metric: string;
+  page: number;
+  per_page: number;
+  window_days: number;
+  repos: LeaderboardRow[];
+};
+
+async function fetchBoard(metric: "stars" | "velocity"): Promise<LeaderboardResponse | null> {
+  try {
+    const res = await fetch(
+      `${apiBase}/api/leaderboard.json?metric=${metric}&per=50&page=0`,
+      {
+        headers: { accept: "application/json" },
+        signal: AbortSignal.timeout(5_000),
+      },
+    );
+    if (!res.ok) return null;
+    return (await res.json()) as LeaderboardResponse;
+  } catch {
+    return null;
+  }
+}
+
+const [velocityBoard, starsBoard, totalAnalyzed] = await Promise.all([
+  fetchBoard("velocity"),
+  fetchBoard("stars"),
+  (async () => {
+    try {
+      const res = await fetch(`${apiBase}/api/sitemap/repos?page=0&per=1`, {
+        headers: { accept: "application/json" },
+        signal: AbortSignal.timeout(5_000),
+      });
+      if (!res.ok) return null;
+      const j = (await res.json()) as { total?: number };
+      return typeof j.total === "number" ? j.total : null;
+    } catch {
+      return null;
+    }
+  })(),
+]);
+
+const trending = velocityBoard?.repos ?? [];
+const mostStarred = starsBoard?.repos ?? [];
+const loaded = velocityBoard !== null || starsBoard !== null;
+const hasRows = trending.length > 0 || mostStarred.length > 0;
+const windowDays = velocityBoard?.window_days ?? 7;
+
+if (staticCatalogRequired() && !loaded) {
+  throw new Error("Static leaderboard refresh failed: backend unavailable");
+}
+
+const top = trending[0] ?? null;
+const topStarred = mostStarred[0] ?? null;
+const runnerUp = trending[1] ?? null;
+
+const vsPair =
+  top && runnerUp
+    ? [top.repo, runnerUp.repo].sort((a, b) => (a < b ? -1 : 1))
+    : null;
+const vsLabel = top && runnerUp ? `${top.repo} vs ${runnerUp.repo}` : null;
+
+const updatedDate = new Date().toLocaleDateString("en-US", {
+  month: "long",
+  day: "numeric",
+  year: "numeric",
+  timeZone: "UTC",
+});
+const year = new Date().getUTCFullYear();
+
+const title = `Fastest-growing GitHub repos (${year}) · gitdebt`;
+const description = top
+  ? `${top.repo} leads the gitdebt leaderboard with ${top.velocity.toLocaleString()} stars gained in ${windowDays} days. See the fastest-growing and most-starred repos, from public star timestamps.`
+  : `Fastest-growing and most-starred GitHub repos, ranked from public star timestamps across every repo gitdebt has analyzed. Updated daily.`;
+
+const canonicalPath = "/leaderboard";
+const ogImage = `${apiBase}/api/og.png`;
+
+const noindex = !loaded || !hasRows;
+
+const featuredCategories = CATEGORIES.slice(0, 8);
+
+const jsonLd: Record<string, unknown>[] = [
+  {
+    "@context": "https://schema.org",
+    "@type": "WebPage",
+    name: "GitHub repo leaderboard — fastest-growing & most-starred",
+    url: `${site}/leaderboard`,
+    description,
+    dateModified: new Date().toISOString().slice(0, 10),
+  },
+  {
+    "@context": "https://schema.org",
+    "@type": "BreadcrumbList",
+    itemListElement: [
+      { "@type": "ListItem", position: 1, name: "gitdebt", item: `${site}/` },
+      { "@type": "ListItem", position: 2, name: "Leaderboard", item: `${site}/leaderboard` },
+    ],
+  },
+];
+if (trending.length > 0) {
+  jsonLd.push({
+    "@context": "https://schema.org",
+    "@type": "ItemList",
+    name: `Fastest-growing GitHub repos (trailing ${windowDays} days)`,
+    itemListOrder: "https://schema.org/ItemListOrderDescending",
+    numberOfItems: trending.length,
+    itemListElement: trending.slice(0, 25).map((r) => ({
+      "@type": "ListItem",
+      position: r.rank,
+      name: r.repo,
+      url: `${site}/${r.repo}`,
+    })),
+  });
+}
+if (mostStarred.length > 0) {
+  jsonLd.push({
+    "@context": "https://schema.org",
+    "@type": "ItemList",
+    name: "Most-starred repos on gitdebt",
+    itemListOrder: "https://schema.org/ItemListOrderDescending",
+    numberOfItems: mostStarred.length,
+    itemListElement: mostStarred.slice(0, 25).map((r) => ({
+      "@type": "ListItem",
+      position: r.rank,
+      name: r.repo,
+      url: `${site}/${r.repo}`,
+    })),
+  });
+}
+if (top && topStarred) {
+  jsonLd.push({
+    "@context": "https://schema.org",
+    "@type": "FAQPage",
+    mainEntity: [
+      {
+        "@type": "Question",
+        name: "What is the fastest-growing repo on gitdebt right now?",
+        acceptedAnswer: {
+          "@type": "Answer",
+          text: `${top.repo} is the fastest-growing repo gitdebt tracks, gaining ${top.velocity.toLocaleString()} GitHub stars in the last ${windowDays} days (as of ${updatedDate}). The full ranking is computed from public stargazer timestamps.`,
+        },
+      },
+      {
+        "@type": "Question",
+        name: "How is the gitdebt leaderboard computed?",
+        acceptedAnswer: {
+          "@type": "Answer",
+          text: `Rankings come from public GitHub star timestamps cached by gitdebt${totalAnalyzed ? ` across the ${totalAnalyzed.toLocaleString()} repos it has analyzed` : ""}. "Fastest-growing" counts stars added in the trailing ${windowDays} days; "most-starred" ranks by current total stars. No repo is ranked until its full star history has been fetched.`,
+        },
+      },
+    ],
+  });
+}
+
+const thClass =
+  "py-3 pr-4 font-mono text-xs font-medium tracking-wide text-muted-foreground uppercase whitespace-nowrap";
+const rowClass = "border-b border-border";
+---
+
+<!doctype html>
+<html lang="en">
+  <head>
+    <BaseHead />
+    <Seo
+      title={title}
+      description={description}
+      canonicalPath={canonicalPath}
+      ogImage={ogImage}
+      noindex={noindex}
+      jsonLd={jsonLd}
+    />
+  </head>
+  <body>
+    <div class="isolate flex min-h-dvh flex-col">
+      <SiteHeader />
+
+      <main id="main-content" class="mx-auto flex w-full max-w-5xl flex-1 flex-col gap-10 px-6 py-12">
+        <nav aria-label="Breadcrumb" class="font-mono text-xs text-muted-foreground">
+          <a href="/" class="hover:text-foreground">gitdebt</a>
+          <span class="px-1.5 text-border" aria-hidden="true">/</span>
+          <span class="text-foreground">leaderboard</span>
+        </nav>
+
+        <header class="space-y-3">
+          <p class="font-mono text-xs tracking-wide text-muted-foreground uppercase">
+            Repo leaderboard
+          </p>
+          <h1 class="text-3xl font-semibold tracking-tight text-balance sm:text-4xl">
+            Fastest-growing & most-starred repos
+          </h1>
+          {top ? (
+            <p class="max-w-[68ch] text-lg text-pretty text-muted-foreground">
+              <a href={`/${top.repo}`} class="font-medium text-foreground underline decoration-signal/60 underline-offset-4 hover:decoration-signal">{top.repo}</a>
+              {" "}is the fastest-growing repo gitdebt tracks right now, gaining{" "}
+              <span class="tabular-nums">{top.velocity.toLocaleString()}</span> stars in the
+              last {windowDays} days. Rankings are computed from public star timestamps
+              {totalAnalyzed
+                ? ` across the ${totalAnalyzed.toLocaleString()} repos gitdebt has analyzed`
+                : " across every repo gitdebt has analyzed"} — repos join the board once
+              their full star history is cached.
+            </p>
+          ) : (
+            <p class="max-w-[68ch] text-lg text-pretty text-muted-foreground">
+              Repos ranked by star growth and total stars, computed from public star
+              timestamps across every repo gitdebt has analyzed.
+            </p>
+          )}
+          <p class="font-mono text-base text-muted-foreground sm:text-xs">
+            Data updated {updatedDate} · refreshed continuously as star history is fetched
+          </p>
+          <nav class="flex flex-wrap gap-2 pt-1" aria-label="Leaderboard sections">
+            <a
+              href="#trending"
+              class="inline-flex min-h-11 items-center rounded-md border border-border bg-background px-3 py-2 font-mono text-base text-muted-foreground hover:bg-accent hover:text-accent-foreground sm:min-h-0 sm:py-1.5 sm:text-xs"
+            >
+              Trending ({windowDays}d)
+            </a>
+            <a
+              href="#most-starred"
+              class="inline-flex min-h-11 items-center rounded-md border border-border bg-background px-3 py-2 font-mono text-base text-muted-foreground hover:bg-accent hover:text-accent-foreground sm:min-h-0 sm:py-1.5 sm:text-xs"
+            >
+              Most starred
+            </a>
+          </nav>
+        </header>
+
+        {!loaded && (
+          <section class="card-panel p-6" role="alert">
+            <p class="font-mono text-xs tracking-wide text-destructive uppercase">
+              Leaderboard unavailable
+            </p>
+            <p class="mt-1.5 text-base text-muted-foreground sm:text-sm">
+              We couldn't load the rankings. Try again in a moment.
+            </p>
+          </section>
+        )}
+
+        {loaded && !hasRows && (
+          <section class="card-panel p-6">
+            <p class="text-base text-muted-foreground sm:text-sm">
+              No repos have a complete star history yet. Look up any repo to start
+              tracking it — it joins the leaderboard as soon as its history is cached.
+            </p>
+          </section>
+        )}
+
+        {trending.length > 0 && (
+          <section id="trending" class="scroll-mt-20 space-y-4">
+            <h2 class="flex items-center gap-2 text-xl font-semibold tracking-tight">
+              <span class="size-1.5 shrink-0 rounded-full bg-signal" aria-hidden="true"></span>
+              Trending: stars gained in the last {windowDays} days
+            </h2>
+            {vsPair && vsLabel && (
+              <p class="text-base text-muted-foreground sm:text-sm">
+                Neck and neck at the top?{" "}
+                <a
+                  href={`/vs/${vsPair[0]}/${vsPair[1]}`}
+                  class="underline decoration-signal/60 underline-offset-4 hover:decoration-signal"
+                >
+                  Compare {vsLabel} star history
+                </a>.
+              </p>
+            )}
+            <div class="-mx-6 -my-2 overflow-x-auto">
+              <div class="inline-block min-w-full px-6 py-2 align-middle">
+                <table class="w-full text-left text-base sm:text-sm">
+                  <thead>
+                    <tr class="border-b border-border">
+                      <th class={thClass}>#</th>
+                      <th class={thClass}>Repository</th>
+                      <th class={`${thClass} text-right`}>+{windowDays}d</th>
+                      <th class={`${thClass} text-right`}>Total stars</th>
+                    </tr>
+                  </thead>
+                  <tbody class="tabular-nums">
+                    {trending.map((r) => (
+                      <tr class={rowClass}>
+                        <td class="py-3 pr-4 font-mono text-base text-muted-foreground sm:text-xs">{r.rank}</td>
+                        <td class="py-3 pr-4">
+                          <a href={`/${r.repo}`} class="font-medium hover:text-signal">
+                            {r.repo}
+                          </a>
+                        </td>
+                        <td class="py-3 pr-4 text-right font-medium text-signal">
+                          +{r.velocity.toLocaleString()}
+                        </td>
+                        <td class="py-3 text-right text-muted-foreground">
+                          {formatCompact(r.stars)}
+                        </td>
+                      </tr>
+                    ))}
+                  </tbody>
+                </table>
+              </div>
+            </div>
+          </section>
+        )}
+
+        {mostStarred.length > 0 && (
+          <section id="most-starred" class="scroll-mt-20 space-y-4">
+            <h2 class="flex items-center gap-2 text-xl font-semibold tracking-tight">
+              <span class="size-1.5 shrink-0 rounded-full bg-signal" aria-hidden="true"></span>
+              Most-starred repos on gitdebt
+            </h2>
+            <div class="-mx-6 -my-2 overflow-x-auto">
+              <div class="inline-block min-w-full px-6 py-2 align-middle">
+                <table class="w-full text-left text-base sm:text-sm">
+                  <thead>
+                    <tr class="border-b border-border">
+                      <th class={thClass}>#</th>
+                      <th class={thClass}>Repository</th>
+                      <th class={`${thClass} text-right`}>Total stars</th>
+                      <th class={`${thClass} text-right`}>+{windowDays}d</th>
+                    </tr>
+                  </thead>
+                  <tbody class="tabular-nums">
+                    {mostStarred.map((r) => (
+                      <tr class={rowClass}>
+                        <td class="py-3 pr-4 font-mono text-base text-muted-foreground sm:text-xs">{r.rank}</td>
+                        <td class="py-3 pr-4">
+                          <a href={`/${r.repo}`} class="font-medium hover:text-signal">
+                            {r.repo}
+                          </a>
+                        </td>
+                        <td class="py-3 pr-4 text-right font-medium">
+                          {r.stars.toLocaleString()}
+                        </td>
+                        <td class="py-3 text-right text-muted-foreground">
+                          +{r.velocity.toLocaleString()}
+                        </td>
+                      </tr>
+                    ))}
+                  </tbody>
+                </table>
+              </div>
+            </div>
+          </section>
+        )}
+
+        {hasRows && (
+          <section class="card-panel space-y-3 p-6">
+            <h2 class="text-base font-medium">How this leaderboard works</h2>
+            <p class="max-w-[70ch] text-base text-pretty text-muted-foreground sm:text-sm">
+              gitdebt caches the public timestamp of every star on the repos it analyzes.
+              "Trending" counts stars added in the trailing {windowDays} days; "most
+              starred" ranks by current totals. A repo appears once its complete star
+              history is cached, so the board covers
+              {totalAnalyzed
+                ? ` the ${totalAnalyzed.toLocaleString()} repos analyzed so far`
+                : " the repos analyzed so far"} rather than all of GitHub — look up any
+              repo to add it.
+            </p>
+          </section>
+        )}
+
+        <section class="space-y-4">
+          <h2 class="flex items-center gap-2 text-xl font-semibold tracking-tight">
+            <span class="size-1.5 shrink-0 rounded-full bg-signal" aria-hidden="true"></span>
+            Browse by category
+          </h2>
+          <div class="grid gap-3 sm:grid-cols-2 lg:grid-cols-4">
+            {featuredCategories.map((c) => (
+              <a
+                href={`/compare/${c.slug}`}
+                class="card-panel block p-4 hover:border-signal/50"
+              >
+                <p class="font-medium">{c.name}</p>
+                <p class="mt-1 text-base text-muted-foreground sm:text-sm">{c.short}</p>
+              </a>
+            ))}
+          </div>
+          <p class="text-base text-muted-foreground sm:text-sm">
+            <a href="/compare#categories" class="underline decoration-signal/60 underline-offset-4 hover:decoration-signal">
+              All comparison categories
+            </a>{" "}
+            · or{" "}
+            <a href="/compare" class="underline decoration-signal/60 underline-offset-4 hover:decoration-signal">
+              build your own star-history comparison
+            </a>
+          </p>
+        </section>
+      </main>
+
+      <SiteFooter />
+    </div>
+  </body>
+</html>

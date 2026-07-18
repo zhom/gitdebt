@@ -1,0 +1,99 @@
+name: ci
+
+on:
+  push:
+    branches: [main]
+  pull_request:
+
+permissions:
+  contents: read
+
+concurrency:
+  group: ${{ github.workflow }}-${{ github.ref }}
+  cancel-in-progress: true
+
+jobs:
+  backend:
+    name: backend (cargo)
+    runs-on: ubuntu-latest
+
+    services:
+      postgres:
+        image: postgres:16
+        env:
+          POSTGRES_USER: gitdebt
+          POSTGRES_PASSWORD: gitdebt
+          POSTGRES_DB: gitdebt
+        ports:
+          - 5432:5432
+        options: >-
+          --health-cmd pg_isready
+          --health-interval 10s
+          --health-timeout 5s
+          --health-retries 5
+
+    steps:
+      - uses: actions/checkout@v6
+
+      - uses: dtolnay/rust-toolchain@1.94.0
+        with:
+          components: clippy, rustfmt
+      - uses: Swatinem/rust-cache@v2
+
+      - run: sudo apt-get update && sudo apt-get install -y git
+
+      - name: cargo fmt
+        run: cargo fmt --all -- --check
+
+      - name: cargo build
+        env:
+          RUSTFLAGS: "-D warnings"
+        run: cargo build --release --locked --workspace --all-targets
+
+      - name: cargo test
+        env:
+          RUSTFLAGS: "-D warnings"
+          GITDEBT_TEST_DATABASE_URL: postgres://gitdebt:gitdebt@localhost:5432/gitdebt
+        run: cargo test --release --locked --workspace
+
+      - name: cargo clippy
+        run: cargo clippy --locked --workspace --all-targets -- -D warnings
+
+      - name: cargo audit
+        run: |
+          cargo install cargo-audit --locked
+          cargo audit
+
+  frontend:
+    name: frontend (astro)
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v6
+
+      - uses: pnpm/action-setup@v6
+
+      - uses: actions/setup-node@v6
+        with:
+          node-version: 22.13
+          cache: pnpm
+
+      - run: pnpm install --frozen-lockfile
+      - run: pnpm --filter gitdebt-frontend build
+        env:
+          PUBLIC_API_BASE: https://api.gitdebt.com
+          PUBLIC_SITE_URL: https://gitdebt.com
+      - run: pnpm audit --prod
+
+  extension:
+    name: extension (test, lint, package)
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v6
+
+      - uses: actions/setup-node@v6
+        with:
+          node-version: 22.13
+
+      - run: npm --prefix extension ci
+      - run: npm --prefix extension run package
+      - run: npm --prefix extension audit --audit-level=high

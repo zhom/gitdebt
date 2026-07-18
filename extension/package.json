@@ -1,0 +1,25 @@
+{
+  "name": "gitdebt-extension",
+  "version": "0.1.0",
+  "private": true,
+  "license": "MIT",
+  "author": "Internet Technology Services LLC",
+  "type": "module",
+  "description": "gitdebt browser extension — star history & repo-debt analytics on GitHub repo pages. Chrome + Firefox (MV3).",
+  "engines": {
+    "node": ">=20"
+  },
+  "scripts": {
+    "lint": "web-ext lint --source-dir=. --ignore-files package.json package-lock.json node_modules build.mjs dist README.md PRIVACY.md STORE_LISTING.md .gitignore web-ext-artifacts test",
+    "start:firefox": "web-ext run --source-dir=. --target=firefox-desktop --ignore-files package.json package-lock.json node_modules build.mjs dist README.md PRIVACY.md STORE_LISTING.md .gitignore web-ext-artifacts test",
+    "start:chrome": "web-ext run --source-dir=. --target=chromium --ignore-files package.json package-lock.json node_modules build.mjs dist README.md PRIVACY.md STORE_LISTING.md .gitignore web-ext-artifacts test",
+    "package": "npm test && npm run lint && node build.mjs",
+    "test": "node --test test/*.test.mjs"
+  },
+  "devDependencies": {
+    "web-ext": "^10.5.0"
+  },
+  "overrides": {
+    "adm-zip": "0.6.0"
+  }
+}

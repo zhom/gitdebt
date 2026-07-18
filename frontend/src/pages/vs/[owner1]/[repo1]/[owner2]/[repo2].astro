@@ -1,0 +1,279 @@
+---
+import "@/styles/globals.css";
+import { staticComparisonPaths } from "@/lib/build-catalog";
+import { staticApiBase } from "@/lib/static-api-base";
+import BaseHead from "@/components/BaseHead.astro";
+import Seo from "@/components/Seo.astro";
+import SiteHeader from "@/components/SiteHeader.astro";
+import SiteFooter from "@/components/SiteFooter.astro";
+import { VsHero } from "@/components/VsHero";
+import { ChartViewer } from "@/components/ChartViewer";
+
+export function getStaticPaths() {
+  return staticComparisonPaths();
+}
+
+const {
+  owner1: rawOwner1,
+  repo1: rawRepo1,
+  owner2: rawOwner2,
+  repo2: rawRepo2,
+} = Astro.params;
+
+const validSlug = /^[A-Za-z0-9._-]+$/;
+if (
+  !rawOwner1 ||
+  !rawRepo1 ||
+  !rawOwner2 ||
+  !rawRepo2 ||
+  !validSlug.test(rawOwner1) ||
+  !validSlug.test(rawRepo1) ||
+  !validSlug.test(rawOwner2) ||
+  !validSlug.test(rawRepo2)
+) {
+  return new Response("Not found", { status: 404 });
+}
+
+const lower1 = rawOwner1.toLowerCase();
+const lowerR1 = rawRepo1.toLowerCase();
+const lower2 = rawOwner2.toLowerCase();
+const lowerR2 = rawRepo2.toLowerCase();
+const slugA = `${lower1}/${lowerR1}`;
+const slugB = `${lower2}/${lowerR2}`;
+const [first, second] = slugA <= slugB
+  ? [[lower1, lowerR1], [lower2, lowerR2]]
+  : [[lower2, lowerR2], [lower1, lowerR1]];
+const canonicalPathname = `/vs/${first[0]}/${first[1]}/${second[0]}/${second[1]}`;
+const rawPathname = `/vs/${rawOwner1}/${rawRepo1}/${rawOwner2}/${rawRepo2}`;
+if (rawPathname !== canonicalPathname) {
+  return new Response("Not found", { status: 404 });
+}
+
+const owner1 = first[0];
+const repo1 = first[1];
+const owner2 = second[0];
+const repo2 = second[1];
+
+const apiBase = staticApiBase();
+
+type AnalyzeResponse = {
+  repo: string;
+  total_stars: number;
+  created_at: string | null;
+  queued: number;
+  history_complete: boolean;
+  not_found?: boolean;
+  history: { date: string; stars: number }[];
+};
+
+async function fetchAnalyze(o: string, r: string): Promise<{
+  data: AnalyzeResponse | null;
+  error: string | null;
+  notFound: boolean;
+}> {
+  try {
+    const res = await fetch(`${apiBase}/api/repos/${o}/${r}/analyze`, {
+      headers: { accept: "application/json" },
+      signal: AbortSignal.timeout(5_000),
+    });
+    if (res.ok) {
+      const json = (await res.json()) as AnalyzeResponse;
+      if (json.not_found) {
+        return { data: null, error: null, notFound: true };
+      }
+      return { data: json, error: null, notFound: false };
+    }
+    if (res.status === 404) {
+      return { data: null, error: null, notFound: true };
+    }
+    return { data: null, error: `backend returned ${res.status}`, notFound: false };
+  } catch (err) {
+    return {
+      data: null,
+      error: err instanceof Error ? err.message : String(err),
+      notFound: false,
+    };
+  }
+}
+
+const [left, right] = await Promise.all([
+  fetchAnalyze(owner1, repo1),
+  fetchAnalyze(owner2, repo2),
+]);
+
+if (left.notFound || right.notFound) {
+  return new Response("Repo not found", { status: 404 });
+}
+
+const slug1 = `${owner1}/${repo1}`;
+const slug2 = `${owner2}/${repo2}`;
+const bothLoaded = left.data !== null && right.data !== null;
+const fetchError = left.error ?? right.error;
+const ready =
+  bothLoaded &&
+  left.data!.history.length > 0 &&
+  right.data!.history.length > 0;
+
+function firstStarYear(d: AnalyzeResponse): string | null {
+  const first = d.history[0]?.date;
+  if (!first) return null;
+  const date = new Date(first);
+  return Number.isNaN(date.getTime()) ? null : String(date.getUTCFullYear());
+}
+
+const reposParam = encodeURIComponent(`${slug1},${slug2}`);
+const overlayPath = `/api/chart.svg?repos=${reposParam}`;
+
+const title = `${repo1} vs ${repo2} — star history · gitdebt`;
+const description = `Compare the star history of ${slug1} and ${slug2} on gitdebt — cumulative star growth overlaid on one timeline, with first-star dates and totals.`;
+const site = (Astro.site ?? new URL("https://gitdebt.com")).href.replace(/\/$/, "");
+const canonicalPath = `/vs/${slug1}/${slug2}`;
+const canonical = `${site}${canonicalPath}`;
+
+const ogImage = `${apiBase}/api/og.png?repos=${reposParam}`;
+
+const noindex = !ready || fetchError !== null;
+
+const jsonLd = [
+  {
+    "@context": "https://schema.org",
+    "@type": "WebPage",
+    name: `${slug1} vs ${slug2}`,
+    url: canonical,
+    description,
+  },
+  {
+    "@context": "https://schema.org",
+    "@type": "BreadcrumbList",
+    itemListElement: [
+      { "@type": "ListItem", position: 1, name: "gitdebt", item: `${site}/` },
+      { "@type": "ListItem", position: 2, name: "Compare", item: `${site}/compare` },
+      { "@type": "ListItem", position: 3, name: `${slug1} vs ${slug2}`, item: canonical },
+    ],
+  },
+];
+
+const heroLeft =
+  left.data !== null
+    ? {
+        slug: slug1,
+        totalStars: left.data.total_stars,
+        firstStarYear: firstStarYear(left.data),
+      }
+    : null;
+const heroRight =
+  right.data !== null
+    ? {
+        slug: slug2,
+        totalStars: right.data.total_stars,
+        firstStarYear: firstStarYear(right.data),
+      }
+    : null;
+---
+
+<!doctype html>
+<html lang="en">
+  <head>
+    <BaseHead />
+    <Seo
+      title={title}
+      description={description}
+      canonicalPath={canonicalPath}
+      ogImage={ogImage}
+      imageAlt={`Star history comparison card for ${slug1} versus ${slug2}`}
+      noindex={noindex}
+      jsonLd={jsonLd}
+    />
+  </head>
+  <body>
+    <div class="isolate flex min-h-dvh flex-col">
+      <SiteHeader />
+
+      <main id="main-content" class="mx-auto flex w-full max-w-6xl flex-1 flex-col gap-10 px-6 py-12">
+        <nav aria-label="Breadcrumb" class="font-mono text-xs text-muted-foreground">
+          <a href="/" class="hover:text-foreground">gitdebt</a>
+          <span class="px-1.5 text-border" aria-hidden="true">/</span>
+          <span class="text-foreground">vs</span>
+          <span class="px-1.5 text-border" aria-hidden="true">/</span>
+          <span class="text-foreground">{slug1} · {slug2}</span>
+        </nav>
+
+        {bothLoaded && heroLeft && heroRight ? (
+          <>
+            <VsHero client:load left={heroLeft} right={heroRight} />
+
+            <ChartViewer
+              client:load
+              apiBase={apiBase}
+              path={overlayPath}
+              alt={`Star history overlay of ${slug1} and ${slug2}`}
+              caption="Star history overlay"
+              embedLink={canonical}
+              label={`${slug1} vs ${slug2}`}
+            />
+
+            <section class="space-y-4">
+              <h2 class="flex items-center gap-2 text-base font-medium">
+                <span class="size-1.5 shrink-0 rounded-full bg-signal" aria-hidden="true"></span>
+                Summary
+              </h2>
+              <div class="-mx-6 -my-2 overflow-x-auto">
+                <div class="inline-block min-w-full px-6 py-2 align-middle">
+                  <table class="w-full text-left text-base sm:text-sm">
+                    <thead>
+                      <tr class="border-b border-border">
+                        <th class="py-3 pr-4 font-mono text-xs font-medium tracking-wide text-muted-foreground uppercase whitespace-nowrap">
+                          Metric
+                        </th>
+                        <th class="py-3 pr-4 text-right font-mono text-xs font-medium tracking-wide text-muted-foreground uppercase whitespace-nowrap">
+                          {slug1}
+                        </th>
+                        <th class="py-3 text-right font-mono text-xs font-medium tracking-wide text-muted-foreground uppercase whitespace-nowrap">
+                          {slug2}
+                        </th>
+                      </tr>
+                    </thead>
+                    <tbody class="tabular-nums">
+                      <tr class="border-b border-border">
+                        <td class="py-3 pr-4 text-muted-foreground">Total stars</td>
+                        <td class="py-3 pr-4 text-right">
+                          {heroLeft.totalStars.toLocaleString()}
+                        </td>
+                        <td class="py-3 text-right">
+                          {heroRight.totalStars.toLocaleString()}
+                        </td>
+                      </tr>
+                      <tr class="border-b border-border">
+                        <td class="py-3 pr-4 text-muted-foreground">First star</td>
+                        <td class="py-3 pr-4 text-right text-muted-foreground">
+                          {heroLeft.firstStarYear ?? "—"}
+                        </td>
+                        <td class="py-3 text-right text-muted-foreground">
+                          {heroRight.firstStarYear ?? "—"}
+                        </td>
+                      </tr>
+                    </tbody>
+                  </table>
+                </div>
+              </div>
+            </section>
+          </>
+        ) : (
+          <section class="card-panel p-6" role="alert">
+            <p class="font-mono text-xs tracking-wide text-destructive uppercase">
+              Comparison unavailable
+            </p>
+            <h1 class="mt-2 text-xl font-semibold tracking-tight">
+              We couldn't load both repos
+            </h1>
+            <p class="mt-2 text-base text-pretty text-muted-foreground sm:text-sm">
+              Try again in a moment.
+            </p>
+          </section>
+        )}
+      </main>
+
+      <SiteFooter />
+    </div>
+  </body>
+</html>

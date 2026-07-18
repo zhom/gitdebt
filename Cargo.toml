@@ -1,0 +1,45 @@
+[workspace]
+resolver = "2"
+members = ["backend"]
+
+[workspace.package]
+edition = "2024"
+rust-version = "1.94"
+license = "MIT"
+authors = ["Internet Technology Services LLC"]
+homepage = "https://gitdebt.com"
+repository = "https://github.com/zhom/gitdebt"
+
+[workspace.dependencies]
+tokio = { version = "1", features = ["full"] }
+axum = "0.8"
+tower = "0.5"
+tower-http = { version = "0.7", features = ["cors", "trace", "timeout", "limit"] }
+serde = { version = "1", features = ["derive"] }
+serde_json = "1"
+reqwest = { version = "0.13", default-features = false, features = ["json", "form", "rustls", "gzip"] }
+chrono = { version = "0.4", features = ["serde"] }
+anyhow = "1"
+thiserror = "2"
+tracing = "0.1"
+tracing-subscriber = { version = "0.3", features = ["env-filter"] }
+dotenvy = "0.15"
+url = "2"
+futures = "0.3"
+sqlx = { version = "0.9", default-features = false, features = ["postgres", "runtime-tokio", "tls-rustls-aws-lc-rs", "chrono", "json"] }
+sha2 = "0.11"
+hex = "0.4"
+async-trait = "0.1"
+moka = { version = "0.12", features = ["future"] }
+axum-extra = { version = "0.12", features = ["cookie"] }
+hmac = "0.13"
+rand = "0.10"
+cookie = "0.18"
+walkdir = "2"
+md-5 = "0.11"
+tempfile = "3"
+resvg = { version = "0.47", default-features = false, features = ["text", "raster-images"] }
+image = { version = "0.25", default-features = false, features = ["gif", "webp"] }
+aes-gcm = "0.11"
+base64 = "0.22"
+tower_governor = { version = "0.8", default-features = false, features = ["axum"] }

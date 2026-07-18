@@ -1,0 +1,165 @@
+---
+import "@/styles/globals.css";
+import { staticApiBase } from "@/lib/static-api-base";
+import BaseHead from "@/components/BaseHead.astro";
+import Seo from "@/components/Seo.astro";
+import SiteHeader from "@/components/SiteHeader.astro";
+import SiteFooter from "@/components/SiteFooter.astro";
+import { CompareBuilder } from "@/components/CompareBuilder";
+import { CATEGORIES } from "@/data/categories";
+
+const POPULAR_PAIRS: [string, string][] = [
+  ["facebook/react", "vuejs/vue"],
+  ["denoland/deno", "oven-sh/bun"],
+  ["tailwindlabs/tailwindcss", "twbs/bootstrap"],
+  ["django/django", "fastapi/fastapi"],
+  ["gatsbyjs/gatsby", "vercel/next.js"],
+  ["actix/actix-web", "tokio-rs/axum"],
+  ["ollama/ollama", "vllm-project/vllm"],
+  ["microsoft/vscode", "neovim/neovim"],
+].map(
+  ([a, b]) => (a < b ? [a, b] : [b, a]) as [string, string],
+);
+
+const apiBase = staticApiBase();
+
+const site = (Astro.site ?? new URL("https://gitdebt.com")).href.replace(/\/$/, "");
+
+const SLUG_RE = /^[a-z0-9._-]+\/[a-z0-9._-]+$/;
+const rawRepos = Astro.url.searchParams.get("repos");
+let repos: string[] = [];
+if (rawRepos) {
+  const parts = rawRepos
+    .split(",")
+    .map((s) => s.trim().toLowerCase())
+    .filter(Boolean);
+  if (parts.every((p) => SLUG_RE.test(p))) {
+    repos = Array.from(new Set(parts)).sort().slice(0, 8);
+  }
+}
+const hasSelection = repos.length >= 2;
+const reposParam = repos.join(",");
+
+const title = hasSelection
+  ? `${repos.join(" vs ")} — star history · gitdebt`
+  : "Compare GitHub star history · gitdebt";
+const description = hasSelection
+  ? `Star history of ${repos.join(", ")} overlaid on one chart — compare trajectories and copy an embeddable README badge.`
+  : "Compare up to eight GitHub repos on one star-history chart. Switch between calendar and timeline views, then copy an embeddable README chart.";
+
+const ogImage = hasSelection
+  ? `${apiBase}/api/og.png?repos=${encodeURIComponent(reposParam)}`
+  : `${apiBase}/api/og.png`;
+const canonicalPath = !hasSelection
+  ? "/compare"
+  : repos.length === 2
+    ? `/vs/${repos[0]}/${repos[1]}`
+    : `/compare?repos=${encodeURIComponent(reposParam)}`;
+
+const jsonLd = {
+  "@context": "https://schema.org",
+  "@type": "WebPage",
+  name: hasSelection
+    ? `Compare star history: ${repos.join(" vs ")}`
+    : "Compare GitHub star history",
+  url: `${site}${canonicalPath}`,
+  description,
+};
+---
+
+<!doctype html>
+<html lang="en">
+  <head>
+    <BaseHead />
+    <Seo
+      title={title}
+      description={description}
+      canonicalPath={canonicalPath}
+      ogImage={ogImage}
+      imageAlt={hasSelection
+        ? `Star history comparison card for ${repos.join(" versus ")}`
+        : undefined}
+      jsonLd={jsonLd}
+    />
+  </head>
+  <body>
+    <div class="isolate flex min-h-dvh flex-col">
+      <SiteHeader />
+
+      <main id="main-content" class="mx-auto flex w-full max-w-5xl flex-1 flex-col gap-10 px-6 py-12">
+        <nav aria-label="Breadcrumb" class="font-mono text-xs text-muted-foreground">
+          <a href="/" class="hover:text-foreground">gitdebt</a>
+          <span class="px-1.5 text-border" aria-hidden="true">/</span>
+          <span class="text-foreground">compare</span>
+        </nav>
+
+        <header class="space-y-2">
+          <p class="font-mono text-xs tracking-wide text-muted-foreground uppercase">
+            Star history overlay
+          </p>
+          <h1 class="text-3xl font-semibold tracking-tight text-balance sm:text-4xl">
+            Compare star history
+          </h1>
+          <p class="max-w-[60ch] text-lg text-pretty text-muted-foreground">
+            Overlay up to eight repos on one timeline. Add any owner/repo,
+            toggle the axis, and grab an embeddable badge for your README.
+          </p>
+        </header>
+
+        <CompareBuilder client:load apiBase={apiBase} initialRepos={repos} />
+
+        <section class="space-y-4">
+          <h2 class="flex items-center gap-2 text-xl font-semibold tracking-tight">
+            <span class="size-1.5 shrink-0 rounded-full bg-signal" aria-hidden="true"></span>
+            Popular comparisons
+          </h2>
+          <div class="flex flex-wrap items-center gap-2">
+            {POPULAR_PAIRS.map(([a, b]) => (
+              <a
+                href={`/vs/${a}/${b}`}
+                class="inline-flex min-h-11 items-center gap-1.5 rounded-md border border-border bg-background px-3 py-2 font-mono text-base text-muted-foreground shadow-xs hover:bg-accent hover:text-accent-foreground sm:min-h-0 sm:py-1.5 sm:text-sm dark:shadow-none"
+              >
+                {a.split("/")[1]} vs {b.split("/")[1]}
+              </a>
+            ))}
+          </div>
+        </section>
+
+        <section id="categories" class="scroll-mt-20 space-y-4">
+          <header class="space-y-1">
+            <h2 class="flex items-center gap-2 text-xl font-semibold tracking-tight">
+              <span class="size-1.5 shrink-0 rounded-full bg-signal" aria-hidden="true"></span>
+              Comparison categories
+            </h2>
+            <p class="max-w-[60ch] text-base text-pretty text-muted-foreground sm:text-sm">
+              Curated head-to-head categories — every page charts the whole
+              field on one timeline and ranks it by stars and growth.
+            </p>
+          </header>
+          <div class="grid gap-3 sm:grid-cols-2 lg:grid-cols-3">
+            {CATEGORIES.map((c) => (
+              <a
+                href={`/compare/${c.slug}`}
+                class="card-panel block p-4 hover:border-signal/50"
+              >
+                <p class="font-medium">{c.name}</p>
+                <p class="mt-1 text-base text-muted-foreground sm:text-sm">{c.short}</p>
+              </a>
+            ))}
+          </div>
+          <p class="text-base text-muted-foreground sm:text-sm">
+            Looking for what's hot right now? See the{" "}
+            <a
+              href="/leaderboard"
+              class="underline decoration-signal/60 underline-offset-4 hover:decoration-signal"
+            >
+              fastest-growing repos leaderboard
+            </a>.
+          </p>
+        </section>
+      </main>
+
+      <SiteFooter />
+    </div>
+  </body>
+</html>

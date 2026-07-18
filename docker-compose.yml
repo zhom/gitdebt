@@ -1,0 +1,26 @@
+services:
+  postgres:
+    image: postgres:16-alpine
+    container_name: gitdebt-postgres
+    restart: unless-stopped
+    environment:
+      # Defaults are fine for local dev. In production, set these via
+      # your secrets store (Dokploy environment variables) — same
+      # values that `DATABASE_URL` consumes from the backend side.
+      POSTGRES_DB: ${POSTGRES_DB:-gitdebt}
+      POSTGRES_USER: ${POSTGRES_USER:-gitdebt}
+      POSTGRES_PASSWORD: ${POSTGRES_PASSWORD:-gitdebt}
+    ports:
+      - "5432:5432"
+    volumes:
+      # Named volume so Postgres' on-disk format is owned by the container's
+      # uid/gid, not the host user. Survives `docker compose down`.
+      - postgres-data:/var/lib/postgresql/data
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready -U ${POSTGRES_USER:-gitdebt} -d ${POSTGRES_DB:-gitdebt}"]
+      interval: 5s
+      timeout: 5s
+      retries: 10
+
+volumes:
+  postgres-data:

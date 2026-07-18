@@ -1,0 +1,40 @@
+# Rust
+/target
+**/*.rs.bk
+Cargo.lock.bak
+
+# Node
+node_modules
+.pnpm-store
+npm-debug.log*
+yarn-debug.log*
+yarn-error.log*
+
+# Astro
+.astro
+dist
+.output
+
+# Wrangler / Cloudflare local state
+.wrangler
+.dev.vars
+
+# Local sqlite (legacy fallback) + the ad-hoc repo-root data dir.
+# Anchored to the repo root: an unanchored `data/` also swallowed
+# checked-in source dirs like frontend/src/data/ (categories.ts).
+/data/
+*.db
+*.db-shm
+*.db-wal
+
+# Env / local
+.env
+.env.local
+.env.*.local
+
+# Editors / OS
+.vscode/*
+!.vscode/extensions.json
+.idea
+.DS_Store
+*.log

@@ -1,0 +1,300 @@
+---
+import "@/styles/globals.css";
+import { staticLoginPaths } from "@/lib/build-catalog";
+import { staticApiBase } from "@/lib/static-api-base";
+import BaseHead from "@/components/BaseHead.astro";
+import Seo from "@/components/Seo.astro";
+import SiteHeader from "@/components/SiteHeader.astro";
+import SiteFooter from "@/components/SiteFooter.astro";
+import { ChartViewer } from "@/components/ChartViewer";
+import { EmbedSnippet } from "@/components/EmbedSnippet";
+import { firstStarYear, gainedInTrailingDays } from "@/lib/star-insights";
+
+export async function getStaticPaths() {
+  return staticLoginPaths();
+}
+
+const { login: rawLogin } = Astro.params;
+
+const validLogin = /^[A-Za-z0-9._-]{1,39}$/;
+if (!rawLogin || !validLogin.test(rawLogin) || rawLogin === "." || rawLogin === "..") {
+  return new Response("Not found", { status: 404 });
+}
+const login = rawLogin.toLowerCase();
+
+const apiBase = staticApiBase();
+const site = (Astro.site ?? new URL("https://gitdebt.com")).href.replace(/\/$/, "");
+const canonicalPath = `/u/${login}`;
+const canonical = `${site}${canonicalPath}`;
+
+type UserAnalyze = {
+  login: string;
+  repos_included: number;
+  repos_pending: number;
+  total_stars: number;
+  history: { date: string; stars: number }[];
+};
+
+let data: UserAnalyze | null = null;
+let fetchError: string | null = null;
+try {
+  const res = await fetch(`${apiBase}/api/users/${login}/analyze`, {
+    headers: { accept: "application/json" },
+    signal: AbortSignal.timeout(5_000),
+  });
+  if (res.ok) {
+    data = (await res.json()) as UserAnalyze;
+  } else if (res.status === 404) {
+    return new Response("User not found", { status: 404 });
+  } else {
+    fetchError = `backend returned ${res.status}`;
+  }
+} catch (err) {
+  fetchError = err instanceof Error ? err.message : String(err);
+}
+
+// The sitemap feed is a best-effort source for linking tracked repos.
+let ownedRepos: string[] = [];
+if (data) {
+  try {
+    const res = await fetch(`${apiBase}/api/sitemap/repos?page=0&per=20000`, {
+      headers: { accept: "application/json" },
+      signal: AbortSignal.timeout(5_000),
+    });
+    if (res.ok) {
+      const j = (await res.json()) as { repos?: { slug: string }[] };
+      ownedRepos = (j.repos ?? [])
+        .map((r) => r.slug)
+        .filter((slug) => slug.startsWith(`${login}/`))
+        .slice(0, 24);
+    }
+  } catch {}
+}
+
+const hasData = data !== null && data.repos_included > 0 && data.history.length > 0;
+const pending = data !== null && data.repos_pending > 0;
+const sinceYear = data ? firstStarYear(data.history) : null;
+const gained90 = data ? gainedInTrailingDays(data.history, 90) : null;
+
+const title = `${login} — GitHub star history across repos · gitdebt`;
+const description = hasData
+  ? `${login}'s public repos have earned ${data!.total_stars.toLocaleString()} GitHub stars${
+      sinceYear ? ` since ${sinceYear}` : ""
+    }${
+      gained90 !== null && gained90 > 0 ? `, ${gained90.toLocaleString()} in the last 90 days` : ""
+    }. Aggregate star-history chart across ${data!.repos_included} repos, plus a README profile card.`
+  : `Aggregate GitHub star history for ${login}'s public repos, with an embeddable README profile card.`;
+
+const ogImage = `${apiBase}/api/og.png`;
+
+const noindex = !hasData || fetchError !== null;
+
+const jsonLd: Record<string, unknown>[] = [
+  {
+    "@context": "https://schema.org",
+    "@type": "CollectionPage",
+    name: `${login} — star history`,
+    url: canonical,
+    description,
+    about: {
+      "@type": "Thing",
+      name: login,
+      sameAs: `https://github.com/${login}`,
+    },
+    ...(hasData && {
+      mainEntity: {
+        "@type": "ItemList",
+        name: `${login}'s tracked GitHub repositories`,
+        numberOfItems: data!.repos_included,
+        itemListElement: ownedRepos.map((slug, index) => ({
+          "@type": "ListItem",
+          position: index + 1,
+          name: slug,
+          url: `${site}/${slug}`,
+        })),
+      },
+    }),
+  },
+  {
+    "@context": "https://schema.org",
+    "@type": "BreadcrumbList",
+    itemListElement: [
+      { "@type": "ListItem", position: 1, name: "gitdebt", item: `${site}/` },
+      { "@type": "ListItem", position: 2, name: login, item: canonical },
+    ],
+  },
+];
+---
+
+<!doctype html>
+<html lang="en">
+  <head>
+    <BaseHead />
+    <Seo
+      title={title}
+      description={description}
+      canonicalPath={canonicalPath}
+      ogImage={ogImage}
+      noindex={noindex}
+      jsonLd={jsonLd}
+    />
+  </head>
+  <body>
+    <div class="isolate flex min-h-dvh flex-col">
+      <SiteHeader />
+
+      <main id="main-content" class="mx-auto flex w-full max-w-5xl flex-1 flex-col gap-10 px-6 py-12">
+        <nav aria-label="Breadcrumb" class="font-mono text-xs text-muted-foreground">
+          <a href="/" class="hover:text-foreground">gitdebt</a>
+          <span class="px-1.5 text-border" aria-hidden="true">/</span>
+          <span class="text-foreground">u/{login}</span>
+        </nav>
+
+        {data ? (
+          <header class="space-y-3">
+            <p class="font-mono text-xs tracking-wide text-muted-foreground uppercase">
+              Maintainer profile
+            </p>
+            <h1 class="text-3xl font-semibold tracking-tight text-balance sm:text-4xl">
+              {login}
+            </h1>
+            <p class="max-w-[68ch] text-lg text-pretty text-muted-foreground">
+              {hasData ? (
+                <>
+                  {login}'s public repos have earned{" "}
+                  <span class="font-medium text-foreground tabular-nums">
+                    {data.total_stars.toLocaleString()}
+                  </span>{" "}
+                  GitHub stars{sinceYear ? ` since ${sinceYear}` : ""}
+                  {gained90 !== null && gained90 > 0
+                    ? `, ${gained90.toLocaleString()} of them in the last 90 days`
+                    : ""}
+                  , across {data.repos_included} tracked{" "}
+                  {data.repos_included === 1 ? "repo" : "repos"}.
+                </>
+              ) : (
+                <>
+                  We're fetching star history for {login}'s public repos in the
+                  background — totals appear as each repo's history completes.
+                </>
+              )}
+            </p>
+            {pending && (
+              <p class="font-mono text-xs text-muted-foreground">
+                Still crunching {data.repos_pending}{" "}
+                {data.repos_pending === 1 ? "repo" : "repos"} — the chart grows as
+                history lands.
+              </p>
+            )}
+            <p class="text-sm">
+              <a
+                href={`https://github.com/${login}`}
+                rel="noopener"
+                class="font-mono text-xs text-muted-foreground underline decoration-border underline-offset-4 hover:text-foreground hover:decoration-signal"
+              >
+                github.com/{login}
+              </a>
+            </p>
+          </header>
+        ) : (
+          <div class="card-panel p-6" role="alert">
+            <p class="font-mono text-xs tracking-wide text-destructive uppercase">Error</p>
+            <p class="mt-1.5 text-base text-muted-foreground sm:text-sm">
+              Profile data is temporarily unavailable. Try again in a moment.
+            </p>
+          </div>
+        )}
+
+        {data && (
+          <ChartViewer
+            client:load
+            apiBase={apiBase}
+            path={`/api/users/${login}/chart.svg`}
+            alt={`Aggregate star history across ${login}'s public repos`}
+            caption="Aggregate star history"
+            embedLink={canonical}
+            label={login}
+          />
+        )}
+
+        {data && (
+          <section class="space-y-4">
+            <header class="space-y-1">
+              <h2 class="flex items-center gap-2 text-xl font-semibold tracking-tight">
+                <span class="size-1.5 shrink-0 rounded-full bg-signal" aria-hidden="true"></span>
+                README profile card
+              </h2>
+              <p class="max-w-[60ch] text-base text-pretty text-muted-foreground sm:text-sm">
+                A compact stats card for {login}'s GitHub profile README — stars,
+                forks, tracked repos and recent activity, rendered from cached data.
+              </p>
+            </header>
+            <div class="card-panel flex justify-center p-6">
+              <picture>
+                <source
+                  media="(prefers-color-scheme: dark)"
+                  srcset={`${apiBase}/api/users/${login}/card.svg?theme=dark`}
+                />
+                <img
+                  src={`${apiBase}/api/users/${login}/card.svg?theme=light`}
+                  alt={`gitdebt profile stats card for ${login}`}
+                  loading="lazy"
+                />
+              </picture>
+            </div>
+            <EmbedSnippet
+              client:visible
+              apiBase={apiBase}
+              chartPath={`/api/users/${login}/card.svg`}
+              linkHref={canonical}
+              label={`${login}'s profile card`}
+            />
+          </section>
+        )}
+
+        {ownedRepos.length > 0 && (
+          <section class="space-y-4">
+            <h2 class="flex items-center gap-2 text-xl font-semibold tracking-tight">
+              <span class="size-1.5 shrink-0 rounded-full bg-signal" aria-hidden="true"></span>
+              Tracked repos
+            </h2>
+            <div class="flex flex-wrap gap-2">
+              {ownedRepos.map((slug) => (
+                <a
+                  href={`/${slug}`}
+                  class="inline-flex items-center rounded-md border border-border bg-background px-3 py-1.5 font-mono text-sm text-muted-foreground shadow-xs hover:bg-accent hover:text-accent-foreground dark:shadow-none"
+                >
+                  {slug}
+                </a>
+              ))}
+            </div>
+            <p class="text-sm text-muted-foreground">
+              Each page has the full star-history chart plus repo-health stats —
+              churn, bug magnets, contributors and more.
+            </p>
+          </section>
+        )}
+
+        <section class="card-panel space-y-3 p-6">
+          <h2 class="text-base font-medium">How this page works</h2>
+          <p class="max-w-[70ch] text-base text-pretty text-muted-foreground sm:text-sm">
+            gitdebt sums the cumulative star history of {login}'s top public repos
+            (up to 50, by stars) from cached public star timestamps. Repos without
+            cached history are fetched in the background and join the total as they
+            complete. Explore more on the{" "}
+            <a href="/leaderboard" class="underline decoration-signal/60 underline-offset-4 hover:decoration-signal">
+              repo leaderboard
+            </a>{" "}
+            or{" "}
+            <a href="/compare" class="underline decoration-signal/60 underline-offset-4 hover:decoration-signal">
+              compare star history
+            </a>{" "}
+            across repos.
+          </p>
+        </section>
+      </main>
+
+      <SiteFooter />
+    </div>
+  </body>
+</html>

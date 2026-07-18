@@ -1,0 +1,23 @@
+---
+interface Props {
+  markClass?: string;
+  wordmarkClass?: string;
+}
+
+const {
+  markClass = "size-8",
+  wordmarkClass = "font-mono text-sm font-medium tracking-tight",
+} = Astro.props;
+---
+
+<span class="inline-flex items-center gap-2">
+  <img
+    src="/logo.svg"
+    alt=""
+    width="32"
+    height="32"
+    class:list={[markClass, "dark:invert"]}
+    decoding="async"
+  />
+  <span class={wordmarkClass}>gitdebt</span>
+</span>

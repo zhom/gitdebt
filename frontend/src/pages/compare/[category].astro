@@ -1,0 +1,458 @@
+---
+import "@/styles/globals.css";
+import { staticCategoryPaths } from "@/lib/build-catalog";
+import { staticApiBase } from "@/lib/static-api-base";
+import BaseHead from "@/components/BaseHead.astro";
+import Seo from "@/components/Seo.astro";
+import SiteHeader from "@/components/SiteHeader.astro";
+import SiteFooter from "@/components/SiteFooter.astro";
+import { ChartViewer } from "@/components/ChartViewer";
+import { getCategory, relatedCategories } from "@/data/categories";
+import {
+  firstStarYear,
+  formatCompact,
+  formatMonthYear,
+  gainedInTrailingDays,
+  growthTrend,
+} from "@/lib/star-insights";
+
+export function getStaticPaths() {
+  return staticCategoryPaths();
+}
+
+const { category: rawCategory } = Astro.params;
+
+if (!rawCategory || !/^[a-z0-9-]+$/i.test(rawCategory)) {
+  return new Response("Not found", { status: 404 });
+}
+const category = getCategory(rawCategory.toLowerCase());
+if (!category) {
+  return new Response("Not found", { status: 404 });
+}
+
+const apiBase = staticApiBase();
+const site = (Astro.site ?? new URL("https://gitdebt.com")).href.replace(/\/$/, "");
+const canonicalPath = `/compare/${category.slug}`;
+const canonical = `${site}${canonicalPath}`;
+
+type AnalyzeResponse = {
+  repo: string;
+  total_stars: number;
+  created_at: string | null;
+  queued: number;
+  history_complete: boolean;
+  not_found?: boolean;
+  history: { date: string; stars: number }[];
+};
+
+const results = await Promise.allSettled(
+  category.repos.map(async (slug) => {
+    const res = await fetch(`${apiBase}/api/repos/${slug}/analyze`, {
+      headers: { accept: "application/json" },
+      signal: AbortSignal.timeout(5_000),
+    });
+    if (!res.ok) throw new Error(`status ${res.status}`);
+    return (await res.json()) as AnalyzeResponse;
+  }),
+);
+
+type MemberRow = {
+  slug: string;
+  stars: number;
+  gained90: number | null;
+  firstYear: number | null;
+  trend: "accelerating" | "steady" | "slowing" | null;
+  hasHistory: boolean;
+  lastDate: string | null;
+};
+
+const members: MemberRow[] = [];
+for (let i = 0; i < category.repos.length; i++) {
+  const r = results[i];
+  if (r.status !== "fulfilled") continue;
+  const d = r.value;
+  if (d.not_found) continue;
+  members.push({
+    slug: category.repos[i],
+    stars: d.total_stars,
+    gained90: gainedInTrailingDays(d.history, 90),
+    firstYear: firstStarYear(d.history),
+    trend: growthTrend(d.history),
+    hasHistory: d.history.length > 0,
+    lastDate: d.history.length > 0 ? d.history[d.history.length - 1].date : null,
+  });
+}
+members.sort((a, b) => b.stars - a.stars || (a.slug < b.slug ? -1 : 1));
+
+const loadedEnough = members.filter((m) => m.hasHistory).length >= 2;
+
+const latestDataDate = members.reduce<string | null>(
+  (acc, m) => (m.lastDate && (!acc || m.lastDate > acc) ? m.lastDate : acc),
+  null,
+);
+const updatedLabel = formatMonthYear(latestDataDate);
+
+const leader = members[0] ?? null;
+const fastest = members.reduce<MemberRow | null>(
+  (acc, m) =>
+    m.gained90 !== null && (acc === null || (acc.gained90 ?? 0) < m.gained90) ? m : acc,
+  null,
+);
+
+const year = new Date().getUTCFullYear();
+const title = `Best ${category.name}: star history compared (${year})`;
+const description = leader
+  ? `#1 is ${leader.slug} with ${leader.stars.toLocaleString()} GitHub stars. ${category.name} compared by star history and growth: ${members
+      .slice(0, 3)
+      .map((m) => m.slug.split("/")[1])
+      .join(", ")} and more.`
+  : `${category.short} Star history, growth and repo health, compared on one chart.`;
+
+const reposParam = category.repos.join(",");
+const overlayPath = `/api/chart.svg?repos=${encodeURIComponent(reposParam)}`;
+const ogImage = `${apiBase}/api/og.png?repos=${encodeURIComponent(
+  category.repos.slice(0, 4).join(","),
+)}`;
+
+const topSlugs = members.slice(0, 3).map((m) => m.slug);
+const pairs: [string, string][] = [];
+for (let i = 0; i < topSlugs.length; i++) {
+  for (let j = i + 1; j < topSlugs.length; j++) {
+    const pair = [topSlugs[i], topSlugs[j]].sort((a, b) => (a < b ? -1 : 1)) as [
+      string,
+      string,
+    ];
+    pairs.push(pair);
+  }
+}
+
+const related = relatedCategories(category, 4);
+
+const noindex = !loadedEnough;
+
+const faqs: { q: string; a: string }[] = [];
+if (leader) {
+  faqs.push({
+    q: `Which of these ${category.name.toLowerCase()} has the most GitHub stars?`,
+    a: `${leader.slug} is the most-starred of the ${category.name.toLowerCase()} gitdebt compares, with ${leader.stars.toLocaleString()} GitHub stars${
+      updatedLabel ? ` as of ${updatedLabel}` : ""
+    }.${leader.firstYear ? ` It earned its first star in ${leader.firstYear}.` : ""}`,
+  });
+}
+if (fastest && fastest.gained90 !== null) {
+  faqs.push({
+    q: `Which of these ${category.name.toLowerCase()} is growing the fastest?`,
+    a: `${fastest.slug} added the most stars over the last 90 days of its cached history — about ${fastest.gained90.toLocaleString()} new stars${
+      fastest.slug !== leader?.slug && leader
+        ? `, compared with about ${leader.gained90?.toLocaleString() ?? "fewer"} for the category leader ${leader.slug}`
+        : ""
+    }. 90-day figures are approximate for older repos, whose history is downsampled.`,
+  });
+}
+faqs.push({
+  q: "How is this comparison computed?",
+  a: `gitdebt caches the public timestamp of every star on each repo and plots the cumulative series on shared axes. The table ranks by current total stars; the 90-day column counts stars added in the trailing 90 days of each repo's cached history — an approximate figure for older repos, whose history is downsampled. Repo-health charts (churn, bug magnets, contributors) come from each repo's commit history.`,
+});
+
+const jsonLd: Record<string, unknown>[] = [
+  {
+    "@context": "https://schema.org",
+    "@type": "CollectionPage",
+    name: `${category.name} — star history compared`,
+    url: canonical,
+    description,
+    ...(latestDataDate ? { dateModified: latestDataDate.slice(0, 10) } : {}),
+    mainEntity: {
+      "@type": "ItemList",
+      itemListOrder: "https://schema.org/ItemListOrderDescending",
+      numberOfItems: members.length,
+      itemListElement: members.map((m, i) => ({
+        "@type": "ListItem",
+        position: i + 1,
+        name: m.slug,
+        url: `${site}/${m.slug}`,
+      })),
+    },
+  },
+  {
+    "@context": "https://schema.org",
+    "@type": "BreadcrumbList",
+    itemListElement: [
+      { "@type": "ListItem", position: 1, name: "gitdebt", item: `${site}/` },
+      { "@type": "ListItem", position: 2, name: "Compare", item: `${site}/compare` },
+      { "@type": "ListItem", position: 3, name: category.name, item: canonical },
+    ],
+  },
+];
+if (faqs.length > 0 && loadedEnough) {
+  jsonLd.push({
+    "@context": "https://schema.org",
+    "@type": "FAQPage",
+    mainEntity: faqs.map((f) => ({
+      "@type": "Question",
+      name: f.q,
+      acceptedAnswer: { "@type": "Answer", text: f.a },
+    })),
+  });
+}
+
+function trendSentence(m: MemberRow): string {
+  switch (m.trend) {
+    case "accelerating":
+      return "It's currently growing faster than its lifetime average.";
+    case "slowing":
+      return "Growth has cooled relative to its lifetime average.";
+    case "steady":
+      return "Growth is holding close to its lifetime average.";
+    default:
+      return "";
+  }
+}
+
+const thClass =
+  "py-3 pr-4 font-mono text-xs font-medium tracking-wide text-muted-foreground uppercase whitespace-nowrap";
+const rowClass = "border-b border-border";
+---
+
+<!doctype html>
+<html lang="en">
+  <head>
+    <BaseHead />
+    <Seo
+      title={`${title} · gitdebt`}
+      description={description}
+      canonicalPath={canonicalPath}
+      ogImage={ogImage}
+      imageAlt={`Star history comparison card for ${category.name}`}
+      noindex={noindex}
+      jsonLd={jsonLd}
+    />
+  </head>
+  <body>
+    <div class="isolate flex min-h-dvh flex-col">
+      <SiteHeader />
+
+      <main id="main-content" class="mx-auto flex w-full max-w-5xl flex-1 flex-col gap-10 px-6 py-12">
+        <nav aria-label="Breadcrumb" class="font-mono text-xs text-muted-foreground">
+          <a href="/" class="hover:text-foreground">gitdebt</a>
+          <span class="px-1.5 text-border" aria-hidden="true">/</span>
+          <a href="/compare" class="hover:text-foreground">compare</a>
+          <span class="px-1.5 text-border" aria-hidden="true">/</span>
+          <span class="text-foreground">{category.slug}</span>
+        </nav>
+
+        <header class="space-y-3">
+          <p class="font-mono text-xs tracking-wide text-muted-foreground uppercase">
+            Category comparison
+          </p>
+          <h1 class="text-3xl font-semibold tracking-tight text-balance sm:text-4xl">
+            {category.name}: star history compared
+          </h1>
+          <p class="max-w-[70ch] text-lg text-pretty text-muted-foreground">
+            {category.intro}
+          </p>
+          <p class="font-mono text-xs text-muted-foreground">
+            Ranked by current GitHub stars · growth = stars gained in the trailing 90
+            days{updatedLabel ? ` · data updated ${updatedLabel}` : ""}
+          </p>
+        </header>
+
+        {loadedEnough ? (
+          <>
+            <ChartViewer
+              client:load
+              apiBase={apiBase}
+              path={overlayPath}
+              alt={`Star history overlay of ${category.repos.join(", ")}`}
+              caption={`${category.name} — star history`}
+              embedLink={canonical}
+              label={category.name}
+            />
+
+            <section class="space-y-4">
+              <h2 class="flex items-center gap-2 text-xl font-semibold tracking-tight">
+                <span class="size-1.5 shrink-0 rounded-full bg-signal" aria-hidden="true"></span>
+                Ranking
+              </h2>
+              <div class="-mx-6 -my-2 overflow-x-auto">
+                <div class="inline-block min-w-full px-6 py-2 align-middle">
+                  <table class="w-full text-left text-base sm:text-sm">
+                    <thead>
+                      <tr class="border-b border-border">
+                        <th class={thClass}>#</th>
+                        <th class={thClass}>Repository</th>
+                        <th class={`${thClass} text-right`}>Stars</th>
+                        <th class={`${thClass} text-right`}>+90d</th>
+                        <th class={`${thClass} text-right`}>First star</th>
+                        <th class={thClass}>Health</th>
+                      </tr>
+                    </thead>
+                    <tbody class="tabular-nums">
+                      {members.map((m, i) => (
+                        <tr class={rowClass}>
+                          <td class="py-3 pr-4 font-mono text-xs text-muted-foreground">{i + 1}</td>
+                          <td class="py-3 pr-4">
+                            <a href={`/${m.slug}`} class="font-medium hover:text-signal">
+                              {m.slug}
+                            </a>
+                          </td>
+                          <td class="py-3 pr-4 text-right font-medium">
+                            {m.stars.toLocaleString()}
+                          </td>
+                          <td class="py-3 pr-4 text-right text-signal">
+                            {m.gained90 !== null ? `~${formatCompact(m.gained90)}` : "—"}
+                          </td>
+                          <td class="py-3 pr-4 text-right text-muted-foreground">
+                            {m.firstYear ?? "—"}
+                          </td>
+                          <td class="py-3">
+                            <a
+                              href={`/${m.slug}#stats`}
+                              class="font-mono text-xs text-muted-foreground underline decoration-border underline-offset-4 hover:text-foreground hover:decoration-signal"
+                            >
+                              debt charts
+                            </a>
+                          </td>
+                        </tr>
+                      ))}
+                    </tbody>
+                  </table>
+                </div>
+              </div>
+            </section>
+
+            <section class="space-y-4">
+              <h2 class="flex items-center gap-2 text-xl font-semibold tracking-tight">
+                <span class="size-1.5 shrink-0 rounded-full bg-signal" aria-hidden="true"></span>
+                Repo by repo
+              </h2>
+              <div class="grid gap-4 sm:grid-cols-2">
+                {members.map((m) => (
+                  <article class="card-panel space-y-1.5 p-5">
+                    <h3 class="font-mono text-sm font-medium">
+                      <a href={`/${m.slug}`} class="hover:text-signal">{m.slug}</a>
+                    </h3>
+                    <p class="text-sm text-pretty text-muted-foreground">
+                      {m.slug.split("/")[1]} has {m.stars.toLocaleString()} GitHub stars
+                      {m.gained90 !== null
+                        ? `, about ${m.gained90.toLocaleString()} of them added in the last 90 days`
+                        : ""}
+                      {m.firstYear ? `, and earned its first star in ${m.firstYear}` : ""}.
+                      {trendSentence(m)}
+                    </p>
+                    <p class="text-sm">
+                      <a
+                        href={`/${m.slug}`}
+                        class="font-mono text-xs text-muted-foreground underline decoration-border underline-offset-4 hover:text-foreground hover:decoration-signal"
+                      >
+                        {m.slug.split("/")[1]} star history & repo health
+                      </a>
+                    </p>
+                  </article>
+                ))}
+              </div>
+            </section>
+
+            {pairs.length > 0 && (
+              <section class="space-y-4">
+                <h2 class="flex items-center gap-2 text-xl font-semibold tracking-tight">
+                  <span class="size-1.5 shrink-0 rounded-full bg-signal" aria-hidden="true"></span>
+                  Head to head
+                </h2>
+                <div class="flex flex-wrap items-center gap-2">
+                  {pairs.map(([a, b]) => (
+                    <a
+                      href={`/vs/${a}/${b}`}
+                      class="inline-flex items-center gap-1.5 rounded-md border border-border bg-background px-3 py-1.5 font-mono text-sm text-muted-foreground shadow-xs hover:bg-accent hover:text-accent-foreground dark:shadow-none"
+                    >
+                      {a.split("/")[1]} vs {b.split("/")[1]}
+                    </a>
+                  ))}
+                  <a
+                    href={`/compare?repos=${encodeURIComponent(reposParam)}`}
+                    class="inline-flex items-center gap-1.5 rounded-md border border-signal/50 bg-background px-3 py-1.5 font-mono text-sm text-foreground hover:bg-accent"
+                  >
+                    Open in the compare builder
+                  </a>
+                </div>
+              </section>
+            )}
+
+            {faqs.length > 0 && (
+              <section class="space-y-4">
+                <h2 class="flex items-center gap-2 text-xl font-semibold tracking-tight">
+                  <span class="size-1.5 shrink-0 rounded-full bg-signal" aria-hidden="true"></span>
+                  Frequently asked
+                </h2>
+                <div class="space-y-4">
+                  {faqs.map((f) => (
+                    <details class="card-panel group p-5 open:pb-5">
+                      <summary class="cursor-pointer list-none font-medium [&::-webkit-details-marker]:hidden">
+                        {f.q}
+                      </summary>
+                      <p class="mt-2 text-base text-pretty text-muted-foreground sm:text-sm">
+                        {f.a}
+                      </p>
+                    </details>
+                  ))}
+                </div>
+              </section>
+            )}
+          </>
+        ) : (
+          <section class="card-panel p-6">
+            <p class="font-mono text-xs tracking-wide text-muted-foreground uppercase">
+              Warming up
+            </p>
+            <p class="mt-1.5 max-w-[70ch] text-base text-pretty text-muted-foreground sm:text-sm">
+              We're still fetching star history for the repos in this category — that
+              happens automatically in the background. Check back shortly, or open any
+              member repo to watch its history fill in:
+            </p>
+            <div class="mt-3 flex flex-wrap gap-2">
+              {category.repos.map((slug) => (
+                <a
+                  href={`/${slug}`}
+                  class="inline-flex items-center rounded-md border border-border bg-background px-3 py-1.5 font-mono text-sm text-muted-foreground hover:bg-accent hover:text-accent-foreground"
+                >
+                  {slug}
+                </a>
+              ))}
+            </div>
+          </section>
+        )}
+
+        {related.length > 0 && (
+          <section class="space-y-4">
+            <h2 class="flex items-center gap-2 text-xl font-semibold tracking-tight">
+              <span class="size-1.5 shrink-0 rounded-full bg-signal" aria-hidden="true"></span>
+              Related categories
+            </h2>
+            <div class="grid gap-3 sm:grid-cols-2 lg:grid-cols-4">
+              {related.map((c) => (
+                <a
+                  href={`/compare/${c.slug}`}
+                  class="card-panel block p-4 hover:border-signal/50"
+                >
+                  <p class="font-medium">{c.name}</p>
+                  <p class="mt-1 text-sm text-muted-foreground">{c.short}</p>
+                </a>
+              ))}
+            </div>
+            <p class="text-sm text-muted-foreground">
+              <a
+                href="/leaderboard"
+                class="underline decoration-signal/60 underline-offset-4 hover:decoration-signal"
+              >
+                Fastest-growing repos across all of gitdebt
+              </a>{" "}
+              · <a href="/compare#categories" class="underline decoration-signal/60 underline-offset-4 hover:decoration-signal">all categories</a>
+            </p>
+          </section>
+        )}
+      </main>
+
+      <SiteFooter />
+    </div>
+  </body>
+</html>

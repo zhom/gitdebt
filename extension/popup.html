@@ -1,0 +1,61 @@
+<!doctype html>
+<html lang="en">
+  <head>
+    <meta charset="utf-8" />
+    <meta name="viewport" content="width=device-width, initial-scale=1" />
+    <title>gitdebt</title>
+    <link rel="stylesheet" href="popup.css" />
+  </head>
+  <body>
+    <main class="gd-popup">
+      <header class="gd-head">
+        <div class="gd-wordmark">
+          <img src="icons/icon.svg" alt="" width="28" height="28" />
+          <span>gitdebt</span>
+        </div>
+        <p class="gd-tagline">Star history and repo health on GitHub.</p>
+      </header>
+
+      <section class="gd-section" aria-labelledby="gd-panel-heading">
+        <label class="gd-toggle-row" for="gd-enabled">
+          <span>
+            <span id="gd-panel-heading" class="gd-label-title">
+              Show the GitHub panel
+            </span>
+            <span class="gd-label-sub">
+              Add charts automatically on repository pages.
+            </span>
+          </span>
+          <input id="gd-enabled" type="checkbox" class="gd-switch" />
+        </label>
+        <p id="gd-feedback" class="gd-feedback" role="status" aria-live="polite" hidden></p>
+      </section>
+
+      <section class="gd-section">
+        <button id="gd-open" type="button" class="gd-button" disabled>
+          Open this repo on gitdebt
+        </button>
+        <p id="gd-open-hint" class="gd-help">
+          Open a public GitHub repository to view its full report.
+        </p>
+      </section>
+
+      <p class="gd-disclosure">
+        When enabled, gitdebt sends the repository name and visible star count
+        to keep its public charts fresh.
+        <a href="https://gitdebt.com/privacy" target="_blank" rel="noopener noreferrer">
+          Privacy
+        </a>
+      </p>
+
+      <footer class="gd-foot">
+        <a href="https://gitdebt.com" target="_blank" rel="noopener noreferrer">
+          gitdebt.com
+        </a>
+        <span id="gd-version"></span>
+      </footer>
+    </main>
+
+    <script src="popup.js"></script>
+  </body>
+</html>

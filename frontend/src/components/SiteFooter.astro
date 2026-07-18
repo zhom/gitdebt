@@ -1,0 +1,114 @@
+---
+import { CATEGORIES } from "@/data/categories";
+import Brand from "@/components/Brand.astro";
+
+const year = new Date().getFullYear();
+
+const footerLinks = [
+  { label: "How it works", href: "/#how-it-works" },
+  { label: "Features", href: "/#features" },
+  { label: "Compare repos", href: "/compare" },
+  { label: "Repo leaderboard", href: "/leaderboard" },
+  { label: "README badges", href: "/badges" },
+  { label: "Browser extension", href: "/#extension" },
+];
+
+const categoryLinks = [
+  ...CATEGORIES.slice(0, 6).map((c) => ({
+    label: c.name,
+    href: `/compare/${c.slug}`,
+  })),
+  { label: "All categories →", href: "/compare#categories" },
+];
+
+const legalLinks = [
+  { label: "About", href: "/about" },
+  { label: "Privacy", href: "/privacy" },
+  { label: "Terms", href: "/terms" },
+];
+---
+
+<footer class="border-t border-border bg-muted/30">
+  <div class="mx-auto max-w-6xl px-6 py-14">
+    <div class="flex flex-col gap-8 sm:flex-row sm:items-start sm:justify-between">
+      <div class="max-w-sm space-y-3">
+        <a
+          href="/"
+          aria-label="gitdebt homepage"
+          class="inline-flex items-center rounded-md focus-visible:outline-2 focus-visible:outline-offset-4 focus-visible:outline-ring"
+        >
+          <Brand markClass="size-7" />
+        </a>
+        <p class="text-base text-pretty text-muted-foreground sm:text-sm">
+          GitHub star history and repo-debt analytics. Chart any repo's star
+          growth, overlay several at once, and embed it in your README.
+        </p>
+      </div>
+
+      <div class="flex flex-col gap-8 sm:flex-row sm:gap-16">
+        <nav class="flex flex-col gap-3">
+          <p
+            class="font-mono text-xs tracking-wide text-muted-foreground uppercase"
+          >
+            Explore
+          </p>
+          {
+            footerLinks.map((link) => (
+              <a
+                href={link.href}
+                class="rounded-sm text-base font-normal text-muted-foreground hover:text-foreground focus-visible:outline-2 focus-visible:outline-offset-2 focus-visible:outline-ring sm:text-sm"
+              >
+                {link.label}
+              </a>
+            ))
+          }
+        </nav>
+
+        <nav class="flex flex-col gap-3">
+          <p
+            class="font-mono text-xs tracking-wide text-muted-foreground uppercase"
+          >
+            Categories
+          </p>
+          {
+            categoryLinks.map((link) => (
+              <a
+                href={link.href}
+                class="rounded-sm text-base font-normal text-muted-foreground hover:text-foreground focus-visible:outline-2 focus-visible:outline-offset-2 focus-visible:outline-ring sm:text-sm"
+              >
+                {link.label}
+              </a>
+            ))
+          }
+        </nav>
+
+        <nav class="flex flex-col gap-3">
+          <p
+            class="font-mono text-xs tracking-wide text-muted-foreground uppercase"
+          >
+            Legal
+          </p>
+          {
+            legalLinks.map((link) => (
+              <a
+                href={link.href}
+                class="rounded-sm text-base font-normal text-muted-foreground hover:text-foreground focus-visible:outline-2 focus-visible:outline-offset-2 focus-visible:outline-ring sm:text-sm"
+              >
+                {link.label}
+              </a>
+            ))
+          }
+        </nav>
+      </div>
+    </div>
+
+    <div
+      class="mt-10 flex flex-col gap-2 border-t border-border pt-6 text-base text-muted-foreground sm:flex-row sm:items-center sm:justify-between sm:text-sm"
+    >
+      <p>© <span class="tabular-nums">{year}</span> gitdebt</p>
+      <p class="font-mono text-sm">
+        Independent tool · not affiliated with GitHub
+      </p>
+    </div>
+  </div>
+</footer>

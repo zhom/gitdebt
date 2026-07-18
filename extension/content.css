@@ -1,0 +1,11 @@
+#gitdebt-panel-host {
+  display: block;
+  width: 100%;
+  contain: layout style;
+}
+#gitdebt-panel-host[data-gd-mode="sidebar"] {
+  margin-top: 16px;
+}
+#gitdebt-panel-host[data-gd-mode="main"] {
+  margin: 16px 0;
+}

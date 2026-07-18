@@ -1,0 +1,102 @@
+---
+type JsonLd = Record<string, unknown>;
+
+interface Props {
+  title: string;
+  description: string;
+  canonicalPath: string;
+  ogImage: string;
+  ogType?: "website" | "article";
+  noindex?: boolean;
+  imageAlt?: string;
+  jsonLd?: JsonLd | JsonLd[];
+}
+
+const {
+  title,
+  description,
+  canonicalPath,
+  ogImage,
+  ogType = "website",
+  noindex = false,
+  imageAlt,
+  jsonLd,
+} = Astro.props;
+
+const site = Astro.site ?? new URL("https://gitdebt.com");
+const canonical = new URL(canonicalPath, site).href;
+const socialImage = new URL(ogImage, site).href;
+
+function truncate(value: string, maxLength: number): string {
+  if (value.length <= maxLength) return value;
+  const shortened = value.slice(0, maxLength - 1);
+  const lastSpace = shortened.lastIndexOf(" ");
+  return `${shortened.slice(0, lastSpace > maxLength * 0.7 ? lastSpace : undefined).trim()}…`;
+}
+
+const metaTitle = truncate(title, 70);
+const metaDescription = truncate(description, 160);
+const robots = noindex
+  ? "noindex,follow"
+  : "index,follow,max-image-preview:large,max-snippet:-1,max-video-preview:-1";
+const alt = imageAlt ?? metaTitle;
+
+const jsonLdEntries: JsonLd[] = jsonLd
+  ? Array.isArray(jsonLd)
+    ? jsonLd
+    : [jsonLd]
+  : [];
+
+function serializeJsonLd(entry: JsonLd): string {
+  return JSON.stringify(entry)
+    .replace(/</g, "\\u003c")
+    .replace(/>/g, "\\u003e")
+    .replace(/&/g, "\\u0026")
+    .replace(/\u2028/g, "\\u2028")
+    .replace(/\u2029/g, "\\u2029");
+}
+
+const serializedJsonLd = jsonLdEntries.map(serializeJsonLd);
+if (Astro.csp) {
+  for (const value of serializedJsonLd) {
+    const digest = await crypto.subtle.digest(
+      "SHA-256",
+      new TextEncoder().encode(value),
+    );
+    const base64 = btoa(
+      String.fromCharCode(...new Uint8Array(digest)),
+    );
+    Astro.csp.insertScriptHash(`sha256-${base64}`);
+  }
+}
+---
+
+<title>{metaTitle}</title>
+<meta name="description" content={metaDescription} />
+<link rel="canonical" href={canonical} />
+<meta name="robots" content={robots} />
+
+<meta property="og:type" content={ogType} />
+<meta property="og:title" content={metaTitle} />
+<meta property="og:description" content={metaDescription} />
+<meta property="og:url" content={canonical} />
+<meta property="og:site_name" content="gitdebt" />
+<meta property="og:locale" content="en_US" />
+<meta property="og:image" content={socialImage} />
+<meta property="og:image:secure_url" content={socialImage} />
+<meta property="og:image:type" content="image/png" />
+<meta property="og:image:width" content="1200" />
+<meta property="og:image:height" content="630" />
+<meta property="og:image:alt" content={alt} />
+
+<meta name="twitter:card" content="summary_large_image" />
+<meta name="twitter:title" content={metaTitle} />
+<meta name="twitter:description" content={metaDescription} />
+<meta name="twitter:image" content={socialImage} />
+<meta name="twitter:image:alt" content={alt} />
+
+{
+  serializedJsonLd.map((entry) => (
+    <script is:inline type="application/ld+json" set:html={entry} />
+  ))
+}

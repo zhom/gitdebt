@@ -1,0 +1,156 @@
+---
+export const prerender = true;
+
+import "@/styles/globals.css";
+import BaseHead from "@/components/BaseHead.astro";
+import Seo from "@/components/Seo.astro";
+import SiteHeader from "@/components/SiteHeader.astro";
+import SiteFooter from "@/components/SiteFooter.astro";
+import { staticApiBase } from "@/lib/static-api-base";
+
+const apiBase = staticApiBase();
+
+const title = "Privacy policy · gitdebt";
+const description =
+  "How gitdebt handles anonymous extension activity, public repository data, and operational request logs. We never sell your data.";
+const ogImage = `${apiBase}/api/og.png`;
+
+const updated = "2026-07-18";
+
+const collected = [
+  {
+    term: "Repository views (browser extension)",
+    desc: "When you open a GitHub repo with the gitdebt extension installed, it sends us {owner, repo, observed star count}. We use this to keep a repo's data fresh and to find popular repos worth charting. The star count is an untrusted hint compared against our cache — it is never stored. The extension is anonymous: no account, cookie, or identifier is attached.",
+  },
+  {
+    term: "Public repository data",
+    desc: "We fetch and cache public GitHub data — stargazer timestamps, commit history, contributors, language lines, and similar metadata — to render star-history and repo-debt charts. We only ever read public data.",
+  },
+  {
+    term: "Operational logs",
+    desc: "Our hosting providers and server may process request metadata such as IP address, user agent, route, timestamp, and response status to operate, secure, and troubleshoot the service. We do not use this data for advertising.",
+  },
+];
+
+const principles = [
+  {
+    term: "We don't sell your data",
+    desc: "gitdebt does not sell, rent, or trade personal data to anyone, and we don't run third-party advertising or analytics trackers.",
+  },
+  {
+    term: "Public data only",
+    desc: "Every repo signal we compute comes from publicly available GitHub data. We never request private-repo, write, or account-management permissions.",
+  },
+  {
+    term: "Minimal retention",
+    desc: "Cached public repo data is kept to serve charts quickly and refreshed over time. The extension's reported star counts are discarded after comparison and never persisted.",
+  },
+];
+
+const jsonLd = {
+  "@context": "https://schema.org",
+  "@type": "WebPage",
+  name: "Privacy policy",
+  url: `${(Astro.site ?? new URL("https://gitdebt.com")).href.replace(/\/$/, "")}/privacy`,
+  description,
+};
+---
+
+<!doctype html>
+<html lang="en">
+  <head>
+    <BaseHead />
+    <Seo
+      title={title}
+      description={description}
+      canonicalPath="/privacy"
+      ogImage={ogImage}
+      jsonLd={jsonLd}
+    />
+  </head>
+  <body>
+    <div class="isolate flex min-h-dvh flex-col">
+      <SiteHeader />
+
+      <main id="main-content" class="mx-auto flex w-full max-w-3xl flex-1 flex-col gap-10 px-6 py-12">
+        <nav aria-label="Breadcrumb" class="font-mono text-xs text-muted-foreground">
+          <a href="/" class="hover:text-foreground">gitdebt</a>
+          <span class="px-1.5 text-border" aria-hidden="true">/</span>
+          <span class="text-foreground">privacy</span>
+        </nav>
+
+        <header class="space-y-2">
+          <p class="font-mono text-xs tracking-wide text-muted-foreground uppercase">
+            Privacy
+          </p>
+          <h1 class="text-3xl font-semibold tracking-tight text-balance sm:text-4xl">
+            Privacy policy
+          </h1>
+          <p class="text-base text-pretty text-muted-foreground sm:text-sm">
+            Last updated <time datetime={updated} class="tabular-nums">{updated}</time>
+          </p>
+        </header>
+
+        <section class="space-y-4">
+          <h2 class="text-xl font-semibold tracking-tight">What we collect</h2>
+          <dl class="space-y-6">
+            {
+              collected.map((item) => (
+                <div class="space-y-1.5">
+                  <dt class="text-base font-medium">{item.term}</dt>
+                  <dd class="text-base text-pretty text-muted-foreground sm:text-sm">
+                    {item.desc}
+                  </dd>
+                </div>
+              ))
+            }
+          </dl>
+        </section>
+
+        <section class="space-y-4">
+          <h2 class="text-xl font-semibold tracking-tight">How we handle it</h2>
+          <dl class="space-y-6">
+            {
+              principles.map((item) => (
+                <div class="space-y-1.5">
+                  <dt class="text-base font-medium">{item.term}</dt>
+                  <dd class="text-base text-pretty text-muted-foreground sm:text-sm">
+                    {item.desc}
+                  </dd>
+                </div>
+              ))
+            }
+          </dl>
+        </section>
+
+        <section class="space-y-4">
+          <h2 class="text-xl font-semibold tracking-tight">Your choices</h2>
+          <p class="text-base text-pretty text-muted-foreground sm:text-sm">
+            gitdebt does not require an account. To stop the browser extension
+            from sending repository views, turn off its automatic panel or
+            uninstall the extension.
+          </p>
+        </section>
+
+        <section class="space-y-4">
+          <h2 class="text-xl font-semibold tracking-tight">Contact</h2>
+          <p class="text-base text-pretty text-muted-foreground sm:text-sm">
+            Questions about this policy? Open a
+            <a
+              href="https://github.com/zhom/gitdebt/issues"
+              class="underline decoration-primary decoration-2 underline-offset-4 hover:decoration-primary/60"
+            >
+              GitHub issue
+            </a>
+            without including private information. Report vulnerabilities
+            through GitHub's private security advisory flow. gitdebt is an
+            independent tool and is not affiliated with, endorsed by, or
+            sponsored by GitHub.
+          </p>
+        </section>
+      </main>
+
+      <SiteFooter />
+    </div>
+  </body>
+</html>

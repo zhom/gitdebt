@@ -1,0 +1,14 @@
+# Dokploy builds from the workspace root. rust-toolchain.toml pins the
+# compiler. git and tar must remain in the runtime image because repository
+# analysis shells out to both after the server has started.
+
+providers = ["rust"]
+
+[phases.setup]
+nixPkgs = ["...", "git", "gnutar", "pkg-config", "openssl", "cmake"]
+
+[phases.build]
+cmds = ["cargo build --release --locked -p backend --bin gitdebt-api"]
+
+[start]
+cmd = "./target/release/gitdebt-api"

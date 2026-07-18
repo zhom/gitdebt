@@ -1,0 +1,124 @@
+---
+export const prerender = true;
+
+import "@/styles/globals.css";
+import BaseHead from "@/components/BaseHead.astro";
+import Seo from "@/components/Seo.astro";
+import SiteHeader from "@/components/SiteHeader.astro";
+import SiteFooter from "@/components/SiteFooter.astro";
+import { staticApiBase } from "@/lib/static-api-base";
+
+const apiBase = staticApiBase();
+
+const title = "Terms of use · gitdebt";
+const description =
+  "Terms for using gitdebt, including acceptable use, service availability, account access, limitations, and GitHub affiliation.";
+const ogImage = `${apiBase}/api/og.png`;
+
+const updated = "2026-07-18";
+
+const terms = [
+  {
+    term: "Acceptable use",
+    desc: "gitdebt charts public GitHub repository data. Use it lawfully and don't attempt to disrupt the service, scrape it at abusive volume, or circumvent its rate limits. We may throttle or block traffic that threatens availability for others.",
+  },
+  {
+    term: "Provided as-is",
+    desc: "gitdebt is provided \"as is\" and \"as available\", without warranties of any kind, express or implied, including fitness for a particular purpose. Charts and repo-debt signals are computed from public data and may be incomplete, delayed, or inaccurate — treat them as informational, not authoritative.",
+  },
+  {
+    term: "Limitation of liability",
+    desc: "To the fullest extent permitted by law, gitdebt and its maintainers are not liable for any indirect, incidental, or consequential damages arising from your use of the service or reliance on its data.",
+  },
+  {
+    term: "Not affiliated with GitHub",
+    desc: "gitdebt is an independent project. It is not affiliated with, endorsed by, or sponsored by GitHub, Inc. \"GitHub\" and related marks belong to their respective owner. We access public data through GitHub's API in line with their terms.",
+  },
+  {
+    term: "Changes",
+    desc: "We may update these terms as the service evolves. Continued use after a change constitutes acceptance of the revised terms; the \"last updated\" date above reflects the current version.",
+  },
+];
+
+const jsonLd = {
+  "@context": "https://schema.org",
+  "@type": "WebPage",
+  name: "Terms of use",
+  url: `${(Astro.site ?? new URL("https://gitdebt.com")).href.replace(/\/$/, "")}/terms`,
+  description,
+};
+---
+
+<!doctype html>
+<html lang="en">
+  <head>
+    <BaseHead />
+    <Seo
+      title={title}
+      description={description}
+      canonicalPath="/terms"
+      ogImage={ogImage}
+      jsonLd={jsonLd}
+    />
+  </head>
+  <body>
+    <div class="isolate flex min-h-dvh flex-col">
+      <SiteHeader />
+
+      <main id="main-content" class="mx-auto flex w-full max-w-3xl flex-1 flex-col gap-10 px-6 py-12">
+        <nav aria-label="Breadcrumb" class="font-mono text-xs text-muted-foreground">
+          <a href="/" class="hover:text-foreground">gitdebt</a>
+          <span class="px-1.5 text-border" aria-hidden="true">/</span>
+          <span class="text-foreground">terms</span>
+        </nav>
+
+        <header class="space-y-2">
+          <p class="font-mono text-xs tracking-wide text-muted-foreground uppercase">
+            Terms
+          </p>
+          <h1 class="text-3xl font-semibold tracking-tight text-balance sm:text-4xl">
+            Terms of use
+          </h1>
+          <p class="text-base text-pretty text-muted-foreground sm:text-sm">
+            Last updated <time datetime={updated} class="tabular-nums">{updated}</time>
+          </p>
+        </header>
+
+        <section class="space-y-4">
+          <p class="text-base text-pretty text-muted-foreground sm:text-sm">
+            By using gitdebt you agree to these terms. If you don't agree,
+            please don't use the service.
+          </p>
+          <dl class="space-y-6">
+            {
+              terms.map((item) => (
+                <div class="space-y-1.5">
+                  <dt class="text-base font-medium">{item.term}</dt>
+                  <dd class="text-base text-pretty text-muted-foreground sm:text-sm">
+                    {item.desc}
+                  </dd>
+                </div>
+              ))
+            }
+          </dl>
+        </section>
+
+        <section class="space-y-4">
+          <h2 class="text-xl font-semibold tracking-tight">Contact</h2>
+          <p class="text-base text-pretty text-muted-foreground sm:text-sm">
+            Questions about these terms? Open a
+            <a
+              href="https://github.com/zhom/gitdebt/issues"
+              class="underline decoration-primary decoration-2 underline-offset-4 hover:decoration-primary/60"
+            >
+              GitHub issue
+            </a>
+            without including private information.
+          </p>
+        </section>
+      </main>
+
+      <SiteFooter />
+    </div>
+  </body>
+</html>

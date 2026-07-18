@@ -1,0 +1,245 @@
+:root {
+  color-scheme: light dark;
+  --gd-bg: #ffffff;
+  --gd-fg: #171b20;
+  --gd-muted: #5c6670;
+  --gd-border: rgba(23, 27, 32, 0.12);
+  --gd-signal: #65a30d;
+  --gd-signal-hover: #4d7c0f;
+  --gd-signal-ink: #111a05;
+  --gd-subtle: #f5f7f3;
+  --gd-focus: rgba(101, 163, 13, 0.32);
+}
+
+@media (prefers-color-scheme: dark) {
+  :root {
+    --gd-bg: #0c0f14;
+    --gd-fg: #f2f4f6;
+    --gd-muted: #a0a8b2;
+    --gd-border: rgba(255, 255, 255, 0.12);
+    --gd-signal: #a3e635;
+    --gd-signal-hover: #bef264;
+    --gd-signal-ink: #182206;
+    --gd-subtle: rgba(255, 255, 255, 0.06);
+    --gd-focus: rgba(163, 230, 53, 0.36);
+  }
+}
+
+* {
+  box-sizing: border-box;
+}
+
+html,
+body {
+  margin: 0;
+  padding: 0;
+}
+
+body {
+  width: 336px;
+  background: var(--gd-bg);
+  color: var(--gd-fg);
+  font: 13px/1.45 ui-sans-serif, system-ui, -apple-system, "Segoe UI", sans-serif;
+  -webkit-font-smoothing: antialiased;
+}
+
+a,
+button,
+input {
+  -webkit-tap-highlight-color: transparent;
+}
+
+a {
+  color: var(--gd-signal-hover);
+  text-underline-offset: 3px;
+}
+
+.gd-popup {
+  isolation: isolate;
+  padding: 16px;
+}
+
+.gd-head {
+  display: grid;
+  gap: 4px;
+  padding-bottom: 14px;
+  border-bottom: 1px solid var(--gd-border);
+}
+
+.gd-wordmark {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  width: fit-content;
+  font: 600 17px/1.3 ui-monospace, SFMono-Regular, Menlo, Consolas, monospace;
+  letter-spacing: -0.03em;
+}
+
+.gd-wordmark img {
+  display: block;
+  width: 28px;
+  height: 28px;
+}
+
+.gd-tagline,
+.gd-help,
+.gd-disclosure,
+.gd-feedback {
+  margin: 0;
+  color: var(--gd-muted);
+  text-wrap: pretty;
+}
+
+.gd-tagline {
+  font-size: 12px;
+}
+
+.gd-section {
+  padding: 14px 0;
+  border-bottom: 1px solid var(--gd-border);
+}
+
+.gd-toggle-row {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 16px;
+  cursor: pointer;
+}
+
+.gd-label-title,
+.gd-label-sub {
+  display: block;
+}
+
+.gd-label-title {
+  font-weight: 600;
+}
+
+.gd-label-sub {
+  margin-top: 2px;
+  color: var(--gd-muted);
+  font-size: 12px;
+}
+
+.gd-switch {
+  appearance: none;
+  position: relative;
+  flex: 0 0 auto;
+  width: 40px;
+  height: 24px;
+  margin: 0;
+  border: 1px solid var(--gd-border);
+  border-radius: 999px;
+  background: var(--gd-subtle);
+  cursor: pointer;
+}
+
+.gd-switch::after {
+  position: absolute;
+  top: 3px;
+  left: 3px;
+  width: 16px;
+  height: 16px;
+  border-radius: 50%;
+  background: var(--gd-muted);
+  content: "";
+  transition: transform 140ms ease;
+}
+
+.gd-switch:checked {
+  border-color: var(--gd-signal);
+  background: var(--gd-signal);
+}
+
+.gd-switch:checked::after {
+  background: var(--gd-signal-ink);
+  transform: translateX(16px);
+}
+
+.gd-switch:focus-visible,
+.gd-button:focus-visible,
+a:focus-visible {
+  outline: 3px solid var(--gd-focus);
+  outline-offset: 2px;
+}
+
+.gd-feedback {
+  margin-top: 8px;
+  color: #b42318;
+  font-size: 12px;
+}
+
+.gd-feedback[hidden],
+.gd-help[hidden] {
+  display: none;
+}
+
+.gd-button {
+  width: 100%;
+  min-height: 36px;
+  padding: 8px 12px;
+  border: 1px solid var(--gd-signal);
+  border-radius: 7px;
+  background: var(--gd-signal);
+  color: var(--gd-signal-ink);
+  cursor: pointer;
+  font-family: inherit;
+  font-size: 13px;
+  font-weight: 600;
+  line-height: 1.3;
+}
+
+.gd-button:not(:disabled):hover {
+  border-color: var(--gd-signal-hover);
+  background: var(--gd-signal-hover);
+}
+
+.gd-button:disabled {
+  border-color: var(--gd-border);
+  background: var(--gd-subtle);
+  color: var(--gd-muted);
+  cursor: not-allowed;
+}
+
+.gd-help {
+  margin-top: 8px;
+  font-size: 12px;
+}
+
+.gd-disclosure {
+  padding: 13px 0;
+  font-size: 12px;
+}
+
+.gd-foot {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  padding-top: 12px;
+  border-top: 1px solid var(--gd-border);
+  color: var(--gd-muted);
+  font-size: 12px;
+  font-variant-numeric: tabular-nums;
+}
+
+.gd-foot a {
+  font-weight: 600;
+  text-decoration: none;
+}
+
+.gd-foot a:hover {
+  text-decoration: underline;
+}
+
+@media (prefers-reduced-motion: reduce) {
+  .gd-switch::after {
+    transition: none;
+  }
+}
+
+@media (forced-colors: active) {
+  .gd-switch:checked::after {
+    background: Highlight;
+  }
+}

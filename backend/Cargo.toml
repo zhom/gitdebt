@@ -1,0 +1,56 @@
+[package]
+name = "backend"
+version = "0.1.0"
+edition.workspace = true
+rust-version.workspace = true
+license.workspace = true
+authors.workspace = true
+homepage.workspace = true
+repository.workspace = true
+publish = false
+default-run = "gitdebt-api"
+
+[[bin]]
+name = "gitdebt-api"
+path = "src/main.rs"
+
+[lib]
+name = "gitdebt"
+path = "src/lib.rs"
+
+[dependencies]
+tokio.workspace = true
+axum.workspace = true
+tower.workspace = true
+tower-http.workspace = true
+serde.workspace = true
+serde_json.workspace = true
+reqwest.workspace = true
+chrono.workspace = true
+anyhow.workspace = true
+thiserror.workspace = true
+tracing.workspace = true
+tracing-subscriber.workspace = true
+dotenvy.workspace = true
+url.workspace = true
+futures.workspace = true
+sqlx.workspace = true
+sha2.workspace = true
+hex.workspace = true
+async-trait.workspace = true
+moka.workspace = true
+axum-extra.workspace = true
+hmac.workspace = true
+rand.workspace = true
+cookie.workspace = true
+walkdir.workspace = true
+md-5.workspace = true
+tempfile.workspace = true
+aes-gcm.workspace = true
+base64.workspace = true
+tower_governor.workspace = true
+resvg.workspace = true
+image.workspace = true
+
+[dev-dependencies]
+tokio = { workspace = true, features = ["full"] }

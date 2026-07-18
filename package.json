@@ -1,0 +1,33 @@
+{
+  "name": "gitdebt",
+  "version": "0.1.0",
+  "private": true,
+  "license": "MIT",
+  "author": "Internet Technology Services LLC",
+  "description": "GitHub star-history + repo-debt analytics. Backend: Rust + Postgres. Frontend: Astro + Cloudflare.",
+  "homepage": "https://gitdebt.com",
+  "repository": {
+    "type": "git",
+    "url": "https://github.com/zhom/gitdebt.git"
+  },
+  "engines": {
+    "node": ">=22.13.0"
+  },
+  "scripts": {
+    "assets:logo": "cargo run -p backend --example logo_assets",
+    "assets:logo:source": "bash scripts/process-logo.sh",
+    "dev": "scripts/db.sh up && concurrently --kill-others-on-fail --names \"api,web\" -c \"cyan,green\" \"cargo run --release --bin gitdebt-api\" \"pnpm --filter gitdebt-frontend dev\"",
+    "dev:web": "pnpm --filter gitdebt-frontend dev",
+    "dev:api": "cargo run --release --bin gitdebt-api",
+    "build": "cargo build --release && pnpm --filter gitdebt-frontend build",
+    "test": "cargo test --release",
+    "db": "scripts/db.sh up",
+    "db:down": "scripts/db.sh down",
+    "db:psql": "scripts/db.sh psql",
+    "db:logs": "scripts/db.sh logs"
+  },
+  "devDependencies": {
+    "concurrently": "^10.0.3"
+  },
+  "packageManager": "pnpm@11.14.0"
+}

@@ -1,0 +1,501 @@
+---
+import "@/styles/globals.css";
+import {
+  staticCatalogRequired,
+  staticRepoPaths,
+} from "@/lib/build-catalog";
+import { staticApiBase } from "@/lib/static-api-base";
+import BaseHead from "@/components/BaseHead.astro";
+import Seo from "@/components/Seo.astro";
+import SiteHeader from "@/components/SiteHeader.astro";
+import SiteFooter from "@/components/SiteFooter.astro";
+import { RepoHero } from "@/components/RepoHero";
+import { ChartViewer } from "@/components/ChartViewer";
+import { StatCard } from "@/components/StatCard";
+import { UsageSection, type UsageResponse } from "@/components/UsageSection";
+import { BadgeStudio } from "@/components/BadgeStudio";
+import { buttonVariants } from "@/components/ui/button";
+import { categoriesForRepo, relatedRepos } from "@/data/categories";
+import {
+  firstStarYear as historyFirstYear,
+  formatFullDate,
+  formatMonthYear,
+  gainedInTrailingDays,
+  growthTrend,
+  starMilestones,
+  formatCompact,
+} from "@/lib/star-insights";
+
+export async function getStaticPaths() {
+  return staticRepoPaths();
+}
+
+const { owner: rawOwner, repo: rawRepo } = Astro.params;
+const { updatedAt = null } = Astro.props as { updatedAt?: string | null };
+
+const validSlug = /^[A-Za-z0-9._-]+$/;
+if (!rawOwner || !rawRepo || !validSlug.test(rawOwner) || !validSlug.test(rawRepo)) {
+  return new Response("Not found", { status: 404 });
+}
+
+const owner = rawOwner.toLowerCase();
+const repo = rawRepo.toLowerCase();
+
+const apiBase = staticApiBase();
+
+type AnalyzeResponse = {
+  repo: string;
+  total_stars: number;
+  created_at: string | null;
+  queued: number;
+  pending?: boolean;
+  history_complete: boolean;
+  backfilling?: boolean;
+  not_found?: boolean;
+  history: { date: string; stars: number }[];
+};
+
+let data: AnalyzeResponse | null = null;
+let fetchError: string | null = null;
+let usage: UsageResponse | null = null;
+try {
+  const [analyzeRes, usageRes] = await Promise.allSettled([
+    fetch(`${apiBase}/api/repos/${owner}/${repo}/analyze`, {
+      headers: { accept: "application/json" },
+      signal: AbortSignal.timeout(5_000),
+    }),
+    fetch(`${apiBase}/api/repos/${owner}/${repo}/usage`, {
+      headers: { accept: "application/json" },
+      signal: AbortSignal.timeout(5_000),
+    }),
+  ]);
+
+  if (analyzeRes.status === "fulfilled") {
+    const res = analyzeRes.value;
+    if (res.ok) {
+      data = (await res.json()) as AnalyzeResponse;
+      if (data.not_found) {
+        return new Response("Repo not found", {
+          status: 404,
+          headers: { "Cache-Control": "no-store" },
+        });
+      }
+    } else if (res.status === 404) {
+      return new Response("Repo not found", { status: 404 });
+    } else {
+      fetchError = `backend returned ${res.status}`;
+    }
+  } else {
+    fetchError =
+      analyzeRes.reason instanceof Error
+        ? analyzeRes.reason.message
+        : String(analyzeRes.reason);
+  }
+
+  if (usageRes.status === "fulfilled" && usageRes.value.ok) {
+    usage = (await usageRes.value.json()) as UsageResponse;
+  }
+} catch (err) {
+  fetchError = err instanceof Error ? err.message : String(err);
+}
+
+if (updatedAt && staticCatalogRequired() && (!data || fetchError)) {
+  throw new Error(
+    `Static snapshot refresh failed for ${owner}/${repo}: ${
+      fetchError ?? "missing analysis data"
+    }`,
+  );
+}
+
+try {
+  await fetch(`${apiBase}/api/repos/${owner}/${repo}/analyze-history`, {
+    method: "POST",
+    signal: AbortSignal.timeout(2_000),
+  });
+} catch {}
+
+const repoSlug = `${owner}/${repo}`;
+const canonicalPath = `/${repoSlug}`;
+const site = (Astro.site ?? new URL("https://gitdebt.com")).href.replace(/\/$/, "");
+const canonical = `${site}/${repoSlug}`;
+
+const history = data?.history ?? [];
+const hasHistory = history.length > 0;
+const firstYear = historyFirstYear(history);
+const firstStarYear = firstYear !== null ? String(firstYear) : null;
+const gained90 = hasHistory ? gainedInTrailingDays(history, 90) : null;
+const gained30 = hasHistory ? gainedInTrailingDays(history, 30) : null;
+const trend = hasHistory ? growthTrend(history) : null;
+const milestones = hasHistory ? starMilestones(history) : [];
+const lastDataDate = hasHistory ? history[history.length - 1].date : null;
+const updatedLabel = formatMonthYear(lastDataDate);
+const createdFull = formatFullDate(data?.created_at ?? null);
+const firstStarMonth = hasHistory ? formatMonthYear(history[0].date) : null;
+
+const title = `${repoSlug} — star history & stats · gitdebt`;
+const description = data
+  ? `${repoSlug} has ${data.total_stars.toLocaleString()} GitHub stars${
+      gained90 !== null && gained90 > 0
+        ? `, up about ${gained90.toLocaleString()} in 90 days`
+        : firstStarYear
+          ? ` since ${firstStarYear}`
+          : ""
+    }. Full star-history chart plus repo health: bug-magnet files, churn, contributors, commit heatmap, TODO trend.`
+  : `Star history and repo-debt insights for ${repoSlug}.`;
+
+const ogImage = `${apiBase}/api/repos/${owner}/${repo}/og.png`;
+
+// Cold and failed pages stay out of search results until history is available.
+const noindex = data === null || fetchError !== null || !hasHistory;
+
+const faqs: { q: string; a: string }[] = [];
+if (data && hasHistory) {
+  faqs.push({
+    q: `How many stars does ${repoSlug} have?`,
+    a: `${repoSlug} has ${data.total_stars.toLocaleString()} GitHub stars${
+      updatedLabel ? ` as of ${updatedLabel}` : ""
+    }${
+      gained90 !== null && gained90 > 0
+        ? `, with about ${gained90.toLocaleString()} of them added in the last 90 days`
+        : ""
+    }.`,
+  });
+  if (gained90 !== null) {
+    const pace =
+      trend === "accelerating"
+        ? " That's faster than its lifetime average pace — growth is accelerating."
+        : trend === "slowing"
+          ? " That's below its lifetime average pace, which is common for mature projects."
+          : trend === "steady"
+            ? " That's right in line with its lifetime average pace."
+            : "";
+    faqs.push({
+      q: `How fast is ${repo} growing?`,
+      a: `${repoSlug} gained about ${gained90.toLocaleString()} stars over the last 90 days of its history${
+        gained30 !== null ? ` (about ${gained30.toLocaleString()} in the last 30)` : ""
+      } — figures are approximate for older repos, whose star history is downsampled.${pace}`,
+    });
+  }
+  if (gained30 !== null) {
+    faqs.push({
+      q: `Is ${repo} still active?`,
+      a:
+        gained30 > 0
+          ? `${repoSlug} is still attracting attention — about ${gained30.toLocaleString()} new GitHub stars in the most recent 30 days of its history. For commit-level signals, see the commit activity heatmap, commit trend, and contributors charts on this page.`
+          : `${repoSlug} added no new stars in the most recent 30 days of its cached history. Star momentum isn't the whole picture — check the commit activity heatmap and commit trend charts on this page for maintenance signals.`,
+    });
+  }
+  if (createdFull || firstStarMonth) {
+    faqs.push({
+      q: `When was ${repo} created?`,
+      a: `${repoSlug}${createdFull ? ` was created on ${createdFull} and` : ""} earned its first GitHub star in ${
+        firstStarMonth ?? firstStarYear
+      }.`,
+    });
+  }
+}
+
+const jsonLd: Record<string, unknown>[] = [
+  {
+    "@context": "https://schema.org",
+    "@type": "SoftwareSourceCode",
+    name: repoSlug,
+    codeRepository: `https://github.com/${repoSlug}`,
+    url: canonical,
+    description,
+    ...(data?.created_at && { dateCreated: data.created_at.slice(0, 10) }),
+    ...(data && {
+      interactionStatistic: {
+        "@type": "InteractionCounter",
+        interactionType: { "@type": "LikeAction" },
+        userInteractionCount: data.total_stars,
+      },
+    }),
+  },
+  {
+    "@context": "https://schema.org",
+    "@type": "BreadcrumbList",
+    itemListElement: [
+      {
+        "@type": "ListItem",
+        position: 1,
+        name: "gitdebt",
+        item: `${site}/`,
+      },
+      {
+        "@type": "ListItem",
+        position: 2,
+        name: owner,
+        item: `${site}/u/${owner}`,
+      },
+      {
+        "@type": "ListItem",
+        position: 3,
+        name: repoSlug,
+        item: canonical,
+      },
+    ],
+  },
+];
+if (faqs.length > 0) {
+  jsonLd.push({
+    "@context": "https://schema.org",
+    "@type": "FAQPage",
+    mainEntity: faqs.map((f) => ({
+      "@type": "Question",
+      name: f.q,
+      acceptedAnswer: { "@type": "Answer", text: f.a },
+    })),
+  });
+}
+
+const stats = [
+  {
+    name: "bug-magnets",
+    label: "Bug-magnet files",
+    desc: "Files with the most fix commits",
+  },
+  {
+    name: "top-files",
+    label: "Most-changed files",
+    desc: "Files with the most commits all-time",
+  },
+  {
+    name: "contributors",
+    label: "Contributors",
+    desc: "Everyone who's shipped code",
+  },
+  {
+    name: "lines",
+    label: "Lines of code",
+    desc: "Per-language breakdown via tokei",
+  },
+  {
+    name: "heatmap",
+    label: "Commit activity",
+    desc: "Last 52 weeks of contributions",
+  },
+  {
+    name: "todo-trend",
+    label: "TODO/FIXME trend",
+    desc: "Running count of debt markers in source",
+  },
+  {
+    name: "bus-factor",
+    label: "Bus factor",
+    desc: "How concentrated the commit knowledge is",
+  },
+  {
+    name: "commit-trend",
+    label: "Commit trend",
+    desc: "Commit volume over the repo's lifetime",
+  },
+];
+
+const repoCategories = categoriesForRepo(repoSlug);
+const categoryRelated = relatedRepos(repoSlug, 6);
+const FALLBACK_SUGGESTIONS = [
+  "facebook/react",
+  "vuejs/vue",
+  "sveltejs/svelte",
+  "rust-lang/rust",
+];
+const vsLinks = (categoryRelated.length > 0 ? categoryRelated : FALLBACK_SUGGESTIONS)
+  .filter((s) => s !== repoSlug)
+  .slice(0, 3);
+---
+
+<!doctype html>
+<html lang="en">
+  <head>
+    <BaseHead />
+    <Seo
+      title={title}
+      description={description}
+      canonicalPath={canonicalPath}
+      ogImage={ogImage}
+      imageAlt={`Star history social card for ${repoSlug}`}
+      noindex={noindex}
+      jsonLd={jsonLd}
+    />
+  </head>
+  <body>
+    <div class="isolate flex min-h-dvh flex-col">
+      <SiteHeader />
+
+      <main id="main-content" class="mx-auto flex w-full max-w-5xl flex-1 flex-col gap-10 px-6 py-12">
+        <nav aria-label="Breadcrumb" class="font-mono text-xs text-muted-foreground">
+          <a href="/" class="hover:text-foreground">gitdebt</a>
+          <span class="px-1.5 text-border" aria-hidden="true">/</span>
+          <a href={`/u/${owner}`} class="hover:text-foreground">{owner}</a>
+          <span class="px-1.5 text-border" aria-hidden="true">/</span>
+          <span class="text-foreground">{repo}</span>
+        </nav>
+
+        {data ? (
+          <RepoHero
+            client:load
+            owner={owner}
+            repo={repo}
+            apiBase={apiBase}
+            initialData={data}
+          />
+        ) : (
+          <div class="card-panel p-6" role="alert">
+            <p class="font-mono text-xs tracking-wide text-destructive uppercase">Error</p>
+            <p class="mt-1.5 text-base text-muted-foreground sm:text-sm">
+              Repo data is unavailable right now. Please try again shortly.
+            </p>
+          </div>
+        )}
+
+        <ChartViewer
+          client:load
+          apiBase={apiBase}
+          path={`/api/repos/${owner}/${repo}/chart.svg`}
+          alt={`Star history for ${repoSlug}`}
+          caption="Star history"
+          embedLink={canonical}
+          label={repoSlug}
+        />
+
+        {faqs.length > 0 && (
+          <section class="space-y-4">
+            <header class="flex flex-wrap items-baseline justify-between gap-2">
+              <h2 class="flex items-center gap-2 text-xl font-semibold tracking-tight">
+                <span class="size-1.5 shrink-0 rounded-full bg-signal" aria-hidden="true"></span>
+                {repoSlug} at a glance
+              </h2>
+              {updatedLabel && (
+                <p class="font-mono text-xs text-muted-foreground">
+                  Data updated {updatedLabel}
+                </p>
+              )}
+            </header>
+            <div class="grid gap-x-8 gap-y-6 sm:grid-cols-2">
+              {faqs.map((f) => (
+                <article class="space-y-1.5 border-t border-border pt-5">
+                  <h3 class="text-base font-medium sm:text-sm">{f.q}</h3>
+                  <p class="text-base text-pretty text-muted-foreground sm:text-sm">{f.a}</p>
+                </article>
+              ))}
+            </div>
+            {milestones.length > 0 && (
+              <p class="text-base text-muted-foreground sm:text-sm">
+                <span class="font-mono text-xs tracking-wide uppercase">Star milestones:</span>{" "}
+                {milestones.map((m, i) => (
+                  <>
+                    {i > 0 && <span aria-hidden="true"> · </span>}
+                    <span class="whitespace-nowrap">
+                      {formatCompact(m.threshold)} around {formatMonthYear(m.date)}
+                    </span>
+                  </>
+                ))}
+              </p>
+            )}
+          </section>
+        )}
+
+        <UsageSection
+          client:visible
+          owner={owner}
+          repo={repo}
+          apiBase={apiBase}
+          initialData={usage}
+        />
+
+        <section class="grid gap-6 sm:grid-cols-2">
+          {stats.map((s, i) => (
+            <StatCard
+              client:visible
+              src={`${apiBase}/api/repos/${owner}/${repo}/stats/${s.name}.svg`}
+              alt={`${s.label} for ${repoSlug}`}
+              caption={s.label}
+              delay={i * 0.05}
+              embedLink={canonical}
+            />
+          ))}
+        </section>
+
+        <section class="card-panel space-y-4 p-6">
+          <header class="space-y-1">
+            <p class="font-mono text-xs tracking-wide text-muted-foreground uppercase">
+              Compare
+            </p>
+            <h2 class="text-xl font-semibold tracking-tight">
+              How does {repoSlug} stack up?
+            </h2>
+          </header>
+          <div class="flex flex-wrap items-center gap-2">
+            {vsLinks.map((other) => (
+              <a
+                href={`/vs/${repoSlug}/${other}`}
+                class="inline-flex min-h-11 items-center gap-1.5 rounded-md border border-border bg-background px-3 py-2 font-mono text-base text-muted-foreground shadow-xs hover:bg-accent hover:text-accent-foreground sm:min-h-0 sm:py-1.5 sm:text-sm dark:shadow-none"
+              >
+                vs {other}
+              </a>
+            ))}
+            <a
+              href={`/compare?repos=${encodeURIComponent(repoSlug)}`}
+              class={buttonVariants({ variant: "outline", size: "sm" })}
+            >
+              Compare with any repo
+            </a>
+          </div>
+          {categoryRelated.length > 3 && (
+            <div class="space-y-2">
+              <p class="font-mono text-xs tracking-wide text-muted-foreground uppercase">
+                Similar repos
+              </p>
+              <div class="flex flex-wrap items-center gap-2">
+                {categoryRelated.slice(3).map((other) => (
+                  <a
+                    href={`/${other}`}
+                    class="inline-flex min-h-11 items-center gap-1.5 rounded-md border border-border bg-background px-3 py-2 font-mono text-base text-muted-foreground shadow-xs hover:bg-accent hover:text-accent-foreground sm:min-h-0 sm:py-1.5 sm:text-sm dark:shadow-none"
+                  >
+                    {other} star history
+                  </a>
+                ))}
+              </div>
+            </div>
+          )}
+          {repoCategories.length > 0 && (
+            <p class="text-base text-muted-foreground sm:text-sm">
+              {repoSlug} is featured in{" "}
+              {repoCategories.map((c, i) => (
+                <>
+                  {i > 0 && ", "}
+                  <a
+                    href={`/compare/${c.slug}`}
+                    class="underline decoration-signal/60 underline-offset-4 hover:decoration-signal"
+                  >
+                    {c.name} compared
+                  </a>
+                </>
+              ))}
+              {" "}— see how the whole category stacks up.
+            </p>
+          )}
+        </section>
+
+        <section id="badges" class="scroll-mt-20 space-y-6">
+          <header class="space-y-2">
+            <p class="font-mono text-xs tracking-wide text-muted-foreground uppercase">
+              Badges
+            </p>
+            <h2 class="text-2xl font-semibold tracking-tight text-balance sm:text-3xl">
+              Build a README badge
+            </h2>
+            <p class="max-w-[60ch] text-base text-pretty text-muted-foreground sm:text-sm">
+              Pick the metrics, style, and theme — then copy a Markdown or
+              HTML snippet for {repoSlug}.
+            </p>
+          </header>
+          <BadgeStudio client:visible owner={owner} repo={repo} apiBase={apiBase} />
+        </section>
+      </main>
+
+      <SiteFooter />
+    </div>
+  </body>
+</html>

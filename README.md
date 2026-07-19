@@ -39,9 +39,7 @@ downloads versus stars.
 
 **Verdict:** the star chart makes gitdebt immediately legible; the git-history
 signals make it worth keeping open. It is especially good at showing the
-difference between attention and maintenance reality. Its present limitation
-is acquisition, not visualization: GitHub is restricting the stargazers
-endpoint, so reliable public scale depends on the planned GH Archive backfill.
+difference between attention and maintenance reality.
 
 ## What feels different
 
@@ -121,18 +119,12 @@ The packaged archives are written to `extension/dist/`.
 | Layer | Stack | Job |
 |---|---|---|
 | Backend | Rust, Axum, SQLx, Postgres | ingestion queue, analysis, exports, deterministic SVG/raster rendering |
-| Frontend | Astro 7, React islands, Tailwind v4 | static product pages and live client reports on Cloudflare Pages |
+| Frontend | Astro 7, React islands, Tailwind v4 | static product pages and live client reports |
 | Extension | Browser-native MV3 JavaScript | repository panel on github.com |
 
 The backend never blocks an analysis request on GitHub pagination. Cold work
 enters a durable Postgres queue; workers drain it under a persistent rate-limit
 tracker. Complete-cache flags keep readers from seeing partial star history.
-
-The frontend is fully static. A GitHub Actions refresh builds tracked repo
-snapshots and sitemaps every three hours, after frontend pushes, or when the
-`refresh-static-pages` repository dispatch is sent. This keeps Pages free while
-`/report` remains live for newly discovered repos; a backend completion hook can
-send the dispatch later without changing the deployment design.
 
 ## Run it locally
 
@@ -155,28 +147,6 @@ PUBLIC_API_BASE=http://localhost:8787 pnpm --filter gitdebt-frontend dev
 
 The API listens on `:8787`; Astro uses `:14321`. The database schema is applied
 idempotently at backend startup.
-
-## Deploy your own
-
-- Backend: connect Dokploy to the repository root and select Nixpacks. The
-  checked-in build pins Rust, retains Git/tar in the runtime, and starts the
-  release binary. Follow [`DOKPLOY.md`](DOKPLOY.md).
-- Frontend: create a Cloudflare Pages Direct Upload project and let
-  `.github/workflows/deploy-pages.yml` build and upload `frontend/dist`.
-  Follow [`frontend/DEPLOYMENT.md`](frontend/DEPLOYMENT.md).
-- Database: bring Postgres 16+, mount persistent repo storage, and schedule
-  off-host `pg_dump` backups.
-
-The full environment contract and cache invariants are documented in
-[`AGENTS.md`](AGENTS.md).
-
-## Honest launch status
-
-Every read surface consumes Postgres and is ready for the ingestion source to
-change. The remaining scale blocker is historical star acquisition: GitHub's
-REST stargazers endpoint is being restricted, and GH Archive is the planned
-primary source. Until that lands, a public deployment should be described as a
-seeded beta rather than an unlimited star-history service.
 
 ## Contributing and ownership
 

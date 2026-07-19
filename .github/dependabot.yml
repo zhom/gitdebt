@@ -8,7 +8,14 @@ updates:
       day: monday
       time: "06:17"
       timezone: Asia/Yerevan
-    open-pull-requests-limit: 10
+    open-pull-requests-limit: 5
+    groups:
+      rust-minor-and-patch:
+        patterns:
+          - "*"
+        update-types:
+          - minor
+          - patch
 
   - package-ecosystem: npm
     directory: /
@@ -17,7 +24,21 @@ updates:
       day: monday
       time: "06:27"
       timezone: Asia/Yerevan
-    open-pull-requests-limit: 10
+    open-pull-requests-limit: 5
+    groups:
+      frontend-minor-and-patch:
+        patterns:
+          - "*"
+        update-types:
+          - minor
+          - patch
+    ignore:
+      - dependency-name: typescript
+        update-types:
+          - version-update:semver-major
+      - dependency-name: "@types/node"
+        update-types:
+          - version-update:semver-major
 
   - package-ecosystem: npm
     directory: /extension
@@ -26,7 +47,14 @@ updates:
       day: monday
       time: "06:37"
       timezone: Asia/Yerevan
-    open-pull-requests-limit: 10
+    open-pull-requests-limit: 5
+    groups:
+      extension-minor-and-patch:
+        patterns:
+          - "*"
+        update-types:
+          - minor
+          - patch
 
   - package-ecosystem: github-actions
     directory: /
@@ -35,4 +63,12 @@ updates:
       day: monday
       time: "06:47"
       timezone: Asia/Yerevan
-    open-pull-requests-limit: 10
+    open-pull-requests-limit: 3
+    groups:
+      actions:
+        patterns:
+          - "*"
+    ignore:
+      # This action's numeric ref is the Rust compiler channel, not the
+      # action's own release. Dependabot proposed nonexistent Rust 1.100.0.
+      - dependency-name: dtolnay/rust-toolchain

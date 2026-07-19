@@ -44,17 +44,15 @@ function curatedRepos(): CatalogRepo[] {
 async function fetchCatalog(): Promise<CatalogRepo[]> {
   const limit = catalogLimit();
   const apiBase = staticApiBase();
+  const endpoint = `${apiBase}/api/sitemap/repos?page=0&per=${limit}`;
   const curated = curatedRepos();
   const bySlug = new Map(curated.map((repo) => [repo.slug, repo]));
 
   try {
-    const response = await fetch(
-      `${apiBase}/api/sitemap/repos?page=0&per=${limit}`,
-      {
-        headers: { accept: "application/json" },
-        signal: AbortSignal.timeout(10_000),
-      },
-    );
+    const response = await fetch(endpoint, {
+      headers: { accept: "application/json" },
+      signal: AbortSignal.timeout(10_000),
+    });
     if (!response.ok) {
       throw new Error(`backend returned ${response.status}`);
     }
@@ -74,7 +72,13 @@ async function fetchCatalog(): Promise<CatalogRepo[]> {
   } catch (error) {
     if (staticCatalogRequired()) {
       const detail = error instanceof Error ? error.message : String(error);
-      throw new Error(`Static catalog refresh failed: ${detail}`);
+      const cause =
+        error instanceof Error && error.cause
+          ? ` (${String(error.cause)})`
+          : "";
+      throw new Error(
+        `Static catalog refresh failed for ${endpoint}: ${detail}${cause}`,
+      );
     }
   }
 

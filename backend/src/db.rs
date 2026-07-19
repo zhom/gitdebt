@@ -1,6 +1,20 @@
 use anyhow::{Context, Result};
+use sqlx::Connection;
+use sqlx::PgConnection;
 use sqlx::PgPool;
 use sqlx::postgres::PgPoolOptions;
+
+/// Serializes the idempotent startup schema across processes and test tasks.
+///
+/// PostgreSQL's `CREATE TABLE IF NOT EXISTS` is not safe when two sessions
+/// create the same table at exactly the same time: both can pass the existence
+/// check, then one loses while inserting the table's implicit row type into
+/// `pg_type`. A session advisory lock prevents that catalog race and stays held
+/// through the out-of-transaction concurrent-index maintenance that follows.
+/// Contenders poll `pg_try_advisory_lock` instead of blocking inside Postgres:
+/// a blocked advisory-lock transaction can itself be waited on by
+/// `CREATE INDEX CONCURRENTLY`, creating a deadlock cycle.
+const SCHEMA_MIGRATION_LOCK_ID: i64 = 0x6769_7464_6562_7401;
 
 /// Schema applied on every startup. Idempotent — uses IF NOT EXISTS.
 ///
@@ -448,18 +462,57 @@ impl Db {
             .await
             .context("connect postgres")?;
         let me = Self { pool };
-        me.migrate().await?;
-        // Complete index maintenance before accepting traffic so expensive
-        // public queries never launch without their required indexes.
-        me.ensure_concurrent_indexes().await;
+        // Keep the session lock on a dedicated connection. Dropping this
+        // connection (including cancellation during startup) closes the
+        // session and releases the lock instead of returning a still-locked
+        // session to the application pool.
+        let mut connection = PgConnection::connect(database_url)
+            .await
+            .context("connect schema session")?;
+        loop {
+            let acquired: bool = sqlx::query_scalar("SELECT pg_try_advisory_lock($1)")
+                .bind(SCHEMA_MIGRATION_LOCK_ID)
+                .fetch_one(&mut connection)
+                .await
+                .context("try schema migration lock")?;
+            if acquired {
+                break;
+            }
+            tokio::time::sleep(std::time::Duration::from_millis(50)).await;
+        }
+
+        let migration_result = me.migrate(&mut connection).await;
+        if migration_result.is_ok() {
+            // Complete index maintenance before accepting traffic so
+            // expensive public queries never launch without their required
+            // indexes.
+            me.ensure_concurrent_indexes(&mut connection).await;
+        }
+        let unlock_result = sqlx::query("SELECT pg_advisory_unlock($1)")
+            .bind(SCHEMA_MIGRATION_LOCK_ID)
+            .execute(&mut connection)
+            .await
+            .context("unlock schema migration");
+        let close_result = connection.close().await.context("close schema session");
+        migration_result?;
+        unlock_result?;
+        close_result?;
         Ok(me)
     }
 
-    async fn migrate(&self) -> Result<()> {
+    async fn migrate(&self, connection: &mut PgConnection) -> Result<()> {
+        let mut transaction = connection
+            .begin()
+            .await
+            .context("begin schema transaction")?;
         sqlx::raw_sql(SCHEMA)
-            .execute(&self.pool)
+            .execute(&mut *transaction)
             .await
             .context("apply schema")?;
+        transaction
+            .commit()
+            .await
+            .context("commit schema transaction")?;
         Ok(())
     }
 
@@ -474,7 +527,7 @@ impl Db {
     /// Each statement runs on its own via the simple-query protocol
     /// (`raw_sql`): `CREATE INDEX CONCURRENTLY` cannot run inside a
     /// transaction block or a multi-statement batch.
-    async fn ensure_concurrent_indexes(&self) {
+    async fn ensure_concurrent_indexes(&self, connection: &mut PgConnection) {
         for (name, create_stmt) in CONCURRENT_INDEXES {
             tracing::info!(index = %name, "ensuring database index");
             // Drop a leftover invalid index so IF NOT EXISTS can rebuild it.
@@ -489,12 +542,12 @@ impl Db {
                  END $$;"
             );
             if let Err(e) = sqlx::raw_sql(sqlx::AssertSqlSafe(drop_invalid))
-                .execute(&self.pool)
+                .execute(&mut *connection)
                 .await
             {
                 tracing::warn!(index = %name, error = %e, "drop invalid index (non-fatal)");
             }
-            if let Err(e) = sqlx::raw_sql(*create_stmt).execute(&self.pool).await {
+            if let Err(e) = sqlx::raw_sql(*create_stmt).execute(&mut *connection).await {
                 tracing::warn!(index = %name, error = %e, "create concurrent index (non-fatal)");
             }
         }
@@ -504,7 +557,7 @@ impl Db {
 
 #[cfg(test)]
 mod tests {
-    use super::{CONCURRENT_INDEXES, SCHEMA};
+    use super::{CONCURRENT_INDEXES, SCHEMA, SCHEMA_MIGRATION_LOCK_ID};
 
     /// The profile-card login index must stay in the idempotent schema
     /// (no migration files in this repo) and must stay partial — a full
@@ -523,6 +576,14 @@ mod tests {
         assert!(
             SCHEMA.contains("IF NOT EXISTS"),
             "schema must stay idempotent"
+        );
+    }
+
+    #[test]
+    fn schema_migration_uses_a_stable_advisory_lock_key() {
+        assert_ne!(
+            SCHEMA_MIGRATION_LOCK_ID, 0,
+            "the startup schema lock must use a dedicated non-zero key"
         );
     }
 

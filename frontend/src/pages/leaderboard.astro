@@ -1,6 +1,5 @@
 ---
 import "@/styles/globals.css";
-import { staticCatalogRequired } from "@/lib/build-catalog";
 import { staticApiBase } from "@/lib/static-api-base";
 import BaseHead from "@/components/BaseHead.astro";
 import Seo from "@/components/Seo.astro";
@@ -26,37 +25,42 @@ type LeaderboardResponse = {
   repos: LeaderboardRow[];
 };
 
-async function fetchBoard(metric: "stars" | "velocity"): Promise<LeaderboardResponse | null> {
-  try {
-    const res = await fetch(
-      `${apiBase}/api/leaderboard.json?metric=${metric}&per=50&page=0`,
-      {
+async function fetchJson<T>(url: string): Promise<T | null> {
+  for (let attempt = 0; attempt < 3; attempt += 1) {
+    try {
+      const res = await fetch(url, {
         headers: { accept: "application/json" },
         signal: AbortSignal.timeout(5_000),
-      },
-    );
-    if (!res.ok) return null;
-    return (await res.json()) as LeaderboardResponse;
-  } catch {
-    return null;
+      });
+      if (res.ok) return (await res.json()) as T;
+      if (res.status < 500 && res.status !== 429) return null;
+    } catch {}
+
+    if (attempt < 2) {
+      await new Promise((resolve) =>
+        setTimeout(resolve, 500 * 2 ** attempt),
+      );
+    }
   }
+  return null;
+}
+
+async function fetchBoard(
+  metric: "stars" | "velocity",
+): Promise<LeaderboardResponse | null> {
+  return fetchJson<LeaderboardResponse>(
+    `${apiBase}/api/leaderboard.json?metric=${metric}&per=50&page=0`,
+  );
 }
 
 const [velocityBoard, starsBoard, totalAnalyzed] = await Promise.all([
   fetchBoard("velocity"),
   fetchBoard("stars"),
   (async () => {
-    try {
-      const res = await fetch(`${apiBase}/api/sitemap/repos?page=0&per=1`, {
-        headers: { accept: "application/json" },
-        signal: AbortSignal.timeout(5_000),
-      });
-      if (!res.ok) return null;
-      const j = (await res.json()) as { total?: number };
-      return typeof j.total === "number" ? j.total : null;
-    } catch {
-      return null;
-    }
+    const result = await fetchJson<{ total?: number }>(
+      `${apiBase}/api/sitemap/repos?page=0&per=1`,
+    );
+    return typeof result?.total === "number" ? result.total : null;
   })(),
 ]);
 
@@ -65,10 +69,6 @@ const mostStarred = starsBoard?.repos ?? [];
 const loaded = velocityBoard !== null || starsBoard !== null;
 const hasRows = trending.length > 0 || mostStarred.length > 0;
 const windowDays = velocityBoard?.window_days ?? 7;
-
-if (staticCatalogRequired() && !loaded) {
-  throw new Error("Static leaderboard refresh failed: backend unavailable");
-}
 
 const top = trending[0] ?? null;
 const topStarred = mostStarred[0] ?? null;

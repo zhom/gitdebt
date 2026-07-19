@@ -101,10 +101,6 @@ const [left, right] = await Promise.all([
   fetchAnalyze(owner2, repo2),
 ]);
 
-if (left.notFound || right.notFound) {
-  return new Response("Repo not found", { status: 404 });
-}
-
 const slug1 = `${owner1}/${repo1}`;
 const slug2 = `${owner2}/${repo2}`;
 const bothLoaded = left.data !== null && right.data !== null;

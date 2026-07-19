@@ -224,6 +224,16 @@ fn is_forbidden(err: &anyhow::Error) -> bool {
     )
 }
 
+/// A 404 from the stargazer-list endpoint is ambiguous after GitHub's
+/// endpoint restriction. `process` confirms the repository through the
+/// metadata endpoint before the worker is allowed to tombstone it.
+fn is_stargazers_unavailable(err: &anyhow::Error) -> bool {
+    matches!(
+        err.downcast_ref::<GithubError>(),
+        Some(GithubError::StargazersUnavailable(_))
+    )
+}
+
 /// Result of one fetch attempt.
 enum Outcome {
     /// The full list was fetched (or refreshed) and committed complete.
@@ -309,19 +319,40 @@ async fn process(ctx: &WorkerCtx, job: &queue::Job) -> Result<Outcome> {
     let (owner, repo) = split_slug(&job.repo);
     let src = GithubPages {
         github: &ctx.github,
-        owner,
-        repo,
+        owner: owner.clone(),
+        repo: repo.clone(),
     };
     // A repo that is already complete and merely stale → incremental tail
     // fetch (only the new pages). Anything else (cold, or a `partial`
     // continuation that never completed) → full fetch from page 1. We
     // detect "complete" via the read-side flag.
     let complete = ctx.cache.repo_stargazers_complete(&job.repo).await?;
-    if complete && !job.partial {
+    let result = if complete && !job.partial {
         incremental_fetch(ctx, &job.repo, &src).await
     } else {
         full_fetch(ctx, &job.repo, &src, job.next_page).await
+    };
+
+    if let Err(error) = &result
+        && is_stargazers_unavailable(error)
+    {
+        return match ctx.github.repo_metadata(&owner, &repo).await? {
+            Some(metadata) => {
+                ctx.cache
+                    .put_repo_metadata(
+                        &job.repo,
+                        metadata.stargazers_count,
+                        metadata.forks_count,
+                        metadata.created_at,
+                    )
+                    .await?;
+                Ok(Outcome::Restricted { fetched: 0 })
+            }
+            None => Err(GithubError::NotFound(job.repo.clone()).into()),
+        };
     }
+
+    result
 }
 
 /// Fetch one resumable oldest-first chunk. Page 1 is always probed for the
@@ -807,6 +838,16 @@ mod tests {
         let rl: anyhow::Error = GithubError::RateLimited(None).into();
         assert!(!is_forbidden(&rl));
         assert!(!is_forbidden(&anyhow::anyhow!("db error")));
+    }
+
+    #[test]
+    fn stargazer_404_requires_metadata_confirmation() {
+        let unavailable: anyhow::Error = GithubError::StargazersUnavailable("o/r".into()).into();
+        assert!(is_stargazers_unavailable(&unavailable));
+        assert!(!is_not_found(&unavailable));
+
+        let repo_404: anyhow::Error = GithubError::NotFound("o/r".into()).into();
+        assert!(!is_stargazers_unavailable(&repo_404));
     }
 
     #[test]

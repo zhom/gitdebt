@@ -27,6 +27,13 @@ pub enum GithubError {
     InvalidToken,
     #[error("repo not found: {0}")]
     NotFound(String),
+    /// The stargazer-list endpoint returned 404. This does not prove the
+    /// repository itself is missing: GitHub can restrict this endpoint
+    /// independently of public repository metadata. The worker confirms
+    /// existence through `/repos/{owner}/{repo}` before deciding whether to
+    /// tombstone or park the history fetch as restricted.
+    #[error("stargazers unavailable: {0}")]
+    StargazersUnavailable(String),
     /// A *durable* 403 with no rate-limit signal — access is denied for a
     /// reason retrying can't fix (e.g. the 2026-06-30 stargazer restriction
     /// serving 403 to non-admin callers). Distinct from [`Self::RateLimited`]
@@ -341,7 +348,7 @@ const REPO_LIST_MAX_PAGES: usize = 10;
 async fn check_status(resp: Response, ctx: &str) -> Result<Response, GithubError> {
     let status = resp.status();
     if status == 404 {
-        return Err(GithubError::NotFound(ctx.to_string()));
+        return Err(GithubError::StargazersUnavailable(ctx.to_string()));
     }
     if status == 403 || status == 429 {
         // GitHub overloads 403 for both rate limiting and plain access

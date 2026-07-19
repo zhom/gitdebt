@@ -336,17 +336,18 @@ CREATE TABLE IF NOT EXISTS login_repos (
 );
 CREATE INDEX IF NOT EXISTS idx_login_repos_rank ON login_repos(login, rank);
 
--- Schema version. Single row, bumped whenever a backwards-incompatible
--- change ships. Idempotent CREATEs keep the table in shape on re-run.
+-- Schema version. Single row, bumped after each one-time repair.
 -- v1: initial schema. v2: timestamp columns moved from TEXT to TIMESTAMPTZ.
+-- v3: clear false repo tombstones created when restricted stargazer 404s
+--     were incorrectly treated as repository-metadata 404s.
 CREATE TABLE IF NOT EXISTS schema_version (
     id           INTEGER PRIMARY KEY,
     version      INTEGER NOT NULL,
     applied_at   TIMESTAMPTZ NOT NULL
 );
 INSERT INTO schema_version (id, version, applied_at)
-VALUES (1, 2, NOW())
-ON CONFLICT (id) DO UPDATE SET version = GREATEST(schema_version.version, EXCLUDED.version);
+VALUES (1, 1, NOW())
+ON CONFLICT (id) DO NOTHING;
 
 -- ===========================================================================
 -- Migration v1 → v2: TEXT timestamps → TIMESTAMPTZ.
@@ -401,6 +402,36 @@ BEGIN
             );
         END IF;
     END LOOP;
+END$$;
+
+-- ===========================================================================
+-- Migration v2 → v3: repair ambiguous stargazer-endpoint 404 tombstones.
+--
+-- Older workers classified a 404 from `/stargazers` as proof that the repo
+-- itself was missing. GitHub now restricts that endpoint independently, so
+-- valid public repos were tombstoned and their jobs parked dead. Clear those
+-- flags once and requeue only jobs carrying that old NotFound error. The new
+-- worker verifies `/repos/{owner}/{repo}`: genuinely missing repos are
+-- tombstoned again, while existing repos are parked as history-restricted.
+-- ===========================================================================
+DO $$
+BEGIN
+    IF (SELECT version FROM schema_version WHERE id = 1) < 3 THEN
+        UPDATE repos SET missing = FALSE WHERE missing = TRUE;
+        UPDATE star_fetch_queue
+        SET status = 'pending',
+            attempts = 0,
+            partial = FALSE,
+            next_page = 1,
+            last_error = NULL,
+            claimed_at = NULL,
+            worker_id = NULL
+        WHERE status = 'dead'
+          AND last_error LIKE 'repo not found:%';
+        UPDATE schema_version
+        SET version = 3, applied_at = NOW()
+        WHERE id = 1;
+    END IF;
 END$$;
 "#;
 
@@ -585,6 +616,14 @@ mod tests {
             SCHEMA_MIGRATION_LOCK_ID, 0,
             "the startup schema lock must use a dedicated non-zero key"
         );
+    }
+
+    #[test]
+    fn schema_repairs_ambiguous_stargazer_404_tombstones_once() {
+        assert!(SCHEMA.contains("IF (SELECT version FROM schema_version WHERE id = 1) < 3"));
+        assert!(SCHEMA.contains("UPDATE repos SET missing = FALSE WHERE missing = TRUE"));
+        assert!(SCHEMA.contains("last_error LIKE 'repo not found:%'"));
+        assert!(SCHEMA.contains("SET version = 3"));
     }
 
     #[test]

@@ -57,6 +57,7 @@ type AnalyzeResponse = {
 
 let data: AnalyzeResponse | null = null;
 let fetchError: string | null = null;
+let repoNotFound = false;
 let usage: UsageResponse | null = null;
 try {
   const [analyzeRes, usageRes] = await Promise.allSettled([
@@ -73,15 +74,14 @@ try {
   if (analyzeRes.status === "fulfilled") {
     const res = analyzeRes.value;
     if (res.ok) {
-      data = (await res.json()) as AnalyzeResponse;
-      if (data.not_found) {
-        return new Response("Repo not found", {
-          status: 404,
-          headers: { "Cache-Control": "no-store" },
-        });
+      const result = (await res.json()) as AnalyzeResponse;
+      if (result.not_found) {
+        repoNotFound = true;
+      } else {
+        data = result;
       }
     } else if (res.status === 404) {
-      return new Response("Repo not found", { status: 404 });
+      repoNotFound = true;
     } else {
       fetchError = `backend returned ${res.status}`;
     }
@@ -99,7 +99,12 @@ try {
   fetchError = err instanceof Error ? err.message : String(err);
 }
 
-if (updatedAt && staticCatalogRequired() && (!data || fetchError)) {
+if (
+  updatedAt &&
+  staticCatalogRequired() &&
+  !repoNotFound &&
+  (!data || fetchError)
+) {
   throw new Error(
     `Static snapshot refresh failed for ${owner}/${repo}: ${
       fetchError ?? "missing analysis data"
@@ -107,12 +112,14 @@ if (updatedAt && staticCatalogRequired() && (!data || fetchError)) {
   );
 }
 
-try {
-  await fetch(`${apiBase}/api/repos/${owner}/${repo}/analyze-history`, {
-    method: "POST",
-    signal: AbortSignal.timeout(2_000),
-  });
-} catch {}
+if (!repoNotFound) {
+  try {
+    await fetch(`${apiBase}/api/repos/${owner}/${repo}/analyze-history`, {
+      method: "POST",
+      signal: AbortSignal.timeout(2_000),
+    });
+  } catch {}
+}
 
 const repoSlug = `${owner}/${repo}`;
 const canonicalPath = `/${repoSlug}`;

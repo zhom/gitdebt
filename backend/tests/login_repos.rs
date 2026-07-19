@@ -18,12 +18,33 @@
 //! transaction; `mark_login_missing` tombstones + clears rows in one
 //! transaction).
 
+use std::sync::OnceLock;
+
 use gitdebt::cache::Cache;
 use gitdebt::db::Db;
+use sqlx::postgres::PgPoolOptions;
+use tokio::sync::Mutex;
+
+static SCHEMA_READY: OnceLock<()> = OnceLock::new();
+static SCHEMA_LOCK: Mutex<()> = Mutex::const_new(());
 
 async fn test_db() -> Option<Db> {
     let url = std::env::var("GITDEBT_TEST_DATABASE_URL").ok()?;
-    Some(Db::connect(&url).await.expect("connect test db"))
+
+    let schema_guard = SCHEMA_LOCK.lock().await;
+    if SCHEMA_READY.get().is_none() {
+        let db = Db::connect(&url).await.expect("connect test db");
+        SCHEMA_READY.set(()).expect("schema initialized once");
+        return Some(db);
+    }
+    drop(schema_guard);
+
+    let pool = PgPoolOptions::new()
+        .max_connections(4)
+        .connect(&url)
+        .await
+        .expect("connect test pool");
+    Some(Db { pool })
 }
 
 async fn cleanup(db: &Db, login: &str) {

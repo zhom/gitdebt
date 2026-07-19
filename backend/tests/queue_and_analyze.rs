@@ -15,14 +15,39 @@
 //! after itself, so the suite is safe to run repeatedly against a shared
 //! dev database without colliding.
 
+use std::sync::OnceLock;
+
 use chrono::{Duration, TimeZone, Utc};
 use gitdebt::{analyzer, cache::Cache, db::Db, queue, repo_analysis};
+use sqlx::postgres::PgPoolOptions;
+use tokio::sync::Mutex;
+
+static SCHEMA_READY: OnceLock<()> = OnceLock::new();
+static SCHEMA_LOCK: Mutex<()> = Mutex::const_new(());
 
 /// Returns a connected `Db` if a test database is configured, else `None`
 /// (the test then no-ops). Keeps the suite green where no DB exists.
 async fn test_db() -> Option<Db> {
     let url = std::env::var("GITDEBT_TEST_DATABASE_URL").ok()?;
-    Some(Db::connect(&url).await.expect("connect test db"))
+
+    // Tokio creates one runtime per #[tokio::test], so a PgPool must not be
+    // shared through a static OnceCell: the runtime that owns its maintenance
+    // tasks can disappear while sibling tests still use the pool. Initialize
+    // the schema exactly once, then give every test a small runtime-local pool.
+    let schema_guard = SCHEMA_LOCK.lock().await;
+    if SCHEMA_READY.get().is_none() {
+        let db = Db::connect(&url).await.expect("connect test db");
+        SCHEMA_READY.set(()).expect("schema initialized once");
+        return Some(db);
+    }
+    drop(schema_guard);
+
+    let pool = PgPoolOptions::new()
+        .max_connections(4)
+        .connect(&url)
+        .await
+        .expect("connect test pool");
+    Some(Db { pool })
 }
 
 async fn cleanup(db: &Db, prefix: &str) {

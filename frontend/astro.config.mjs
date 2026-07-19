@@ -5,6 +5,11 @@ import tailwindcss from "@tailwindcss/vite";
 
 export default defineConfig({
   output: "static",
+  build: {
+    // Cloudflare Pages serves `route.html` at `/route`. Directory output would
+    // normalize `/route` to `/route/`, fighting our no-trailing-slash canonicals.
+    format: "file",
+  },
   integrations: [react()],
   site: process.env.PUBLIC_SITE_URL ?? "https://gitdebt.com",
   trailingSlash: "never",

@@ -75,6 +75,17 @@ pub struct AnalysisResult {
     pub queued: u32,
     /// True once the stargazer-timestamp fetch is complete and cached.
     pub history_complete: bool,
+    /// Semantics of the plotted series. `current_stargazers` is the legacy
+    /// exact current-membership snapshot; `public_star_actions` comes from
+    /// GH Archive WatchEvents and is approximate because unstars are absent.
+    pub history_kind: &'static str,
+    /// Number of source events represented by the plotted series. This can
+    /// differ from `total_stars`, which remains GitHub's current metadata
+    /// count for GH Archive-backed histories.
+    pub history_event_count: u32,
+    pub history_coverage_start: Option<DateTime<Utc>>,
+    pub history_coverage_end: Option<DateTime<Utc>>,
+    pub history_approximate: bool,
     /// True when a background fetch is in flight / was just enqueued for
     /// this repo (cold, stale, or already queued). The frontend polls
     /// until this is false.
@@ -132,6 +143,11 @@ pub async fn analyze_repo(owner: &str, repo: &str, ctx: &AnalyzerCtx) -> Result<
             created_at: None,
             queued: queued.clamp(0, u32::MAX as i64) as u32,
             history_complete: false,
+            history_kind: "unavailable",
+            history_event_count: 0,
+            history_coverage_start: None,
+            history_coverage_end: None,
+            history_approximate: false,
             pending: false,
             backfilling: false,
             history_unavailable: false,
@@ -155,10 +171,16 @@ pub async fn analyze_repo(owner: &str, repo: &str, ctx: &AnalyzerCtx) -> Result<
     let (history, history_complete, total_stars) = match &cached {
         Some(items) => {
             let full_series = chart::cumulative_series(items);
+            let total = summary
+                .as_ref()
+                .and_then(|value| value.star_count)
+                .filter(|value| *value >= 0)
+                .unwrap_or(items.len() as i64)
+                .clamp(0, u32::MAX as i64) as u32;
             (
                 chart::downsample(&full_series, MAX_HISTORY_POINTS),
                 true,
-                items.len() as u32,
+                total,
             )
         }
         None => {
@@ -207,6 +229,31 @@ pub async fn analyze_repo(owner: &str, repo: &str, ctx: &AnalyzerCtx) -> Result<
         created_at,
         queued: queued.clamp(0, u32::MAX as i64) as u32,
         history_complete,
+        history_kind: if summary
+            .as_ref()
+            .and_then(|value| value.history_source.as_deref())
+            == Some("gh_archive")
+        {
+            "public_star_actions"
+        } else if history_complete {
+            "current_stargazers"
+        } else {
+            "unavailable"
+        },
+        history_event_count: cached
+            .as_ref()
+            .map(|items| items.len().min(u32::MAX as usize) as u32)
+            .unwrap_or(0),
+        history_coverage_start: summary
+            .as_ref()
+            .and_then(|value| value.history_coverage_start),
+        history_coverage_end: summary
+            .as_ref()
+            .and_then(|value| value.history_coverage_end),
+        history_approximate: summary
+            .as_ref()
+            .and_then(|value| value.history_source.as_deref())
+            == Some("gh_archive"),
         pending,
         backfilling,
         history_unavailable,
@@ -346,7 +393,13 @@ fn maybe_refresh_metadata(owner: &str, repo: &str, ctx: &AnalyzerCtx) {
         match github.repo_metadata(&owner_s, &repo_s).await {
             Ok(Some(m)) => {
                 if let Err(e) = cache
-                    .put_repo_metadata(&repo_full, m.stargazers_count, m.forks_count, m.created_at)
+                    .put_repo_metadata(
+                        &repo_full,
+                        m.id,
+                        m.stargazers_count,
+                        m.forks_count,
+                        m.created_at,
+                    )
                     .await
                 {
                     tracing::warn!(repo = %repo_full, error = %e, "put_repo_metadata");
@@ -375,6 +428,11 @@ mod tests {
             created_at: Some(Utc.timestamp_opt(1_546_300_800, 0).unwrap()),
             queued: 0,
             history_complete: true,
+            history_kind: "current_stargazers",
+            history_event_count: 10,
+            history_coverage_start: None,
+            history_coverage_end: None,
+            history_approximate: false,
             pending: false,
             backfilling: false,
             history_unavailable: false,
@@ -391,6 +449,9 @@ mod tests {
         assert_eq!(v["created_at"], "2019-01-01T00:00:00Z");
         assert_eq!(v["queued"], 0);
         assert_eq!(v["history_complete"], true);
+        assert_eq!(v["history_kind"], "current_stargazers");
+        assert_eq!(v["history_event_count"], 10);
+        assert_eq!(v["history_approximate"], false);
         // `pending` is the extension/poll contract flag.
         assert_eq!(v["pending"], false);
         // New flags: present, default false on a healthy complete repo.
@@ -425,6 +486,11 @@ mod tests {
             created_at: None,
             queued: 3,
             history_complete: false,
+            history_kind: "unavailable",
+            history_event_count: 0,
+            history_coverage_start: None,
+            history_coverage_end: None,
+            history_approximate: false,
             pending: true,
             backfilling: false,
             history_unavailable: false,
@@ -448,6 +514,11 @@ mod tests {
             created_at: None,
             queued: 1,
             history_complete: true,
+            history_kind: "current_stargazers",
+            history_event_count: 40_000,
+            history_coverage_start: None,
+            history_coverage_end: None,
+            history_approximate: false,
             pending: false,
             backfilling: true,
             history_unavailable: false,
@@ -468,6 +539,11 @@ mod tests {
             created_at: None,
             queued: 0,
             history_complete: false,
+            history_kind: "unavailable",
+            history_event_count: 0,
+            history_coverage_start: None,
+            history_coverage_end: None,
+            history_approximate: false,
             pending: false,
             backfilling: false,
             history_unavailable: false,
@@ -503,6 +579,11 @@ mod tests {
             created_at: None,
             queued: 0,
             history_complete: true,
+            history_kind: "current_stargazers",
+            history_event_count: 0,
+            history_coverage_start: None,
+            history_coverage_end: None,
+            history_approximate: false,
             pending: false,
             backfilling: false,
             history_unavailable: false,

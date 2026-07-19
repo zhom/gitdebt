@@ -49,6 +49,8 @@ tempfile.workspace = true
 aes-gcm.workspace = true
 base64.workspace = true
 tower_governor.workspace = true
+gcp_auth.workspace = true
+flate2.workspace = true
 resvg.workspace = true
 image.workspace = true
 

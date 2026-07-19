@@ -9,7 +9,8 @@ and `extension/` is a zero-build MV3 browser extension.
 - Star history is the core product; repo-health charts are the differentiator.
 - Never add fake-star detection, suspicious-account labels, per-stargazer
   scoring, or name-and-shame features.
-- Store stargazer timestamps only. Do not collect stargazer profiles or events.
+- Store star timestamps plus the opaque GH Archive event ID needed for
+  idempotency. Do not collect actors, stargazer profiles, or event payloads.
 - Do not add another code path that paginates GitHub's stargazers endpoint.
   Star-series read surfaces must use Postgres.
 
@@ -26,6 +27,8 @@ Read the relevant module before changing it. Important backend modules:
 
 - `db.rs`, `cache.rs`: schema and completeness contracts
 - `queue.rs`, `worker.rs`, `analyzer.rs`: non-blocking ingestion
+- `gh_archive.rs`, `archive_worker.rs`, `gh_archive_hourly.rs`: BigQuery
+  history and raw-hour forward ingestion
 - `chart.rs`, `repo_charts.rs`, `cards.rs`, `badge.rs`, `og.rs`: rendering
 - `export.rs`, `aggregate.rs`, `usage.rs`: Postgres-backed data surfaces
 - `repo_endpoints.rs`, `api.rs`: routing and response policy
@@ -58,7 +61,8 @@ npm --prefix extension run package
 - Readers must never serve partial cache data. A `*_complete` flag gates reads.
 - Writers replace entity data and flip completeness atomically in one
   transaction. Errors must leave data incomplete.
-- Cached stargazer timestamps are not re-fetched after completion.
+- Exact GitHub-API snapshots are not re-fetched after completion. Approximate
+  GH Archive activity may refresh from later day/hour partitions.
 - GitHub 404/private/deleted entities are tombstoned.
 - Cold analysis requests enqueue durable work and return promptly; never
   paginate GitHub synchronously on a request path.

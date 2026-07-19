@@ -54,7 +54,7 @@ async fn main() -> Result<()> {
     if reset > 0 {
         tracing::info!(
             reset_count = reset,
-            "repo-analysis: reset orphaned in_progress jobs"
+            "repo-analysis: reset expired in_progress leases"
         );
     }
     gitdebt::repo_analysis::spawn_pool(
@@ -67,11 +67,11 @@ async fn main() -> Result<()> {
     );
     tracing::info!(analysis_workers, "repo-analysis worker pool started");
 
-    // Star-history fetch pool. GitHub-API-bound (every page goes through
-    // the RateLimitTracker), so a SINGLE worker by default avoids
-    // burstiness; WORKER_COUNT overrides. Reset any in_progress jobs left
-    // by a hard kill — the completeness invariant guarantees nothing
-    // partial was committed complete, so re-running is safe.
+    // Star-history acquisition. With GH Archive enabled there is exactly one
+    // BigQuery coordinator: it batches repos into shared corpus scans, while
+    // WORKER_COUNT only controls the inexpensive GitHub metadata lookups
+    // needed to resolve stable numeric repo IDs. The legacy GitHub
+    // stargazer-list pool remains an explicit fallback for local/dev installs.
     let worker_count: usize = std::env::var("WORKER_COUNT")
         .ok()
         .and_then(|s| s.parse().ok())
@@ -81,14 +81,39 @@ async fn main() -> Result<()> {
     if star_reset > 0 {
         tracing::info!(
             reset_count = star_reset,
-            "star-fetch: reset orphaned in_progress jobs"
+            "star-fetch: reset expired in_progress leases"
         );
     }
-    gitdebt::worker::spawn_pool(
-        gitdebt::worker::WorkerCtx::new(github.clone(), cache.clone()),
-        worker_count,
-    );
-    tracing::info!(worker_count, "star-fetch worker pool started");
+    let archive_client = gitdebt::gh_archive::GhArchiveBigQueryClient::from_env()
+        .await
+        .context("GH Archive BigQuery configuration/authentication failed")?;
+    if let Some(archive_client) = archive_client {
+        let revived = gitdebt::queue::revive_restricted_for_archive(cache.db()).await?;
+        if revived > 0 {
+            tracing::info!(revived, "gh-archive: revived restricted history jobs");
+        }
+        gitdebt::archive_worker::spawn(gitdebt::archive_worker::ArchiveWorkerCtx::from_env(
+            Arc::new(archive_client),
+            github.clone(),
+            cache.clone(),
+            worker_count,
+        ));
+        gitdebt::archive_hourly_db::spawn(cache.db().clone())
+            .context("GH Archive hourly follower configuration failed")?;
+        tracing::info!(
+            metadata_concurrency = worker_count,
+            "GH Archive historical coordinator and hourly follower started"
+        );
+    } else {
+        gitdebt::worker::spawn_pool(
+            gitdebt::worker::WorkerCtx::new(github.clone(), cache.clone()),
+            worker_count,
+        );
+        tracing::warn!(
+            worker_count,
+            "GH Archive disabled; using the restricted GitHub stargazer-list fallback"
+        );
+    }
 
     let analyzer = AnalyzerCtx { github, cache };
     let gh_app =
@@ -124,7 +149,7 @@ async fn main() -> Result<()> {
     // in-flight requests finish instead of dropping connections. Workers
     // currently exit when the runtime stops — they don't get a clean
     // drain, but their state is durable in Postgres (queue rows persist;
-    // on restart `reset_inflight_on_startup` resets stuck claims).
+    // expired claims are reclaimed from the durable queues).
     // `into_make_service_with_connect_info::<SocketAddr>` registers the
     // peer socket as `ConnectInfo` on each request. tower_governor's
     // SmartIpKeyExtractor falls back to that when no `X-Forwarded-For`

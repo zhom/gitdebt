@@ -19,16 +19,56 @@ const exampleRepo = "react";
 
 const title = "GitHub README badges · gitdebt";
 const description =
-  "Build a GitHub README badge with stars, forks, and package downloads. Choose flat, modern, glass, or terminal styles in light or dark.";
+  "Build a theme-aware GitHub README badge for repository stars, forks, and package downloads, then copy accessible Markdown or HTML.";
 const ogImage = `${apiBase}/api/og.png`;
 
-const jsonLd = {
-  "@context": "https://schema.org",
-  "@type": "WebPage",
-  name: "GitHub README badges",
-  url: `${site}/badges`,
-  description,
-};
+const jsonLd = [
+  {
+    "@context": "https://schema.org",
+    "@type": "CollectionPage",
+    "@id": `${site}/badges#page`,
+    name: "GitHub README badge builder",
+    url: `${site}/badges`,
+    description,
+    isPartOf: {
+      "@type": "WebSite",
+      "@id": `${site}/#website`,
+      name: "gitdebt",
+      url: site,
+    },
+    mainEntity: {
+      "@type": "WebApplication",
+      name: "gitdebt README badge builder",
+      applicationCategory: "DeveloperApplication",
+      operatingSystem: "Web",
+      url: `${site}/badges`,
+      isAccessibleForFree: true,
+      offers: {
+        "@type": "Offer",
+        price: 0,
+        priceCurrency: "USD",
+      },
+    },
+  },
+  {
+    "@context": "https://schema.org",
+    "@type": "BreadcrumbList",
+    itemListElement: [
+      {
+        "@type": "ListItem",
+        position: 1,
+        name: "gitdebt",
+        item: site,
+      },
+      {
+        "@type": "ListItem",
+        position: 2,
+        name: "README badges",
+        item: `${site}/badges`,
+      },
+    ],
+  },
+];
 ---
 
 <!doctype html>
@@ -40,59 +80,165 @@ const jsonLd = {
       description={description}
       canonicalPath="/badges"
       ogImage={ogImage}
+      imageAlt="gitdebt GitHub README badge builder"
+      imageType="image/png"
+      imageWidth={1200}
+      imageHeight={630}
       jsonLd={jsonLd}
     />
   </head>
   <body>
-    <div class="isolate flex min-h-dvh flex-col">
+    <div class="badge-page isolate flex min-h-dvh flex-col">
       <SiteHeader />
 
-      <main id="main-content" class="mx-auto flex w-full max-w-5xl flex-1 flex-col gap-10 px-6 py-12">
+      <main
+        id="main-content"
+        class="mx-auto flex w-full max-w-5xl flex-1 flex-col gap-9 px-4 py-8 sm:gap-12 sm:px-6 sm:py-12"
+      >
         <nav aria-label="Breadcrumb" class="font-mono text-xs text-muted-foreground">
           <a href="/" class="hover:text-foreground">gitdebt</a>
           <span class="px-1.5 text-border" aria-hidden="true">/</span>
           <span class="text-foreground">badges</span>
         </nav>
 
-        <header class="space-y-2">
+        <header class="max-w-3xl space-y-3">
           <p class="font-mono text-xs tracking-wide text-muted-foreground uppercase">
-            README badges
+            Free · open source · no account required
           </p>
-          <h1 class="text-3xl font-semibold tracking-tight text-balance sm:text-4xl">
-            Build a stats badge
+          <h1 class="text-3xl font-semibold tracking-[-0.035em] text-balance sm:text-5xl">
+            Build a README badge that belongs in your repository.
           </h1>
-          <p class="max-w-[60ch] text-lg text-pretty text-muted-foreground">
-            Stars, forks, and package downloads in one compact badge. Pick a
-            style, toggle animation, and copy a snippet for your README. This
-            demo points at <span class="font-mono">{exampleOwner}/{exampleRepo}</span> —
-            open any repo to build its own.
+          <p class="max-w-[62ch] text-base leading-relaxed text-pretty text-muted-foreground sm:text-lg">
+            Put stars, forks, and package downloads in one compact,
+            accessible badge. Preview every style, choose a light or dark
+            treatment, and copy production-ready Markdown or HTML.
           </p>
+          <div class="flex flex-wrap gap-x-5 gap-y-2 pt-1 font-mono text-xs text-muted-foreground">
+            <span>Static README output</span>
+            <span aria-hidden="true">·</span>
+            <span>Theme-aware HTML</span>
+            <span aria-hidden="true">·</span>
+            <span>Linked attribution</span>
+          </div>
         </header>
 
-        <BadgeStudio
-          client:load
-          owner={exampleOwner}
-          repo={exampleRepo}
-          apiBase={apiBase}
-        />
+        <section aria-labelledby="studio-title" class="space-y-4">
+          <div class="flex flex-col gap-2 border-b border-border pb-4 sm:flex-row sm:items-end sm:justify-between">
+            <div>
+              <p class="font-mono text-xs tracking-wide text-muted-foreground uppercase">
+                Interactive studio
+              </p>
+              <h2 id="studio-title" class="mt-1 text-xl font-semibold tracking-tight sm:text-2xl">
+                Preview {exampleOwner}/{exampleRepo}
+              </h2>
+            </div>
+            <p class="max-w-md text-sm text-muted-foreground sm:text-right">
+              The public example is ready immediately. A repository report
+              opens the same controls with its own owner and name.
+            </p>
+          </div>
 
-        <div class="rounded-xl border border-border bg-muted/30 p-6">
-          <p class="text-base text-pretty text-muted-foreground sm:text-sm">
-            Want a badge for a different repo? Open its page and scroll to the
-            Badges section — the studio is wired to that repo.
-          </p>
-          <div class="mt-4">
+          <BadgeStudio
+            client:load
+            owner={exampleOwner}
+            repo={exampleRepo}
+            apiBase={apiBase}
+          />
+          <noscript>
+            <p class="border-y border-border py-4 text-sm text-muted-foreground">
+              Enable JavaScript to configure and copy a badge. Published
+              badges remain static assets and do not require JavaScript.
+            </p>
+          </noscript>
+        </section>
+
+        <section aria-labelledby="badge-workflow-title" class="grid border-y border-border sm:grid-cols-3 sm:divide-x sm:divide-border">
+          <h2 id="badge-workflow-title" class="sr-only">How README badges work</h2>
+          {
+            [
+              {
+                step: "01",
+                title: "Choose evidence",
+                body: "Show stars, forks, downloads, or a focused subset. Missing package data is omitted instead of reported as zero.",
+              },
+              {
+                step: "02",
+                title: "Choose presentation",
+                body: "Compare four restrained styles and preview explicit light and dark assets before publishing.",
+              },
+              {
+                step: "03",
+                title: "Copy the embed",
+                body: "Use Markdown for one theme or HTML picture sources for automatic GitHub light and dark mode.",
+              },
+            ].map(({ step, title, body }) => (
+              <article class="border-b border-border py-6 last:border-b-0 sm:border-b-0 sm:px-6 sm:first:pl-0 sm:last:pr-0">
+                <p class="font-mono text-xs text-muted-foreground">{step}</p>
+                <h3 class="mt-5 font-semibold tracking-tight">{title}</h3>
+                <p class="mt-2 text-sm leading-relaxed text-muted-foreground">{body}</p>
+              </article>
+            ))
+          }
+        </section>
+
+        <aside class="flex flex-col gap-5 border-y border-border py-6 sm:flex-row sm:items-center sm:justify-between">
+          <div>
+            <h2 class="font-semibold tracking-tight">Build one for your repository</h2>
+            <p class="mt-1 max-w-[60ch] text-sm leading-relaxed text-muted-foreground">
+              Open a repository report and use the badge studio already wired
+              to that project. The copied image URL stays cacheable; only its
+              surrounding link carries README attribution.
+            </p>
+          </div>
+          <div class="shrink-0">
             <a
               href={`/${exampleOwner}/${exampleRepo}`}
-              class={buttonVariants({ variant: "outline", size: "lg" })}
+              class={buttonVariants({
+                variant: "outline",
+                size: "lg",
+                className: "w-full sm:w-auto",
+              })}
             >
               View {exampleOwner}/{exampleRepo}
             </a>
           </div>
-        </div>
+        </aside>
       </main>
 
       <SiteFooter />
     </div>
   </body>
 </html>
+
+<style>
+  .badge-page {
+    --background: oklch(1 0 0);
+    --foreground: oklch(0.2 0 0);
+    --card: oklch(1 0 0);
+    --card-foreground: oklch(0.2 0 0);
+    --popover: oklch(1 0 0);
+    --popover-foreground: oklch(0.2 0 0);
+    --primary: oklch(0.2 0 0);
+    --primary-foreground: oklch(0.99 0 0);
+    --secondary: oklch(0.965 0 0);
+    --secondary-foreground: oklch(0.24 0 0);
+    --muted: oklch(0.965 0 0);
+    --muted-foreground: oklch(0.5 0 0);
+    --accent: oklch(0.95 0 0);
+    --accent-foreground: oklch(0.2 0 0);
+    --signal: oklch(0.24 0 0);
+    --signal-foreground: oklch(0.99 0 0);
+    --border: oklch(0.2 0 0 / 0.12);
+    --input: oklch(0.2 0 0 / 0.16);
+    --ring: oklch(0.42 0 0);
+    --grid: oklch(0.2 0 0 / 0.045);
+    color: var(--foreground);
+    background-color: var(--background);
+  }
+
+  .badge-page :global(.bg-grid) {
+    background-color: var(--muted);
+    background-image: none;
+  }
+
+</style>

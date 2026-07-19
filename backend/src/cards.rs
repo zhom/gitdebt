@@ -145,12 +145,12 @@ fn display_title(custom: Option<&str>, default: &str) -> String {
 }
 
 /// Card background per theme — concrete hex, matching the GitHub-native
-/// look (`#0d1117` is GitHub's dark canvas).
+/// look (`#0a0a0a` is the product's dark canvas).
 fn card_bg(theme: &Theme) -> &'static str {
-    if theme.dark { "#0d1117" } else { "#ffffff" }
+    if theme.dark { "#0a0a0a" } else { "#ffffff" }
 }
 
-/// Brand lime accent per theme (categorical palette index 0).
+/// Brand ink accent per theme (categorical palette index 0).
 fn brand(theme: &Theme) -> &'static str {
     palette(theme)[0]
 }
@@ -1281,14 +1281,14 @@ mod tests {
     fn theme_colors_are_baked() {
         let light = render_user_card(&sample_user(), &UserCardOptions::default(), &LIGHT).unwrap();
         let dark = render_user_card(&sample_user(), &UserCardOptions::default(), &DARK).unwrap();
-        assert!(light.contains("#65a30d"));
-        assert!(dark.contains("#a3e635"));
+        assert!(light.contains("#0a0a0a"));
+        assert!(dark.contains("#fafafa"));
         assert!(!light.contains("var(--"));
         assert!(!dark.contains("var(--"));
         let rlight = render_repo_card(&sample_repo(), &full_repo_opts(false), &LIGHT).unwrap();
         let rdark = render_repo_card(&sample_repo(), &full_repo_opts(false), &DARK).unwrap();
-        assert!(rlight.contains("#65a30d"));
-        assert!(rdark.contains("#a3e635"));
+        assert!(rlight.contains("#0a0a0a"));
+        assert!(rdark.contains("#fafafa"));
         assert!(!rlight.contains("var(--"));
         assert!(!rdark.contains("var(--"));
     }

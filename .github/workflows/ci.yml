@@ -78,7 +78,7 @@ jobs:
           cache: pnpm
 
       - run: pnpm install --frozen-lockfile
-      - run: pnpm --filter gitdebt-frontend test:seo
+      - run: pnpm --filter gitdebt-frontend test
       - run: pnpm --filter gitdebt-frontend build
         env:
           PUBLIC_API_BASE: https://api.gitdebt.com

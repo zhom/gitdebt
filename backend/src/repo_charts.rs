@@ -655,14 +655,16 @@ fn humanize(n: i64) -> String {
     }
 }
 
-/// GitHub linguist colors. Anything missing falls back to a neutral grey.
+/// GitHub Linguist colors for every language emitted by `code_count`.
+/// Synthetic aliases use their parent language's color, while formats
+/// without an official color fall back to an achromatic gray.
+const NEUTRAL_LANGUAGE_COLOR: &str = "#8b8b8b";
+
 fn linguist_color(name: &str) -> &'static str {
     match name {
         "Rust" => "#dea584",
-        "TypeScript" => "#3178c6",
-        "TSX" => "#3178c6",
-        "JavaScript" => "#f1e05a",
-        "JSX" => "#f1e05a",
+        "TypeScript" | "TSX" => "#3178c6",
+        "JavaScript" | "JSX" => "#f1e05a",
         "Python" => "#3572A5",
         "Go" => "#00ADD8",
         "Ruby" => "#701516",
@@ -678,8 +680,10 @@ fn linguist_color(name: &str) -> &'static str {
         "HTML" => "#e34c26",
         "CSS" => "#563d7c",
         "SCSS" => "#c6538c",
+        "Less" => "#1d365d",
         "Vue" => "#41b883",
         "Svelte" => "#ff3e00",
+        "Astro" => "#ff5a03",
         "Markdown" => "#083fa1",
         "TOML" => "#9c4221",
         "YAML" => "#cb171e",
@@ -691,6 +695,7 @@ fn linguist_color(name: &str) -> &'static str {
         "Perl" => "#0298c3",
         "PHP" => "#4F5D95",
         "Scala" => "#c22d40",
+        "Groovy" => "#4298b8",
         "Haskell" => "#5e5086",
         "Elixir" => "#6e4a7e",
         "Erlang" => "#B83998",
@@ -701,9 +706,14 @@ fn linguist_color(name: &str) -> &'static str {
         "Julia" => "#a270ba",
         "Nix" => "#7e7eff",
         "Makefile" => "#427819",
+        "CMake" => "#DA3434",
         "SQL" => "#e38c00",
         "GraphQL" => "#e10098",
-        _ => "#94a3b8",
+        "Verilog" => "#b2b7f8",
+        "Terraform" | "HCL" => "#844FBA",
+        "TeX" => "#3D6117",
+        "Config" => NEUTRAL_LANGUAGE_COLOR,
+        _ => NEUTRAL_LANGUAGE_COLOR,
     }
 }
 
@@ -1669,8 +1679,30 @@ mod tests {
         assert!(svg.contains(" code · "));
         // Per-row meta has files + code.
         assert!(svg.contains("88 files · "));
-        // Linguist color shows up for known langs.
-        assert!(svg.contains("#dea584"));
+        // Language marks use GitHub Linguist colors while labels stay themed.
+        assert!(svg.contains(r##"<circle cx="6" cy="9.0" r="6" fill="#dea584" />"##));
+        assert!(svg.contains(r##"height="18" rx="3" fill="#3178c6" />"##));
+        assert!(svg.contains(".bar-label { fill: #0a0a0a;"));
+    }
+
+    #[test]
+    fn languages_use_known_colors_and_neutral_fallback() {
+        assert_eq!(linguist_color("Rust"), "#dea584");
+        assert_eq!(linguist_color("TypeScript"), "#3178c6");
+        assert_eq!(linguist_color("Astro"), "#ff5a03");
+        assert_eq!(linguist_color("Config"), NEUTRAL_LANGUAGE_COLOR);
+        assert_eq!(linguist_color("Unknown language"), NEUTRAL_LANGUAGE_COLOR);
+
+        let rows = vec![LanguageBar {
+            language: "Unknown language".into(),
+            files: 1,
+            lines_code: 12,
+            lines_blank: 1,
+            lines_comment: 2,
+        }];
+        let svg = render_languages("foo/bar", &rows, &theme::DARK);
+        assert!(svg.contains(r##"fill="#8b8b8b""##));
+        assert!(svg.contains(".bar-label { fill: #fafafa;"));
     }
 
     #[test]

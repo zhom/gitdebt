@@ -5,6 +5,7 @@ use reqwest::Response;
 use reqwest::header::{ACCEPT, AUTHORIZATION, HeaderMap, HeaderValue, LINK, USER_AGENT};
 use serde::{Deserialize, Serialize};
 use thiserror::Error;
+use tokio::sync::Semaphore;
 
 use crate::rate_limit::{RateLimitTracker, source_for_token};
 
@@ -18,6 +19,8 @@ type StargazerPageEvents = Vec<(i64, DateTime<Utc>)>;
 /// wakeups when GitHub momentarily slows. Tunable per-deployment if a
 /// faster pipe wants to push it.
 const STARGAZER_FETCH_CONCURRENCY: usize = 8;
+const DEFAULT_MAX_IN_FLIGHT_REQUESTS: usize = 64;
+const HARD_MAX_IN_FLIGHT_REQUESTS: usize = 90;
 
 #[derive(Debug, Error)]
 pub enum GithubError {
@@ -56,6 +59,10 @@ pub struct GithubClient {
     /// OAuth user token, etc). Tokens with separate GitHub-side budgets
     /// must each have a distinct source so we don't conflate quotas.
     source: String,
+    /// GitHub recommends keeping concurrent REST requests below 100. This
+    /// process-wide-per-client gate keeps an 8× analysis configuration plus
+    /// request traffic inside that boundary.
+    request_permits: Arc<Semaphore>,
 }
 
 impl GithubClient {
@@ -95,7 +102,17 @@ impl GithubClient {
             .pool_idle_timeout(std::time::Duration::from_secs(90))
             .build()?;
         let source = source_for_token(kind, token);
-        Ok(Self { http, rate, source })
+        let max_in_flight = std::env::var("GITHUB_MAX_IN_FLIGHT_REQUESTS")
+            .ok()
+            .and_then(|value| value.parse::<usize>().ok())
+            .unwrap_or(DEFAULT_MAX_IN_FLIGHT_REQUESTS)
+            .clamp(1, HARD_MAX_IN_FLIGHT_REQUESTS);
+        Ok(Self {
+            http,
+            rate,
+            source,
+            request_permits: Arc::new(Semaphore::new(max_in_flight)),
+        })
     }
 
     pub fn source(&self) -> &str {
@@ -126,6 +143,11 @@ impl GithubClient {
         accept_override: Option<&'static str>,
     ) -> Result<Response, GithubError> {
         self.rate.acquire(&self.source).await;
+        let _permit = self
+            .request_permits
+            .acquire()
+            .await
+            .expect("GitHub request semaphore is never closed");
         let mut req = self.http.get(url);
         if let Some(a) = accept_override {
             req = req.header(ACCEPT, a);
@@ -455,6 +477,8 @@ pub struct User {
 /// authoritative star count, the fork count, and the repo creation date.
 #[derive(Debug, Clone, Deserialize)]
 pub struct RepoMetadata {
+    #[serde(default)]
+    pub id: Option<u64>,
     #[serde(default)]
     pub stargazers_count: u64,
     #[serde(default)]

@@ -11,9 +11,10 @@ import SiteHeader from "@/components/SiteHeader.astro";
 import SiteFooter from "@/components/SiteFooter.astro";
 import { RepoHero } from "@/components/RepoHero";
 import { ChartViewer } from "@/components/ChartViewer";
+import { ReportShare } from "@/components/ReportShare";
 import { StatCard } from "@/components/StatCard";
 import { UsageSection, type UsageResponse } from "@/components/UsageSection";
-import { BadgeStudio } from "@/components/BadgeStudio";
+import { WarmRepos } from "@/components/WarmRepos";
 import { buttonVariants } from "@/components/ui/button";
 import { categoriesForRepo, relatedRepos } from "@/data/categories";
 import {
@@ -32,6 +33,7 @@ export async function getStaticPaths() {
 
 const { owner: rawOwner, repo: rawRepo } = Astro.params;
 const { updatedAt = null } = Astro.props as { updatedAt?: string | null };
+const requiredSnapshot = Boolean(updatedAt && staticCatalogRequired());
 
 const validSlug = /^[A-Za-z0-9._-]+$/;
 if (!rawOwner || !rawRepo || !validSlug.test(rawOwner) || !validSlug.test(rawRepo)) {
@@ -50,6 +52,14 @@ type AnalyzeResponse = {
   queued: number;
   pending?: boolean;
   history_complete: boolean;
+  history_kind:
+    | "current_stargazers"
+    | "public_star_actions"
+    | "unavailable";
+  history_event_count: number;
+  history_coverage_start: string | null;
+  history_coverage_end: string | null;
+  history_approximate: boolean;
   backfilling?: boolean;
   not_found?: boolean;
   history: { date: string; stars: number }[];
@@ -59,12 +69,48 @@ let data: AnalyzeResponse | null = null;
 let fetchError: string | null = null;
 let repoNotFound = false;
 let usage: UsageResponse | null = null;
+
+async function fetchAnalysis() {
+  const maxAttempts = requiredSnapshot ? 5 : 1;
+
+  for (let attempt = 0; attempt < maxAttempts; attempt += 1) {
+    try {
+      const response = await fetch(
+        `${apiBase}/api/repos/${owner}/${repo}/analyze`,
+        {
+          headers: { accept: "application/json" },
+          signal: AbortSignal.timeout(5_000),
+        },
+      );
+      const transient =
+        response.status === 408 ||
+        response.status === 425 ||
+        response.status === 429 ||
+        response.status >= 500;
+
+      if (!transient || attempt === maxAttempts - 1) return response;
+
+      await response.body?.cancel();
+      const retryAfter = Number(response.headers.get("retry-after"));
+      const delayMs =
+        Number.isFinite(retryAfter) && retryAfter > 0
+          ? Math.min(retryAfter * 1_000, 30_000)
+          : 2_000 * 2 ** attempt;
+      await new Promise((resolve) => setTimeout(resolve, delayMs));
+    } catch (error) {
+      if (attempt === maxAttempts - 1) throw error;
+      await new Promise((resolve) =>
+        setTimeout(resolve, 2_000 * 2 ** attempt),
+      );
+    }
+  }
+
+  throw new Error("analysis request exhausted its retry budget");
+}
+
 try {
   const [analyzeRes, usageRes] = await Promise.allSettled([
-    fetch(`${apiBase}/api/repos/${owner}/${repo}/analyze`, {
-      headers: { accept: "application/json" },
-      signal: AbortSignal.timeout(5_000),
-    }),
+    fetchAnalysis(),
     fetch(`${apiBase}/api/repos/${owner}/${repo}/usage`, {
       headers: { accept: "application/json" },
       signal: AbortSignal.timeout(5_000),
@@ -100,8 +146,7 @@ try {
 }
 
 if (
-  updatedAt &&
-  staticCatalogRequired() &&
+  requiredSnapshot &&
   !repoNotFound &&
   (!data || fetchError)
 ) {
@@ -128,6 +173,9 @@ const canonical = `${site}/${repoSlug}`;
 
 const history = data?.history ?? [];
 const hasHistory = history.length > 0;
+const archiveHistory =
+  data?.history_kind === "public_star_actions" ||
+  data?.history_approximate === true;
 const firstYear = historyFirstYear(history);
 const firstStarYear = firstYear !== null ? String(firstYear) : null;
 const gained90 = hasHistory ? gainedInTrailingDays(history, 90) : null;
@@ -135,19 +183,23 @@ const gained30 = hasHistory ? gainedInTrailingDays(history, 30) : null;
 const trend = hasHistory ? growthTrend(history) : null;
 const milestones = hasHistory ? starMilestones(history) : [];
 const lastDataDate = hasHistory ? history[history.length - 1].date : null;
-const updatedLabel = formatMonthYear(lastDataDate);
+const updatedLabel = formatMonthYear(
+  data?.history_coverage_end ?? lastDataDate,
+);
 const createdFull = formatFullDate(data?.created_at ?? null);
 const firstStarMonth = hasHistory ? formatMonthYear(history[0].date) : null;
 
 const title = `${repoSlug} — star history & stats · gitdebt`;
 const description = data
   ? `${repoSlug} has ${data.total_stars.toLocaleString()} GitHub stars${
-      gained90 !== null && gained90 > 0
-        ? `, up about ${gained90.toLocaleString()} in 90 days`
-        : firstStarYear
-          ? ` since ${firstStarYear}`
-          : ""
-    }. Full star-history chart plus repo health: bug-magnet files, churn, contributors, commit heatmap, TODO trend.`
+      archiveHistory && gained90 !== null && gained90 > 0
+        ? `, with about ${gained90.toLocaleString()} public star actions observed in the latest 90 days of archive coverage`
+        : gained90 !== null && gained90 > 0
+          ? `, up about ${gained90.toLocaleString()} in 90 days`
+          : firstStarYear
+            ? ` since ${firstStarYear}`
+            : ""
+    }. ${archiveHistory ? "Approximate public star-activity chart" : "Full star-history chart"} plus repo health: bug-magnet files, churn, contributors, commit heatmap, TODO trend.`
   : `Star history and repo-debt insights for ${repoSlug}.`;
 
 const ogImage = `${apiBase}/api/repos/${owner}/${repo}/og.png`;
@@ -159,35 +211,42 @@ const faqs: { q: string; a: string }[] = [];
 if (data && hasHistory) {
   faqs.push({
     q: `How many stars does ${repoSlug} have?`,
-    a: `${repoSlug} has ${data.total_stars.toLocaleString()} GitHub stars${
-      updatedLabel ? ` as of ${updatedLabel}` : ""
-    }${
-      gained90 !== null && gained90 > 0
+    a: `GitHub currently reports ${data.total_stars.toLocaleString()} stars for ${repoSlug}${
+      !archiveHistory && gained90 !== null && gained90 > 0
         ? `, with about ${gained90.toLocaleString()} of them added in the last 90 days`
         : ""
-    }.`,
+    }.${archiveHistory ? ` The chart separately represents ${data.history_event_count.toLocaleString()} public star actions and can differ because public WatchEvents do not include unstars.` : ""}`,
   });
   if (gained90 !== null) {
     const pace =
       trend === "accelerating"
-        ? " That's faster than its lifetime average pace — growth is accelerating."
+        ? ` That's faster than its lifetime average ${archiveHistory ? "activity" : "growth"} pace.`
         : trend === "slowing"
-          ? " That's below its lifetime average pace, which is common for mature projects."
+          ? ` That's below its lifetime average ${archiveHistory ? "activity" : "growth"} pace, which is common for mature projects.`
           : trend === "steady"
-            ? " That's right in line with its lifetime average pace."
+            ? ` That's in line with its lifetime average ${archiveHistory ? "activity" : "growth"} pace.`
             : "";
     faqs.push({
-      q: `How fast is ${repo} growing?`,
-      a: `${repoSlug} gained about ${gained90.toLocaleString()} stars over the last 90 days of its history${
-        gained30 !== null ? ` (about ${gained30.toLocaleString()} in the last 30)` : ""
-      } — figures are approximate for older repos, whose star history is downsampled.${pace}`,
+      q: archiveHistory
+        ? `What does recent star activity look like for ${repo}?`
+        : `How fast is ${repo} growing?`,
+      a: archiveHistory
+        ? `gitdebt observed about ${gained90.toLocaleString()} public star actions for ${repoSlug} over the latest 90 days of archive coverage${
+            gained30 !== null ? ` (about ${gained30.toLocaleString()} in the latest 30)` : ""
+          }. This is an approximate attention signal, not a net-star count, because unstars are not present.${pace}`
+        : `${repoSlug} gained about ${gained90.toLocaleString()} stars over the last 90 days of its history${
+            gained30 !== null ? ` (about ${gained30.toLocaleString()} in the last 30)` : ""
+          } — figures are approximate for older repos, whose star history is downsampled.${pace}`,
     });
   }
   if (gained30 !== null) {
     faqs.push({
       q: `Is ${repo} still active?`,
-      a:
-        gained30 > 0
+      a: archiveHistory
+        ? gained30 > 0
+          ? `Public archive data shows about ${gained30.toLocaleString()} star actions for ${repoSlug} in the latest 30 days of coverage. For repository activity, use the commit heatmap, commit trend, and contributor charts on this page.`
+          : `Public archive data shows no star actions for ${repoSlug} in the latest 30 days of coverage. That does not describe maintenance activity; use the commit heatmap and commit trend charts on this page.`
+        : gained30 > 0
           ? `${repoSlug} is still attracting attention — about ${gained30.toLocaleString()} new GitHub stars in the most recent 30 days of its history. For commit-level signals, see the commit activity heatmap, commit trend, and contributors charts on this page.`
           : `${repoSlug} added no new stars in the most recent 30 days of its cached history. Star momentum isn't the whole picture — check the commit activity heatmap and commit trend charts on this page for maintenance signals.`,
     });
@@ -195,9 +254,13 @@ if (data && hasHistory) {
   if (createdFull || firstStarMonth) {
     faqs.push({
       q: `When was ${repo} created?`,
-      a: `${repoSlug}${createdFull ? ` was created on ${createdFull} and` : ""} earned its first GitHub star in ${
-        firstStarMonth ?? firstStarYear
-      }.`,
+      a: archiveHistory
+        ? `${createdFull ? `${repoSlug} was created on ${createdFull}. ` : ""}The first public star activity observed for ${repoSlug} is from ${
+            firstStarMonth ?? firstStarYear
+          }.`
+        : `${repoSlug}${createdFull ? ` was created on ${createdFull} and` : ""} earned its first GitHub star in ${
+            firstStarMonth ?? firstStarYear
+          }.`,
     });
   }
 }
@@ -298,6 +361,14 @@ const stats = [
     desc: "Commit volume over the repo's lifetime",
   },
 ];
+const primaryStatNames = new Set([
+  "bug-magnets",
+  "top-files",
+  "bus-factor",
+  "commit-trend",
+]);
+const primaryStats = stats.filter((stat) => primaryStatNames.has(stat.name));
+const secondaryStats = stats.filter((stat) => !primaryStatNames.has(stat.name));
 
 const repoCategories = categoriesForRepo(repoSlug);
 const categoryRelated = relatedRepos(repoSlug, 6);
@@ -339,43 +410,34 @@ const vsLinks = (categoryRelated.length > 0 ? categoryRelated : FALLBACK_SUGGEST
           <span class="text-foreground">{repo}</span>
         </nav>
 
-        {data ? (
-          <RepoHero
-            client:load
-            owner={owner}
-            repo={repo}
-            apiBase={apiBase}
-            initialData={data}
-          />
-        ) : (
-          <div class="card-panel p-6" role="alert">
-            <p class="font-mono text-xs tracking-wide text-destructive uppercase">Error</p>
-            <p class="mt-1.5 text-base text-muted-foreground sm:text-sm">
-              Repo data is unavailable right now. Please try again shortly.
-            </p>
-          </div>
-        )}
+        <RepoHero
+          client:load
+          owner={owner}
+          repo={repo}
+          apiBase={apiBase}
+          initialData={data}
+        />
 
         <ChartViewer
           client:load
           apiBase={apiBase}
           path={`/api/repos/${owner}/${repo}/chart.svg`}
-          alt={`Star history for ${repoSlug}`}
-          caption="Star history"
-          embedLink={canonical}
-          label={repoSlug}
+          alt={`${archiveHistory ? "Approximate public star activity" : "Star history"} for ${repoSlug}`}
+          caption={archiveHistory ? "Approximate public star activity" : "Cumulative star history"}
+          priority={true}
+          liveRepo={repoSlug}
         />
 
         {faqs.length > 0 && (
           <section class="space-y-4">
             <header class="flex flex-wrap items-baseline justify-between gap-2">
-              <h2 class="flex items-center gap-2 text-xl font-semibold tracking-tight">
-                <span class="size-1.5 shrink-0 rounded-full bg-signal" aria-hidden="true"></span>
+              <h2 class="text-xl font-semibold tracking-tight">
                 {repoSlug} at a glance
               </h2>
               {updatedLabel && (
                 <p class="font-mono text-xs text-muted-foreground">
-                  Data updated {updatedLabel}
+                  {archiveHistory ? "Archive coverage through" : "Latest recorded star"}{" "}
+                  {updatedLabel}
                 </p>
               )}
             </header>
@@ -389,7 +451,9 @@ const vsLinks = (categoryRelated.length > 0 ? categoryRelated : FALLBACK_SUGGEST
             </div>
             {milestones.length > 0 && (
               <p class="text-base text-muted-foreground sm:text-sm">
-                <span class="font-mono text-xs tracking-wide uppercase">Star milestones:</span>{" "}
+                <strong class="font-mono tracking-wide uppercase">
+                  {archiveHistory ? "Observed activity milestones:" : "Star milestones:"}
+                </strong>{" "}
                 {milestones.map((m, i) => (
                   <>
                     {i > 0 && <span aria-hidden="true"> · </span>}
@@ -403,31 +467,79 @@ const vsLinks = (categoryRelated.length > 0 ? categoryRelated : FALLBACK_SUGGEST
           </section>
         )}
 
-        <UsageSection
-          client:visible
-          owner={owner}
-          repo={repo}
-          apiBase={apiBase}
-          initialData={usage}
-        />
-
-        <section class="grid gap-6 sm:grid-cols-2">
-          {stats.map((s, i) => (
-            <StatCard
-              client:visible
-              src={`${apiBase}/api/repos/${owner}/${repo}/stats/${s.name}.svg`}
-              alt={`${s.label} for ${repoSlug}`}
-              caption={s.label}
-              delay={i * 0.05}
-              embedLink={canonical}
-            />
-          ))}
+        <section id="stats" class="scroll-mt-24 space-y-6">
+          <header class="max-w-2xl space-y-2">
+            <p class="font-mono text-xs tracking-wide text-muted-foreground uppercase">
+              Maintenance signals
+            </p>
+            <h2 class="text-2xl font-semibold tracking-tight text-balance sm:text-3xl">
+              What deserves attention first
+            </h2>
+            <p class="text-base leading-relaxed text-pretty text-muted-foreground">
+              Start with fix concentration, file churn, ownership risk, and
+              maintenance cadence. These four views are the fastest way to
+              locate structural pressure in {repoSlug}.
+            </p>
+          </header>
+          <div class="grid gap-6 sm:grid-cols-2">
+            {primaryStats.map((s) => (
+              <StatCard
+                client:load
+                src={`${apiBase}/api/repos/${owner}/${repo}/stats/${s.name}.svg`}
+                alt={`${s.label} for ${repoSlug}`}
+                caption={s.label}
+                priority={true}
+                liveRepo={repoSlug}
+              />
+            ))}
+          </div>
+          <details class="group border-y border-border">
+            <summary class="flex min-h-14 cursor-pointer list-none items-center justify-between gap-4 py-3 text-sm font-medium focus-visible:outline-2 focus-visible:-outline-offset-2 focus-visible:outline-ring [&::-webkit-details-marker]:hidden">
+              Four more repository signals
+              <span
+                class="font-mono text-lg text-muted-foreground transition-transform duration-150 group-open:rotate-45 motion-reduce:transition-none"
+                aria-hidden="true"
+              >
+                +
+              </span>
+            </summary>
+            <div class="grid gap-6 border-t border-border py-5 sm:grid-cols-2">
+              {secondaryStats.map((s) => (
+                <StatCard
+                  client:visible
+                  src={`${apiBase}/api/repos/${owner}/${repo}/stats/${s.name}.svg`}
+                  alt={`${s.label} for ${repoSlug}`}
+                  caption={s.label}
+                  liveRepo={repoSlug}
+                />
+              ))}
+            </div>
+          </details>
         </section>
 
-        <section class="card-panel space-y-4 p-6">
+        <section class="space-y-6">
+          <header class="max-w-2xl space-y-2">
+            <p class="font-mono text-xs tracking-wide text-muted-foreground uppercase">
+              Adoption
+            </p>
+            <h2 class="text-2xl font-semibold tracking-tight text-balance sm:text-3xl">
+              Attention versus real usage
+            </h2>
+          </header>
+          <UsageSection
+            client:visible
+            owner={owner}
+            repo={repo}
+            apiBase={apiBase}
+            initialData={usage}
+            showEmbed={false}
+          />
+        </section>
+
+        <section class="space-y-4 border-y border-border py-6">
           <header class="space-y-1">
             <p class="font-mono text-xs tracking-wide text-muted-foreground uppercase">
-              Compare
+              Context
             </p>
             <h2 class="text-xl font-semibold tracking-tight">
               How does {repoSlug} stack up?
@@ -437,7 +549,8 @@ const vsLinks = (categoryRelated.length > 0 ? categoryRelated : FALLBACK_SUGGEST
             {vsLinks.map((other) => (
               <a
                 href={`/vs/${repoSlug}/${other}`}
-                class="inline-flex min-h-11 items-center gap-1.5 rounded-md border border-border bg-background px-3 py-2 font-mono text-base text-muted-foreground shadow-xs hover:bg-accent hover:text-accent-foreground sm:min-h-0 sm:py-1.5 sm:text-sm dark:shadow-none"
+                data-warm-repos={`${repoSlug},${other}`}
+                class="inline-flex min-h-11 items-center gap-1.5 rounded-md border border-border bg-background px-3 py-2 font-mono text-base text-muted-foreground hover:bg-accent hover:text-accent-foreground sm:min-h-0 sm:py-1.5 sm:text-sm"
               >
                 vs {other}
               </a>
@@ -449,23 +562,6 @@ const vsLinks = (categoryRelated.length > 0 ? categoryRelated : FALLBACK_SUGGEST
               Compare with any repo
             </a>
           </div>
-          {categoryRelated.length > 3 && (
-            <div class="space-y-2">
-              <p class="font-mono text-xs tracking-wide text-muted-foreground uppercase">
-                Similar repos
-              </p>
-              <div class="flex flex-wrap items-center gap-2">
-                {categoryRelated.slice(3).map((other) => (
-                  <a
-                    href={`/${other}`}
-                    class="inline-flex min-h-11 items-center gap-1.5 rounded-md border border-border bg-background px-3 py-2 font-mono text-base text-muted-foreground shadow-xs hover:bg-accent hover:text-accent-foreground sm:min-h-0 sm:py-1.5 sm:text-sm dark:shadow-none"
-                  >
-                    {other} star history
-                  </a>
-                ))}
-              </div>
-            </div>
-          )}
           {repoCategories.length > 0 && (
             <p class="text-base text-muted-foreground sm:text-sm">
               {repoSlug} is featured in{" "}
@@ -485,21 +581,18 @@ const vsLinks = (categoryRelated.length > 0 ? categoryRelated : FALLBACK_SUGGEST
           )}
         </section>
 
-        <section id="badges" class="scroll-mt-20 space-y-6">
-          <header class="space-y-2">
-            <p class="font-mono text-xs tracking-wide text-muted-foreground uppercase">
-              Badges
-            </p>
-            <h2 class="text-2xl font-semibold tracking-tight text-balance sm:text-3xl">
-              Build a README badge
-            </h2>
-            <p class="max-w-[60ch] text-base text-pretty text-muted-foreground sm:text-sm">
-              Pick the metrics, style, and theme — then copy a Markdown or
-              HTML snippet for {repoSlug}.
-            </p>
-          </header>
-          <BadgeStudio client:visible owner={owner} repo={repo} apiBase={apiBase} />
-        </section>
+        <ReportShare
+          client:visible
+          owner={owner}
+          repo={repo}
+          apiBase={apiBase}
+          pageUrl={canonical}
+        />
+        <WarmRepos
+          client:load
+          apiBase={apiBase}
+          repos={[repoSlug, ...vsLinks]}
+        />
       </main>
 
       <SiteFooter />

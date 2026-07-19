@@ -1,4 +1,4 @@
-import { useId, useState } from "react";
+import { useEffect, useId, useState } from "react";
 
 import { EmbedSnippet } from "@/components/EmbedSnippet";
 
@@ -12,6 +12,8 @@ type Props = {
   delay?: number;
   embedLink?: string;
   label?: string;
+  priority?: boolean;
+  liveRepo?: string;
 };
 
 const DATE_RE = /^\d{4}-\d{2}-\d{2}$/;
@@ -23,13 +25,36 @@ export function ChartViewer({
   caption,
   embedLink,
   label,
+  priority = false,
+  liveRepo,
 }: Props) {
   const [type, setType] = useState<ChartType>("date");
   const [logScale, setLogScale] = useState(false);
   const [from, setFrom] = useState("");
   const [to, setTo] = useState("");
   const [controlsChanged, setControlsChanged] = useState(false);
+  const [revision, setRevision] = useState(0);
   const id = useId();
+
+  useEffect(() => {
+    const targetRepo = liveRepo;
+    if (!targetRepo) return;
+    function refresh(event: Event) {
+      if (!targetRepo) return;
+      const detail = (event as CustomEvent<{
+        repo?: string;
+        stars?: { phase?: string };
+      }>).detail;
+      if (
+        detail?.repo?.toLowerCase() === targetRepo.toLowerCase() &&
+        detail.stars?.phase === "complete"
+      ) {
+        setRevision((value) => value + 1);
+      }
+    }
+    window.addEventListener("gitdebt:repo-progress", refresh);
+    return () => window.removeEventListener("gitdebt:repo-progress", refresh);
+  }, [liveRepo]);
 
   const validFrom = DATE_RE.test(from) ? from : "";
   const validTo = DATE_RE.test(to) ? to : "";
@@ -41,6 +66,7 @@ export function ChartViewer({
   if (logScale) params.push("log=1");
   if (validFrom) params.push(`from=${validFrom}`);
   if (validTo) params.push(`to=${validTo}`);
+  if (revision > 0) params.push(`v=${revision}`);
 
   const src = `${apiBase}${path}`;
   const sep = path.includes("?") ? "&" : "?";
@@ -55,16 +81,16 @@ export function ChartViewer({
     }`;
 
   const dateInputClass =
-    "min-h-11 w-full rounded-md border border-input bg-background px-2 py-2 font-mono text-base text-foreground outline-none scheme-light focus-visible:outline-2 focus-visible:-outline-offset-1 focus-visible:outline-ring sm:min-h-0 sm:w-[8.5rem] sm:py-1 sm:text-xs dark:scheme-dark";
+    "min-h-11 w-full rounded-md border border-input bg-background px-2 py-2 font-mono text-base text-foreground outline-none scheme-light focus-visible:outline-2 focus-visible:-outline-offset-1 focus-visible:outline-ring sm:min-h-0 sm:w-[8.5rem] sm:py-1 sm:text-xs";
 
   const figure = (
     <figure className="card-panel overflow-hidden">
       <figcaption className="flex flex-wrap items-center justify-between gap-3 border-b border-border bg-muted/40 px-5 py-3">
         {caption && (
-          <span className="inline-flex items-center gap-2 font-mono text-xs tracking-wide text-muted-foreground uppercase">
+          <div className="inline-flex items-center gap-2 font-mono text-xs tracking-wide text-muted-foreground uppercase">
             <span className="size-1.5 shrink-0 rounded-full bg-signal" aria-hidden="true" />
             {caption}
-          </span>
+          </div>
         )}
         <div className="flex w-full flex-wrap items-center gap-3 sm:w-auto">
           <div className="grid w-full grid-cols-[auto_1fr] items-center gap-2 sm:flex sm:w-auto sm:gap-1.5">
@@ -144,16 +170,14 @@ export function ChartViewer({
           </div>
         </div>
       </figcaption>
-      <picture>
-        <source media="(prefers-color-scheme: dark)" srcSet={withParams("dark")} />
-        <img
-          src={withParams("light")}
-          alt={alt}
-          loading="lazy"
-          decoding="async"
-          className="block w-full"
-        />
-      </picture>
+      <img
+        src={withParams("light")}
+        alt={alt}
+        loading={priority ? "eager" : "lazy"}
+        fetchPriority={priority ? "high" : "auto"}
+        decoding="async"
+        className="block w-full"
+      />
     </figure>
   );
 

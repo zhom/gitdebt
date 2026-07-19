@@ -155,14 +155,15 @@ pub async fn history_unavailable(db: &Db, repo: &str) -> Result<bool> {
     Ok(unavailable)
 }
 
-/// On startup, requeue any job left `in_progress` by a worker that died
-/// mid-fetch (hard kill / crash). The fetch wrote nothing complete (the
-/// completeness invariant guarantees that), so re-running is safe and
-/// idempotent. Mirrors `repo_analysis::reset_inflight_on_startup`.
+/// On startup, requeue only expired `in_progress` claims. A rolling deploy can
+/// briefly run old and new replicas against the same database; resetting every
+/// live claim would create duplicate writers. Fresh claims self-recover through
+/// the same 15-minute lease predicate in the claim functions.
 pub async fn reset_inflight_on_startup(db: &Db) -> Result<u64> {
     let res = sqlx::query(
         "UPDATE star_fetch_queue SET status = 'pending', worker_id = NULL, claimed_at = NULL \
-         WHERE status = 'in_progress'",
+         WHERE status = 'in_progress' \
+           AND (claimed_at IS NULL OR claimed_at < NOW() - INTERVAL '15 minutes')",
     )
     .execute(&db.pool)
     .await?;
@@ -180,6 +181,7 @@ pub async fn claim_one(db: &Db, worker_id: &str) -> Result<Option<Job>> {
          WHERE repo = ( \
             SELECT repo FROM star_fetch_queue \
             WHERE status = 'pending' \
+               OR (status = 'in_progress' AND claimed_at < NOW() - INTERVAL '15 minutes') \
             ORDER BY priority DESC, enqueued_at \
             FOR UPDATE SKIP LOCKED LIMIT 1 \
          ) \
@@ -197,6 +199,70 @@ pub async fn claim_one(db: &Db, worker_id: &str) -> Result<Option<Job>> {
             .unwrap_or(1)
             .clamp(1, u32::MAX as i64) as u32,
     }))
+}
+
+/// Claim a bounded batch for a GH Archive query. A single BigQuery scan can
+/// serve many repositories, so the archive coordinator uses this instead of
+/// multiplying identical corpus scans across `WORKER_COUNT` tasks.
+pub async fn claim_many(db: &Db, worker_id: &str, limit: usize) -> Result<Vec<Job>> {
+    let limit = i64::try_from(limit.clamp(1, 1_000)).unwrap_or(1_000);
+    let rows = sqlx::query(
+        "WITH selected AS ( \
+            SELECT repo FROM star_fetch_queue \
+            WHERE status = 'pending' \
+               OR (status = 'in_progress' AND claimed_at < NOW() - INTERVAL '15 minutes') \
+            ORDER BY priority DESC, enqueued_at \
+            FOR UPDATE SKIP LOCKED LIMIT $1 \
+         ) \
+         UPDATE star_fetch_queue AS queue \
+         SET status = 'in_progress', worker_id = $2, claimed_at = $3 \
+         FROM selected WHERE queue.repo = selected.repo \
+         RETURNING queue.repo, queue.partial, queue.next_page",
+    )
+    .bind(limit)
+    .bind(worker_id)
+    .bind(Utc::now())
+    .fetch_all(&db.pool)
+    .await?;
+    Ok(rows
+        .into_iter()
+        .map(|row| Job {
+            repo: row.try_get::<String, _>("repo").unwrap_or_default(),
+            partial: row.try_get::<bool, _>("partial").unwrap_or(false),
+            next_page: row
+                .try_get::<i64, _>("next_page")
+                .unwrap_or(1)
+                .clamp(1, u32::MAX as i64) as u32,
+        })
+        .collect())
+}
+
+/// Release a successfully advanced archive backfill for its next date window.
+/// Unlike a transient failure, progress does not consume the retry budget.
+pub async fn requeue_archive_window(db: &Db, repo: &str) -> Result<()> {
+    sqlx::query(
+        "UPDATE star_fetch_queue SET partial = TRUE, worker_id = NULL, \
+            claimed_at = NULL, status = 'pending', last_error = NULL \
+         WHERE repo = $1",
+    )
+    .bind(repo)
+    .execute(&db.pool)
+    .await?;
+    Ok(())
+}
+
+/// Re-open only jobs parked due to the retired GitHub stargazer-list
+/// restriction. Generic exhausted failures and 404 tombstones remain terminal.
+pub async fn revive_restricted_for_archive(db: &Db) -> Result<u64> {
+    let result = sqlx::query(
+        "UPDATE star_fetch_queue SET status = 'pending', attempts = 0, \
+            partial = FALSE, next_page = 1, worker_id = NULL, claimed_at = NULL \
+         WHERE status = 'dead' AND last_error LIKE $1",
+    )
+    .bind(format!("{RESTRICTED_MARKER}%"))
+    .execute(&db.pool)
+    .await?;
+    Ok(result.rows_affected())
 }
 
 /// Mark a job done by deleting its row. The stargazer cache was already

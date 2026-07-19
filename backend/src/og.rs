@@ -4,7 +4,7 @@
 //! (Twitter/X, Slack, LinkedIn, Discord, Facebook) **reject SVG** as an
 //! `og:image` and demand a real raster at the dimensions the page
 //! declares. The chart SVGs are 1200×600 line charts tuned for README
-//! embeds; an OG card is a different composition — branded charcoal
+//! embeds; an OG card is a different composition — a branded monochrome
 //! background, a giant headline number, a sparkline across the lower
 //! third, a footer lockup — sized at exactly **1200×630** so the
 //! rasterized PNG matches the `og:image:width`/`height` the frontend
@@ -24,11 +24,10 @@
 //! so these resolve and text renders. Introducing a novel family here
 //! would render blank glyph boxes in the PNG — don't.
 //!
-//! OG cards are **fixed dark** (the Signal palette baked as hex): social
-//! previews don't theme-switch, and a charcoal card with the lime accent
-//! is the brand surface. The optional `theme=light` knob is accepted by
-//! the API for symmetry but the default — and the only well-tuned
-//! variant — is the dark card. Deterministic: same input → same bytes.
+//! OG cards share the chart system's concrete light/dark colors. Social
+//! previews don't theme-switch, so the default is the white-first light
+//! card and callers may explicitly request the black dark variant.
+//! Deterministic: same input → same bytes.
 
 use crate::chart::{Point, palette};
 use crate::theme::Theme;
@@ -39,14 +38,11 @@ use crate::theme::Theme;
 pub const OG_WIDTH: u32 = 1200;
 pub const OG_HEIGHT: u32 = 630;
 
-/// Charcoal card background. Matches the dark Signal palette's deepest
-/// surface (a touch darker than `theme::DARK.grid`'s `#1e293b` so the
-/// grid lines + sparkline read against it). Baked, not themed.
-const CARD_BG: &str = "#0b1120";
-/// A slightly-lifted panel tone for the sparkline plot floor.
-const CARD_PANEL: &str = "#111827";
-/// Brand lime accents on the dark card (palette index 0, dark).
-const BRAND_LIME: &str = "#a3e635";
+/// Dark-card canvas and slightly lifted sparkline floor.
+const CARD_BG: &str = "#0a0a0a";
+const CARD_PANEL: &str = "#171717";
+/// The strongest white-first brand mark.
+const BRAND_INK: &str = "#0a0a0a";
 
 /// The same font stacks the chart/badge SVGs use. `raster.rs` resolves
 /// every generic family to the bundled Inter, so these render in PNG.
@@ -75,7 +71,7 @@ pub struct RepoCard {
 
 /// One repo entry on a compare card: slug, star count, and the series
 /// for the overlay sparkline. The caller orders these to match the
-/// categorical palette (index 0 = brand lime).
+/// categorical palette (index 0 = strongest contrast).
 #[derive(Debug, Clone, Default)]
 pub struct CompareEntry {
     pub slug: String,
@@ -152,7 +148,7 @@ fn secondary_line(card: &RepoCard) -> String {
 
 /// Render the multi-repo compare card SVG (1200×630): a "{a} vs {b}"
 /// title, an overlay sparkline, and each repo's star count in its
-/// series color. `entries` is in palette order (index 0 = lime).
+/// series color. `entries` is in stable palette order.
 pub fn render_compare_card(entries: &[CompareEntry], theme: &Theme) -> String {
     let bg = card_bg(theme);
     let fg = card_fg(theme);
@@ -209,7 +205,7 @@ pub fn render_compare_card(entries: &[CompareEntry], theme: &Theme) -> String {
 // Default site card
 
 /// Render the default site card SVG (1200×630): the gitdebt lockup, the
-/// tagline, and a subtle lime grid motif. Used for `/api/og.png` with no
+/// tagline, and a subtle technical grid motif. Used for `/api/og.png` with no
 /// repos.
 pub fn render_default_card(theme: &Theme) -> String {
     let bg = card_bg(theme);
@@ -336,7 +332,7 @@ fn sparkline_panel(series: &[(String, &Vec<Point>)], theme: &Theme, top: f32) ->
     out
 }
 
-/// Faint lime grid motif for the default card. Deterministic set of
+/// Faint monochrome grid motif for the default card. Deterministic set of
 /// vertical + horizontal hairlines at a fixed spacing.
 fn grid_motif(theme: &Theme) -> String {
     let grid = card_grid(theme);
@@ -361,8 +357,8 @@ fn grid_motif(theme: &Theme) -> String {
     out
 }
 
-/// Wrap a card body in the 1200×630 SVG envelope with the charcoal
-/// background rect. A thin accent rule along the top edge ties it to the
+/// Wrap a card body in the 1200×630 SVG envelope. A thin contrast rule
+/// along the top edge ties it to the
 /// brand. `aria_label` describes the card for accessibility tooling.
 fn wrap_svg(body: &str, bg: &str, aria_label: &str) -> String {
     format!(
@@ -373,7 +369,7 @@ fn wrap_svg(body: &str, bg: &str, aria_label: &str) -> String {
         w = OG_WIDTH,
         h = OG_HEIGHT,
         bg = bg,
-        accent = BRAND_LIME,
+        accent = if bg == CARD_BG { "#fafafa" } else { BRAND_INK },
         label = escape_xml(aria_label),
         body = body,
     )
@@ -388,14 +384,13 @@ fn short_slug(slug: &str) -> String {
     }
 }
 
-// Card palette accessors. OG cards are fixed-dark by default; we still
-// route through the theme so a `theme=light` request produces a sane
-// (if untuned) light card rather than illegible lime-on-white.
+// Card palette accessors. The default light card and explicit dark card
+// use the same white/ink system as every other share surface.
 fn card_bg(theme: &Theme) -> &'static str {
     if theme.dark { CARD_BG } else { "#ffffff" }
 }
 fn card_panel(theme: &Theme) -> &'static str {
-    if theme.dark { CARD_PANEL } else { "#f1f5f9" }
+    if theme.dark { CARD_PANEL } else { "#f5f5f5" }
 }
 fn card_fg(theme: &Theme) -> &'static str {
     theme.fg
@@ -407,8 +402,7 @@ fn card_grid(theme: &Theme) -> &'static str {
     theme.grid
 }
 fn card_accent(theme: &Theme) -> &'static str {
-    // Lime on dark; the light-theme lime (`#65a30d`) for the light card.
-    if theme.dark { BRAND_LIME } else { "#65a30d" }
+    theme.accent
 }
 
 /// Compact integer formatting (1234 → "1.2k", 1_500_000 → "1.5M",
@@ -521,15 +515,15 @@ mod tests {
     }
 
     #[test]
-    fn repo_card_bakes_dark_charcoal_and_lime() {
+    fn repo_card_bakes_dark_monochrome_palette() {
         let card = RepoCard {
             slug: "o/r".into(),
             stars: 1,
             ..Default::default()
         };
         let svg = render_repo_card(&card, &DARK);
-        assert!(svg.contains(CARD_BG)); // charcoal bg
-        assert!(svg.contains(BRAND_LIME)); // lime accent
+        assert!(svg.contains(CARD_BG));
+        assert!(svg.contains("#fafafa"));
         // No CSS vars / theme leakage.
         assert!(!svg.contains("var(--"));
     }
@@ -571,8 +565,8 @@ mod tests {
         assert!(svg.contains("207.0k stars"));
         assert!(svg.contains("234.0k stars"));
         // Both series colors (dark palette index 0 + 1).
-        assert!(svg.contains("#a3e635"));
-        assert!(svg.contains("#60a5fa"));
+        assert!(svg.contains("#fafafa"));
+        assert!(svg.contains("#e5e5e5"));
     }
 
     #[test]
@@ -616,7 +610,7 @@ mod tests {
         // The logo stays strictly monochrome on every card theme.
         assert!(svg.contains("#000"));
         assert!(svg.contains("#fff"));
-        assert!(!svg.contains(CARD_BG));
+        assert!(svg.contains(r##"<rect x="0" y="0" width="1200" height="630" fill="#ffffff" />"##));
     }
 
     #[test]
@@ -630,7 +624,7 @@ mod tests {
             ..Default::default()
         };
         let svg = render_repo_card(&card, &LIGHT);
-        assert!(svg.contains("#f1f5f9"));
+        assert!(svg.contains("#f5f5f5"));
     }
 
     #[test]
@@ -681,7 +675,7 @@ mod tests {
 
         // Text-renders check without an optional PNG decoder: a card whose
         // body actually rasterized glyphs + a sparkline compresses to a
-        // materially larger PNG than a same-size flat charcoal fill. If the
+        // materially larger PNG than a same-size flat fill. If the
         // font failed to resolve (blank glyph boxes) and the body dropped
         // out, the PNG would collapse toward the flat-fill size.
         let blank = format!(

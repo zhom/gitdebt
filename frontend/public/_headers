@@ -10,3 +10,14 @@
 
 /_astro/*
   Cache-Control: public, max-age=31536000, immutable
+
+/badges
+  Cache-Control: public, max-age=0, must-revalidate
+
+/report
+  Cache-Control: public, max-age=0, must-revalidate
+  X-Robots-Tag: noindex, follow
+
+/profile
+  Cache-Control: public, max-age=0, must-revalidate
+  X-Robots-Tag: noindex, follow

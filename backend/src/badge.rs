@@ -81,7 +81,7 @@ pub enum BadgeStyle {
     Flat,
     /// Rounded, soft, brand-accent leading dot.
     Modern,
-    /// Translucent gradient panel.
+    /// Translucent-style monochrome panel.
     Glass,
     /// Monospace, dark chip.
     Terminal,
@@ -282,7 +282,7 @@ pub fn render_badge(input: &BadgeInput, theme: &Theme) -> String {
     }
 }
 
-/// Shared SVG header. `extra_defs` lets a style inject gradients/filters.
+/// Shared SVG header. `extra_defs` lets a style inject filters or other defs.
 fn svg_header(width: f32, label: &str, defs: &str) -> String {
     format!(
         r##"<svg xmlns="http://www.w3.org/2000/svg" width="{w:.0}" height="{h:.0}" viewBox="0 0 {w:.0} {h:.0}" role="img" aria-label="{label}">
@@ -357,9 +357,9 @@ enum SegAnim {
 }
 
 fn render_flat(placed: &[Placed], width: f32, theme: &Theme, animate: bool) -> String {
-    // shields-like: brand-lime left accent strip, segments in the panel bg.
-    let pal0 = if theme.dark { "#a3e635" } else { "#65a30d" };
-    let bg = if theme.dark { "#1f2937" } else { "#f1f5f9" };
+    // shields-like: high-contrast leading strip, segments in the panel bg.
+    let pal0 = theme.accent;
+    let bg = if theme.dark { "#171717" } else { "#f5f5f5" };
     let label = aria_label(placed);
     let mut body = String::new();
     // Rounded container.
@@ -400,12 +400,12 @@ fn render_flat(placed: &[Placed], width: f32, theme: &Theme, animate: bool) -> S
 
 fn render_modern(placed: &[Placed], width: f32, theme: &Theme, animate: bool) -> String {
     // Rounded, soft shadow, brand-accent leading dot before the first value.
-    let pal0 = if theme.dark { "#a3e635" } else { "#65a30d" };
-    let bg = if theme.dark { "#0f172a" } else { "#ffffff" };
+    let pal0 = theme.accent;
+    let bg = if theme.dark { "#0a0a0a" } else { "#ffffff" };
     let label = aria_label(placed);
     let defs = format!(
         "  <defs><filter id=\"mshadow\" x=\"-20%\" y=\"-20%\" width=\"140%\" height=\"160%\"><feDropShadow dx=\"0\" dy=\"1\" stdDeviation=\"1.2\" flood-color=\"{}\" flood-opacity=\"0.18\" /></filter></defs>\n",
-        if theme.dark { "#000000" } else { "#64748b" },
+        if theme.dark { "#000000" } else { "#737373" },
     );
     let mut body = String::new();
     body.push_str(&format!(
@@ -446,22 +446,16 @@ fn render_modern(placed: &[Placed], width: f32, theme: &Theme, animate: bool) ->
 }
 
 fn render_glass(placed: &[Placed], width: f32, theme: &Theme, animate: bool) -> String {
-    // Translucent gradient panel + a shimmer sweep highlight.
-    let pal0 = if theme.dark { "#a3e635" } else { "#65a30d" };
+    // Restrained translucent-style panel + a brief solid highlight sweep.
+    let pal0 = theme.accent;
     let label = aria_label(placed);
-    let (g_top, g_bot) = if theme.dark {
-        ("#334155", "#1e293b")
-    } else {
-        ("#ffffff", "#e2e8f0")
-    };
-    let defs = format!(
-        "  <defs><linearGradient id=\"gpanel\" x1=\"0\" y1=\"0\" x2=\"0\" y2=\"1\"><stop offset=\"0\" stop-color=\"{g_top}\" stop-opacity=\"0.85\" /><stop offset=\"1\" stop-color=\"{g_bot}\" stop-opacity=\"0.95\" /></linearGradient><linearGradient id=\"gshine\" x1=\"0\" y1=\"0\" x2=\"1\" y2=\"0\"><stop offset=\"0\" stop-color=\"#ffffff\" stop-opacity=\"0\" /><stop offset=\"0.5\" stop-color=\"#ffffff\" stop-opacity=\"0.35\" /><stop offset=\"1\" stop-color=\"#ffffff\" stop-opacity=\"0\" /></linearGradient></defs>\n",
-    );
+    let panel = if theme.dark { "#262626" } else { "#f5f5f5" };
     let mut body = String::new();
     body.push_str(&format!(
-        "  <rect x=\"0.5\" y=\"0.5\" width=\"{w:.1}\" height=\"{h:.1}\" rx=\"10\" fill=\"url(#gpanel)\" stroke=\"{border}\" stroke-width=\"1\" />\n",
+        "  <rect x=\"0.5\" y=\"0.5\" width=\"{w:.1}\" height=\"{h:.1}\" rx=\"10\" fill=\"{panel}\" stroke=\"{border}\" stroke-width=\"1\" />\n",
         w = width - 1.0,
         h = HEIGHT - 1.0,
+        panel = panel,
         border = theme.border,
     ));
     // Top glass highlight.
@@ -488,30 +482,29 @@ fn render_glass(placed: &[Placed], width: f32, theme: &Theme, animate: bool) -> 
             i,
         ));
     }
-    // Shimmer sweep: a thin gradient bar that slides left→right and freezes
+    // Highlight sweep: a thin bar that slides left→right and freezes
     // off-screen-right (so the frozen GitHub frame shows a clean panel).
     if animate {
         body.push_str(&format!(
-            "  <rect x=\"{end:.1}\" y=\"0\" width=\"30\" height=\"{h:.1}\" fill=\"url(#gshine)\" opacity=\"0.9\" transform=\"translate(0 0)\"><animateTransform class=\"motion\" attributeName=\"transform\" type=\"translate\" from=\"-{distance:.1} 0\" to=\"0 0\" dur=\"1.2s\" begin=\"0s\" fill=\"freeze\" calcMode=\"linear\" /></rect>\n",
+            "  <rect x=\"{end:.1}\" y=\"0\" width=\"12\" height=\"{h:.1}\" fill=\"#ffffff\" opacity=\"0.18\" transform=\"translate(0 0)\"><animateTransform class=\"motion\" attributeName=\"transform\" type=\"translate\" from=\"-{distance:.1} 0\" to=\"0 0\" dur=\"0.6s\" begin=\"0s\" fill=\"freeze\" calcMode=\"linear\" /></rect>\n",
             h = HEIGHT,
             end = width,
-            distance = width + 30.0,
+            distance = width + 12.0,
         ));
     }
     format!(
-        "{header}  <style><![CDATA[ text {{ font: 600 12px ui-sans-serif, system-ui, sans-serif; }} {motion_css} ]]></style>\n{defs}{body}</svg>",
+        "{header}  <style><![CDATA[ text {{ font: 600 12px ui-sans-serif, system-ui, sans-serif; }} {motion_css} ]]></style>\n{body}</svg>",
         header = svg_header(width, &label, ""),
         motion_css = MOTION_CSS,
-        defs = defs,
     )
 }
 
 fn render_terminal(placed: &[Placed], width: f32, theme: &Theme, animate: bool) -> String {
     // Monospace, dark chip with a prompt-style leading marker + a blinking
     // cursor (the cursor "pulse" is the animation; it freezes visible).
-    let bg = "#0b1020";
-    let fg = "#d1fae5";
-    let accent = "#a3e635";
+    let bg = "#0a0a0a";
+    let fg = "#fafafa";
+    let accent = "#ffffff";
     let _ = theme; // terminal style is intentionally theme-independent (always dark chip).
     let label = aria_label(placed);
     let mut body = String::new();
@@ -578,12 +571,12 @@ fn segment_terminal(p: &Placed, fg: &str, accent: &str, animate: bool, index: us
 
 fn empty_badge(style: BadgeStyle, theme: &Theme) -> String {
     let bg = match style {
-        BadgeStyle::Terminal => "#0b1020",
-        _ if theme.dark => "#1f2937",
-        _ => "#f1f5f9",
+        BadgeStyle::Terminal => "#0a0a0a",
+        _ if theme.dark => "#171717",
+        _ => "#f5f5f5",
     };
     let fg = match style {
-        BadgeStyle::Terminal => "#d1fae5",
+        BadgeStyle::Terminal => "#fafafa",
         _ => theme.muted,
     };
     let w = 92.0;
@@ -809,9 +802,9 @@ mod tests {
     fn per_theme_colors_baked() {
         let light = render_badge(&full_input(BadgeStyle::Flat, false), &LIGHT);
         let dark = render_badge(&full_input(BadgeStyle::Flat, false), &DARK);
-        // Brand lime per theme.
-        assert!(light.contains("#65a30d"));
-        assert!(dark.contains("#a3e635"));
+        // Monochrome brand ink per theme.
+        assert!(light.contains("#0a0a0a"));
+        assert!(dark.contains("#fafafa"));
         // No CSS variables.
         assert!(!light.contains("var(--"));
         assert!(!dark.contains("var(--"));
@@ -852,7 +845,7 @@ mod tests {
     fn every_style_rasterizes_frozen_frame() {
         // The .png/.webp variants run through the raster freezer; confirm
         // each style's animated SVG produces valid PNG bytes after the SMIL
-        // → frozen-frame rewrite (catches gradient/filter parse failures).
+        // → frozen-frame rewrite (catches filter parse failures).
         for style in [
             BadgeStyle::Flat,
             BadgeStyle::Modern,

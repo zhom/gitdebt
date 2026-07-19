@@ -18,7 +18,12 @@
 use std::sync::OnceLock;
 
 use chrono::{Duration, TimeZone, Utc};
-use gitdebt::{analyzer, cache::Cache, db::Db, queue, repo_analysis};
+use gitdebt::{
+    analyzer,
+    cache::{ArchiveStarEvent, Cache},
+    db::Db,
+    queue, repo_analysis,
+};
 use sqlx::postgres::PgPoolOptions;
 use tokio::sync::Mutex;
 
@@ -57,6 +62,10 @@ async fn cleanup(db: &Db, prefix: &str) {
         .execute(&db.pool)
         .await;
     let _ = sqlx::query("DELETE FROM repo_stargazers WHERE repo LIKE $1")
+        .bind(&like)
+        .execute(&db.pool)
+        .await;
+    let _ = sqlx::query("DELETE FROM repo_star_arrivals WHERE repo LIKE $1")
         .bind(&like)
         .execute(&db.pool)
         .await;
@@ -123,7 +132,16 @@ async fn queue_dedup_and_claim() {
     let second = queue::claim_one(&db, "w1").await.unwrap().unwrap();
     assert_eq!(second.repo, a);
 
-    // reset_inflight requeues the in-progress row.
+    // Fresh claims survive a rolling replica startup; an expired lease is
+    // recoverable.
+    assert_eq!(queue::reset_inflight_on_startup(&db).await.unwrap(), 0);
+    sqlx::query(
+        "UPDATE star_fetch_queue SET claimed_at = NOW() - INTERVAL '16 minutes' WHERE repo = $1",
+    )
+    .bind(&a)
+    .execute(&db.pool)
+    .await
+    .unwrap();
     let reset = queue::reset_inflight_on_startup(&db).await.unwrap();
     assert!(reset >= 1);
     assert!(queue::is_active(&db, &a).await.unwrap());
@@ -399,6 +417,70 @@ async fn stargazer_schema_contains_no_account_identity() {
     .await
     .unwrap();
     assert_eq!(position_columns, 1);
+}
+
+#[tokio::test]
+async fn archive_windows_are_hidden_until_final_commit() {
+    let Some(db) = test_db().await else {
+        eprintln!("skipping: set GITDEBT_TEST_DATABASE_URL to run");
+        return;
+    };
+    let prefix = "gitdebt-test-archive/";
+    cleanup(&db, prefix).await;
+
+    let cache = Cache::new(db.clone());
+    let full = format!("{prefix}history");
+    cache
+        .put_repo_metadata(&full, Some(42), 99, 3, None)
+        .await
+        .unwrap();
+    let base = Utc.timestamp_opt(1_700_000_000, 0).unwrap();
+    let start = chrono::NaiveDate::from_ymd_opt(2011, 2, 12).unwrap();
+    let next = chrono::NaiveDate::from_ymd_opt(2011, 3, 1).unwrap();
+    cache
+        .commit_archive_backfill_window(
+            &full,
+            start,
+            next,
+            &[ArchiveStarEvent {
+                source_event_id: Some("archive-1".to_string()),
+                starred_at: base,
+            }],
+            false,
+        )
+        .await
+        .unwrap();
+    assert!(
+        cache.get_repo_stargazers(&full).await.unwrap().is_none(),
+        "partial archive history must remain invisible"
+    );
+
+    let done = chrono::NaiveDate::from_ymd_opt(2011, 4, 1).unwrap();
+    cache
+        .commit_archive_backfill_window(
+            &full,
+            next,
+            done,
+            &[ArchiveStarEvent {
+                source_event_id: Some("archive-2".to_string()),
+                starred_at: base + Duration::seconds(1),
+            }],
+            true,
+        )
+        .await
+        .unwrap();
+    let history = cache.get_repo_stargazers(&full).await.unwrap().unwrap();
+    assert_eq!(history.len(), 2);
+    assert_eq!(
+        cache.get_repo_star_count(&full).await.unwrap(),
+        Some(99),
+        "archive event count must not replace GitHub's current star total"
+    );
+    let summary = cache.get_repo_summary(&full).await.unwrap().unwrap();
+    assert_eq!(summary.history_source.as_deref(), Some("gh_archive"));
+    assert_eq!(summary.history_observed_count, Some(2));
+
+    cleanup(&db, prefix).await;
 }
 
 #[tokio::test]

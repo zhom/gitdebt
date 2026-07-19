@@ -28,14 +28,14 @@ const legalLinks = [
 ];
 ---
 
-<footer class="border-t border-border bg-muted/30">
-  <div class="mx-auto max-w-6xl px-6 py-14">
-    <div class="flex flex-col gap-8 sm:flex-row sm:items-start sm:justify-between">
+<footer class="border-t border-border bg-white">
+  <div class="mx-auto max-w-6xl px-4 py-12 sm:px-6 sm:py-14">
+    <div class="grid gap-10 lg:grid-cols-[minmax(0,1fr)_auto] lg:gap-16">
       <div class="max-w-sm space-y-3">
         <a
           href="/"
           aria-label="gitdebt homepage"
-          class="inline-flex items-center rounded-md focus-visible:outline-2 focus-visible:outline-offset-4 focus-visible:outline-ring"
+          class="inline-flex min-h-12 items-center rounded-md focus-visible:outline-2 focus-visible:outline-offset-4 focus-visible:outline-ring"
         >
           <Brand markClass="size-7" />
         </a>
@@ -45,10 +45,10 @@ const legalLinks = [
         </p>
       </div>
 
-      <div class="flex flex-col gap-8 sm:flex-row sm:gap-16">
-        <nav class="flex flex-col gap-3">
+      <div class="grid grid-cols-2 gap-x-6 gap-y-10 sm:grid-cols-3 sm:gap-x-12">
+        <nav class="flex min-w-0 flex-col">
           <p
-            class="font-mono text-xs tracking-wide text-muted-foreground uppercase"
+            class="mb-2 font-mono text-xs tracking-wide text-muted-foreground uppercase"
           >
             Explore
           </p>
@@ -56,7 +56,7 @@ const legalLinks = [
             footerLinks.map((link) => (
               <a
                 href={link.href}
-                class="rounded-sm text-base font-normal text-muted-foreground hover:text-foreground focus-visible:outline-2 focus-visible:outline-offset-2 focus-visible:outline-ring sm:text-sm"
+                class="flex min-h-12 items-center rounded-sm text-base font-normal text-muted-foreground transition-colors duration-150 hover:text-foreground focus-visible:outline-2 focus-visible:outline-offset-2 focus-visible:outline-ring sm:min-h-9 sm:text-sm"
               >
                 {link.label}
               </a>
@@ -64,9 +64,9 @@ const legalLinks = [
           }
         </nav>
 
-        <nav class="flex flex-col gap-3">
+        <nav class="flex min-w-0 flex-col">
           <p
-            class="font-mono text-xs tracking-wide text-muted-foreground uppercase"
+            class="mb-2 font-mono text-xs tracking-wide text-muted-foreground uppercase"
           >
             Categories
           </p>
@@ -74,7 +74,7 @@ const legalLinks = [
             categoryLinks.map((link) => (
               <a
                 href={link.href}
-                class="rounded-sm text-base font-normal text-muted-foreground hover:text-foreground focus-visible:outline-2 focus-visible:outline-offset-2 focus-visible:outline-ring sm:text-sm"
+                class="flex min-h-12 items-center rounded-sm text-base font-normal text-muted-foreground transition-colors duration-150 hover:text-foreground focus-visible:outline-2 focus-visible:outline-offset-2 focus-visible:outline-ring sm:min-h-9 sm:text-sm"
               >
                 {link.label}
               </a>
@@ -82,9 +82,9 @@ const legalLinks = [
           }
         </nav>
 
-        <nav class="flex flex-col gap-3">
+        <nav class="col-span-2 flex min-w-0 flex-col sm:col-span-1">
           <p
-            class="font-mono text-xs tracking-wide text-muted-foreground uppercase"
+            class="mb-2 font-mono text-xs tracking-wide text-muted-foreground uppercase"
           >
             Legal
           </p>
@@ -92,7 +92,7 @@ const legalLinks = [
             legalLinks.map((link) => (
               <a
                 href={link.href}
-                class="rounded-sm text-base font-normal text-muted-foreground hover:text-foreground focus-visible:outline-2 focus-visible:outline-offset-2 focus-visible:outline-ring sm:text-sm"
+                class="flex min-h-12 items-center rounded-sm text-base font-normal text-muted-foreground transition-colors duration-150 hover:text-foreground focus-visible:outline-2 focus-visible:outline-offset-2 focus-visible:outline-ring sm:min-h-9 sm:text-sm"
               >
                 {link.label}
               </a>
@@ -106,9 +106,7 @@ const legalLinks = [
       class="mt-10 flex flex-col gap-2 border-t border-border pt-6 text-base text-muted-foreground sm:flex-row sm:items-center sm:justify-between sm:text-sm"
     >
       <p>© <span class="tabular-nums">{year}</span> gitdebt</p>
-      <p class="font-mono text-sm">
-        Independent tool · not affiliated with GitHub
-      </p>
+      <p class="text-sm">Independent tool · not affiliated with GitHub</p>
     </div>
   </div>
 </footer>

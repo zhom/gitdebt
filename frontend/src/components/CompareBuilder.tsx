@@ -4,6 +4,7 @@ import { ArrowRight, Plus, X } from "lucide-react";
 
 import { Button } from "@/components/ui/button";
 import { ChartViewer } from "@/components/ChartViewer";
+import { warmRepos } from "@/components/WarmRepos";
 import { CATEGORIES } from "@/data/categories";
 import {
   DURATION,
@@ -111,6 +112,7 @@ export function CompareBuilder({ apiBase, initialRepos = [] }: Props) {
       return;
     }
     const unique = Array.from(new Set(cleaned)).slice(0, MAX_REPOS);
+    warmRepos(apiBase, unique, true);
     setActive(unique);
   }
 
@@ -176,7 +178,7 @@ export function CompareBuilder({ apiBase, initialRepos = [] }: Props) {
                 }}
                 className="flex items-center gap-2"
               >
-                <div className="flex flex-1 items-center rounded-md border border-input bg-background font-mono text-base shadow-xs focus-within:outline-2 focus-within:outline-offset-2 focus-within:outline-ring sm:text-sm dark:shadow-none">
+                <div className="flex flex-1 items-center rounded-md border border-input bg-background font-mono text-base focus-within:outline-2 focus-within:outline-offset-2 focus-within:outline-ring sm:text-sm">
                   <label
                     htmlFor={`compare-repo-${row.id}`}
                     className="pl-3.5 text-muted-foreground select-none"
@@ -223,7 +225,7 @@ export function CompareBuilder({ apiBase, initialRepos = [] }: Props) {
             type="button"
             onClick={addRow}
             disabled={rows.length >= MAX_REPOS}
-            className="inline-flex min-h-11 items-center justify-center gap-1.5 rounded-md border border-border bg-background px-3 py-2 font-mono text-base text-muted-foreground shadow-xs hover:bg-accent hover:text-accent-foreground active:bg-accent/70 disabled:pointer-events-none disabled:opacity-40 sm:min-h-0 sm:py-1.5 sm:text-sm dark:shadow-none"
+            className="inline-flex min-h-11 items-center justify-center gap-1.5 rounded-md border border-border bg-background px-3 py-2 font-mono text-base text-muted-foreground hover:bg-accent hover:text-accent-foreground active:bg-accent/70 disabled:pointer-events-none disabled:opacity-40 sm:min-h-0 sm:py-1.5 sm:text-sm"
           >
             <Plus className="size-4 shrink-0" strokeWidth={2} aria-hidden="true" />
             Add repo
@@ -264,7 +266,7 @@ export function CompareBuilder({ apiBase, initialRepos = [] }: Props) {
             <div>
               <a
                 href={vsHref}
-                className="inline-flex min-h-11 items-center gap-2 rounded-md border border-border bg-background px-3 py-2 font-mono text-base text-muted-foreground shadow-xs hover:bg-accent hover:text-accent-foreground sm:min-h-0 sm:py-1.5 sm:text-sm dark:shadow-none"
+                className="inline-flex min-h-11 items-center gap-2 rounded-md border border-border bg-background px-3 py-2 font-mono text-base text-muted-foreground hover:bg-accent hover:text-accent-foreground sm:min-h-0 sm:py-1.5 sm:text-sm"
               >
                 Open the {active[0]} vs {active[1]} head-to-head page
                 <ArrowRight className="size-4 shrink-0" strokeWidth={2} aria-hidden="true" />

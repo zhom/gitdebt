@@ -14,6 +14,8 @@ type Props = {
   caption?: string;
   delay?: number;
   embedLink?: string;
+  priority?: boolean;
+  liveRepo?: string;
 };
 
 type Phase = "gathering" | "ready" | "error";
@@ -26,7 +28,14 @@ function retryDelay(attempt: number): number {
   return Math.min(BASE_DELAY_MS * 2 ** attempt, MAX_DELAY_MS);
 }
 
-export function StatCard({ src, alt, caption, embedLink }: Props) {
+export function StatCard({
+  src,
+  alt,
+  caption,
+  embedLink,
+  priority = false,
+  liveRepo,
+}: Props) {
   const [attempt, setAttempt] = useState(0);
   const [phase, setPhase] = useState<Phase>("gathering");
   const timerRef = useRef<ReturnType<typeof setTimeout> | null>(null);
@@ -36,13 +45,34 @@ export function StatCard({ src, alt, caption, embedLink }: Props) {
   const sep = liveSrc.includes("?") ? "&" : "?";
   const bust = attempt === 0 ? "" : `${sep}_=${attempt}`;
   const lightSrc = `${liveSrc}${sep}theme=light${bust}`;
-  const darkSrc = `${liveSrc}${sep}theme=dark${bust}`;
 
   useEffect(() => {
     return () => {
       if (timerRef.current) clearTimeout(timerRef.current);
     };
   }, []);
+
+  useEffect(() => {
+    const targetRepo = liveRepo;
+    if (!targetRepo) return;
+    function refresh(event: Event) {
+      if (!targetRepo) return;
+      const detail = (event as CustomEvent<{
+        repo?: string;
+        analysis?: { phase?: string };
+      }>).detail;
+      if (
+        detail?.repo?.toLowerCase() === targetRepo.toLowerCase() &&
+        detail.analysis?.phase === "complete"
+      ) {
+        if (timerRef.current) clearTimeout(timerRef.current);
+        setPhase("gathering");
+        setAttempt((value) => value + 1);
+      }
+    }
+    window.addEventListener("gitdebt:repo-progress", refresh);
+    return () => window.removeEventListener("gitdebt:repo-progress", refresh);
+  }, [liveRepo]);
 
   function handleLoad() {
     if (timerRef.current) {
@@ -81,10 +111,10 @@ export function StatCard({ src, alt, caption, embedLink }: Props) {
     <figure className="card-panel overflow-hidden">
       {caption && (
         <figcaption className="flex items-center justify-between gap-3 border-b border-border bg-muted/40 px-5 py-3">
-          <span className="inline-flex items-center gap-2 font-mono text-xs tracking-wide text-muted-foreground uppercase">
+          <div className="inline-flex items-center gap-2 font-mono text-xs tracking-wide text-muted-foreground uppercase">
             <span className="size-1.5 shrink-0 rounded-full bg-signal" aria-hidden="true" />
             {caption}
-          </span>
+          </div>
           {embedLink && (
             <CopyButton
               value={embedSnippet}
@@ -110,19 +140,17 @@ export function StatCard({ src, alt, caption, embedLink }: Props) {
           }}
           aria-hidden={phase !== "ready"}
         >
-          <picture>
-            <source media="(prefers-color-scheme: dark)" srcSet={darkSrc} />
-            <img
-              key={attempt}
-              src={lightSrc}
-              alt={alt}
-              loading="lazy"
-              decoding="async"
-              onLoad={handleLoad}
-              onError={handleError}
-              className="block w-full"
-            />
-          </picture>
+          <img
+            key={attempt}
+            src={lightSrc}
+            alt={alt}
+            loading={priority ? "eager" : "lazy"}
+            fetchPriority={priority ? "high" : "auto"}
+            decoding="async"
+            onLoad={handleLoad}
+            onError={handleError}
+            className="block w-full"
+          />
         </motion.div>
 
         <AnimatePresence initial={false}>

@@ -55,39 +55,39 @@ pub struct Theme {
 pub static LIGHT: Theme = Theme {
     dark: false,
     bg: "#ffffff",
-    fg: "#0f172a",
-    muted: "#64748b",
-    border: "#cbd5e1",
-    grid: "#e2e8f0",
-    track: "#e5e7eb",
-    accent: "#2563eb",
-    accent_dim: "#1d4ed8",
-    bug: "#ef4444",
-    bug_dim: "#b91c1c",
-    heat_0: "#ebedf0",
-    heat_1: "#9be9a8",
-    heat_2: "#40c463",
-    heat_3: "#30a14e",
-    heat_4: "#216e39",
+    fg: "#0a0a0a",
+    muted: "#525252",
+    border: "#d4d4d4",
+    grid: "#e5e5e5",
+    track: "#ededed",
+    accent: "#0a0a0a",
+    accent_dim: "#404040",
+    bug: "#0a0a0a",
+    bug_dim: "#525252",
+    heat_0: "#f5f5f5",
+    heat_1: "#d4d4d4",
+    heat_2: "#a3a3a3",
+    heat_3: "#737373",
+    heat_4: "#262626",
 };
 
 pub static DARK: Theme = Theme {
     dark: true,
-    bg: "#0d1117",
-    fg: "#e2e8f0",
-    muted: "#94a3b8",
-    border: "#334155",
-    grid: "#1e293b",
-    track: "#1f2937",
-    accent: "#60a5fa",
-    accent_dim: "#93c5fd",
-    bug: "#f87171",
-    bug_dim: "#fca5a5",
-    heat_0: "#161b22",
-    heat_1: "#0e4429",
-    heat_2: "#006d32",
-    heat_3: "#26a641",
-    heat_4: "#39d353",
+    bg: "#0a0a0a",
+    fg: "#fafafa",
+    muted: "#a3a3a3",
+    border: "#404040",
+    grid: "#262626",
+    track: "#171717",
+    accent: "#fafafa",
+    accent_dim: "#d4d4d4",
+    bug: "#fafafa",
+    bug_dim: "#a3a3a3",
+    heat_0: "#171717",
+    heat_1: "#404040",
+    heat_2: "#737373",
+    heat_3: "#a3a3a3",
+    heat_4: "#f5f5f5",
 };
 
 pub fn theme_for(name: Option<&str>) -> &'static Theme {
@@ -109,7 +109,7 @@ pub fn contrast_on(hex: &str) -> &'static str {
     match parse_hex_rgb(hex) {
         Some((r, g, b)) => {
             let yiq = (r as u32 * 299 + g as u32 * 587 + b as u32 * 114) / 1000;
-            if yiq >= 145 { "#0f172a" } else { "#ffffff" }
+            if yiq >= 145 { "#0a0a0a" } else { "#ffffff" }
         }
         None => "#ffffff",
     }
@@ -131,14 +131,14 @@ mod tests {
 
     #[test]
     fn contrast_picks_white_on_dark_bg() {
-        assert_eq!(contrast_on("#0f172a"), "#ffffff");
+        assert_eq!(contrast_on("#0a0a0a"), "#ffffff");
         assert_eq!(contrast_on("#000000"), "#ffffff");
     }
 
     #[test]
     fn contrast_picks_dark_on_light_bg() {
-        assert_eq!(contrast_on("#ffffff"), "#0f172a");
-        assert_eq!(contrast_on("#f1e05a"), "#0f172a"); // yellow JS bar
+        assert_eq!(contrast_on("#ffffff"), "#0a0a0a");
+        assert_eq!(contrast_on("#f5f5f5"), "#0a0a0a");
     }
 
     #[test]

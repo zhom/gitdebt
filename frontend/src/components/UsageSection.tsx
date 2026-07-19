@@ -39,6 +39,8 @@ type Props = {
   repo: string;
   apiBase: string;
   initialData?: UsageResponse | null;
+  showEmbed?: boolean;
+  priority?: boolean;
 };
 
 function availableSources(resolved: UsageResponse["resolved"]): UsageSource[] {
@@ -63,7 +65,14 @@ function compact(n: number): string {
   }).format(n);
 }
 
-export function UsageSection({ owner, repo, apiBase, initialData = null }: Props) {
+export function UsageSection({
+  owner,
+  repo,
+  apiBase,
+  initialData = null,
+  showEmbed = true,
+  priority = false,
+}: Props) {
   const [data, setData] = useState<UsageResponse | null>(initialData);
   const [loading, setLoading] = useState(!initialData);
   const [errored, setErrored] = useState(false);
@@ -199,13 +208,13 @@ export function UsageSection({ owner, repo, apiBase, initialData = null }: Props
       <section className="space-y-6">
         <figure className="card-panel overflow-hidden">
           <figcaption className="flex flex-wrap items-center justify-between gap-3 border-b border-border bg-muted/40 px-5 py-3">
-            <span className="inline-flex items-center gap-2 font-mono text-xs tracking-wide text-muted-foreground uppercase">
+            <div className="inline-flex items-center gap-2 font-mono text-xs tracking-wide text-muted-foreground uppercase">
               <span
                 className="size-1.5 shrink-0 rounded-full bg-signal"
                 aria-hidden="true"
               />
               Stars vs. usage
-            </span>
+            </div>
             <div className="flex flex-wrap items-center gap-3">
               {sources.length > 1 && (
                 <div className="inline-flex items-center gap-2">
@@ -290,19 +299,14 @@ export function UsageSection({ owner, repo, apiBase, initialData = null }: Props
           </div>
 
           {hasDownloadSeries ? (
-            <picture>
-              <source
-                media="(prefers-color-scheme: dark)"
-                srcSet={`${apiBase}${chartPath}&theme=dark`}
-              />
-              <img
-                src={`${apiBase}${chartPath}&theme=light`}
-                alt={`Star growth versus download volume for ${owner}/${repo}`}
-                loading="lazy"
-                decoding="async"
-                className="block w-full"
-              />
-            </picture>
+            <img
+              src={`${apiBase}${chartPath}&theme=light`}
+              alt={`Star growth versus download volume for ${owner}/${repo}`}
+              loading={priority ? "eager" : "lazy"}
+              fetchPriority={priority ? "high" : "auto"}
+              decoding="async"
+              className="block w-full"
+            />
           ) : (
             <div className="px-5 py-8">
               <p className="text-base text-pretty text-muted-foreground sm:text-sm">
@@ -313,7 +317,7 @@ export function UsageSection({ owner, repo, apiBase, initialData = null }: Props
           )}
         </figure>
 
-        {hasDownloadSeries && (
+        {hasDownloadSeries && showEmbed && (
           <EmbedSnippet
             apiBase={apiBase}
             chartPath={`/api/repos/${owner}/${repo}/usage.svg?source=${source}`}

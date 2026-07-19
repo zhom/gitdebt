@@ -12,7 +12,9 @@
     "dev": "astro dev",
     "start": "astro dev",
     "check": "astro check",
-    "build": "astro check && astro build && node scripts/audit-seo.mjs --prune-noindex-sitemap",
+    "build": "astro check && astro build && node scripts/audit-routing.mjs && node scripts/audit-seo.mjs --prune-noindex-sitemap",
+    "test": "node --test scripts/*.test.mjs",
+    "test:routing": "node --test scripts/static-routing.test.mjs",
     "seo:audit": "node scripts/audit-seo.mjs",
     "test:seo": "node --test scripts/audit-seo.test.mjs",
     "preview": "astro preview",
@@ -37,10 +39,11 @@
   },
   "devDependencies": {
     "@astrojs/check": "^0.9.9",
-    "@types/node": "^22.20.1",
+    "@types/node": "^26.1.1",
     "@types/react": "^19.2.17",
     "@types/react-dom": "^19.2.3",
     "shadcn": "4.13.1",
-    "typescript": "^6.0.3"
+    "typescript": "^6.0.3",
+    "wrangler": "^4.112.0"
   }
 }

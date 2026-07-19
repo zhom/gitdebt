@@ -341,6 +341,7 @@ async fn process(ctx: &WorkerCtx, job: &queue::Job) -> Result<Outcome> {
                 ctx.cache
                     .put_repo_metadata(
                         &job.repo,
+                        metadata.id,
                         metadata.stargazers_count,
                         metadata.forks_count,
                         metadata.created_at,
@@ -422,6 +423,7 @@ async fn full_fetch<S: PageSource + Sync>(
                 ctx.cache
                     .put_repo_metadata(
                         repo,
+                        metadata.id,
                         metadata.stargazers_count,
                         metadata.forks_count,
                         metadata.created_at,

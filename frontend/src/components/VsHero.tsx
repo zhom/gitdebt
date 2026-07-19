@@ -33,19 +33,13 @@ function RepoCard({ summary }: { summary: RepoSummary }) {
     ? `${summary.totalStars.toLocaleString()} stars · since ${summary.firstStarYear}`
     : `${summary.totalStars.toLocaleString()} stars`;
   return (
-    <div className="card-panel relative overflow-hidden p-6">
-      <div
-        className="absolute inset-x-0 top-0 h-px bg-linear-to-r from-transparent via-signal to-transparent"
-        aria-hidden="true"
-      />
+    <div className="card-panel p-6">
       <p className="truncate font-mono text-xs tracking-wide text-muted-foreground uppercase">
         {summary.slug}
       </p>
-      <div className="mt-3">
-        <span className="inline-block text-4xl font-semibold tracking-tight tabular-nums sm:text-5xl">
-          {summary.totalStars.toLocaleString()}
-        </span>
-      </div>
+      <p className="mt-3 text-4xl font-semibold tracking-tight tabular-nums sm:text-5xl">
+        {summary.totalStars.toLocaleString()}
+      </p>
       <p className="mt-1 text-base text-muted-foreground sm:text-sm">{subtitle}</p>
     </div>
   );

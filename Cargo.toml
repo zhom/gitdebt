@@ -43,3 +43,5 @@ image = { version = "0.25", default-features = false, features = ["gif", "webp"]
 aes-gcm = "0.11"
 base64 = "0.22"
 tower_governor = { version = "0.8", default-features = false, features = ["axum"] }
+gcp_auth = { version = "0.12.7", default-features = false, features = ["aws-lc-rs"] }
+flate2 = "1"

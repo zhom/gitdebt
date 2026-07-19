@@ -120,8 +120,8 @@ function firstStarYear(d: AnalyzeResponse): string | null {
 const reposParam = encodeURIComponent(`${slug1},${slug2}`);
 const overlayPath = `/api/chart.svg?repos=${reposParam}`;
 
-const title = `${repo1} vs ${repo2} — star history · gitdebt`;
-const description = `Compare the star history of ${slug1} and ${slug2} on gitdebt — cumulative star growth overlaid on one timeline, with first-star dates and totals.`;
+const title = `${repo1} vs ${repo2} — GitHub stars compared · gitdebt`;
+const description = `Compare ${slug1} and ${slug2} by current GitHub stars, with a historical growth overlay when stargazer timestamps are available.`;
 const site = (Astro.site ?? new URL("https://gitdebt.com")).href.replace(/\/$/, "");
 const canonicalPath = `/vs/${slug1}/${slug2}`;
 const canonical = `${site}${canonicalPath}`;
@@ -198,15 +198,28 @@ const heroRight =
           <>
             <VsHero client:load left={heroLeft} right={heroRight} />
 
-            <ChartViewer
-              client:load
-              apiBase={apiBase}
-              path={overlayPath}
-              alt={`Star history overlay of ${slug1} and ${slug2}`}
-              caption="Star history overlay"
-              embedLink={canonical}
-              label={`${slug1} vs ${slug2}`}
-            />
+            {ready ? (
+              <ChartViewer
+                client:load
+                apiBase={apiBase}
+                path={overlayPath}
+                alt={`Star history overlay of ${slug1} and ${slug2}`}
+                caption="Star history overlay"
+                embedLink={canonical}
+                label={`${slug1} vs ${slug2}`}
+              />
+            ) : (
+              <section class="border-y border-border py-6">
+                <p class="font-mono text-xs tracking-wide text-muted-foreground uppercase">
+                  Current totals ready
+                </p>
+                <p class="mt-2 max-w-[70ch] text-base/7 text-pretty text-muted-foreground sm:text-sm/6">
+                  The head-to-head totals below are live. A historical overlay
+                  needs stargazer timestamps for both repositories, which
+                  GitHub may not expose.
+                </p>
+              </section>
+            )}
 
             <section class="space-y-4">
               <h2 class="flex items-center gap-2 text-base font-medium">

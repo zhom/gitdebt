@@ -29,6 +29,13 @@ const ogImage = `${apiBase}/api/og.png`;
       ogImage={ogImage}
       noindex={true}
     />
+    <meta name="gitdebt-route-fallback" content="missing-repo" />
+    <script>
+      import { missingRepoReportTarget } from "@/lib/static-routing.mjs";
+
+      const target = missingRepoReportTarget(window.location.pathname);
+      if (target) window.location.replace(target);
+    </script>
   </head>
   <body>
     <div class="isolate flex min-h-dvh flex-col">

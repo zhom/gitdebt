@@ -1,5 +1,5 @@
 use anyhow::{Context, Result};
-use chrono::{DateTime, Utc};
+use chrono::{DateTime, NaiveDate, Utc};
 use sqlx::{PgConnection, Row};
 
 use crate::db::Db;
@@ -20,6 +20,23 @@ pub struct Cache {
 }
 
 pub type StargazerEvent = (i64, DateTime<Utc>);
+
+#[derive(Debug, Clone, Eq, PartialEq)]
+pub struct ArchiveStarEvent {
+    pub source_event_id: Option<String>,
+    pub starred_at: DateTime<Utc>,
+}
+
+#[derive(Debug, Clone)]
+pub struct ArchiveBackfillState {
+    pub github_id: Option<i64>,
+    pub cursor: Option<NaiveDate>,
+    pub complete: bool,
+    pub authoritative_total: Option<i64>,
+    pub exact_history_complete: bool,
+}
+
+type ArchiveBackfillRow = (Option<i64>, Option<NaiveDate>, bool, Option<i64>, bool);
 
 async fn upsert_stargazer_events(
     conn: &mut PgConnection,
@@ -44,25 +61,65 @@ async fn upsert_stargazer_events(
     Ok(())
 }
 
+async fn upsert_archive_events(
+    conn: &mut PgConnection,
+    repo: &str,
+    start_position: i64,
+    items: &[ArchiveStarEvent],
+) -> Result<()> {
+    let positions: Vec<i64> = (0..items.len())
+        .map(|index| start_position.saturating_add(index as i64))
+        .collect();
+    let source_event_ids: Vec<Option<String>> = items
+        .iter()
+        .map(|item| item.source_event_id.clone())
+        .collect();
+    let timestamps: Vec<DateTime<Utc>> = items.iter().map(|item| item.starred_at).collect();
+    sqlx::query(
+        "INSERT INTO repo_star_arrivals (repo, position, source_event_id, starred_at) \
+         SELECT $1, events.position, events.source_event_id, events.starred_at \
+         FROM UNNEST($2::BIGINT[], $3::TEXT[], $4::TIMESTAMPTZ[]) \
+              AS events(position, source_event_id, starred_at) \
+         ON CONFLICT DO NOTHING",
+    )
+    .bind(repo)
+    .bind(positions)
+    .bind(source_event_ids)
+    .bind(timestamps)
+    .execute(conn)
+    .await?;
+    Ok(())
+}
+
 /// The single-row `repos` fields the `/analyze` hot path reads, fetched in
 /// one query (see [`Cache::get_repo_summary`]).
 #[derive(Debug, Clone)]
 pub struct RepoSummary {
     pub missing: bool,
+    pub github_id: Option<i64>,
     pub stargazers_complete: bool,
     pub stargazers_fetched_at: Option<DateTime<Utc>>,
     pub metadata_fetched_at: Option<DateTime<Utc>>,
     pub star_count: Option<i64>,
+    pub history_source: Option<String>,
+    pub history_observed_count: Option<i64>,
+    pub history_coverage_start: Option<DateTime<Utc>>,
+    pub history_coverage_end: Option<DateTime<Utc>>,
     pub created_at: Option<DateTime<Utc>>,
     pub view_count: i64,
 }
 
 type RepoSummaryRow = (
     bool,
+    Option<i64>,
     bool,
     Option<DateTime<Utc>>,
     Option<DateTime<Utc>>,
     Option<i64>,
+    Option<String>,
+    Option<i64>,
+    Option<DateTime<Utc>>,
+    Option<DateTime<Utc>>,
     Option<DateTime<Utc>>,
     i64,
 );
@@ -115,7 +172,7 @@ impl Cache {
     /// timestamps leave the cache layer.
     pub async fn get_repo_stargazers(&self, repo: &str) -> Result<Option<Vec<DateTime<Utc>>>> {
         let complete: Option<bool> =
-            sqlx::query_scalar("SELECT stargazers_complete FROM repos WHERE repo = $1")
+            sqlx::query_scalar("SELECT history_complete FROM repos WHERE repo = $1")
                 .bind(repo)
                 .fetch_optional(&self.db.pool)
                 .await?;
@@ -123,7 +180,8 @@ impl Cache {
             return Ok(None);
         }
         let rows: Vec<DateTime<Utc>> = sqlx::query_scalar(
-            "SELECT starred_at FROM repo_stargazers WHERE repo = $1 ORDER BY position",
+            "SELECT starred_at FROM active_repo_star_history \
+             WHERE repo = $1 ORDER BY position",
         )
         .bind(repo)
         .fetch_all(&self.db.pool)
@@ -151,11 +209,16 @@ impl Cache {
         // or be un-deleted). Without this the 404 tombstone was one-way.
         sqlx::query(
             "UPDATE repos SET stargazers_fetched_at = $1, stargazers_complete = TRUE, \
-                star_count = $2, missing = FALSE \
-             WHERE repo = $3",
+                history_complete = TRUE, \
+                star_count = $2, history_source = 'github_api', \
+                history_observed_count = $2, history_coverage_start = $3, \
+                history_coverage_end = $4, missing = FALSE \
+             WHERE repo = $5",
         )
         .bind(now)
         .bind(items.len() as i64)
+        .bind(items.first().map(|(_, at)| *at))
+        .bind(items.last().map(|(_, at)| *at))
         .bind(repo)
         .execute(&mut *tx)
         .await?;
@@ -175,8 +238,11 @@ impl Cache {
     /// `None` when the repo row doesn't exist (truly cold).
     pub async fn get_repo_summary(&self, repo: &str) -> Result<Option<RepoSummary>> {
         let row: Option<RepoSummaryRow> = sqlx::query_as(
-            "SELECT missing, stargazers_complete, stargazers_fetched_at, metadata_fetched_at, \
-                    star_count, created_at, view_count \
+            "SELECT missing, github_id, history_complete, \
+                    COALESCE(archive_fetched_at, stargazers_fetched_at), \
+                    metadata_fetched_at, star_count, history_source, \
+                    history_observed_count, history_coverage_start, history_coverage_end, \
+                    created_at, view_count \
              FROM repos WHERE repo = $1",
         )
         .bind(repo)
@@ -185,18 +251,28 @@ impl Cache {
         Ok(row.map(
             |(
                 missing,
+                github_id,
                 complete,
                 stargazers_fetched_at,
                 metadata_fetched_at,
                 star_count,
+                history_source,
+                history_observed_count,
+                history_coverage_start,
+                history_coverage_end,
                 created_at,
                 view_count,
             )| RepoSummary {
                 missing,
+                github_id,
                 stargazers_complete: complete,
                 stargazers_fetched_at,
                 metadata_fetched_at,
                 star_count,
+                history_source,
+                history_observed_count,
+                history_coverage_start,
+                history_coverage_end,
                 created_at,
                 view_count,
             },
@@ -209,7 +285,7 @@ impl Cache {
     /// and "enqueue + return pending" without loading the rows.
     pub async fn repo_stargazers_complete(&self, repo: &str) -> Result<bool> {
         let complete: Option<bool> =
-            sqlx::query_scalar("SELECT stargazers_complete FROM repos WHERE repo = $1")
+            sqlx::query_scalar("SELECT history_complete FROM repos WHERE repo = $1")
                 .bind(repo)
                 .fetch_optional(&self.db.pool)
                 .await?;
@@ -226,7 +302,8 @@ impl Cache {
         ttl: chrono::Duration,
     ) -> Result<bool> {
         let row: Option<(bool, Option<DateTime<Utc>>)> = sqlx::query_as(
-            "SELECT stargazers_complete, stargazers_fetched_at FROM repos WHERE repo = $1",
+            "SELECT history_complete, COALESCE(archive_fetched_at, stargazers_fetched_at) \
+             FROM repos WHERE repo = $1",
         )
         .bind(repo)
         .fetch_optional(&self.db.pool)
@@ -283,6 +360,247 @@ impl Cache {
         Ok(count)
     }
 
+    /// Read cached timestamps at or after `since`, regardless of completeness.
+    /// The GH Archive refresh path uses this small overlap window to remove
+    /// events it already stored without retaining actor identities or event
+    /// payloads.
+    pub async fn get_repo_stargazers_since(
+        &self,
+        repo: &str,
+        since: DateTime<Utc>,
+    ) -> Result<Vec<DateTime<Utc>>> {
+        let rows = sqlx::query_scalar(
+            "SELECT starred_at FROM active_repo_star_history \
+             WHERE repo = $1 AND starred_at >= $2 ORDER BY starred_at, position",
+        )
+        .bind(repo)
+        .bind(since)
+        .fetch_all(&self.db.pool)
+        .await?;
+        Ok(rows)
+    }
+
+    /// Atomically replace a repository's star-event timeline with the
+    /// complete GH Archive result. `authoritative_total` remains GitHub's
+    /// current star count; GH Archive WatchEvents are an event history and
+    /// can differ because unstars are not public events and coverage begins
+    /// in 2011. Keeping both values avoids presenting the archive event count
+    /// as the current GitHub total.
+    pub async fn put_repo_stargazers_from_archive(
+        &self,
+        repo: &str,
+        items: &[ArchiveStarEvent],
+        authoritative_total: i64,
+        coverage_start: DateTime<Utc>,
+        coverage_end: DateTime<Utc>,
+        truncated_before: bool,
+    ) -> Result<()> {
+        let mut tx = self.db.pool.begin().await?;
+        sqlx::query("INSERT INTO repos (repo) VALUES ($1) ON CONFLICT DO NOTHING")
+            .bind(repo)
+            .execute(&mut *tx)
+            .await?;
+        sqlx::query("UPDATE repos SET archive_complete = FALSE WHERE repo = $1")
+            .bind(repo)
+            .execute(&mut *tx)
+            .await?;
+        sqlx::query("DELETE FROM repo_star_arrivals WHERE repo = $1")
+            .bind(repo)
+            .execute(&mut *tx)
+            .await?;
+        upsert_archive_events(&mut tx, repo, 1, items).await?;
+        sqlx::query(
+            "UPDATE repos SET archive_fetched_at = $1, archive_complete = TRUE, \
+                history_complete = TRUE, \
+                star_count = $2, history_source = 'gh_archive', \
+                history_observed_count = $3, history_coverage_start = $4, \
+                history_coverage_end = $5, archive_truncated_before = $6, \
+                missing = FALSE \
+             WHERE repo = $7",
+        )
+        .bind(Utc::now())
+        .bind(authoritative_total.max(0))
+        .bind(items.len() as i64)
+        .bind(coverage_start)
+        .bind(coverage_end)
+        .bind(truncated_before)
+        .bind(repo)
+        .execute(&mut *tx)
+        .await?;
+        tx.commit().await?;
+        Ok(())
+    }
+
+    /// Append only the novel tail returned by GH Archive and advance the
+    /// archive coverage cursor atomically. The worker removes the overlap
+    /// multiset before calling this method; positions are assigned here so
+    /// retries and multi-worker operation cannot race a caller-computed
+    /// offset.
+    pub async fn append_repo_stargazers_from_archive(
+        &self,
+        repo: &str,
+        items: &[ArchiveStarEvent],
+        authoritative_total: i64,
+        coverage_start: DateTime<Utc>,
+        coverage_end: DateTime<Utc>,
+    ) -> Result<i64> {
+        let mut tx = self.db.pool.begin().await?;
+        sqlx::query("INSERT INTO repos (repo) VALUES ($1) ON CONFLICT DO NOTHING")
+            .bind(repo)
+            .execute(&mut *tx)
+            .await?;
+        // Queue dedup already gives one writer per repo. Locking the row here
+        // makes the position assignment safe even if an operator manually
+        // starts a second process against the same database.
+        sqlx::query("SELECT repo FROM repos WHERE repo = $1 FOR UPDATE")
+            .bind(repo)
+            .fetch_one(&mut *tx)
+            .await?;
+        let base: i64 = sqlx::query_scalar(
+            "SELECT COALESCE(MAX(position), 0)::BIGINT \
+             FROM repo_star_arrivals WHERE repo = $1",
+        )
+        .bind(repo)
+        .fetch_one(&mut *tx)
+        .await?;
+        upsert_archive_events(&mut tx, repo, base.saturating_add(1), items).await?;
+        let observed: i64 =
+            sqlx::query_scalar("SELECT COUNT(*)::BIGINT FROM repo_star_arrivals WHERE repo = $1")
+                .bind(repo)
+                .fetch_one(&mut *tx)
+                .await?;
+        sqlx::query(
+            "UPDATE repos SET archive_fetched_at = $1, archive_complete = TRUE, \
+                history_complete = TRUE, \
+                star_count = $2, \
+                history_source = 'gh_archive', \
+                history_observed_count = $3, \
+                history_coverage_start = LEAST( \
+                    COALESCE(history_coverage_start, $4), $4), \
+                history_coverage_end = GREATEST( \
+                    COALESCE(history_coverage_end, $5), $5), \
+                missing = FALSE \
+             WHERE repo = $6",
+        )
+        .bind(Utc::now())
+        .bind(authoritative_total.max(0))
+        .bind(observed)
+        .bind(coverage_start)
+        .bind(coverage_end)
+        .bind(repo)
+        .execute(&mut *tx)
+        .await?;
+        tx.commit().await?;
+        Ok(observed)
+    }
+
+    /// Durable state for a historical GH Archive backfill. `cursor` is the
+    /// first day that has not yet been committed.
+    pub async fn get_archive_backfill_state(
+        &self,
+        repo: &str,
+    ) -> Result<Option<ArchiveBackfillState>> {
+        let row: Option<ArchiveBackfillRow> = sqlx::query_as(
+            "SELECT github_id, archive_cursor, archive_complete, star_count, \
+                        stargazers_complete \
+                 FROM repos WHERE repo = $1",
+        )
+        .bind(repo)
+        .fetch_optional(&self.db.pool)
+        .await?;
+        Ok(row.map(
+            |(github_id, cursor, complete, authoritative_total, exact_history_complete)| {
+                ArchiveBackfillState {
+                    github_id,
+                    cursor,
+                    complete,
+                    authoritative_total,
+                    exact_history_complete,
+                }
+            },
+        ))
+    }
+
+    /// Commit one fully-fetched BigQuery date window and advance the cursor
+    /// in the same transaction. Archive rows stay invisible until `complete`
+    /// is true, so readers never observe a half-backfilled series.
+    pub async fn commit_archive_backfill_window(
+        &self,
+        repo: &str,
+        window_start: NaiveDate,
+        next_cursor: NaiveDate,
+        items: &[ArchiveStarEvent],
+        complete: bool,
+    ) -> Result<i64> {
+        let mut tx = self.db.pool.begin().await?;
+        sqlx::query("INSERT INTO repos (repo) VALUES ($1) ON CONFLICT DO NOTHING")
+            .bind(repo)
+            .execute(&mut *tx)
+            .await?;
+        sqlx::query("SELECT repo FROM repos WHERE repo = $1 FOR UPDATE")
+            .bind(repo)
+            .fetch_one(&mut *tx)
+            .await?;
+
+        let stored_cursor: Option<NaiveDate> =
+            sqlx::query_scalar("SELECT archive_cursor FROM repos WHERE repo = $1")
+                .bind(repo)
+                .fetch_one(&mut *tx)
+                .await?;
+        if let Some(stored_cursor) = stored_cursor {
+            if stored_cursor != window_start {
+                anyhow::bail!(
+                    "archive cursor changed for {repo}: expected {window_start}, found {stored_cursor}"
+                );
+            }
+        } else {
+            sqlx::query("DELETE FROM repo_star_arrivals WHERE repo = $1")
+                .bind(repo)
+                .execute(&mut *tx)
+                .await?;
+        }
+
+        let base: i64 = sqlx::query_scalar(
+            "SELECT COALESCE(MAX(position), 0)::BIGINT \
+             FROM repo_star_arrivals WHERE repo = $1",
+        )
+        .bind(repo)
+        .fetch_one(&mut *tx)
+        .await?;
+        upsert_archive_events(&mut tx, repo, base.saturating_add(1), items).await?;
+
+        let observed: i64 =
+            sqlx::query_scalar("SELECT COUNT(*)::BIGINT FROM repo_star_arrivals WHERE repo = $1")
+                .bind(repo)
+                .fetch_one(&mut *tx)
+                .await?;
+        sqlx::query(
+            "UPDATE repos SET archive_cursor = $1, archive_complete = $2, \
+                archive_fetched_at = CASE WHEN $2 THEN $3 ELSE archive_fetched_at END, \
+                archive_truncated_before = TRUE, \
+                history_complete = $2, \
+                history_source = CASE WHEN $2 THEN 'gh_archive' ELSE history_source END, \
+                history_observed_count = CASE WHEN $2 THEN $4 ELSE history_observed_count END, \
+                history_coverage_start = CASE WHEN $2 THEN \
+                    (SELECT MIN(starred_at) FROM repo_star_arrivals WHERE repo = $5) \
+                    ELSE history_coverage_start END, \
+                history_coverage_end = CASE WHEN $2 THEN \
+                    (SELECT MAX(starred_at) FROM repo_star_arrivals WHERE repo = $5) \
+                    ELSE history_coverage_end END, \
+                missing = FALSE \
+             WHERE repo = $5",
+        )
+        .bind(next_cursor)
+        .bind(complete)
+        .bind(Utc::now())
+        .bind(observed)
+        .bind(repo)
+        .execute(&mut *tx)
+        .await?;
+        tx.commit().await?;
+        Ok(observed)
+    }
+
     /// Append newly-fetched stargazers to the existing set and mark the
     /// repo complete, atomically. Used by the incremental refresh path:
     /// the worker fetched only the new tail (the rows GitHub added since
@@ -309,7 +627,13 @@ impl Cache {
         // the repo is reachable again (see `put_repo_stargazers`).
         sqlx::query(
             "UPDATE repos SET stargazers_fetched_at = $1, stargazers_complete = TRUE, \
-                star_count = $2, missing = FALSE WHERE repo = $3",
+                history_complete = TRUE, \
+                star_count = $2, history_source = 'github_api', \
+                history_observed_count = $2, \
+                history_coverage_start = COALESCE(history_coverage_start, \
+                    (SELECT MIN(starred_at) FROM repo_stargazers WHERE repo = $3)), \
+                history_coverage_end = (SELECT MAX(starred_at) FROM repo_stargazers WHERE repo = $3), \
+                missing = FALSE WHERE repo = $3",
         )
         .bind(now)
         .bind(total)
@@ -332,8 +656,10 @@ impl Cache {
     ) -> Result<()> {
         let mut tx = self.db.pool.begin().await?;
         sqlx::query(
-            "INSERT INTO repos (repo, stargazers_complete) VALUES ($1, FALSE) \
-             ON CONFLICT (repo) DO UPDATE SET stargazers_complete = FALSE",
+            "INSERT INTO repos (repo, stargazers_complete, history_complete) \
+             VALUES ($1, FALSE, FALSE) \
+             ON CONFLICT (repo) DO UPDATE SET \
+                stargazers_complete = FALSE, history_complete = FALSE",
         )
         .bind(repo)
         .execute(&mut *tx)
@@ -353,8 +679,10 @@ impl Cache {
     ) -> Result<()> {
         let mut tx = self.db.pool.begin().await?;
         sqlx::query(
-            "INSERT INTO repos (repo, stargazers_complete) VALUES ($1, FALSE) \
-             ON CONFLICT (repo) DO UPDATE SET stargazers_complete = FALSE",
+            "INSERT INTO repos (repo, stargazers_complete, history_complete) \
+             VALUES ($1, FALSE, FALSE) \
+             ON CONFLICT (repo) DO UPDATE SET \
+                stargazers_complete = FALSE, history_complete = FALSE",
         )
         .bind(repo)
         .execute(&mut *tx)
@@ -389,7 +717,12 @@ impl Cache {
                 .await?;
         sqlx::query(
             "UPDATE repos SET stargazers_fetched_at = $1, stargazers_complete = TRUE, \
-             star_count = $2, missing = FALSE WHERE repo = $3",
+             history_complete = TRUE, \
+             star_count = $2, history_source = 'github_api', \
+             history_observed_count = $2, \
+             history_coverage_start = (SELECT MIN(starred_at) FROM repo_stargazers WHERE repo = $3), \
+             history_coverage_end = (SELECT MAX(starred_at) FROM repo_stargazers WHERE repo = $3), \
+             missing = FALSE WHERE repo = $3",
         )
         .bind(Utc::now())
         .bind(total)
@@ -463,15 +796,19 @@ impl Cache {
     pub async fn put_repo_metadata(
         &self,
         repo: &str,
+        github_id: Option<u64>,
         stargazers: u64,
         forks: u64,
         created_at: Option<DateTime<Utc>>,
     ) -> Result<()> {
         let now = Utc::now();
+        let github_id = github_id.and_then(|value| i64::try_from(value).ok());
         sqlx::query(
-            "INSERT INTO repos (repo, star_count, forks_count, created_at, metadata_fetched_at) \
-             VALUES ($1, $2, $3, $4, $5) \
+            "INSERT INTO repos \
+                (repo, github_id, star_count, forks_count, created_at, metadata_fetched_at) \
+             VALUES ($1, $2, $3, $4, $5, $6) \
              ON CONFLICT (repo) DO UPDATE SET \
+                github_id = COALESCE(EXCLUDED.github_id, repos.github_id), \
                 star_count = COALESCE(EXCLUDED.star_count, repos.star_count), \
                 forks_count = COALESCE(EXCLUDED.forks_count, repos.forks_count), \
                 created_at = COALESCE(EXCLUDED.created_at, repos.created_at), \
@@ -479,6 +816,7 @@ impl Cache {
                 missing = FALSE",
         )
         .bind(repo)
+        .bind(github_id)
         .bind(stargazers as i64)
         .bind(forks as i64)
         .bind(created_at)
@@ -552,7 +890,7 @@ impl Cache {
     pub async fn count_sitemap_repos(&self) -> Result<i64> {
         let n: i64 = sqlx::query_scalar(
             "SELECT COUNT(*) FROM repos \
-                 WHERE stargazers_complete = TRUE AND missing = FALSE",
+                 WHERE history_complete = TRUE AND missing = FALSE",
         )
         .fetch_one(&self.db.pool)
         .await?;
@@ -572,10 +910,10 @@ impl Cache {
     ) -> Result<Vec<(String, DateTime<Utc>)>> {
         let rows = sqlx::query(
             "SELECT repo, \
-                    COALESCE(GREATEST(stargazers_fetched_at, metadata_fetched_at), \
-                             stargazers_fetched_at, metadata_fetched_at, NOW()) AS updated_at \
+                    COALESCE(GREATEST(archive_fetched_at, stargazers_fetched_at, metadata_fetched_at), \
+                             archive_fetched_at, stargazers_fetched_at, metadata_fetched_at, NOW()) AS updated_at \
              FROM repos \
-             WHERE stargazers_complete = TRUE AND missing = FALSE \
+             WHERE history_complete = TRUE AND missing = FALSE \
              ORDER BY updated_at DESC, repo ASC \
              LIMIT $1 OFFSET $2",
         )

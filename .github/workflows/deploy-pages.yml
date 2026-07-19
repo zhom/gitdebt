@@ -1,0 +1,76 @@
+name: refresh static site
+
+on:
+  push:
+    branches: [main]
+    paths:
+      - "frontend/**"
+      - "package.json"
+      - "pnpm-lock.yaml"
+      - "pnpm-workspace.yaml"
+      - ".github/workflows/deploy-pages.yml"
+  schedule:
+    # Avoid the top of the hour, where scheduled Actions are most likely to queue.
+    - cron: "17 * * * *"
+  workflow_dispatch:
+  repository_dispatch:
+    types: [refresh-static-pages]
+
+permissions:
+  contents: read
+
+concurrency:
+  group: cloudflare-pages-production
+  cancel-in-progress: true
+
+jobs:
+  deploy:
+    name: build and deploy
+    if: github.repository == 'zhom/gitdebt'
+    runs-on: ubuntu-latest
+    timeout-minutes: 20
+    environment:
+      name: production
+      url: https://gitdebt.com
+    env:
+      PUBLIC_API_BASE: https://api.gitdebt.com
+      PUBLIC_SITE_URL: https://gitdebt.com
+      STATIC_CATALOG_REQUIRED: "1"
+      STATIC_REPO_LIMIT: "1000"
+
+    steps:
+      - uses: actions/checkout@v7
+
+      - uses: pnpm/action-setup@v6
+
+      - uses: actions/setup-node@v7
+        with:
+          node-version: 22.13
+          cache: pnpm
+
+      - name: Install dependencies
+        run: pnpm install --frozen-lockfile
+
+      - name: Test routing
+        run: pnpm --filter gitdebt-frontend test
+
+      - name: Build static site
+        run: pnpm --filter gitdebt-frontend build
+
+      - name: Enforce Cloudflare Pages free-plan file limit
+        shell: bash
+        run: |
+          file_count=$(find frontend/dist -type f | wc -l)
+          echo "Static output contains ${file_count} files"
+          test "${file_count}" -le 20000
+
+      - name: Deploy to Cloudflare Pages
+        working-directory: frontend
+        env:
+          CLOUDFLARE_ACCOUNT_ID: ${{ secrets.CLOUDFLARE_ACCOUNT_ID }}
+          CLOUDFLARE_API_TOKEN: ${{ secrets.CLOUDFLARE_API_TOKEN }}
+        run: >-
+          pnpm exec wrangler pages deploy dist
+          --project-name=gitdebt
+          --branch=main
+          --commit-hash="${GITHUB_SHA}"

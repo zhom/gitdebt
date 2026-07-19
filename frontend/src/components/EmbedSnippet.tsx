@@ -118,10 +118,10 @@ export function EmbedSnippet({ apiBase, chartPath, linkHref, label, state }: Pro
   return (
     <figure className="card-panel overflow-hidden">
       <figcaption className="flex flex-wrap items-center justify-between gap-3 border-b border-border bg-muted/40 px-5 py-3">
-        <span className="inline-flex items-center gap-2 font-mono text-xs tracking-wide text-muted-foreground uppercase">
+        <div className="inline-flex items-center gap-2 font-mono text-xs tracking-wide text-muted-foreground uppercase">
           <span className="size-1.5 shrink-0 rounded-full bg-signal" aria-hidden="true" />
           Embed
-        </span>
+        </div>
         <div className="flex flex-wrap items-center gap-3">
           <div className="grid grid-cols-1">
             <select

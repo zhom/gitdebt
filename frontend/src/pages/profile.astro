@@ -1,0 +1,36 @@
+---
+export const prerender = true;
+
+import "@/styles/globals.css";
+import BaseHead from "@/components/BaseHead.astro";
+import Seo from "@/components/Seo.astro";
+import SiteFooter from "@/components/SiteFooter.astro";
+import SiteHeader from "@/components/SiteHeader.astro";
+import { LiveUserProfile } from "@/components/LiveUserProfile";
+import { staticApiBase } from "@/lib/static-api-base";
+
+const apiBase = staticApiBase();
+---
+
+<!doctype html>
+<html lang="en">
+  <head>
+    <BaseHead />
+    <Seo
+      title="Your GitHub profile report · gitdebt"
+      description="Open a live aggregate report for your public GitHub repositories."
+      canonicalPath="/profile"
+      ogImage={`${apiBase}/api/og.png`}
+      noindex={true}
+    />
+  </head>
+  <body>
+    <div class="isolate flex min-h-dvh flex-col">
+      <SiteHeader />
+      <main id="main-content" class="mx-auto w-full max-w-5xl flex-1 px-6 py-12">
+        <LiveUserProfile client:only="react" apiBase={apiBase} />
+      </main>
+      <SiteFooter />
+    </div>
+  </body>
+</html>

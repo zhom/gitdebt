@@ -229,18 +229,12 @@ const jsonLd: Record<string, unknown>[] = [
                 forks, tracked repos and recent activity, rendered from cached data.
               </p>
             </header>
-            <div class="card-panel flex justify-center p-6">
-              <picture>
-                <source
-                  media="(prefers-color-scheme: dark)"
-                  srcset={`${apiBase}/api/users/${login}/card.svg?theme=dark`}
-                />
-                <img
-                  src={`${apiBase}/api/users/${login}/card.svg?theme=light`}
-                  alt={`gitdebt profile stats card for ${login}`}
-                  loading="lazy"
-                />
-              </picture>
+            <div class="flex justify-center border-y border-border py-6">
+              <img
+                src={`${apiBase}/api/users/${login}/card.svg?theme=light`}
+                alt={`gitdebt profile stats card for ${login}`}
+                loading="lazy"
+              />
             </div>
             <EmbedSnippet
               client:visible
@@ -262,7 +256,7 @@ const jsonLd: Record<string, unknown>[] = [
               {ownedRepos.map((slug) => (
                 <a
                   href={`/${slug}`}
-                  class="inline-flex items-center rounded-md border border-border bg-background px-3 py-1.5 font-mono text-sm text-muted-foreground shadow-xs hover:bg-accent hover:text-accent-foreground dark:shadow-none"
+                  class="inline-flex items-center rounded-md border border-border bg-background px-3 py-1.5 font-mono text-sm text-muted-foreground hover:bg-accent hover:text-accent-foreground"
                 >
                   {slug}
                 </a>

@@ -156,6 +156,7 @@ async fn enqueue_analysis(
                     .cache
                     .put_repo_metadata(
                         &full,
+                        metadata.id,
                         metadata.stargazers_count,
                         metadata.forks_count,
                         metadata.created_at,

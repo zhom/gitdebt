@@ -3,100 +3,120 @@ export const prerender = true;
 
 import "@/styles/globals.css";
 import {
-  LineChart,
-  Layers,
-  Bug,
-  GitFork,
-  Users,
-  ListTodo,
-  Package,
-  BadgeCheck,
   AppWindow,
+  ArrowRight,
+  ChartNoAxesCombined,
+  Code2,
+  GitCompareArrows,
   Globe,
-  Puzzle,
 } from "lucide-react";
 
+import BaseHead from "@/components/BaseHead.astro";
+import Seo from "@/components/Seo.astro";
+import SiteHeader from "@/components/SiteHeader.astro";
+import SiteFooter from "@/components/SiteFooter.astro";
+import { ComparisonModeGraphic } from "@/components/ComparisonModeGraphic";
+import { LandingRepoLookup } from "@/components/LandingRepoLookup";
+import { SignalFlowGraphic } from "@/components/SignalFlowGraphic";
+import { ThemeEmbedPreview } from "@/components/ThemeEmbedPreview";
+import { WarmRepos } from "@/components/WarmRepos";
+import { CATEGORIES } from "@/data/categories";
 import {
   EXTENSION_CHROME_URL,
   EXTENSION_FIREFOX_URL,
 } from "@/lib/extension-links";
-
-import BaseHead from "@/components/BaseHead.astro";
-import Brand from "@/components/Brand.astro";
-import Seo from "@/components/Seo.astro";
-import SiteHeader from "@/components/SiteHeader.astro";
-import SiteFooter from "@/components/SiteFooter.astro";
-import { RepoLookup } from "@/components/RepoLookup";
-import { buttonVariants } from "@/components/ui/button";
-
 import { staticApiBase } from "@/lib/static-api-base";
-const apiBase = staticApiBase();
 
+const apiBase = staticApiBase();
 const site = (Astro.site ?? new URL("https://gitdebt.com")).href.replace(/\/$/, "");
 
-const title = "gitdebt — GitHub star history & repo-debt analytics";
+const title = "gitdebt — GitHub star history & repository health";
 const description =
-  "Chart any GitHub repo's star history, compare repos on one timeline, and embed charts in your README. Explore churn, contributors, and code-health signals.";
+  "Chart any GitHub repository's star history, compare growth on one timeline, and inspect churn, contributors, bug magnets, and maintenance debt. Free, open source, and README-ready.";
 const ogImage = `${apiBase}/api/og.png`;
 
-const jsonLd = {
-  "@context": "https://schema.org",
-  "@type": "WebSite",
-  name: "gitdebt",
-  url: `${site}/`,
-  description,
-};
-
-const features = [
+const jsonLd = [
   {
-    icon: LineChart,
-    title: "Star history",
-    desc: "A fast cumulative star-growth chart for any repo — by calendar date or days since the first star.",
+    "@context": "https://schema.org",
+    "@type": "WebApplication",
+    name: "gitdebt",
+    url: `${site}/`,
+    description,
+    applicationCategory: "DeveloperApplication",
+    operatingSystem: "Any",
+    browserRequirements: "Requires JavaScript for live report updates",
+    isAccessibleForFree: true,
+    license: "https://opensource.org/license/mit",
+    codeRepository: "https://github.com/zhom/gitdebt",
+    author: {
+      "@type": "Organization",
+      name: "Internet Technology Services LLC",
+    },
+    offers: {
+      "@type": "Offer",
+      price: 0,
+      priceCurrency: "USD",
+    },
   },
   {
-    icon: Layers,
-    title: "Multi-repo overlay",
-    desc: "Plot several repos on shared axes to compare trajectories. Copy a theme-aware README badge and embed it anywhere.",
-  },
-  {
-    icon: Bug,
-    title: "Bug-magnet files",
-    desc: "Which files attract the most fix commits — the parts of the codebase that keep breaking.",
-  },
-  {
-    icon: GitFork,
-    title: "Churn & language lines",
-    desc: "Most-changed files plus a per-language lines-of-code breakdown, so you can see where the weight sits.",
-  },
-  {
-    icon: Users,
-    title: "Contributors & heatmap",
-    desc: "Everyone who's shipped code, and a 52-week commit-activity heatmap of how the project moves.",
-  },
-  {
-    icon: ListTodo,
-    title: "TODO / FIXME trend",
-    desc: "A running count of debt markers in source over time — is the backlog of loose ends growing or shrinking?",
+    "@context": "https://schema.org",
+    "@type": "WebSite",
+    name: "gitdebt",
+    url: `${site}/`,
+    description,
   },
 ];
 
-const steps = [
+const reportLayers = [
   {
-    n: "01",
-    title: "Paste a repo",
-    desc: "Drop in any owner/repo. No install, no login, no waiting on a rebuild.",
+    number: "01",
+    title: "See attention accumulate",
+    desc: "Read cumulative GitHub star history by calendar date or days since the first star. Window the series, export the raw data, or overlay up to eight repositories.",
+    link: "/compare",
+    linkLabel: "Open the comparison tool",
   },
   {
-    n: "02",
-    title: "We chart its history",
-    desc: "Workers fetch stargazer timestamps and the repo's commit data under strict GitHub rate-limit discipline.",
+    number: "02",
+    title: "Find the maintenance pressure",
+    desc: "Inspect churn, bug-magnet files, contributor concentration, commit activity, TODO/FIXME trends, language weight, and bus factor from the repository's history.",
+    link: "/report?repo=facebook/react",
+    linkLabel: "Open an example report",
   },
   {
-    n: "03",
-    title: "Read it · embed it",
-    desc: "A live star-history chart plus repo-debt insights — and a copy-paste badge for your README.",
+    number: "03",
+    title: "Keep the evidence portable",
+    desc: "Publish static or animated charts, README stat cards, badges, and raster assets. Theme-aware snippets use separate light and dark files for dependable embeds.",
+    link: "/badges",
+    linkLabel: "Build a README asset",
   },
 ];
+
+const popularPairs = [
+  ["facebook/react", "vuejs/vue"],
+  ["denoland/deno", "oven-sh/bun"],
+  ["django/django", "fastapi/fastapi"],
+  ["gatsbyjs/gatsby", "vercel/next.js"],
+].map((repos) => ({
+  repos: [...repos].sort(),
+  label: repos.map((repo) => repo.split("/")[1]).join(" vs "),
+}));
+
+const featuredCategorySlugs = [
+  "frontend-frameworks",
+  "build-tools",
+  "ai-coding-tools",
+  "sql-databases",
+];
+const featuredCategories = featuredCategorySlugs.flatMap((slug) => {
+  const category = CATEGORIES.find((candidate) => candidate.slug === slug);
+  return category ? [category] : [];
+});
+const landingWarmRepos = Array.from(
+  new Set([
+    ...popularPairs.flatMap((pair) => pair.repos),
+    ...featuredCategories.flatMap((category) => category.repos),
+  ]),
+);
 ---
 
 <!doctype html>
@@ -115,447 +135,277 @@ const steps = [
     <div class="isolate flex min-h-dvh flex-col">
       <SiteHeader />
 
-      <main id="main-content" class="flex-1">
-        <section id="top" class="relative isolate overflow-hidden border-b border-border">
-          <div
-            class="signal-glow pointer-events-none absolute inset-x-0 top-0 -z-10 h-[480px]"
-            aria-hidden="true"
-          >
-          </div>
-          <div
-            class="bg-grid pointer-events-none absolute inset-0 -z-10 [mask-image:radial-gradient(ellipse_60%_50%_at_50%_0%,black,transparent)]"
-            aria-hidden="true"
-          >
-          </div>
+      <main id="main-content" class="flex-1 bg-white text-zinc-950">
+        <section id="top" class="border-b border-zinc-300">
+          <div class="mx-auto max-w-6xl px-6 py-16 sm:py-24 lg:py-28">
+            <div class="grid gap-14 lg:grid-cols-[minmax(0,1.08fr)_minmax(24rem,0.92fr)] lg:items-center">
+              <div class="min-w-0">
+                <p class="font-mono text-xs tracking-[0.12em] text-zinc-600 uppercase">
+                  Open-source repository intelligence
+                </p>
+                <h1 class="mt-5 max-w-[16ch] text-4xl font-semibold tracking-[-0.04em] text-balance sm:text-6xl lg:text-7xl">
+                  Growth is visible. Maintenance cost usually isn’t.
+                </h1>
+                <p class="mt-6 max-w-[56ch] text-lg/8 text-pretty text-zinc-600">
+                  gitdebt puts GitHub star history, repository health, and
+                  package adoption in one public report—then makes every signal
+                  easy to compare, export, and embed.
+                </p>
 
-          <div class="mx-auto max-w-6xl px-6 py-24 text-center sm:py-32">
-            <div
-              class="mx-auto mb-6 inline-flex items-center gap-2 rounded-full border border-border bg-card/70 py-1 pr-3 pl-2 font-mono text-xs tracking-wide text-muted-foreground uppercase backdrop-blur"
-            >
-              <span
-                class="inline-flex size-2 rounded-full bg-signal"
-                aria-hidden="true"
-              ></span>
-              GitHub star history
+                <div id="lookup" class="mt-9 scroll-mt-24">
+                  <LandingRepoLookup client:load />
+                </div>
+
+                <dl class="mt-8 grid grid-cols-3 border-t border-zinc-300 pt-4">
+                  <div class="min-w-0">
+                    <dt class="font-mono text-xs text-zinc-500 uppercase">Access</dt>
+                    <dd class="mt-1 text-sm font-medium">No login</dd>
+                  </div>
+                  <div class="min-w-0 border-l border-zinc-200 pl-4">
+                    <dt class="font-mono text-xs text-zinc-500 uppercase">Output</dt>
+                    <dd class="mt-1 text-sm font-medium">README-ready</dd>
+                  </div>
+                  <div class="min-w-0 border-l border-zinc-200 pl-4">
+                    <dt class="font-mono text-xs text-zinc-500 uppercase">License</dt>
+                    <dd class="mt-1 text-sm font-medium">Open source</dd>
+                  </div>
+                </dl>
+              </div>
+
+              <SignalFlowGraphic client:load />
             </div>
-
-            <h1
-              class="mx-auto max-w-[24ch] text-4xl font-semibold tracking-tight text-balance sm:text-5xl lg:text-6xl"
-            >
-              See a repo's <span class="text-signal">star history</span> — and its debt.
-            </h1>
-            <p
-              class="mx-auto mt-6 max-w-[48ch] text-lg text-pretty text-muted-foreground"
-            >
-              Chart any GitHub repo's star growth, overlay several at once, and
-              embed it in your README — plus repo-debt insights you won't find
-              on star-history.com.
-            </p>
-
-            <div class="mt-10">
-              <RepoLookup client:load />
-            </div>
-
-            <p class="mx-auto mt-6 font-mono text-sm text-muted-foreground">
-              No login · Embeddable charts · Single &amp; multi-repo
-            </p>
           </div>
         </section>
 
-        <section id="features" class="scroll-mt-20 border-b border-border">
+        <section id="how-it-works" class="scroll-mt-20 border-b border-zinc-300">
           <div class="mx-auto max-w-6xl px-6 py-20 sm:py-28">
-            <div>
-              <p class="font-mono text-xs tracking-wide text-signal uppercase">
-                What you get
+            <header class="grid gap-6 lg:grid-cols-[0.75fr_1.25fr] lg:items-end">
+              <p class="font-mono text-xs tracking-[0.12em] text-zinc-500 uppercase">
+                One repository, read in layers
               </p>
-              <h2
-                class="mt-3 max-w-[35ch] text-3xl font-semibold tracking-tight text-balance sm:text-4xl"
-              >
-                Star history, plus the debt underneath it.
-              </h2>
-              <p
-                class="mt-4 max-w-[48ch] text-lg text-pretty text-muted-foreground"
-              >
-                A fast, embeddable star-history chart — single repo or
-                multi-repo overlay — and a set of repo-debt charts that read the
-                codebase itself, not just the star count.
-              </p>
-            </div>
+              <div>
+                <h2 class="max-w-[24ch] text-3xl font-semibold tracking-[-0.035em] text-balance sm:text-5xl">
+                  A star count tells you what is popular. The history tells you why it matters.
+                </h2>
+                <p class="mt-5 max-w-[64ch] text-base/7 text-pretty text-zinc-600">
+                  Popularity, adoption, and maintenance are different signals.
+                  gitdebt keeps them separate so a dependency review, project
+                  comparison, or launch retrospective starts with evidence.
+                </p>
+              </div>
+            </header>
 
-            <ul class="mt-12 grid grid-cols-1 gap-x-8 gap-y-10 sm:grid-cols-2 lg:grid-cols-3" role="list">
-              {
-                features.map((feature, i) => {
-                  const Icon = feature.icon;
-                  return (
-                    <li class="border-t border-border pt-6">
-                      <Icon
-                        className="size-6 shrink-0 text-signal"
-                        strokeWidth={1.75}
-                        aria-hidden="true"
-                      />
-                      <p class="mt-5 font-mono text-xs tracking-wide text-muted-foreground uppercase tabular-nums">
-                        Feature {String(i + 1).padStart(2, "0")}
-                      </p>
-                      <h3 class="mt-2 text-base font-medium">{feature.title}</h3>
-                      <p class="mt-2 text-base/7 text-pretty text-muted-foreground sm:text-sm/6">
-                        {feature.desc}
-                      </p>
-                    </li>
-                  );
-                })
-              }
-            </ul>
-          </div>
-        </section>
-
-        <section id="how-it-works" class="scroll-mt-20 border-b border-border">
-          <div class="mx-auto max-w-6xl px-6 py-20 sm:py-28">
-            <div>
-              <p class="font-mono text-xs tracking-wide text-signal uppercase">
-                How it works
-              </p>
-              <h2
-                class="mt-3 max-w-[35ch] text-3xl font-semibold tracking-tight text-balance sm:text-4xl"
-              >
-                From URL to chart in one paste.
-              </h2>
-            </div>
-
-            <ol class="mt-12 grid grid-cols-1 gap-x-8 gap-y-10 md:grid-cols-3" role="list">
-              {
-                steps.map((step) => (
-                  <li class="border-t border-border pt-6">
-                    <p class="font-mono text-2xl font-semibold text-signal tabular-nums">
-                      {step.n}
-                    </p>
-                    <h3 class="mt-4 text-base font-medium">{step.title}</h3>
-                    <p class="mt-2 text-base/7 text-pretty text-muted-foreground sm:text-sm/6">
-                      {step.desc}
-                    </p>
-                  </li>
-                ))
-              }
+            <ol id="features" role="list" class="mt-14 scroll-mt-24 border-y border-black">
+              {reportLayers.map((layer) => (
+                <li class="grid gap-5 border-b border-zinc-300 py-8 last:border-b-0 md:grid-cols-[4rem_0.8fr_1.2fr_auto] md:items-start">
+                  <p class="font-mono text-xs text-zinc-500">{layer.number}</p>
+                  <h3 class="max-w-[18ch] text-xl font-medium tracking-tight">
+                    {layer.title}
+                  </h3>
+                  <p class="max-w-[62ch] text-base/7 text-pretty text-zinc-600 sm:text-sm/6">
+                    {layer.desc}
+                  </p>
+                  <a
+                    href={layer.link}
+                    class="group inline-flex min-h-11 items-center gap-2 self-start border-b border-zinc-300 font-mono text-sm outline-none hover:border-black focus-visible:outline-2 focus-visible:outline-offset-4 focus-visible:outline-black sm:min-h-0"
+                  >
+                    {layer.linkLabel}
+                    <ArrowRight
+                      className="size-4 transition-transform duration-150 group-hover:translate-x-0.5 motion-reduce:transition-none"
+                      strokeWidth={1.75}
+                      aria-hidden="true"
+                    />
+                  </a>
+                </li>
+              ))}
             </ol>
           </div>
         </section>
 
-        <section id="compare" class="scroll-mt-20 border-b border-border">
+        <section id="compare" class="scroll-mt-20 border-b border-zinc-300">
           <div class="mx-auto max-w-6xl px-6 py-20 sm:py-28">
-            <div class="grid grid-cols-1 gap-10 lg:grid-cols-2 lg:items-center">
-              <div>
-                <p class="font-mono text-xs tracking-wide text-signal uppercase">
-                  Compare
+            <div class="grid gap-12 lg:grid-cols-[0.82fr_1.18fr] lg:items-start">
+              <header class="lg:sticky lg:top-24">
+                <GitCompareArrows className="size-7 text-black" strokeWidth={1.5} aria-hidden="true" />
+                <p class="mt-6 font-mono text-xs tracking-[0.12em] text-zinc-500 uppercase">
+                  Compare without flattening
                 </p>
-                <h2
-                  class="mt-3 max-w-[30ch] text-3xl font-semibold tracking-tight text-balance sm:text-4xl"
-                >
-                  Several repos, one timeline.
+                <h2 class="mt-4 max-w-[18ch] text-3xl font-semibold tracking-[-0.035em] text-balance sm:text-5xl">
+                  Totals reward age. Trajectories reveal momentum.
                 </h2>
-                <p
-                  class="mt-4 max-w-[48ch] text-lg text-pretty text-muted-foreground"
-                >
-                  Overlay up to eight repos' star histories on shared axes.
-                  Switch between calendar date and days-since-first-star, then
-                  copy an embeddable badge for your README.
+                <p class="mt-5 max-w-[48ch] text-base/7 text-pretty text-zinc-600">
+                  Switch between real calendar time and an equal-start view.
+                  The same star timestamps answer two different questions:
+                  who grew when, and who grew fastest after launch.
                 </p>
-                <div class="mt-8">
-                  <a
-                    href="/compare?repos=facebook/react,vuejs/vue"
-                    class={buttonVariants({ variant: "outline", size: "lg" })}
-                  >
-                    Open the compare tool
-                  </a>
-                </div>
-              </div>
-
-              <div class="card-panel overflow-hidden">
-                <div
-                  class="flex items-center gap-1.5 border-b border-border bg-muted/40 px-4 py-3 font-mono text-xs text-muted-foreground"
+                <a
+                  href="/compare"
+                  class="group mt-7 inline-flex min-h-12 items-center gap-2 bg-black px-5 text-sm font-medium text-white outline-none hover:bg-zinc-800 focus-visible:outline-2 focus-visible:outline-offset-4 focus-visible:outline-black"
                 >
-                  <span class="size-2.5 rounded-full bg-border"></span>
-                  <span class="size-2.5 rounded-full bg-border"></span>
-                  <span class="size-2.5 rounded-full bg-border"></span>
-                  <span class="ml-2">/compare</span>
-                </div>
-                <div class="p-6 font-mono text-sm">
-                  <p class="break-all text-pretty text-muted-foreground">
-                    api.gitdebt.com/api/chart.svg?repos=<span class="text-foreground"
-                      >facebook/react</span
-                    >,<span class="text-signal">vuejs/vue</span>
-                  </p>
-                  <div class="my-5 h-px bg-border"></div>
-                  <p class="text-pretty text-muted-foreground">
-                    Many repos. One chart. Embeddable anywhere.
-                  </p>
-                </div>
-              </div>
-            </div>
-          </div>
-        </section>
-
-        <section id="usage" class="scroll-mt-20 border-b border-border">
-          <div class="mx-auto max-w-6xl px-6 py-20 sm:py-28">
-            <div class="grid grid-cols-1 gap-10 lg:grid-cols-2 lg:items-center">
-              <div>
-                <p class="font-mono text-xs tracking-wide text-signal uppercase">
-                  Stars vs. real usage
-                </p>
-                <h2
-                  class="mt-3 max-w-[28ch] text-3xl font-semibold tracking-tight text-balance sm:text-4xl"
-                >
-                  Attention and adoption, on one chart.
-                </h2>
-                <p
-                  class="mt-4 max-w-[48ch] text-lg text-pretty text-muted-foreground"
-                >
-                  Stars show attention; package downloads show use. gitdebt
-                  overlays both signals so you can see how interest and
-                  adoption move together.
-                </p>
-                <ul class="mt-6 space-y-5" role="list">
-                  <li class="flex items-start gap-3">
-                    <Package
-                      className="mt-0.5 size-6 shrink-0 text-signal"
-                      strokeWidth={1.75}
-                      aria-hidden="true"
-                    />
-                    <div>
-                      <h3 class="text-base font-medium">Auto-resolved packages</h3>
-                      <p class="mt-1 text-base/7 text-pretty text-muted-foreground sm:text-sm/6">
-                        Finds the repo's published package and pulls its download
-                        history.
-                      </p>
-                    </div>
-                  </li>
-                  <li class="flex items-start gap-3">
-                    <LineChart
-                      className="mt-0.5 size-6 shrink-0 text-signal"
-                      strokeWidth={1.75}
-                      aria-hidden="true"
-                    />
-                    <div>
-                      <h3 class="text-base font-medium">Dual-axis overlay</h3>
-                      <p class="mt-1 text-base/7 text-pretty text-muted-foreground sm:text-sm/6">
-                        Stars on one scale, downloads on the other — with a
-                        calendar / since-first-star toggle.
-                      </p>
-                    </div>
-                  </li>
-                </ul>
-              </div>
-
-              <div class="card-panel overflow-hidden">
-                <div
-                  class="flex items-center gap-2 border-b border-border bg-muted/40 px-5 py-3 font-mono text-xs tracking-wide text-muted-foreground uppercase"
-                >
-                  <span class="size-1.5 shrink-0 rounded-full bg-signal" aria-hidden="true"></span>
-                  Stars vs. usage
-                </div>
-                <picture>
-                  <source
-                    media="(prefers-color-scheme: dark)"
-                    srcset={`${apiBase}/api/repos/facebook/react/usage.svg?type=date&source=auto&theme=dark`}
+                  Build a comparison
+                  <ArrowRight
+                    className="size-4 transition-transform duration-150 group-hover:translate-x-0.5 motion-reduce:transition-none"
+                    strokeWidth={1.75}
+                    aria-hidden="true"
                   />
-                  <img
-                    src={`${apiBase}/api/repos/facebook/react/usage.svg?type=date&source=auto&theme=light`}
-                    alt="Star growth versus download volume for facebook/react"
-                    width="900"
-                    height="600"
-                    loading="lazy"
-                    decoding="async"
-                    class="block w-full"
-                  />
-                </picture>
-              </div>
-            </div>
-          </div>
-        </section>
+                </a>
+              </header>
 
-        <section id="badges" class="scroll-mt-20 border-b border-border">
-          <div class="mx-auto max-w-6xl px-6 py-20 sm:py-28">
-            <div class="grid grid-cols-1 gap-10 lg:grid-cols-2 lg:items-center">
               <div>
-                <p class="font-mono text-xs tracking-wide text-signal uppercase">
-                  README badges
-                </p>
-                <h2
-                  class="mt-3 max-w-[28ch] text-3xl font-semibold tracking-tight text-balance sm:text-4xl"
-                >
-                  A badge for the metrics that matter.
-                </h2>
-                <p
-                  class="mt-4 max-w-[48ch] text-lg text-pretty text-muted-foreground"
-                >
-                  Drop a compact stats badge in your README — stars, forks, and
-                  package downloads — in four styles, animated or static, light
-                  or dark. Configure it in the badge studio and copy a snippet.
-                </p>
-                <div class="mt-8">
-                  <a
-                    href="/badges"
-                    class={buttonVariants({ variant: "outline", size: "lg" })}
-                  >
-                    <BadgeCheck className="size-4 shrink-0" strokeWidth={2} aria-hidden="true" />
-                    Open the badge studio
-                  </a>
+                <ComparisonModeGraphic client:idle />
+
+                <div class="mt-10 grid gap-10 sm:grid-cols-2">
+                  <section>
+                    <h3 class="font-mono text-xs tracking-wide text-zinc-500 uppercase">
+                      Head to head
+                    </h3>
+                    <ul role="list" class="mt-4 border-y border-black">
+                      {popularPairs.map((pair) => (
+                        <li class="border-b border-zinc-200 last:border-b-0">
+                          <a
+                            href={`/vs/${pair.repos[0]}/${pair.repos[1]}`}
+                            data-warm-repos={pair.repos.join(",")}
+                            class="group flex min-h-14 items-center justify-between gap-4 py-3 font-mono text-sm outline-none focus-visible:outline-2 focus-visible:-outline-offset-2 focus-visible:outline-black"
+                          >
+                            <span>{pair.label}</span>
+                            <ArrowRight
+                              className="size-4 shrink-0 text-zinc-400 transition-transform duration-150 group-hover:translate-x-0.5 group-hover:text-black motion-reduce:transition-none"
+                              strokeWidth={1.75}
+                              aria-hidden="true"
+                            />
+                          </a>
+                        </li>
+                      ))}
+                    </ul>
+                  </section>
+
+                  <section>
+                    <h3 class="font-mono text-xs tracking-wide text-zinc-500 uppercase">
+                      Curated fields
+                    </h3>
+                    <ul role="list" class="mt-4 border-y border-black">
+                      {featuredCategories.map((category) => (
+                        <li class="border-b border-zinc-200 last:border-b-0">
+                          <a
+                            href={`/compare/${category.slug}`}
+                            data-warm-repos={category.repos.join(",")}
+                            class="group flex min-h-14 items-center justify-between gap-4 py-3 outline-none focus-visible:outline-2 focus-visible:-outline-offset-2 focus-visible:outline-black"
+                          >
+                            <div class="text-sm">
+                              <span class="font-medium">{category.name}</span>
+                              <div class="mt-0.5 text-zinc-500">
+                                {category.repos.length} repositories
+                              </div>
+                            </div>
+                            <ArrowRight
+                              className="size-4 shrink-0 text-zinc-400 transition-transform duration-150 group-hover:translate-x-0.5 group-hover:text-black motion-reduce:transition-none"
+                              strokeWidth={1.75}
+                              aria-hidden="true"
+                            />
+                          </a>
+                        </li>
+                      ))}
+                    </ul>
+                  </section>
                 </div>
               </div>
-
-              <div class="card-panel flex flex-col items-start gap-4 p-6">
-                <p class="font-mono text-xs tracking-wide text-muted-foreground uppercase">
-                  Live styles
-                </p>
-                {
-                  [
-                    {
-                      metrics: "stars,forks,downloads",
-                      style: "modern",
-                      alt: "Modern animated stats badge for facebook/react",
-                    },
-                    {
-                      metrics: "stars,downloads",
-                      style: "glass",
-                      alt: "Glass animated stats badge for facebook/react",
-                    },
-                    {
-                      metrics: "stars,forks,downloads",
-                      style: "terminal",
-                      alt: "Terminal animated stats badge for facebook/react",
-                    },
-                  ].map(({ metrics, style, alt }) => {
-                    const badgeUrl = `${apiBase}/api/repos/facebook/react/badge.svg?metrics=${metrics}&style=${style}&animate=1&source=auto`;
-                    return (
-                      <picture>
-                        <source
-                          media="(prefers-color-scheme: dark)"
-                          srcset={`${badgeUrl}&theme=dark`}
-                        />
-                        <img
-                          src={`${badgeUrl}&theme=light`}
-                          alt={alt}
-                          loading="lazy"
-                          decoding="async"
-                          class="block h-auto max-w-full"
-                        />
-                      </picture>
-                    );
-                  })
-                }
-              </div>
             </div>
           </div>
         </section>
 
-        <section id="extension" class="scroll-mt-20 border-b border-border">
+        <section id="share" class="scroll-mt-20 border-b border-zinc-300">
           <div class="mx-auto max-w-6xl px-6 py-20 sm:py-28">
-            <div class="grid grid-cols-1 gap-10 lg:grid-cols-2 lg:items-center">
+            <div class="grid gap-12 lg:grid-cols-[1.08fr_0.92fr] lg:items-start">
+              <ThemeEmbedPreview client:idle />
+
               <div>
-                <p class="font-mono text-xs tracking-wide text-signal uppercase">
-                  Browser extension
+                <Code2 className="size-7 text-black" strokeWidth={1.5} aria-hidden="true" />
+                <p class="mt-6 font-mono text-xs tracking-[0.12em] text-zinc-500 uppercase">
+                  Share the evidence
                 </p>
-                <h2
-                  class="mt-3 max-w-[28ch] text-3xl font-semibold tracking-tight text-balance sm:text-4xl"
-                >
-                  gitdebt on every GitHub repo page.
+                <h2 class="mt-4 max-w-[18ch] text-3xl font-semibold tracking-[-0.035em] text-balance sm:text-5xl">
+                  A report is more useful when it travels.
                 </h2>
-                <p
-                  class="mt-4 max-w-[48ch] text-lg text-pretty text-muted-foreground"
-                >
-                  The extension injects a native-looking panel into any
-                  github.com repo — star history inline, repo-debt charts one
-                  click away, themed to match GitHub exactly. It needs no login
-                  or gitdebt account; repo visits are sent to gitdebt to load
-                  the requested report.
+                <p class="mt-5 max-w-[50ch] text-base/7 text-pretty text-zinc-600">
+                  Every chart, stat card, and badge has stable light and dark
+                  assets. Copy a GitHub-ready <code class="font-mono text-black"
+                    >&lt;picture&gt;</code
+                  > snippet or choose GIF when an animated raster is the better fit.
                 </p>
-                <div class="mt-8 flex flex-wrap gap-3">
+                <a
+                  href="/badges"
+                  class="group mt-7 inline-flex min-h-11 items-center gap-2 border-b border-zinc-300 font-mono text-sm outline-none hover:border-black focus-visible:outline-2 focus-visible:outline-offset-4 focus-visible:outline-black sm:min-h-0"
+                >
+                  Open the badge studio
+                  <ArrowRight
+                    className="size-4 transition-transform duration-150 group-hover:translate-x-0.5 motion-reduce:transition-none"
+                    strokeWidth={1.75}
+                    aria-hidden="true"
+                  />
+                </a>
+              </div>
+            </div>
+
+            <section id="extension" class="mt-16 scroll-mt-20 border-y border-black">
+              <div class="grid gap-6 py-8 md:grid-cols-[3rem_0.8fr_1.2fr_auto] md:items-start">
+                <AppWindow className="size-6 text-black" strokeWidth={1.5} aria-hidden="true" />
+                <h3 class="text-xl font-medium tracking-tight">
+                  Read gitdebt without leaving GitHub
+                </h3>
+                <p class="max-w-[62ch] text-base/7 text-pretty text-zinc-600 sm:text-sm/6">
+                  The browser extension places star history and repository
+                  health on the GitHub pages you already use. It follows
+                  GitHub’s light or dark appearance and requires no gitdebt account.
+                </p>
+                <div class="flex flex-wrap gap-x-5 gap-y-3">
                   <a
                     href={EXTENSION_CHROME_URL}
                     rel="noopener"
-                    class={buttonVariants({ variant: "outline", size: "lg" })}
+                    class="inline-flex min-h-11 items-center gap-2 border-b border-zinc-300 font-mono text-sm outline-none hover:border-black focus-visible:outline-2 focus-visible:outline-offset-4 focus-visible:outline-black sm:min-h-0"
                   >
-                    <AppWindow className="size-4 shrink-0" strokeWidth={2} aria-hidden="true" />
-                    Add to Chrome
+                    Chrome
+                    <AppWindow className="size-4" strokeWidth={1.5} aria-hidden="true" />
                   </a>
                   <a
                     href={EXTENSION_FIREFOX_URL}
                     rel="noopener"
-                    class={buttonVariants({ variant: "outline", size: "lg" })}
+                    class="inline-flex min-h-11 items-center gap-2 border-b border-zinc-300 font-mono text-sm outline-none hover:border-black focus-visible:outline-2 focus-visible:outline-offset-4 focus-visible:outline-black sm:min-h-0"
                   >
-                    <Globe className="size-4 shrink-0" strokeWidth={2} aria-hidden="true" />
-                    Add to Firefox
+                    Firefox
+                    <Globe className="size-4" strokeWidth={1.5} aria-hidden="true" />
                   </a>
                 </div>
               </div>
-
-              <div class="card-panel overflow-hidden">
-                <div
-                  class="flex items-center gap-2 border-b border-border bg-muted/40 px-5 py-3 font-mono text-xs tracking-wide text-muted-foreground uppercase"
-                >
-                  <Puzzle className="size-3.5 shrink-0 text-signal" strokeWidth={2} aria-hidden="true" />
-                  On github.com/facebook/react
-                </div>
-                <div class="p-6">
-                  <div class="rounded-md border border-border">
-                    <div
-                      class="flex items-center justify-between border-b border-border px-4 py-2 text-sm font-semibold"
-                    >
-                      <span>Star history</span>
-                      <span class="text-muted-foreground">
-                        <Brand
-                          markClass="size-5"
-                          wordmarkClass="font-mono text-xs font-medium"
-                        />
-                      </span>
-                    </div>
-                    <div class="p-4">
-                      <picture>
-                        <source
-                          media="(prefers-color-scheme: dark)"
-                          srcset={`${apiBase}/api/repos/facebook/react/chart.svg?theme=dark&animate=1`}
-                        />
-                        <img
-                          src={`${apiBase}/api/repos/facebook/react/chart.svg?theme=light&animate=1`}
-                          alt="Star history chart for facebook/react, as shown by the gitdebt extension"
-                          width="900"
-                          height="600"
-                          loading="lazy"
-                          decoding="async"
-                          class="block w-full rounded-sm"
-                        />
-                      </picture>
-                      <p class="mt-3 font-mono text-xs text-muted-foreground">
-                        ▸ Repo-debt charts · Full report ↗ · Compare ↗
-                      </p>
-                    </div>
-                  </div>
-                </div>
-              </div>
-            </div>
+            </section>
           </div>
         </section>
 
-        <section class="bg-muted/30">
-          <div class="mx-auto max-w-6xl px-6 py-20 text-center sm:py-24">
-            <h2
-              class="mx-auto max-w-[24ch] text-3xl font-semibold tracking-tight text-balance sm:text-4xl"
-            >
-              Chart your repo's star history.
-            </h2>
-            <p
-              class="mx-auto mt-4 max-w-[48ch] text-lg text-pretty text-muted-foreground"
-            >
-              Paste any repo and get an embeddable chart in seconds.
-            </p>
-            <div class="mt-8">
-              <a
-                href="#top"
-                class={buttonVariants({ variant: "outline", size: "lg" })}
-              >
-                View a repo
-              </a>
+        <section class="bg-black text-white">
+          <div class="mx-auto grid max-w-6xl gap-8 px-6 py-16 sm:py-20 md:grid-cols-[1fr_auto] md:items-end">
+            <div>
+              <ChartNoAxesCombined className="size-7 text-white" strokeWidth={1.5} aria-hidden="true" />
+              <h2 class="mt-6 max-w-[18ch] text-3xl font-semibold tracking-[-0.035em] text-balance sm:text-5xl">
+                Start with a repository you already know.
+              </h2>
+              <p class="mt-4 max-w-[52ch] text-base/7 text-zinc-400">
+                The public report is free to view, compare, export, and share.
+              </p>
             </div>
+            <a
+              href="#lookup"
+              class="group inline-flex min-h-12 items-center justify-center gap-2 border border-white px-5 text-sm font-medium text-white outline-none hover:bg-white hover:text-black focus-visible:outline-2 focus-visible:outline-offset-4 focus-visible:outline-white"
+            >
+              Analyze a repository
+              <ArrowRight
+                className="size-4 transition-transform duration-150 group-hover:translate-x-0.5 motion-reduce:transition-none"
+                strokeWidth={1.75}
+                aria-hidden="true"
+              />
+            </a>
           </div>
         </section>
+
+        <WarmRepos client:load apiBase={apiBase} repos={landingWarmRepos} />
       </main>
 
       <SiteFooter />

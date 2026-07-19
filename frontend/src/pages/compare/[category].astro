@@ -7,13 +7,13 @@ import Seo from "@/components/Seo.astro";
 import SiteHeader from "@/components/SiteHeader.astro";
 import SiteFooter from "@/components/SiteFooter.astro";
 import { ChartViewer } from "@/components/ChartViewer";
+import { WarmRepos } from "@/components/WarmRepos";
 import { getCategory, relatedCategories } from "@/data/categories";
 import {
   firstStarYear,
   formatCompact,
   formatMonthYear,
   gainedInTrailingDays,
-  growthTrend,
 } from "@/lib/star-insights";
 
 export function getStaticPaths() {
@@ -61,7 +61,6 @@ type MemberRow = {
   stars: number;
   gained90: number | null;
   firstYear: number | null;
-  trend: "accelerating" | "steady" | "slowing" | null;
   hasHistory: boolean;
   lastDate: string | null;
 };
@@ -77,7 +76,6 @@ for (let i = 0; i < category.repos.length; i++) {
     stars: d.total_stars,
     gained90: gainedInTrailingDays(d.history, 90),
     firstYear: firstStarYear(d.history),
-    trend: growthTrend(d.history),
     hasHistory: d.history.length > 0,
     lastDate: d.history.length > 0 ? d.history[d.history.length - 1].date : null,
   });
@@ -85,6 +83,7 @@ for (let i = 0; i < category.repos.length; i++) {
 members.sort((a, b) => b.stars - a.stars || (a.slug < b.slug ? -1 : 1));
 
 const loadedEnough = members.filter((m) => m.hasHistory).length >= 2;
+const hasCurrentRanking = members.length >= 2;
 
 const latestDataDate = members.reduce<string | null>(
   (acc, m) => (m.lastDate && (!acc || m.lastDate > acc) ? m.lastDate : acc),
@@ -100,13 +99,13 @@ const fastest = members.reduce<MemberRow | null>(
 );
 
 const year = new Date().getUTCFullYear();
-const title = `Best ${category.name}: star history compared (${year})`;
+const title = `Best ${category.name}: GitHub stars compared (${year})`;
 const description = leader
   ? `#1 is ${leader.slug} with ${leader.stars.toLocaleString()} GitHub stars. ${category.name} compared by star history and growth: ${members
       .slice(0, 3)
       .map((m) => m.slug.split("/")[1])
       .join(", ")} and more.`
-  : `${category.short} Star history, growth and repo health, compared on one chart.`;
+  : `${category.short} Current GitHub stars, historical growth when available, and repository health compared.`;
 
 const reposParam = category.repos.join(",");
 const overlayPath = `/api/chart.svg?repos=${encodeURIComponent(reposParam)}`;
@@ -127,8 +126,14 @@ for (let i = 0; i < topSlugs.length; i++) {
 }
 
 const related = relatedCategories(category, 4);
+const warmTargets = Array.from(
+  new Set([
+    ...category.repos,
+    ...related.flatMap((relatedCategory) => relatedCategory.repos),
+  ]),
+);
 
-const noindex = !loadedEnough;
+const noindex = !hasCurrentRanking;
 
 const faqs: { q: string; a: string }[] = [];
 if (leader) {
@@ -151,7 +156,9 @@ if (fastest && fastest.gained90 !== null) {
 }
 faqs.push({
   q: "How is this comparison computed?",
-  a: `gitdebt caches the public timestamp of every star on each repo and plots the cumulative series on shared axes. The table ranks by current total stars; the 90-day column counts stars added in the trailing 90 days of each repo's cached history — an approximate figure for older repos, whose history is downsampled. Repo-health charts (churn, bug magnets, contributors) come from each repo's commit history.`,
+  a: loadedEnough
+    ? `The table ranks public repository metadata by current total stars. When historical stargazer timestamps are available, gitdebt plots their cumulative series on shared axes and estimates trailing 90-day growth. Repo-health charts come independently from each repository's commit history.`
+    : `The table ranks public repository metadata by current total stars. Historical growth columns and the shared timeline appear only when stargazer timestamps are available; repo-health charts come independently from each repository's commit history.`,
 });
 
 const jsonLd: Record<string, unknown>[] = [
@@ -184,7 +191,7 @@ const jsonLd: Record<string, unknown>[] = [
     ],
   },
 ];
-if (faqs.length > 0 && loadedEnough) {
+if (faqs.length > 0 && hasCurrentRanking) {
   jsonLd.push({
     "@context": "https://schema.org",
     "@type": "FAQPage",
@@ -194,19 +201,6 @@ if (faqs.length > 0 && loadedEnough) {
       acceptedAnswer: { "@type": "Answer", text: f.a },
     })),
   });
-}
-
-function trendSentence(m: MemberRow): string {
-  switch (m.trend) {
-    case "accelerating":
-      return "It's currently growing faster than its lifetime average.";
-    case "slowing":
-      return "Growth has cooled relative to its lifetime average.";
-    case "steady":
-      return "Growth is holding close to its lifetime average.";
-    default:
-      return "";
-  }
 }
 
 const thClass =
@@ -257,23 +251,36 @@ const rowClass = "border-b border-border";
           </p>
         </header>
 
-        {loadedEnough ? (
+        {loadedEnough && (
+          <ChartViewer
+            client:load
+            apiBase={apiBase}
+            path={overlayPath}
+            alt={`Star history overlay of ${category.repos.join(", ")}`}
+            caption={`${category.name} — star history`}
+            embedLink={canonical}
+            label={category.name}
+          />
+        )}
+
+        {members.length > 0 ? (
           <>
-            <ChartViewer
-              client:load
-              apiBase={apiBase}
-              path={overlayPath}
-              alt={`Star history overlay of ${category.repos.join(", ")}`}
-              caption={`${category.name} — star history`}
-              embedLink={canonical}
-              label={category.name}
-            />
+            {!loadedEnough && (
+              <section class="border-y border-border py-6">
+                <p class="font-mono text-xs tracking-wide text-muted-foreground uppercase">
+                  Current ranking ready
+                </p>
+                <p class="mt-2 max-w-[72ch] text-base/7 text-pretty text-muted-foreground sm:text-sm/6">
+                  Current GitHub star totals and repository-health links are
+                  usable now. Historical curves and 90-day growth will appear
+                  only for repositories whose stargazer timestamps are
+                  available.
+                </p>
+              </section>
+            )}
 
             <section class="space-y-4">
-              <h2 class="flex items-center gap-2 text-xl font-semibold tracking-tight">
-                <span class="size-1.5 shrink-0 rounded-full bg-signal" aria-hidden="true"></span>
-                Ranking
-              </h2>
+              <h2 class="text-xl font-semibold tracking-tight">Ranking</h2>
               <div class="-mx-6 -my-2 overflow-x-auto">
                 <div class="inline-block min-w-full px-6 py-2 align-middle">
                   <table class="w-full text-left text-base sm:text-sm">
@@ -321,49 +328,15 @@ const rowClass = "border-b border-border";
               </div>
             </section>
 
-            <section class="space-y-4">
-              <h2 class="flex items-center gap-2 text-xl font-semibold tracking-tight">
-                <span class="size-1.5 shrink-0 rounded-full bg-signal" aria-hidden="true"></span>
-                Repo by repo
-              </h2>
-              <div class="grid gap-4 sm:grid-cols-2">
-                {members.map((m) => (
-                  <article class="card-panel space-y-1.5 p-5">
-                    <h3 class="font-mono text-sm font-medium">
-                      <a href={`/${m.slug}`} class="hover:text-signal">{m.slug}</a>
-                    </h3>
-                    <p class="text-sm text-pretty text-muted-foreground">
-                      {m.slug.split("/")[1]} has {m.stars.toLocaleString()} GitHub stars
-                      {m.gained90 !== null
-                        ? `, about ${m.gained90.toLocaleString()} of them added in the last 90 days`
-                        : ""}
-                      {m.firstYear ? `, and earned its first star in ${m.firstYear}` : ""}.
-                      {trendSentence(m)}
-                    </p>
-                    <p class="text-sm">
-                      <a
-                        href={`/${m.slug}`}
-                        class="font-mono text-xs text-muted-foreground underline decoration-border underline-offset-4 hover:text-foreground hover:decoration-signal"
-                      >
-                        {m.slug.split("/")[1]} star history & repo health
-                      </a>
-                    </p>
-                  </article>
-                ))}
-              </div>
-            </section>
-
             {pairs.length > 0 && (
               <section class="space-y-4">
-                <h2 class="flex items-center gap-2 text-xl font-semibold tracking-tight">
-                  <span class="size-1.5 shrink-0 rounded-full bg-signal" aria-hidden="true"></span>
-                  Head to head
-                </h2>
+                <h2 class="text-xl font-semibold tracking-tight">Head to head</h2>
                 <div class="flex flex-wrap items-center gap-2">
                   {pairs.map(([a, b]) => (
                     <a
                       href={`/vs/${a}/${b}`}
-                      class="inline-flex items-center gap-1.5 rounded-md border border-border bg-background px-3 py-1.5 font-mono text-sm text-muted-foreground shadow-xs hover:bg-accent hover:text-accent-foreground dark:shadow-none"
+                      data-warm-repos={`${a},${b}`}
+                      class="inline-flex items-center gap-1.5 rounded-md border border-border bg-background px-3 py-1.5 font-mono text-sm text-muted-foreground hover:bg-accent hover:text-accent-foreground"
                     >
                       {a.split("/")[1]} vs {b.split("/")[1]}
                     </a>
@@ -380,17 +353,14 @@ const rowClass = "border-b border-border";
 
             {faqs.length > 0 && (
               <section class="space-y-4">
-                <h2 class="flex items-center gap-2 text-xl font-semibold tracking-tight">
-                  <span class="size-1.5 shrink-0 rounded-full bg-signal" aria-hidden="true"></span>
-                  Frequently asked
-                </h2>
-                <div class="space-y-4">
+                <h2 class="text-xl font-semibold tracking-tight">Frequently asked</h2>
+                <div class="divide-y divide-border border-y border-border">
                   {faqs.map((f) => (
-                    <details class="card-panel group p-5 open:pb-5">
+                    <details class="group py-5">
                       <summary class="cursor-pointer list-none font-medium [&::-webkit-details-marker]:hidden">
                         {f.q}
                       </summary>
-                      <p class="mt-2 text-base text-pretty text-muted-foreground sm:text-sm">
+                      <p class="mt-3 max-w-[72ch] text-base/7 text-pretty text-muted-foreground sm:text-sm/6">
                         {f.a}
                       </p>
                     </details>
@@ -400,19 +370,20 @@ const rowClass = "border-b border-border";
             )}
           </>
         ) : (
-          <section class="card-panel p-6">
+          <section class="border-y border-border py-6">
             <p class="font-mono text-xs tracking-wide text-muted-foreground uppercase">
               Warming up
             </p>
-            <p class="mt-1.5 max-w-[70ch] text-base text-pretty text-muted-foreground sm:text-sm">
-              We're still fetching star history for the repos in this category — that
-              happens automatically in the background. Check back shortly, or open any
-              member repo to watch its history fill in:
+            <p class="mt-2 max-w-[70ch] text-base/7 text-pretty text-muted-foreground sm:text-sm/6">
+              Repository metadata has not loaded for this field yet. The repos
+              below are being initialized automatically; open any one to watch
+              its analysis progress:
             </p>
             <div class="mt-3 flex flex-wrap gap-2">
               {category.repos.map((slug) => (
                 <a
                   href={`/${slug}`}
+                  data-warm-repos={slug}
                   class="inline-flex items-center rounded-md border border-border bg-background px-3 py-1.5 font-mono text-sm text-muted-foreground hover:bg-accent hover:text-accent-foreground"
                 >
                   {slug}
@@ -424,22 +395,29 @@ const rowClass = "border-b border-border";
 
         {related.length > 0 && (
           <section class="space-y-4">
-            <h2 class="flex items-center gap-2 text-xl font-semibold tracking-tight">
-              <span class="size-1.5 shrink-0 rounded-full bg-signal" aria-hidden="true"></span>
-              Related categories
-            </h2>
-            <div class="grid gap-3 sm:grid-cols-2 lg:grid-cols-4">
-              {related.map((c) => (
-                <a
-                  href={`/compare/${c.slug}`}
-                  class="card-panel block p-4 hover:border-signal/50"
+            <h2 class="text-xl font-semibold tracking-tight">Related categories</h2>
+            <ul role="list" class="grid border-y border-border sm:grid-cols-2 sm:divide-x sm:divide-border">
+              {related.map((relatedCategory, index) => (
+                <li
+                  class:list={[
+                    "border-b border-border sm:[&:nth-last-child(-n+2)]:border-b-0",
+                    index === related.length - 1 && "border-b-0",
+                  ]}
                 >
-                  <p class="font-medium">{c.name}</p>
-                  <p class="mt-1 text-sm text-muted-foreground">{c.short}</p>
-                </a>
+                  <a
+                    href={`/compare/${relatedCategory.slug}`}
+                    data-warm-repos={relatedCategory.repos.join(",")}
+                    class="block min-h-20 px-4 py-4"
+                  >
+                    <div class="text-base font-medium sm:text-sm">{relatedCategory.name}</div>
+                    <div class="mt-1 text-muted-foreground">
+                      {relatedCategory.short}
+                    </div>
+                  </a>
+                </li>
               ))}
-            </div>
-            <p class="text-sm text-muted-foreground">
+            </ul>
+            <p class="text-base text-muted-foreground sm:text-sm">
               <a
                 href="/leaderboard"
                 class="underline decoration-signal/60 underline-offset-4 hover:decoration-signal"
@@ -450,6 +428,8 @@ const rowClass = "border-b border-border";
             </p>
           </section>
         )}
+
+        <WarmRepos client:load apiBase={apiBase} repos={warmTargets} />
       </main>
 
       <SiteFooter />

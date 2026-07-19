@@ -1,32 +1,35 @@
 ---
 import { Menu, X } from "lucide-react";
 import Brand from "@/components/Brand.astro";
+import { AuthControl } from "@/components/AuthControl";
+import { staticApiBase } from "@/lib/static-api-base";
 
 const navLinks = [
-  { label: "How it works", href: "/#how-it-works" },
+  { label: "Analyze", href: "/#lookup" },
   { label: "Compare", href: "/compare" },
-  { label: "Categories", href: "/compare#categories" },
   { label: "Leaderboard", href: "/leaderboard" },
-  { label: "Badges", href: "/badges" },
-  { label: "Extension", href: "/#extension" },
 ];
+
+const apiBase = staticApiBase();
 ---
 
 <a
   href="#main-content"
-  class="fixed top-3 left-3 z-999 -translate-y-20 rounded-md bg-primary px-3 py-2 text-sm font-medium text-primary-foreground focus:translate-y-0 focus-visible:outline-2 focus-visible:outline-offset-2 focus-visible:outline-ring"
+  class="fixed top-3 left-3 z-999 inline-flex min-h-12 -translate-y-20 items-center rounded-md bg-primary px-4 text-sm font-medium text-primary-foreground focus:translate-y-0 focus-visible:outline-2 focus-visible:outline-offset-2 focus-visible:outline-ring"
 >
   Skip to content
 </a>
 
 <header
-  class="sticky top-0 z-50 border-b border-border bg-background/80 backdrop-blur-md"
+  class="site-header sticky top-0 z-50 border-b border-border bg-white/90 backdrop-blur-xl"
 >
-  <div class="mx-auto grid h-16 max-w-6xl grid-cols-[1fr_auto_1fr] items-center px-6">
+  <div
+    class="mx-auto flex h-16 max-w-6xl items-center justify-between gap-3 px-4 sm:px-6 lg:grid lg:grid-cols-[1fr_auto_1fr]"
+  >
     <a
       href="/"
       aria-label="gitdebt homepage"
-      class="inline-flex items-center rounded-md focus-visible:outline-2 focus-visible:outline-offset-4 focus-visible:outline-ring"
+      class="inline-flex min-h-12 min-w-0 shrink-0 items-center rounded-md focus-visible:outline-2 focus-visible:outline-offset-4 focus-visible:outline-ring"
     >
       <Brand />
     </a>
@@ -36,7 +39,7 @@ const navLinks = [
         navLinks.map((link) => (
           <a
             href={link.href}
-            class="rounded-md px-3 py-2 text-sm text-muted-foreground hover:bg-accent hover:text-accent-foreground focus-visible:outline-2 focus-visible:outline-offset-2 focus-visible:outline-ring"
+            class="inline-flex min-h-11 items-center rounded-md px-3 text-sm text-muted-foreground transition-colors duration-150 hover:bg-accent hover:text-accent-foreground focus-visible:outline-2 focus-visible:outline-offset-2 focus-visible:outline-ring active:text-foreground"
           >
             {link.label}
           </a>
@@ -44,33 +47,40 @@ const navLinks = [
       }
     </nav>
 
-    <div class="flex items-center justify-self-end">
+    <div class="flex shrink-0 items-center gap-1 justify-self-end sm:gap-2">
+      <div data-auth-slot>
+        <AuthControl client:load apiBase={apiBase} />
+      </div>
       <details class="relative lg:hidden" data-mobile-menu data-state="closed">
         <summary
-          class="grid size-12 cursor-pointer list-none place-items-center rounded-md text-foreground hover:bg-accent focus-visible:outline-2 focus-visible:outline-offset-2 focus-visible:outline-ring [&::-webkit-details-marker]:hidden"
-          aria-label="Toggle menu"
+          class="grid size-12 cursor-pointer list-none place-items-center rounded-md text-foreground transition-colors duration-150 hover:bg-accent focus-visible:outline-2 focus-visible:outline-offset-2 focus-visible:outline-ring [&::-webkit-details-marker]:hidden"
+          aria-label="Open navigation"
           aria-controls="mobile-navigation"
           aria-expanded="false"
         >
           <Menu
             className="mobile-nav-icon mobile-nav-icon-menu size-6"
             strokeWidth={1.75}
+            aria-hidden="true"
           />
           <X
             className="mobile-nav-icon mobile-nav-icon-close size-6"
             strokeWidth={1.75}
+            aria-hidden="true"
           />
         </summary>
         <div
-          class="mobile-nav-panel absolute right-0 mt-2 w-56 origin-top-right rounded-lg border border-border bg-popover p-2 text-popover-foreground shadow-lg shadow-black/5 dark:shadow-black/40"
+          class="mobile-nav-panel absolute right-0 mt-2 w-[min(18rem,calc(100vw-2rem))] origin-top-right rounded-lg border border-border bg-popover p-2 text-popover-foreground"
           data-mobile-menu-panel
+          aria-hidden="true"
+          inert
         >
           <nav id="mobile-navigation" class="flex flex-col">
             {
               navLinks.map((link) => (
                 <a
                   href={link.href}
-                  class="rounded-md px-3 py-2 text-base text-muted-foreground hover:bg-accent hover:text-accent-foreground focus-visible:outline-2 focus-visible:-outline-offset-2 focus-visible:outline-ring"
+                  class="flex min-h-12 items-center rounded-md px-3 text-base text-muted-foreground transition-colors duration-150 hover:bg-accent hover:text-accent-foreground focus-visible:outline-2 focus-visible:-outline-offset-2 focus-visible:outline-ring active:text-foreground"
                 >
                   {link.label}
                 </a>
@@ -91,6 +101,7 @@ const navLinks = [
     const panel = details.querySelector<HTMLElement>("[data-mobile-menu-panel]");
     if (!summary || !panel) return;
     const trigger = summary;
+    const menuPanel = panel;
 
     let closeTimer: ReturnType<typeof setTimeout> | null = null;
     let openFrame: number | null = null;
@@ -103,6 +114,12 @@ const navLinks = [
       settleFrame = null;
     }
 
+    function setPanelInteractive(interactive: boolean) {
+      menuPanel.setAttribute("aria-hidden", String(!interactive));
+      if (interactive) menuPanel.removeAttribute("inert");
+      else menuPanel.setAttribute("inert", "");
+    }
+
     function openMenu() {
       if (closeTimer) clearTimeout(closeTimer);
       closeTimer = null;
@@ -110,6 +127,8 @@ const navLinks = [
       details.open = true;
       details.dataset.state = "closed";
       trigger.setAttribute("aria-expanded", "true");
+      trigger.setAttribute("aria-label", "Close navigation");
+      setPanelInteractive(true);
       openFrame = requestAnimationFrame(() => {
         openFrame = null;
         settleFrame = requestAnimationFrame(() => {
@@ -127,6 +146,8 @@ const navLinks = [
       cancelOpenFrames();
       details.dataset.state = "closed";
       trigger.setAttribute("aria-expanded", "false");
+      trigger.setAttribute("aria-label", "Open navigation");
+      setPanelInteractive(false);
       closeTimer = setTimeout(() => {
         details.open = false;
         closeTimer = null;
@@ -151,7 +172,7 @@ const navLinks = [
       }
     });
 
-    panel.addEventListener("click", (event) => {
+    menuPanel.addEventListener("click", (event) => {
       if ((event.target as Element).closest("a")) closeMenu();
     });
   }

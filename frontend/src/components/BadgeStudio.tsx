@@ -325,7 +325,7 @@ export function BadgeStudio({ apiBase, owner, repo }: Props) {
                 aria-hidden="true"
               >
                 <span
-                  className="inline-block size-4 translate-x-0.5 rounded-full bg-background shadow-xs transition-transform duration-200 ease-out group-has-checked:translate-x-4 motion-reduce:transition-none"
+                  className="inline-block size-4 translate-x-0.5 rounded-full bg-background transition-transform duration-200 ease-out group-has-checked:translate-x-4 motion-reduce:transition-none"
                 />
               </span>
               {animate ? "Animated" : "Static"}
@@ -335,10 +335,10 @@ export function BadgeStudio({ apiBase, owner, repo }: Props) {
 
         <div className="card-panel flex flex-col overflow-hidden">
           <div className="flex items-center justify-between gap-2 border-b border-border bg-muted/40 px-5 py-3">
-            <span className="inline-flex items-center gap-2 font-mono text-xs tracking-wide text-muted-foreground uppercase">
+            <div className="inline-flex items-center gap-2 font-mono text-xs tracking-wide text-muted-foreground uppercase">
               <span className="size-1.5 shrink-0 rounded-full bg-signal" aria-hidden="true" />
               Live preview
-            </span>
+            </div>
             <CopyButton
               value={theme === "auto" ? pictureEmbed : embedThemeUrl}
               ariaLabel={
@@ -401,10 +401,10 @@ function BadgeEmbed({
   return (
     <figure className="card-panel overflow-hidden">
       <figcaption className="flex flex-wrap items-center justify-between gap-3 border-b border-border bg-muted/40 px-5 py-3">
-        <span className="inline-flex items-center gap-2 font-mono text-xs tracking-wide text-muted-foreground uppercase">
+        <div className="inline-flex items-center gap-2 font-mono text-xs tracking-wide text-muted-foreground uppercase">
           <span className="size-1.5 shrink-0 rounded-full bg-signal" aria-hidden="true" />
           Embed badge
-        </span>
+        </div>
         <div className="flex items-center gap-1" role="group" aria-label="Embed format">
           <button
             type="button"

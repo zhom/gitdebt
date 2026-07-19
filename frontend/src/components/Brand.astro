@@ -6,17 +6,17 @@ interface Props {
 
 const {
   markClass = "size-8",
-  wordmarkClass = "font-mono text-sm font-medium tracking-tight",
+  wordmarkClass = "text-[0.9375rem] font-semibold tracking-[-0.02em]",
 } = Astro.props;
 ---
 
-<span class="inline-flex items-center gap-2">
+<span class="inline-flex min-w-0 items-center gap-2">
   <img
     src="/logo.svg"
     alt=""
     width="32"
     height="32"
-    class:list={[markClass, "dark:invert"]}
+    class={markClass}
     decoding="async"
   />
   <span class={wordmarkClass}>gitdebt</span>

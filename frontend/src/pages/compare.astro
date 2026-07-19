@@ -1,14 +1,17 @@
 ---
 import "@/styles/globals.css";
-import { staticApiBase } from "@/lib/static-api-base";
+import { ArrowRight } from "lucide-react";
+
 import BaseHead from "@/components/BaseHead.astro";
 import Seo from "@/components/Seo.astro";
 import SiteHeader from "@/components/SiteHeader.astro";
 import SiteFooter from "@/components/SiteFooter.astro";
 import { CompareBuilder } from "@/components/CompareBuilder";
-import { CATEGORIES } from "@/data/categories";
+import { WarmRepos } from "@/components/WarmRepos";
+import { CATEGORIES, CATEGORY_GROUPS } from "@/data/categories";
+import { staticApiBase } from "@/lib/static-api-base";
 
-const POPULAR_PAIRS: [string, string][] = [
+const POPULAR_PAIRS = [
   ["facebook/react", "vuejs/vue"],
   ["denoland/deno", "oven-sh/bun"],
   ["tailwindlabs/tailwindcss", "twbs/bootstrap"],
@@ -17,12 +20,12 @@ const POPULAR_PAIRS: [string, string][] = [
   ["actix/actix-web", "tokio-rs/axum"],
   ["ollama/ollama", "vllm-project/vllm"],
   ["microsoft/vscode", "neovim/neovim"],
-].map(
-  ([a, b]) => (a < b ? [a, b] : [b, a]) as [string, string],
-);
+].map((repos) => ({
+  repos: [...repos].sort(),
+  label: repos.map((repo) => repo.split("/")[1]).join(" vs "),
+}));
 
 const apiBase = staticApiBase();
-
 const site = (Astro.site ?? new URL("https://gitdebt.com")).href.replace(/\/$/, "");
 
 const SLUG_RE = /^[a-z0-9._-]+\/[a-z0-9._-]+$/;
@@ -31,9 +34,9 @@ let repos: string[] = [];
 if (rawRepos) {
   const parts = rawRepos
     .split(",")
-    .map((s) => s.trim().toLowerCase())
+    .map((slug) => slug.trim().toLowerCase())
     .filter(Boolean);
-  if (parts.every((p) => SLUG_RE.test(p))) {
+  if (parts.every((slug) => SLUG_RE.test(slug))) {
     repos = Array.from(new Set(parts)).sort().slice(0, 8);
   }
 }
@@ -44,8 +47,8 @@ const title = hasSelection
   ? `${repos.join(" vs ")} — star history · gitdebt`
   : "Compare GitHub star history · gitdebt";
 const description = hasSelection
-  ? `Star history of ${repos.join(", ")} overlaid on one chart — compare trajectories and copy an embeddable README badge.`
-  : "Compare up to eight GitHub repos on one star-history chart. Switch between calendar and timeline views, then copy an embeddable README chart.";
+  ? `Star history of ${repos.join(", ")} overlaid on one chart — compare trajectories and copy an embeddable README chart.`
+  : "Compare up to eight GitHub repositories on one star-history chart, or open a curated category with rankings, growth, and repository-health reports.";
 
 const ogImage = hasSelection
   ? `${apiBase}/api/og.png?repos=${encodeURIComponent(reposParam)}`
@@ -58,13 +61,21 @@ const canonicalPath = !hasSelection
 
 const jsonLd = {
   "@context": "https://schema.org",
-  "@type": "WebPage",
+  "@type": "CollectionPage",
   name: hasSelection
     ? `Compare star history: ${repos.join(" vs ")}`
     : "Compare GitHub star history",
   url: `${site}${canonicalPath}`,
   description,
 };
+
+const suggestionRepos = Array.from(
+  new Set([
+    ...repos,
+    ...POPULAR_PAIRS.flatMap((pair) => pair.repos),
+    ...CATEGORIES.flatMap((category) => category.repos),
+  ]),
+);
 ---
 
 <!doctype html>
@@ -86,77 +97,125 @@ const jsonLd = {
     <div class="isolate flex min-h-dvh flex-col">
       <SiteHeader />
 
-      <main id="main-content" class="mx-auto flex w-full max-w-5xl flex-1 flex-col gap-10 px-6 py-12">
+      <main id="main-content" class="mx-auto flex w-full max-w-6xl flex-1 flex-col gap-14 px-6 py-12 sm:gap-16">
         <nav aria-label="Breadcrumb" class="font-mono text-xs text-muted-foreground">
           <a href="/" class="hover:text-foreground">gitdebt</a>
           <span class="px-1.5 text-border" aria-hidden="true">/</span>
           <span class="text-foreground">compare</span>
         </nav>
 
-        <header class="space-y-2">
-          <p class="font-mono text-xs tracking-wide text-muted-foreground uppercase">
-            Star history overlay
+        <header>
+          <p class="font-mono text-xs tracking-wide text-signal uppercase">
+            GitHub star history overlay
           </p>
-          <h1 class="text-3xl font-semibold tracking-tight text-balance sm:text-4xl">
-            Compare star history
+          <h1 class="mt-3 max-w-[24ch] text-3xl font-semibold tracking-tight text-balance sm:text-4xl">
+            Put repository growth on the same timeline.
           </h1>
-          <p class="max-w-[60ch] text-lg text-pretty text-muted-foreground">
-            Overlay up to eight repos on one timeline. Add any owner/repo,
-            toggle the axis, and grab an embeddable badge for your README.
+          <p class="mt-4 max-w-[65ch] text-lg/8 text-pretty text-muted-foreground">
+            Compare up to eight repos by calendar date or days since their
+            first star. Use the builder for any combination, or open a curated
+            field with rankings and project-health reports.
           </p>
         </header>
 
         <CompareBuilder client:load apiBase={apiBase} initialRepos={repos} />
 
-        <section class="space-y-4">
-          <h2 class="flex items-center gap-2 text-xl font-semibold tracking-tight">
-            <span class="size-1.5 shrink-0 rounded-full bg-signal" aria-hidden="true"></span>
-            Popular comparisons
-          </h2>
-          <div class="flex flex-wrap items-center gap-2">
-            {POPULAR_PAIRS.map(([a, b]) => (
-              <a
-                href={`/vs/${a}/${b}`}
-                class="inline-flex min-h-11 items-center gap-1.5 rounded-md border border-border bg-background px-3 py-2 font-mono text-base text-muted-foreground shadow-xs hover:bg-accent hover:text-accent-foreground sm:min-h-0 sm:py-1.5 sm:text-sm dark:shadow-none"
+        <section>
+          <header>
+            <p class="font-mono text-xs tracking-wide text-muted-foreground uppercase">
+              Popular head to head
+            </p>
+            <h2 class="mt-2 text-2xl font-semibold tracking-tight">
+              Start with a familiar decision
+            </h2>
+          </header>
+          <ul role="list" class="mt-6 grid border-y border-border sm:grid-cols-2 sm:divide-x sm:divide-border">
+            {POPULAR_PAIRS.map((pair, index) => (
+              <li
+                class:list={[
+                  "border-b border-border sm:[&:nth-last-child(-n+2)]:border-b-0",
+                  index === POPULAR_PAIRS.length - 1 && "border-b-0",
+                ]}
               >
-                {a.split("/")[1]} vs {b.split("/")[1]}
-              </a>
+                <a
+                  href={`/vs/${pair.repos[0]}/${pair.repos[1]}`}
+                  data-warm-repos={pair.repos.join(",")}
+                  class="group flex min-h-16 items-center justify-between gap-4 px-4 py-3 font-mono text-sm"
+                >
+                  <span>{pair.label}</span>
+                  <ArrowRight
+                    className="size-4 shrink-0 text-muted-foreground group-hover:text-signal"
+                    strokeWidth={1.75}
+                    aria-hidden="true"
+                  />
+                </a>
+              </li>
             ))}
-          </div>
+          </ul>
         </section>
 
-        <section id="categories" class="scroll-mt-20 space-y-4">
-          <header class="space-y-1">
-            <h2 class="flex items-center gap-2 text-xl font-semibold tracking-tight">
-              <span class="size-1.5 shrink-0 rounded-full bg-signal" aria-hidden="true"></span>
-              Comparison categories
+        <section id="categories" class="scroll-mt-20">
+          <header>
+            <p class="font-mono text-xs tracking-wide text-muted-foreground uppercase">
+              Curated fields
+            </p>
+            <h2 class="mt-2 max-w-[30ch] text-2xl font-semibold tracking-tight text-balance sm:text-3xl">
+              Compare the tools that compete for the same job.
             </h2>
-            <p class="max-w-[60ch] text-base text-pretty text-muted-foreground sm:text-sm">
-              Curated head-to-head categories — every page charts the whole
-              field on one timeline and ranks it by stars and growth.
+            <p class="mt-3 max-w-[68ch] text-base/7 text-pretty text-muted-foreground sm:text-sm/6">
+              Each page has an editorial introduction, a shared star-history
+              chart, recent growth, current ranking, and direct access to the
+              maintenance signals behind every repository.
             </p>
           </header>
-          <div class="grid gap-3 sm:grid-cols-2 lg:grid-cols-3">
-            {CATEGORIES.map((c) => (
-              <a
-                href={`/compare/${c.slug}`}
-                class="card-panel block p-4 hover:border-signal/50"
-              >
-                <p class="font-medium">{c.name}</p>
-                <p class="mt-1 text-base text-muted-foreground sm:text-sm">{c.short}</p>
-              </a>
+
+          <div class="mt-10 grid gap-10 lg:grid-cols-3">
+            {CATEGORY_GROUPS.map((group) => (
+              <section>
+                <h3 class="text-lg font-medium">{group.name}</h3>
+                <p class="mt-1 text-base/7 text-pretty text-muted-foreground sm:text-sm/6">
+                  {group.description}
+                </p>
+                <ul role="list" class="mt-5 divide-y divide-border border-y border-border">
+                  {group.categories.map((category) => (
+                    <li>
+                      <a
+                        href={`/compare/${category.slug}`}
+                        data-warm-repos={category.repos.join(",")}
+                        class="group flex min-h-16 items-center justify-between gap-4 py-3"
+                      >
+                        <div class="text-base sm:text-sm">
+                          <span class="font-medium">{category.name}</span>
+                          <div class="mt-0.5 text-muted-foreground">
+                            {category.short}
+                          </div>
+                        </div>
+                        <ArrowRight
+                          className="size-4 shrink-0 text-muted-foreground group-hover:text-signal"
+                          strokeWidth={1.75}
+                          aria-hidden="true"
+                        />
+                      </a>
+                    </li>
+                  ))}
+                </ul>
+              </section>
             ))}
           </div>
-          <p class="text-base text-muted-foreground sm:text-sm">
-            Looking for what's hot right now? See the{" "}
+
+          <p class="mt-8 text-base text-muted-foreground sm:text-sm">
+            Prefer one live ranking? See the{" "}
             <a
               href="/leaderboard"
               class="underline decoration-signal/60 underline-offset-4 hover:decoration-signal"
             >
-              fastest-growing repos leaderboard
-            </a>.
+              fastest-growing repositories
+            </a>{" "}
+            across the tracked catalog.
           </p>
         </section>
+
+        <WarmRepos client:load apiBase={apiBase} repos={suggestionRepos} />
       </main>
 
       <SiteFooter />

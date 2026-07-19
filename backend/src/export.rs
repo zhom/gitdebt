@@ -39,7 +39,7 @@ pub struct DayStat {
 }
 
 /// The `/stars.json` body. Locked contract:
-/// `{repo,total_stars,complete,series:[{date,total,delta}]}`.
+/// `{repo,total_stars,complete,history_kind,approximate,series:[...]}`.
 #[derive(Debug, Clone, Serialize)]
 pub struct StarExport {
     pub repo: String,
@@ -49,6 +49,10 @@ pub struct StarExport {
     /// False while the stargazer fetch hasn't completed. The series is
     /// then empty — readers never trust partial data (see `cache.rs`).
     pub complete: bool,
+    /// `current_stargazers` for a legacy exact snapshot,
+    /// `public_star_actions` for GH Archive WatchEvents.
+    pub history_kind: String,
+    pub approximate: bool,
     pub series: Vec<DayStat>,
 }
 
@@ -253,7 +257,7 @@ pub fn to_csv(rows: &[DayStat]) -> String {
 pub async fn load_day_deltas(db: &Db, repo: &str) -> Result<Vec<(NaiveDate, i64)>> {
     let rows = sqlx::query(
         "SELECT (starred_at AT TIME ZONE 'UTC')::date AS day, COUNT(*) AS delta \
-         FROM repo_stargazers \
+         FROM active_repo_star_history \
          WHERE repo = $1 \
          GROUP BY 1 \
          ORDER BY 1",
@@ -583,12 +587,16 @@ mod tests {
             repo: "owner/repo".into(),
             total_stars: 11,
             complete: true,
+            history_kind: "current_stargazers".into(),
+            approximate: false,
             series: sample_days(),
         };
         let v = serde_json::to_value(&body).unwrap();
         assert_eq!(v["repo"], "owner/repo");
         assert_eq!(v["total_stars"], 11);
         assert_eq!(v["complete"], true);
+        assert_eq!(v["history_kind"], "current_stargazers");
+        assert_eq!(v["approximate"], false);
         assert_eq!(v["series"][0]["date"], "2020-01-01");
         assert_eq!(v["series"][0]["total"], 3);
         assert_eq!(v["series"][0]["delta"], 3);

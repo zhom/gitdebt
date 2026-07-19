@@ -18,10 +18,11 @@ const SCHEMA_MIGRATION_LOCK_ID: i64 = 0x6769_7464_6562_7401;
 
 /// Schema applied on every startup. Idempotent — uses IF NOT EXISTS.
 ///
-/// Completeness invariant: a `repos` row's stargazer set is only
-/// authoritative when `stargazers_complete = true`. Partial fetches MUST
-/// leave the flag `false` so the next request re-fetches instead of
-/// trusting half-empty data.
+/// Completeness invariant: a `repos` row's selected history is only readable
+/// when `history_complete = true`. `stargazers_complete` remains the stricter
+/// legacy flag for an exact GitHub-API membership snapshot; GH Archive
+/// WatchEvents are stored and labeled separately because they do not include
+/// unstars. Partial writes MUST leave both relevant flags false.
 ///
 /// `api_quota` persists each GitHub token's current rate-limit budget so
 /// restarts do not rediscover exhaustion through failed requests.
@@ -32,6 +33,20 @@ CREATE TABLE IF NOT EXISTS repo_stargazers (
     starred_at  TIMESTAMPTZ NOT NULL,
     PRIMARY KEY (repo, position)
 );
+
+-- GH Archive WatchEvents are public star-addition actions, not the current
+-- stargazer membership returned by GitHub's legacy endpoint: unstars are not
+-- emitted and coverage begins on 2011-02-12. Keep them physically separate so
+-- source semantics cannot be confused. `active_repo_star_history` exposes the
+-- selected source to read surfaces without duplicating source-branching SQL.
+CREATE TABLE IF NOT EXISTS repo_star_arrivals (
+    repo            TEXT NOT NULL,
+    position        BIGINT NOT NULL,
+    source_event_id TEXT,
+    starred_at      TIMESTAMPTZ NOT NULL,
+    PRIMARY KEY (repo, position)
+);
+ALTER TABLE repo_star_arrivals ADD COLUMN IF NOT EXISTS source_event_id TEXT;
 -- Migrate older installations away from persisted stargazer identities.
 -- Pagination position is non-identifying and keeps chunk retries idempotent
 -- when multiple stars share an identical timestamp.
@@ -67,9 +82,19 @@ END $$;
 
 CREATE TABLE IF NOT EXISTS repos (
     repo                  TEXT PRIMARY KEY NOT NULL,
+    github_id             BIGINT,
     stargazers_fetched_at TIMESTAMPTZ,
     stargazers_complete   BOOLEAN NOT NULL DEFAULT FALSE,
+    history_complete      BOOLEAN NOT NULL DEFAULT FALSE,
     star_count            BIGINT,
+    history_source        TEXT,
+    history_observed_count BIGINT,
+    history_coverage_start TIMESTAMPTZ,
+    history_coverage_end   TIMESTAMPTZ,
+    archive_complete      BOOLEAN NOT NULL DEFAULT FALSE,
+    archive_fetched_at    TIMESTAMPTZ,
+    archive_truncated_before BOOLEAN NOT NULL DEFAULT FALSE,
+    archive_cursor        DATE,
     forks_count           BIGINT,
     created_at            TIMESTAMPTZ,
     metadata_fetched_at   TIMESTAMPTZ,
@@ -89,12 +114,31 @@ CREATE TABLE IF NOT EXISTS repos (
     -- future successful metadata/stargazer fetch overwrites it.
     missing               BOOLEAN NOT NULL DEFAULT FALSE
 );
+ALTER TABLE repos ADD COLUMN IF NOT EXISTS github_id              BIGINT;
+ALTER TABLE repos ADD COLUMN IF NOT EXISTS history_complete       BOOLEAN NOT NULL DEFAULT FALSE;
 ALTER TABLE repos ADD COLUMN IF NOT EXISTS forks_count         BIGINT;
 ALTER TABLE repos ADD COLUMN IF NOT EXISTS created_at          TIMESTAMPTZ;
 ALTER TABLE repos ADD COLUMN IF NOT EXISTS metadata_fetched_at TIMESTAMPTZ;
 ALTER TABLE repos ADD COLUMN IF NOT EXISTS view_count          BIGINT NOT NULL DEFAULT 0;
 ALTER TABLE repos ADD COLUMN IF NOT EXISTS last_viewed_at      TIMESTAMPTZ;
 ALTER TABLE repos ADD COLUMN IF NOT EXISTS missing             BOOLEAN NOT NULL DEFAULT FALSE;
+ALTER TABLE repos ADD COLUMN IF NOT EXISTS history_source         TEXT;
+ALTER TABLE repos ADD COLUMN IF NOT EXISTS history_observed_count BIGINT;
+ALTER TABLE repos ADD COLUMN IF NOT EXISTS history_coverage_start TIMESTAMPTZ;
+ALTER TABLE repos ADD COLUMN IF NOT EXISTS history_coverage_end   TIMESTAMPTZ;
+ALTER TABLE repos ADD COLUMN IF NOT EXISTS archive_complete       BOOLEAN NOT NULL DEFAULT FALSE;
+ALTER TABLE repos ADD COLUMN IF NOT EXISTS archive_fetched_at     TIMESTAMPTZ;
+ALTER TABLE repos ADD COLUMN IF NOT EXISTS archive_truncated_before BOOLEAN NOT NULL DEFAULT FALSE;
+ALTER TABLE repos ADD COLUMN IF NOT EXISTS archive_cursor          DATE;
+-- Existing installations used stargazers_complete as the only source flag.
+-- Preserve those exact histories as the active source during the migration.
+UPDATE repos
+SET history_complete = TRUE,
+    history_source = COALESCE(history_source, 'github_api'),
+    history_observed_count = COALESCE(history_observed_count, star_count)
+WHERE stargazers_complete = TRUE AND history_complete = FALSE;
+CREATE INDEX IF NOT EXISTS idx_repos_github_id ON repos (github_id)
+    WHERE github_id IS NOT NULL;
 -- Owner-prefix lookups for the profile cards (`WHERE repo LIKE $1 || '/%'`
 -- in api.rs::load_user_card_data). Under a non-C collation the plain PK
 -- btree cannot serve a LIKE prefix, so every card render was a sequential
@@ -104,9 +148,20 @@ CREATE INDEX IF NOT EXISTS idx_repos_repo_prefix ON repos (repo text_pattern_ops
 -- metric=stars). Partial over exactly the rows that ranking selects, with
 -- the query's ORDER BY baked in, so the top-N page is an ordered index
 -- scan + LIMIT instead of sorting every tracked repo per cache miss.
-CREATE INDEX IF NOT EXISTS idx_repos_star_count
+CREATE INDEX IF NOT EXISTS idx_repos_history_star_count
     ON repos (star_count DESC, repo ASC)
-    WHERE stargazers_complete AND NOT missing AND star_count IS NOT NULL;
+    WHERE history_complete AND NOT missing AND star_count IS NOT NULL;
+
+CREATE OR REPLACE VIEW active_repo_star_history AS
+    SELECT stars.repo, stars.position, stars.starred_at
+    FROM repo_stargazers AS stars
+    JOIN repos ON repos.repo = stars.repo
+    WHERE repos.history_source = 'github_api'
+    UNION ALL
+    SELECT arrivals.repo, arrivals.position, arrivals.starred_at
+    FROM repo_star_arrivals AS arrivals
+    JOIN repos ON repos.repo = arrivals.repo
+    WHERE repos.history_source = 'gh_archive';
 
 -- Star-history fetch queue. Keyed by repo slug (owner/repo, lowercased).
 -- A repo is enqueued on a cold/stale/unknown lookup and drained by the
@@ -141,6 +196,18 @@ CREATE TABLE IF NOT EXISTS api_quota (
     limit_total  BIGINT NOT NULL,
     reset_at     BIGINT NOT NULL,
     updated_at   TIMESTAMPTZ NOT NULL
+);
+
+-- Durable checkpoint for the raw hourly GH Archive follower. An hour and all
+-- of its matching tracked-repo events commit in one transaction, so replay
+-- after a crash is idempotent without persisting actors or event payloads.
+CREATE TABLE IF NOT EXISTS gh_archive_hours (
+    archive_hour TIMESTAMPTZ PRIMARY KEY,
+    status       TEXT NOT NULL,
+    attempts     BIGINT NOT NULL DEFAULT 0,
+    event_count  BIGINT NOT NULL DEFAULT 0,
+    processed_at TIMESTAMPTZ,
+    last_error   TEXT
 );
 
 -- Logged-in gitdebt.com users. PK is GitHub's user id (stable across
@@ -470,6 +537,21 @@ const CONCURRENT_INDEXES: &[(&str, &str)] = &[
         "CREATE INDEX CONCURRENTLY IF NOT EXISTS idx_repo_stargazers_repo_starred_at \
          ON repo_stargazers(repo, starred_at)",
     ),
+    (
+        "idx_repo_star_arrivals_starred_at",
+        "CREATE INDEX CONCURRENTLY IF NOT EXISTS idx_repo_star_arrivals_starred_at \
+         ON repo_star_arrivals(starred_at, repo)",
+    ),
+    (
+        "idx_repo_star_arrivals_repo_starred_at",
+        "CREATE INDEX CONCURRENTLY IF NOT EXISTS idx_repo_star_arrivals_repo_starred_at \
+         ON repo_star_arrivals(repo, starred_at)",
+    ),
+    (
+        "idx_repo_star_arrivals_source_event",
+        "CREATE UNIQUE INDEX CONCURRENTLY IF NOT EXISTS idx_repo_star_arrivals_source_event \
+         ON repo_star_arrivals(repo, source_event_id) WHERE source_event_id IS NOT NULL",
+    ),
 ];
 
 /// Thin wrapper around sqlx's `PgPool`. Cheap to clone (PgPool is internally
@@ -639,6 +721,12 @@ mod tests {
         assert!(SCHEMA.contains("ALTER TABLE repo_stargazers DROP COLUMN login"));
         assert!(SCHEMA.contains("stargazers_complete   BOOLEAN NOT NULL DEFAULT FALSE"));
         assert!(SCHEMA.contains("next_page    BIGINT NOT NULL DEFAULT 1"));
+        assert!(SCHEMA.contains("github_id             BIGINT"));
+        assert!(SCHEMA.contains("history_source        TEXT"));
+        assert!(SCHEMA.contains("history_observed_count BIGINT"));
+        assert!(SCHEMA.contains("history_coverage_start TIMESTAMPTZ"));
+        assert!(SCHEMA.contains("history_coverage_end   TIMESTAMPTZ"));
+        assert!(SCHEMA.contains("idx_repos_github_id"));
         assert!(
             SCHEMA.contains(
                 "ALTER TABLE star_fetch_queue ADD COLUMN IF NOT EXISTS next_page BIGINT NOT NULL DEFAULT 1"
@@ -657,7 +745,7 @@ mod tests {
     fn schema_keeps_leaderboard_and_card_indexes() {
         assert!(SCHEMA.contains("idx_repos_repo_prefix"));
         assert!(SCHEMA.contains("ON repos (repo text_pattern_ops)"));
-        assert!(SCHEMA.contains("idx_repos_star_count"));
+        assert!(SCHEMA.contains("idx_repos_history_star_count"));
         assert!(SCHEMA.contains("idx_repo_lines_repo_prefix"));
         assert!(SCHEMA.contains("ON repo_lines (repo text_pattern_ops)"));
     }
@@ -686,7 +774,8 @@ mod tests {
 
         for (_, stmt) in CONCURRENT_INDEXES {
             assert!(
-                stmt.contains("CREATE INDEX CONCURRENTLY IF NOT EXISTS"),
+                stmt.contains("CREATE INDEX CONCURRENTLY IF NOT EXISTS")
+                    || stmt.contains("CREATE UNIQUE INDEX CONCURRENTLY IF NOT EXISTS"),
                 "{stmt}"
             );
         }
@@ -700,6 +789,38 @@ mod tests {
             CONCURRENT_INDEXES
                 .iter()
                 .any(|(_, s)| s.contains("ON repo_stargazers(repo, starred_at)"))
+        );
+        assert!(
+            CONCURRENT_INDEXES
+                .iter()
+                .any(|(_, s)| s.contains("ON repo_star_arrivals(starred_at, repo)"))
+        );
+        assert!(
+            CONCURRENT_INDEXES
+                .iter()
+                .any(|(_, s)| s.contains("ON repo_star_arrivals(repo, starred_at)"))
+        );
+        assert!(
+            CONCURRENT_INDEXES.iter().any(|(_, s)| {
+                s.contains("ON repo_star_arrivals(repo, source_event_id)")
+                    && s.contains("WHERE source_event_id IS NOT NULL")
+            }),
+            "hourly and BigQuery overlap must deduplicate by archive event ID"
+        );
+    }
+
+    #[test]
+    fn archive_history_is_source_separated_and_hidden_until_complete() {
+        assert!(SCHEMA.contains("CREATE TABLE IF NOT EXISTS repo_star_arrivals"));
+        assert!(SCHEMA.contains("history_complete      BOOLEAN NOT NULL DEFAULT FALSE"));
+        assert!(SCHEMA.contains("archive_cursor        DATE"));
+        assert!(SCHEMA.contains("source_event_id TEXT"));
+        assert!(SCHEMA.contains("CREATE OR REPLACE VIEW active_repo_star_history"));
+        assert!(SCHEMA.contains("repos.history_source = 'github_api'"));
+        assert!(SCHEMA.contains("repos.history_source = 'gh_archive'"));
+        assert!(
+            !SCHEMA.contains("actor.login"),
+            "archive storage must never retain stargazer identities"
         );
     }
 }

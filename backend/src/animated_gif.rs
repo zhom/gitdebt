@@ -245,7 +245,7 @@ mod tests {
         let light_px = decode(&light.bytes)[0].buffer().get_pixel(0, 0).0;
         let dark_px = decode(&dark.bytes)[0].buffer().get_pixel(0, 0).0;
         assert_eq!(&light_px[..3], &[0xff, 0xff, 0xff]);
-        assert_eq!(&dark_px[..3], &[0x0d, 0x11, 0x17]);
+        assert_eq!(&dark_px[..3], &[0x0a, 0x0a, 0x0a]);
     }
 
     #[test]

@@ -1842,7 +1842,7 @@ mod tests {
         );
         assert!(y_lin_mid - y_log_mid > 200.0);
         // Shared x-axis: downloads and stars span the same x range.
-        let star_pts = path_points(&lin, "stroke=\"#65a30d\"");
+        let star_pts = path_points(&lin, "stroke=\"#0a0a0a\"");
         assert!((star_pts[0].0 - lin_pts[0].0).abs() < 0.2);
         assert!((star_pts[2].0 - lin_pts[2].0).abs() < 0.2);
     }

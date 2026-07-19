@@ -339,6 +339,30 @@ export const CATEGORIES: Category[] = [
   },
 ];
 
+export type CategoryGroup = {
+  name: string;
+  description: string;
+  categories: Category[];
+};
+
+export const CATEGORY_GROUPS: CategoryGroup[] = [
+  {
+    name: "Web development",
+    description: "Frameworks, runtimes, styling, build tools and data access.",
+    categories: CATEGORIES.slice(0, 7),
+  },
+  {
+    name: "Developer ecosystems",
+    description: "Language stacks, editors, terminals, AI tools and game engines.",
+    categories: [...CATEGORIES.slice(7, 14), CATEGORIES[20]],
+  },
+  {
+    name: "Data & infrastructure",
+    description: "Databases, messaging, containers, observability and analytics.",
+    categories: CATEGORIES.slice(14, 20),
+  },
+];
+
 /** Look up a category by slug (exact, lowercase). */
 export function getCategory(slug: string): Category | undefined {
   return CATEGORIES.find((c) => c.slug === slug);

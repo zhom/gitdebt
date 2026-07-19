@@ -210,7 +210,19 @@ pub fn router(state: ApiState) -> Router {
         .route("/api/users/{login}/analyze", get(user_analyze))
         .route("/api/leaderboard.json", get(leaderboard_json))
         .route("/api/sitemap/repos", get(sitemap_repos))
-        .layer(GovernorLayer::new(analyze_governor));
+        .layer(GovernorLayer::new(analyze_governor.clone()));
+
+    // SSE is deliberately outside the global 60-second request timeout.
+    // The handler owns a five-minute lifetime, heartbeats, and a process-wide
+    // connection cap; it shares the analyze admission budget because it
+    // polls the same ingestion state.
+    let progress = Router::new()
+        .route(
+            "/api/repos/{owner}/{repo}/progress",
+            get(crate::progress::repo_progress),
+        )
+        .layer(GovernorLayer::new(analyze_governor))
+        .layer(public_cors.clone());
 
     // Render parameters create an unbounded cache-key space, so even
     // edge-cached images need an origin-side per-IP ceiling.
@@ -318,17 +330,21 @@ pub fn router(state: ApiState) -> Router {
             ),
         );
 
-    Router::new()
+    let timed = Router::new()
         .merge(public)
         .merge(ext)
         .merge(credentialed)
         .merge(webhook)
         .merge(rate_limited)
-        .with_state(state)
         .layer(TimeoutLayer::with_status_code(
             StatusCode::GATEWAY_TIMEOUT,
             Duration::from_secs(60),
-        ))
+        ));
+
+    Router::new()
+        .merge(timed)
+        .merge(progress)
+        .with_state(state)
         .layer(TraceLayer::new_for_http())
 }
 
@@ -419,6 +435,7 @@ async fn metrics(
     // `available == 0` for a sustained stretch means chart PNG/WebP encodes
     // are queueing on the semaphore (the CPU is the bottleneck).
     let raster_available = RASTER_PERMITS.available_permits();
+    let (progress_total, progress_available) = crate::progress::connection_metrics();
 
     // In-memory cache occupancy (approximate; moka counts lazily). Rising
     // toward `max_capacity` on a param-derived cache means a cache-busting
@@ -439,6 +456,10 @@ async fn metrics(
         "raster": {
             "permits_total": RASTER_CONCURRENCY,
             "permits_available": raster_available,
+        },
+        "progress_streams": {
+            "connections_limit": progress_total,
+            "connections_active": progress_total.saturating_sub(progress_available),
         },
         "cache_entries": cache_entries,
     });
@@ -616,6 +637,8 @@ async fn build_star_export(
             repo: repo_full,
             total_stars,
             complete: false,
+            history_kind: "unavailable".to_string(),
+            approximate: false,
             series: Vec::new(),
         });
     }
@@ -623,12 +646,27 @@ async fn build_star_export(
     let deltas = export::load_day_deltas(cache.db(), &repo_full).await?;
     let full = export::accumulate(&deltas);
     // Full total, NOT window-filtered (matches /analyze semantics).
-    let total_stars = full.last().map(|r| r.total).unwrap_or(0);
+    let archive_activity = summary
+        .as_ref()
+        .is_some_and(|value| value.history_source.as_deref() == Some("gh_archive"));
+    let total_stars = summary
+        .as_ref()
+        .and_then(|value| value.star_count)
+        .filter(|value| *value >= 0)
+        .map(|value| value as u64)
+        .unwrap_or_else(|| full.last().map(|row| row.total).unwrap_or(0));
     let series = export::filter_day_stats(&full, spec);
     Ok(export::StarExport {
         repo: repo_full,
         total_stars,
         complete: true,
+        history_kind: if archive_activity {
+            "public_star_actions"
+        } else {
+            "current_stargazers"
+        }
+        .to_string(),
+        approximate: archive_activity,
         series,
     })
 }
@@ -636,13 +674,16 @@ async fn build_star_export(
 /// Cache headers shared by the export endpoints — same policy as
 /// `/analyze` (5 min edge, 1 min browser) so freshly-fetched history
 /// shows up promptly while SSR/scrape storms stay flat.
-fn export_response_headers(content_type: &'static str) -> HeaderMap {
+fn export_response_headers(content_type: &'static str, history_kind: &str) -> HeaderMap {
     let mut headers = HeaderMap::new();
     headers.insert(header::CONTENT_TYPE, HeaderValue::from_static(content_type));
     headers.insert(
         header::CACHE_CONTROL,
         HeaderValue::from_static("public, s-maxage=300, max-age=60"),
     );
+    if let Ok(value) = HeaderValue::from_str(history_kind) {
+        headers.insert("x-gitdebt-history-kind", value);
+    }
     headers
 }
 
@@ -658,10 +699,8 @@ async fn stars_csv(
     }
     let spec = q.spec()?;
     let body = build_star_export(&state, &owner, &repo, &spec).await?;
-    Ok((
-        export_response_headers("text/csv; charset=utf-8"),
-        export::to_csv(&body.series),
-    ))
+    let headers = export_response_headers("text/csv; charset=utf-8", &body.history_kind);
+    Ok((headers, export::to_csv(&body.series)))
 }
 
 /// `GET /api/repos/:owner/:repo/stars.json` —
@@ -676,7 +715,8 @@ async fn stars_json(
     }
     let spec = q.spec()?;
     let body = build_star_export(&state, &owner, &repo, &spec).await?;
-    Ok((export_response_headers("application/json"), Json(body)))
+    let headers = export_response_headers("application/json", &body.history_kind);
+    Ok((headers, Json(body)))
 }
 
 // User aggregates
@@ -1248,6 +1288,15 @@ async fn ensure_chart_gif(
 
     let cfg = ChartConfig {
         repo: repo_full,
+        metric_label: if summary
+            .as_ref()
+            .is_some_and(|value| value.history_source.as_deref() == Some("gh_archive"))
+        {
+            "public star actions"
+        } else {
+            "stars"
+        }
+        .to_string(),
         ..ChartConfig::default()
     };
     let mut opts = q.opts();
@@ -1292,7 +1341,21 @@ async fn ensure_chart_svg(
     // and produce identical bytes.
     let owner = owner.to_ascii_lowercase();
     let repo = repo.to_ascii_lowercase();
-    let key = format!("{owner}/{repo}|{theme_key}|{}|{}", q.opts_key(), spec.key());
+    let repo_full = format!("{owner}/{repo}");
+    let summary = state.analyzer.cache.get_repo_summary(&repo_full).await?;
+    let archive_activity = summary
+        .as_ref()
+        .is_some_and(|value| value.history_source.as_deref() == Some("gh_archive"));
+    let source_key = if archive_activity {
+        "archive"
+    } else {
+        "github"
+    };
+    let key = format!(
+        "{repo_full}|{theme_key}|{source_key}|{}|{}",
+        q.opts_key(),
+        spec.key()
+    );
     single_flight_card(&state.svg_cache, key, async {
         let series = star_series(&owner, &repo, &state.analyzer)
             .await
@@ -1305,7 +1368,13 @@ async fn ensure_chart_svg(
         let svg = render_svg(
             &series,
             &ChartConfig {
-                repo: format!("{owner}/{repo}"),
+                repo: repo_full,
+                metric_label: if archive_activity {
+                    "public star actions"
+                } else {
+                    "stars"
+                }
+                .to_string(),
                 ..ChartConfig::default()
             },
             theme,
@@ -2186,13 +2255,21 @@ async fn build_repo_og_svg(
     let repo = repo.to_ascii_lowercase();
     let slug = format!("{owner}/{repo}");
 
-    // Star series (drives both the headline count and the sparkline).
-    // Best-effort: an analyze failure degrades to a zero-star empty card
-    // rather than a 500 — OG images must never error a crawler.
+    // History drives the sparkline, while the headline falls back to the
+    // authoritative metadata total. GitHub can restrict timeline access for
+    // a repository even though its public star count remains available; a
+    // social card must not turn that situation into a misleading "0 stars".
     let series = star_series(&owner, &repo, &state.analyzer)
         .await
         .unwrap_or_default();
-    let stars = series.last().map(|p| p.stars as u64).unwrap_or(0);
+    let metadata_stars = state
+        .analyzer
+        .cache
+        .get_repo_star_count(&slug)
+        .await
+        .ok()
+        .flatten();
+    let stars = best_og_star_total(&series, metadata_stars);
 
     // Forks from the cache (best-effort; 0 → omit the segment).
     let forks = state
@@ -2251,6 +2328,15 @@ fn best_download_total(dl: &UsageDownloads) -> Option<(u64, String)> {
                 .max_by_key(|(total, _)| *total)
                 .filter(|(total, _)| *total > 0)
         })
+}
+
+fn best_og_star_total(series: &[Point], metadata_stars: Option<i64>) -> u64 {
+    let history_total = series.last().map(|point| point.stars as u64).unwrap_or(0);
+    let metadata_total = metadata_stars
+        .filter(|total| *total >= 0)
+        .map(|total| total as u64)
+        .unwrap_or(0);
+    history_total.max(metadata_total)
 }
 
 async fn ensure_repo_og_raster(
@@ -2348,7 +2434,14 @@ async fn build_site_og_svg(
         let series = star_series(owner, repo, &state.analyzer)
             .await
             .unwrap_or_default();
-        let stars = series.last().map(|p| p.stars as u64).unwrap_or(0);
+        let metadata_stars = state
+            .analyzer
+            .cache
+            .get_repo_star_count(&slug)
+            .await
+            .ok()
+            .flatten();
+        let stars = best_og_star_total(&series, metadata_stars);
         entries.push(CompareEntry {
             slug,
             stars,
@@ -2804,18 +2897,33 @@ async fn load_repo_card_data(
     summary: &crate::cache::RepoSummary,
 ) -> Result<cards::RepoCardData, ApiError> {
     let db = state.analyzer.cache.db();
+    let archive_activity = summary.history_source.as_deref() == Some("gh_archive");
 
     let (stars, stars_30d, spark) = if summary.stargazers_complete {
         let day_stats = export::accumulate(&export::load_day_deltas(db, repo_full).await?);
-        let total = day_stats.last().map(|r| r.total);
-        let stars_30d = day_stats.last().map(|last| {
-            let cutoff = last.date - chrono::Duration::days(30);
-            day_stats
-                .iter()
-                .filter(|r| r.date > cutoff)
-                .map(|r| r.delta)
-                .sum::<u64>()
-        });
+        let total = if archive_activity {
+            summary
+                .star_count
+                .filter(|value| *value >= 0)
+                .map(|value| value as u64)
+        } else {
+            day_stats.last().map(|row| row.total)
+        };
+        // A WatchEvent count is not net new stars because unstars are absent.
+        // Do not render it under the github-readme-stats-compatible
+        // `stars_30d` label.
+        let stars_30d = (!archive_activity)
+            .then(|| {
+                day_stats.last().map(|last| {
+                    let cutoff = last.date - chrono::Duration::days(30);
+                    day_stats
+                        .iter()
+                        .filter(|row| row.date > cutoff)
+                        .map(|row| row.delta)
+                        .sum::<u64>()
+                })
+            })
+            .flatten();
         let points: Vec<Point> = day_stats
             .iter()
             .map(|r| Point {
@@ -3288,11 +3396,11 @@ async fn load_leaderboard_rows(
             "SELECT r.repo, COALESCE(r.star_count, 0) AS stars, COALESCE(v.velocity, 0) AS velocity \
              FROM repos r \
              LEFT JOIN LATERAL ( \
-                 SELECT COUNT(*) AS velocity FROM repo_stargazers s \
+                 SELECT COUNT(*) AS velocity FROM active_repo_star_history s \
                  WHERE s.repo = r.repo \
                    AND s.starred_at >= NOW() - make_interval(days => $3) \
              ) v ON TRUE \
-             WHERE r.stargazers_complete = TRUE AND r.missing = FALSE \
+             WHERE r.history_complete = TRUE AND r.missing = FALSE \
                AND r.star_count IS NOT NULL \
              ORDER BY r.star_count DESC, r.repo ASC \
              LIMIT $1 OFFSET $2"
@@ -3304,11 +3412,11 @@ async fn load_leaderboard_rows(
             "SELECT r.repo, COALESCE(r.star_count, 0) AS stars, v.velocity \
              FROM repos r \
              JOIN ( \
-                 SELECT repo, COUNT(*) AS velocity FROM repo_stargazers \
+                 SELECT repo, COUNT(*) AS velocity FROM active_repo_star_history \
                  WHERE starred_at >= NOW() - make_interval(days => $3) \
                  GROUP BY repo \
              ) v ON v.repo = r.repo \
-             WHERE r.stargazers_complete = TRUE AND r.missing = FALSE \
+             WHERE r.history_complete = TRUE AND r.missing = FALSE \
              ORDER BY v.velocity DESC, r.repo ASC \
              LIMIT $1 OFFSET $2"
         }
@@ -3598,6 +3706,21 @@ fn peer_is_trusted(peer: IpAddr) -> bool {
 /// forwarding headers.
 #[derive(Debug, Clone, Copy)]
 struct CloudflareIpKeyExtractor;
+
+/// Resolve a client IP with exactly the same trusted-proxy policy as the
+/// request governors. Long-lived handlers use this to apply concurrency
+/// limits that cannot be represented by a token-bucket admission layer.
+pub(crate) fn request_client_ip(
+    headers: &HeaderMap,
+    connect_info: Option<ConnectInfo<SocketAddr>>,
+) -> Option<IpAddr> {
+    let mut request = axum::http::Request::new(());
+    *request.headers_mut() = headers.clone();
+    if let Some(connect_info) = connect_info {
+        request.extensions_mut().insert(connect_info);
+    }
+    CloudflareIpKeyExtractor.extract(&request).ok()
+}
 
 impl KeyExtractor for CloudflareIpKeyExtractor {
     type Key = IpAddr;
@@ -4103,6 +4226,19 @@ mod tests {
             CardQuery::default().repo_options().width,
             crate::cards::REPO_CARD_DEFAULT_WIDTH
         );
+    }
+
+    #[test]
+    fn og_star_total_uses_metadata_when_timeline_is_unavailable() {
+        assert_eq!(best_og_star_total(&[], Some(246_580)), 246_580);
+        assert_eq!(best_og_star_total(&[], Some(-1)), 0);
+
+        let series = vec![Point {
+            at: chrono::DateTime::UNIX_EPOCH,
+            stars: 120,
+        }];
+        assert_eq!(best_og_star_total(&series, Some(125)), 125);
+        assert_eq!(best_og_star_total(&series, Some(100)), 120);
     }
 
     #[test]

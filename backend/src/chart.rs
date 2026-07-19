@@ -15,7 +15,7 @@
 //! Theme colors are baked as concrete hex (no CSS vars) so the SVG renders
 //! correctly when embedded as an `<img>` regardless of OS / page theme.
 //! Series colors come from a shared categorical palette, index 0 = brand
-//! lime. See `theme.rs` for the per-element fg/muted/grid colors.
+//! ink. See `theme.rs` for the per-element fg/muted/grid colors.
 
 use chrono::{DateTime, Datelike, Utc};
 use serde::Serialize;
@@ -83,6 +83,9 @@ pub struct ChartConfig {
     pub height: u32,
     pub padding: u32,
     pub repo: String,
+    /// Human-readable cumulative metric. Exact GitHub snapshots use
+    /// "stars"; GH Archive WatchEvents use "public star actions".
+    pub metric_label: String,
     /// Animation duration in seconds for the line drawing in. Only the
     /// single-repo [`render_svg`] uses this when animation is enabled.
     pub draw_seconds: f32,
@@ -95,20 +98,21 @@ impl Default for ChartConfig {
             height: 600,
             padding: 56,
             repo: String::new(),
+            metric_label: "stars".to_string(),
             draw_seconds: 0.22,
         }
     }
 }
 
-/// Categorical series palette. Index 0 is brand lime; subsequent indices
-/// cycle through distinct hues. Light and dark variants are tuned for
-/// contrast against the respective backgrounds. Series order = input
-/// order, so a repo's color is stable as long as the slug list is.
+/// Categorical series palette. The product is deliberately monochrome:
+/// light embeds run from ink to mid-gray, while dark embeds reverse that
+/// relationship. Every tone keeps usable contrast against its canvas and
+/// the stable series order keeps a repo's treatment deterministic.
 pub const PALETTE_LIGHT: [&str; 8] = [
-    "#65a30d", "#2563eb", "#db2777", "#d97706", "#0891b2", "#7c3aed", "#dc2626", "#4d7c0f",
+    "#0a0a0a", "#262626", "#404040", "#525252", "#626262", "#737373", "#7f7f7f", "#8a8a8a",
 ];
 pub const PALETTE_DARK: [&str; 8] = [
-    "#a3e635", "#60a5fa", "#f472b6", "#fbbf24", "#22d3ee", "#a78bfa", "#f87171", "#84cc16",
+    "#fafafa", "#e5e5e5", "#d4d4d4", "#c4c4c4", "#b8b8b8", "#a3a3a3", "#939393", "#828282",
 ];
 
 /// The categorical palette for `theme`. `palette(theme)[i % 8]` is the
@@ -209,7 +213,7 @@ fn render_single_svg(
     let axis_lines = render_axes(cfg, &x_ticks, &y_ticks, opts.axis, &x_at, &y_at, theme);
 
     let total = series.last().unwrap().stars;
-    let subtitle_text = format!("{} stars", fmt_count(total));
+    let subtitle_text = format!("{} {}", fmt_count(total), cfg.metric_label);
 
     // `<animate>` is emitted only for an explicit on-site opt-in. Public
     // embed URLs are static by default.
@@ -231,7 +235,7 @@ fn render_single_svg(
         String::new()
     };
     format!(
-        r##"<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 {w} {h}" role="img" aria-label="Star history for {repo}">
+        r##"<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 {w} {h}" role="img" aria-label="Cumulative {metric_label} for {repo}">
   <style><![CDATA[
     .title {{ fill: {fg}; font: 600 18px ui-sans-serif, system-ui, sans-serif; }}
     .subtitle {{ fill: {muted}; font: 13px ui-sans-serif, system-ui, sans-serif; }}
@@ -269,6 +273,7 @@ fn render_single_svg(
         motion = motion,
         axis_lines = axis_lines,
         subtitle = escape_xml(&subtitle_text),
+        metric_label = escape_xml(&cfg.metric_label),
         footer_x = geom.w - geom.pad,
         footer_y = geom.h - 12.0,
     )
@@ -278,7 +283,7 @@ fn render_single_svg(
 
 /// Plot several repos' star histories on shared axes, with a legend
 /// (slug + color swatch). `series_per_repo` is `(slug, points)` in the
-/// order the caller wants them colored — index 0 gets the brand lime.
+/// order the caller wants them treated — index 0 gets the strongest ink.
 ///
 /// Output is intentionally **static**: no SMIL animation, because GitHub
 /// sanitizes `<animate>` out of embedded SVGs and an animated overlay
@@ -421,7 +426,7 @@ pub struct OverlayConfig {
 }
 
 /// Render the "stars vs. real usage" overlay: cumulative **stars** on the
-/// left y-axis (brand lime, palette index 0) and cumulative **downloads**
+/// left y-axis (primary ink, palette index 0) and cumulative **downloads**
 /// on a **right-hand secondary y-axis** (palette index 1), sharing the x
 /// time-axis. Dual-axis legend; both axis scales are labeled in their
 /// series color so the reader knows which line maps to which scale.
@@ -1070,7 +1075,7 @@ mod tests {
     }
 
     #[test]
-    fn render_svg_one_line_with_brand_lime_and_animation() {
+    fn render_svg_one_line_with_brand_ink_and_animation() {
         let arrivals: Vec<_> = (0..10).map(|i| at(i * 86_400)).collect();
         let series = cumulative_series(&arrivals);
         let svg = render_svg(
@@ -1082,8 +1087,8 @@ mod tests {
             &crate::theme::LIGHT,
             &animated_opts(),
         );
-        // Light-theme brand lime is index 0 of the light palette.
-        assert!(svg.contains("#65a30d"));
+        // Light-theme brand ink is index 0 of the light palette.
+        assert!(svg.contains("#0a0a0a"));
         // Exactly one line → exactly one <animate>.
         assert_eq!(svg.matches("<animate ").count(), 1);
         assert!(svg.contains(r#"dur="0.22s""#));
@@ -1162,13 +1167,13 @@ mod tests {
         assert!(!light.contains("<animate"));
         assert!(!dark.contains("<animate"));
         assert!(light.contains(r##"fill="#ffffff""##));
-        assert!(dark.contains(r##"fill="#0d1117""##));
+        assert!(dark.contains(r##"fill="#0a0a0a""##));
         assert!(light.contains(r#"stroke-dashoffset="0""#));
         assert!(dark.contains(r#"stroke-dashoffset="0""#));
     }
 
     #[test]
-    fn render_svg_dark_theme_uses_dark_lime() {
+    fn render_svg_dark_theme_uses_light_ink() {
         let series = cumulative_series(&[at(1), at(2)]);
         let svg = render_svg(
             &series,
@@ -1176,7 +1181,7 @@ mod tests {
             &crate::theme::DARK,
             &ChartOpts::default(),
         );
-        assert!(svg.contains("#a3e635"));
+        assert!(svg.contains("#fafafa"));
         assert!(!svg.contains("#65a30d"));
     }
 
@@ -1230,16 +1235,16 @@ mod tests {
             &ChartOpts::default(),
         );
         // First two light palette colors must appear (series 0 and 1).
-        assert!(light.contains("#65a30d"));
-        assert!(light.contains("#2563eb"));
+        assert!(light.contains("#0a0a0a"));
+        assert!(light.contains("#262626"));
         let dark = render_multi_svg(
             &series,
             &ChartConfig::default(),
             &crate::theme::DARK,
             &ChartOpts::default(),
         );
-        assert!(dark.contains("#a3e635"));
-        assert!(dark.contains("#60a5fa"));
+        assert!(dark.contains("#fafafa"));
+        assert!(dark.contains("#e5e5e5"));
     }
 
     fn cum_dl(days_vals: &[(i64, u64)]) -> Vec<DownloadCumPoint> {
@@ -1267,9 +1272,9 @@ mod tests {
         assert!(!a.contains("<animate"));
         // Deterministic.
         assert_eq!(a, b);
-        // Both series colors present (left = lime index 0, right = index 1).
-        assert!(a.contains("#65a30d"));
-        assert!(a.contains("#2563eb"));
+        // Both monochrome series colors are present.
+        assert!(a.contains("#0a0a0a"));
+        assert!(a.contains("#262626"));
         // Dual-axis legend carries both labels.
         assert!(a.contains("stars"));
         assert!(a.contains("npm downloads"));
@@ -1293,7 +1298,7 @@ mod tests {
         );
         assert!(svg.contains("no package downloads found"));
         // Stars line still drawn.
-        assert!(svg.contains("#65a30d"));
+        assert!(svg.contains("#0a0a0a"));
         // No downloads line color when there's no downloads series.
         assert!(svg.starts_with("<svg"));
     }
@@ -1313,8 +1318,8 @@ mod tests {
             &DARK,
             &ChartOpts::default(),
         );
-        assert!(svg.contains("#a3e635")); // dark stars
-        assert!(svg.contains("#60a5fa")); // dark downloads (index 1)
+        assert!(svg.contains("#fafafa")); // dark stars
+        assert!(svg.contains("#e5e5e5")); // dark downloads (index 1)
         assert!(!svg.contains("var(--"));
     }
 

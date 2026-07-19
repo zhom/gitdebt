@@ -1,18 +1,25 @@
-import { useEffect, useMemo } from "react";
+import { useMemo } from "react";
 
-import { BadgeStudio } from "@/components/BadgeStudio";
 import { ChartViewer } from "@/components/ChartViewer";
+import { ReportShare } from "@/components/ReportShare";
 import { RepoHero } from "@/components/RepoHero";
 import { StatCard } from "@/components/StatCard";
 import { UsageSection } from "@/components/UsageSection";
 
 const SLUG_RE = /^([A-Za-z0-9._-]+)\/([A-Za-z0-9._-]+)$/;
 
-const STATS = [
-  ["bug-magnets", "Bug-magnet files"],
-  ["top-files", "Most-changed files"],
-  ["contributors", "Contributors"],
+const PRIMARY_STATS = [
+  ["bug-magnets", "Where fixes cluster"],
+  ["top-files", "Files carrying the churn"],
+  ["bus-factor", "Knowledge concentration"],
+  ["commit-trend", "Maintenance pulse"],
+] as const;
+
+const SECONDARY_STATS = [
+  ["contributors", "Contributor distribution"],
   ["heatmap", "Commit activity"],
+  ["lines", "Language footprint"],
+  ["todo-trend", "TODO and FIXME trend"],
 ] as const;
 
 function selectedRepo(): { owner: string; repo: string } | null {
@@ -26,23 +33,9 @@ function selectedRepo(): { owner: string; repo: string } | null {
 export function LiveRepoReport({ apiBase }: { apiBase: string }) {
   const selected = useMemo(selectedRepo, []);
 
-  useEffect(() => {
-    if (!selected) return;
-    const controller = new AbortController();
-    void fetch(
-      `${apiBase}/api/repos/${selected.owner}/${selected.repo}/analyze-history`,
-      {
-        method: "POST",
-        credentials: "omit",
-        signal: controller.signal,
-      },
-    ).catch(() => undefined);
-    return () => controller.abort();
-  }, [apiBase, selected]);
-
   if (!selected) {
     return (
-      <div className="card-panel p-6">
+      <div className="border-y border-border py-8">
         <h1 className="text-2xl font-semibold tracking-tight">
           Choose a public GitHub repository
         </h1>
@@ -64,7 +57,7 @@ export function LiveRepoReport({ apiBase }: { apiBase: string }) {
   const repoBase = `${apiBase}/api/repos/${owner}/${repo}`;
 
   return (
-    <div className="space-y-12">
+    <div className="space-y-14">
       <RepoHero
         owner={owner}
         repo={repo}
@@ -75,47 +68,80 @@ export function LiveRepoReport({ apiBase }: { apiBase: string }) {
       <ChartViewer
         apiBase={apiBase}
         path={`/api/repos/${owner}/${repo}/chart.svg`}
-        alt={`Star history of ${slug}`}
-        caption="Cumulative star history"
-        embedLink={`https://gitdebt.com/${slug}`}
-        label={slug}
+        alt={`Star activity history of ${slug}`}
+        caption="Cumulative star activity"
+        priority
+        liveRepo={slug}
       />
 
-      <section className="space-y-5">
-        <header className="space-y-1">
+      <section className="space-y-6">
+        <header className="max-w-2xl space-y-2">
           <p className="font-mono text-xs tracking-wide text-muted-foreground uppercase">
-            Repository health
+            Maintenance signals
           </p>
-          <h2 className="text-2xl font-semibold tracking-tight">
-            Where the maintenance cost lives
+          <h2 className="text-2xl font-semibold tracking-tight text-balance sm:text-3xl">
+            What deserves attention first
           </h2>
+          <p className="text-base leading-relaxed text-pretty text-muted-foreground">
+            Fix concentration, file churn, ownership risk, and maintenance
+            cadence are the clearest starting points for understanding this
+            codebase.
+          </p>
         </header>
         <div className="grid gap-5 lg:grid-cols-2">
-          {STATS.map(([name, label]) => (
+          {PRIMARY_STATS.map(([name, label]) => (
             <StatCard
               key={name}
               src={`${repoBase}/stats/${name}.svg`}
               alt={`${label} for ${slug}`}
               caption={label}
-              embedLink={`https://gitdebt.com/${slug}`}
+              priority
+              liveRepo={slug}
             />
           ))}
         </div>
+        <details className="group border-y border-border">
+          <summary className="flex min-h-14 cursor-pointer list-none items-center justify-between gap-4 px-5 py-3 text-sm font-medium focus-visible:outline-2 focus-visible:-outline-offset-2 focus-visible:outline-ring [&::-webkit-details-marker]:hidden">
+            Four more repository signals
+            <span
+              className="font-mono text-lg text-muted-foreground transition-transform duration-150 group-open:rotate-45 motion-reduce:transition-none"
+              aria-hidden="true"
+            >
+              +
+            </span>
+          </summary>
+          <div className="grid gap-5 border-t border-border py-5 lg:grid-cols-2">
+            {SECONDARY_STATS.map(([name, label]) => (
+              <StatCard
+                key={name}
+                src={`${repoBase}/stats/${name}.svg`}
+                alt={`${label} for ${slug}`}
+                caption={label}
+                liveRepo={slug}
+              />
+            ))}
+          </div>
+        </details>
       </section>
 
-      <UsageSection owner={owner} repo={repo} apiBase={apiBase} />
-
-      <section className="space-y-5">
-        <header className="space-y-1">
+      <section className="space-y-6">
+        <header className="max-w-2xl space-y-2">
           <p className="font-mono text-xs tracking-wide text-muted-foreground uppercase">
-            README badge
+            Adoption
           </p>
-          <h2 className="text-2xl font-semibold tracking-tight">
-            Make the signal shareable
+          <h2 className="text-2xl font-semibold tracking-tight text-balance sm:text-3xl">
+            Attention versus real usage
           </h2>
         </header>
-        <BadgeStudio owner={owner} repo={repo} apiBase={apiBase} />
+        <UsageSection
+          owner={owner}
+          repo={repo}
+          apiBase={apiBase}
+          showEmbed={false}
+        />
       </section>
+
+      <ReportShare owner={owner} repo={repo} apiBase={apiBase} />
     </div>
   );
 }

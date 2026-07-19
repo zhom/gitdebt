@@ -44,7 +44,7 @@ export function RepoLookup() {
     <div className="mx-auto w-full max-w-xl">
       <form onSubmit={onSubmit} className="flex flex-col gap-3 sm:flex-row">
         <div
-          className="flex flex-1 items-center rounded-md border border-input bg-card font-mono text-base shadow-xs focus-within:outline-2 focus-within:outline-offset-2 focus-within:outline-ring sm:text-sm dark:shadow-none"
+          className="flex flex-1 items-center rounded-md border border-input bg-card font-mono text-base focus-within:outline-2 focus-within:outline-offset-2 focus-within:outline-ring sm:text-sm"
           data-invalid={error ? "" : undefined}
         >
           <label htmlFor="repo-lookup" className="pl-3.5 text-muted-foreground select-none">
@@ -104,7 +104,7 @@ export function RepoLookup() {
             key={example}
             type="button"
             onClick={() => pick(example)}
-            className="min-h-11 rounded-md border border-border bg-card px-2.5 py-2 font-mono text-foreground/80 shadow-xs hover:bg-accent hover:text-accent-foreground active:bg-accent/70 sm:min-h-0 sm:py-1 dark:shadow-none"
+            className="min-h-11 rounded-md border border-border bg-card px-2.5 py-2 font-mono text-foreground/80 hover:bg-accent hover:text-accent-foreground active:bg-accent/70 sm:min-h-0 sm:py-1"
           >
             {example}
           </button>

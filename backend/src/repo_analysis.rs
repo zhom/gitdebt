@@ -127,7 +127,8 @@ pub async fn enqueue(db: &Db, repo: &str) -> Result<EnqueueOutcome> {
 pub async fn reset_inflight_on_startup(db: &Db) -> Result<u64> {
     let res = sqlx::query(
         "UPDATE repo_analysis_queue SET status = 'pending', worker_id = NULL, claimed_at = NULL \
-         WHERE status = 'in_progress'",
+         WHERE status = 'in_progress' \
+           AND (claimed_at IS NULL OR claimed_at < NOW() - INTERVAL '2 hours')",
     )
     .execute(&db.pool)
     .await?;
@@ -207,6 +208,7 @@ async fn claim_one(db: &Db, worker_id: &str) -> Result<Option<String>> {
          WHERE repo = ( \
             SELECT repo FROM repo_analysis_queue \
             WHERE status = 'pending' \
+               OR (status = 'in_progress' AND claimed_at < NOW() - INTERVAL '2 hours') \
             ORDER BY enqueued_at FOR UPDATE SKIP LOCKED LIMIT 1 \
          ) \
          RETURNING repo",

@@ -33,6 +33,7 @@ const GITHUB_TOKEN_URL: &str = "https://github.com/login/oauth/access_token";
 const GITHUB_USER_URL: &str = "https://api.github.com/user";
 const SESSION_COOKIE: &str = "session";
 const CSRF_COOKIE: &str = "oauth_csrf";
+const RETURN_TO_COOKIE: &str = "oauth_return_to";
 const SESSION_TTL_DAYS: i64 = 30;
 
 /// Configuration loaded from env. Optional — without these, the auth
@@ -204,6 +205,7 @@ impl IntoResponse for AuthError {
 
 async fn login_start(
     State(state): State<ApiState>,
+    Query(query): Query<LoginStartQuery>,
     jar: CookieJar,
 ) -> Result<(CookieJar, Redirect), AuthError> {
     let cfg = state.gh_app.as_ref().ok_or(AuthError::NotConfigured)?;
@@ -211,6 +213,13 @@ async fn login_start(
     let csrf_cookie = build_cookie(CSRF_COOKIE, csrf.clone(), cfg.cookie_secure)
         .max_age(time::Duration::minutes(10))
         .build();
+    let return_to_cookie = build_cookie(
+        RETURN_TO_COOKIE,
+        safe_return_to(query.return_to.as_deref()),
+        cfg.cookie_secure,
+    )
+    .max_age(time::Duration::minutes(10))
+    .build();
 
     let mut auth = Url::parse(GITHUB_AUTHORIZE_URL).expect("static url");
     auth.query_pairs_mut()
@@ -218,7 +227,15 @@ async fn login_start(
         .append_pair("redirect_uri", &cfg.redirect_uri)
         .append_pair("state", &csrf);
 
-    Ok((jar.add(csrf_cookie), Redirect::temporary(auth.as_str())))
+    Ok((
+        jar.add(csrf_cookie).add(return_to_cookie),
+        Redirect::temporary(auth.as_str()),
+    ))
+}
+
+#[derive(Default, Deserialize)]
+struct LoginStartQuery {
+    return_to: Option<String>,
 }
 
 #[derive(Deserialize)]
@@ -369,11 +386,15 @@ async fn login_callback(
         .max_age(time::Duration::days(SESSION_TTL_DAYS))
         .build();
 
-    // Clear the CSRF cookie now that we've used it.
+    let return_to = safe_return_to(jar.get(RETURN_TO_COOKIE).map(Cookie::value));
+    let destination = format!("{}{return_to}", state.frontend_origin);
+
+    // Clear the short-lived OAuth cookies now that we've used them.
     let jar = jar
         .remove(removal_cookie(CSRF_COOKIE, cfg.cookie_secure))
+        .remove(removal_cookie(RETURN_TO_COOKIE, cfg.cookie_secure))
         .add(session_cookie);
-    Ok((jar, Redirect::to(&state.frontend_origin)))
+    Ok((jar, Redirect::to(&destination)))
 }
 
 async fn logout(State(state): State<ApiState>, jar: CookieJar) -> (CookieJar, Redirect) {
@@ -490,6 +511,25 @@ fn random_hex(bytes: usize) -> String {
     hex::encode(buf)
 }
 
+fn safe_return_to(raw: Option<&str>) -> String {
+    let base = Url::parse("https://gitdebt.invalid/").expect("static URL");
+    let Some(raw) = raw.filter(|value| value.starts_with('/') && !value.starts_with("//")) else {
+        return "/".to_string();
+    };
+    let Ok(joined) = base.join(raw) else {
+        return "/".to_string();
+    };
+    if joined.origin() != base.origin() || joined.fragment().is_some() {
+        return "/".to_string();
+    }
+    let mut target = joined.path().to_string();
+    if let Some(query) = joined.query() {
+        target.push('?');
+        target.push_str(query);
+    }
+    target
+}
+
 fn constant_time_eq(a: &[u8], b: &[u8]) -> bool {
     if a.len() != b.len() {
         return false;
@@ -541,6 +581,17 @@ mod tests {
         assert_eq!(cookie.path(), Some("/"));
         assert!(cookie.secure().unwrap_or(false));
         assert_eq!(cookie.max_age(), Some(time::Duration::ZERO));
+    }
+
+    #[test]
+    fn oauth_return_path_stays_on_the_frontend_origin() {
+        assert_eq!(
+            safe_return_to(Some("/facebook/react?ref=login")),
+            "/facebook/react?ref=login"
+        );
+        assert_eq!(safe_return_to(Some("https://evil.example")), "/");
+        assert_eq!(safe_return_to(Some("//evil.example/path")), "/");
+        assert_eq!(safe_return_to(Some("/safe#https://evil.example")), "/");
     }
 
     #[tokio::test]

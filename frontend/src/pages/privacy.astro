@@ -12,10 +12,10 @@ const apiBase = staticApiBase();
 
 const title = "Privacy policy · gitdebt";
 const description =
-  "How gitdebt handles anonymous extension activity, public repository data, and operational request logs. We never sell your data.";
+  "How gitdebt handles optional GitHub sign-in, anonymous extension activity, public repository data, and operational logs.";
 const ogImage = `${apiBase}/api/og.png`;
 
-const updated = "2026-07-18";
+const updated = "2026-07-19";
 
 const collected = [
   {
@@ -25,6 +25,10 @@ const collected = [
   {
     term: "Public repository data",
     desc: "We fetch and cache public GitHub data — stargazer timestamps, commit history, contributors, language lines, and similar metadata — to render star-history and repo-debt charts. We only ever read public data.",
+  },
+  {
+    term: "Optional GitHub sign-in",
+    desc: "If you choose to sign in, GitHub gives us your public profile identity and an OAuth token. We store the token encrypted at rest and use an HTTP-only signed session cookie to keep you signed in. Sign-in currently provides a one-click link to your profile-wide report; public repository reports do not require it. We do not request private-repository, write, or account-management access.",
   },
   {
     term: "Operational logs",
@@ -43,7 +47,7 @@ const principles = [
   },
   {
     term: "Minimal retention",
-    desc: "Cached public repo data is kept to serve charts quickly and refreshed over time. The extension's reported star counts are discarded after comparison and never persisted.",
+    desc: "Cached public repo data is kept to serve charts quickly and refreshed over time. The extension's reported star counts are discarded after comparison and never persisted. Signing out clears your browser session; you can ask us to remove the stored OAuth record by opening a private security advisory.",
   },
 ];
 
@@ -126,9 +130,10 @@ const jsonLd = {
         <section class="space-y-4">
           <h2 class="text-xl font-semibold tracking-tight">Your choices</h2>
           <p class="text-base text-pretty text-muted-foreground sm:text-sm">
-            gitdebt does not require an account. To stop the browser extension
-            from sending repository views, turn off its automatic panel or
-            uninstall the extension.
+            gitdebt does not require an account. You can sign out at any time
+            from the header menu. To stop the browser extension from sending
+            repository views, turn off its automatic panel or uninstall the
+            extension.
           </p>
         </section>
 

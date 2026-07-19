@@ -272,7 +272,7 @@ pub async fn load_day_deltas_by_repo(
     }
     let rows = sqlx::query(
         "SELECT repo, (starred_at AT TIME ZONE 'UTC')::date AS day, COUNT(*) AS delta \
-         FROM repo_stargazers \
+         FROM active_repo_star_history \
          WHERE repo = ANY($1) \
          GROUP BY 1, 2 \
          ORDER BY 1, 2",
@@ -302,11 +302,13 @@ pub async fn load_repo_states(db: &Db, repos: &[String]) -> Result<HashMap<Strin
     if repos.is_empty() {
         return Ok(HashMap::new());
     }
-    let rows =
-        sqlx::query("SELECT repo, stargazers_complete, missing FROM repos WHERE repo = ANY($1)")
-            .bind(repos)
-            .fetch_all(&db.pool)
-            .await?;
+    let rows = sqlx::query(
+        "SELECT repo, history_complete AS stargazers_complete, missing \
+             FROM repos WHERE repo = ANY($1)",
+    )
+    .bind(repos)
+    .fetch_all(&db.pool)
+    .await?;
     let mut out = HashMap::with_capacity(rows.len());
     for row in rows {
         let repo: String = row.try_get("repo")?;

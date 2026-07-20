@@ -919,12 +919,20 @@ fn parse_event_row(row: &TableRow) -> Result<GhArchiveStarEvent, GhArchiveError>
         }
         None => None,
     };
-    let repository = cell_string(&row.f[1].v)
-        .filter(|value| is_valid_repo_name(value))
-        .ok_or_else(|| {
-            GhArchiveError::InvalidResponse("repository was missing or malformed".to_string())
-        })?
-        .to_string();
+    // Old GH Archive events occasionally retain a missing or malformed
+    // repository name after a rename/deletion. A positive GitHub repository
+    // ID is the authoritative identity in that case, so preserve the event
+    // and leave the display-only name empty. Rows without an ID still require
+    // a validated slug because name matching is their only identity.
+    let repository = match cell_string(&row.f[1].v).filter(|value| is_valid_repo_name(value)) {
+        Some(value) => value.to_string(),
+        None if github_repo_id.is_some() => String::new(),
+        None => {
+            return Err(GhArchiveError::InvalidResponse(
+                "repository identity was missing or malformed".to_string(),
+            ));
+        }
+    };
     let source_event_id = cell_string(&row.f[2].v)
         .filter(|value| !value.trim().is_empty())
         .map(str::to_string);
@@ -1458,6 +1466,33 @@ mod tests {
         let mut reversed = vec![legacy, first.clone()];
         sort_events(&mut reversed);
         assert_eq!(reversed[0], first);
+    }
+
+    #[test]
+    fn response_row_uses_repository_id_when_archive_name_is_bad() {
+        let with_id: TableRow = serde_json::from_value(json!({
+            "f": [
+                {"v": "42"},
+                {"v": null},
+                {"v": "evt-42"},
+                {"v": "2026-01-02T03:04:05.123456Z"}
+            ]
+        }))
+        .unwrap();
+        let parsed = parse_event_row(&with_id).unwrap();
+        assert_eq!(parsed.github_repo_id, Some(42));
+        assert!(parsed.repository.is_empty());
+
+        let without_id: TableRow = serde_json::from_value(json!({
+            "f": [
+                {"v": null},
+                {"v": "not-a-slug"},
+                {"v": "evt-legacy"},
+                {"v": "2026-01-02T03:04:05.123456Z"}
+            ]
+        }))
+        .unwrap();
+        assert!(parse_event_row(&without_id).is_err());
     }
 
     #[test]

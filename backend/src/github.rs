@@ -71,13 +71,6 @@ impl GithubClient {
         Self::with_token("default", token, rate)
     }
 
-    /// Construct a client tied to a specific user's OAuth access token.
-    /// Each user's token has its own 5k/hr GitHub budget and gets its own
-    /// `RateLimitTracker` source bucket.
-    pub fn for_user_token(token: &str, rate: Arc<RateLimitTracker>) -> Result<Self, GithubError> {
-        Self::with_token("user", Some(token), rate)
-    }
-
     fn with_token(
         kind: &str,
         token: Option<&str>,

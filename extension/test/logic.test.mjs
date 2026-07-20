@@ -33,7 +33,9 @@ const parseCount = extractFn(contentSrc, "parseCount");
 
 test("analysis responses have safe terminal and pending states", () => {
   assert.equal(classifyAnalyze({ not_found: true }), "not_found");
-  assert.equal(classifyAnalyze({ history_unavailable: true }), "unavailable");
+  assert.equal(classifyAnalyze({ history_unavailable: true }), "retrying");
+  assert.equal(classifyAnalyze({ history_status: "retrying" }), "retrying");
+  assert.equal(classifyAnalyze({ history_status: "not_public" }), "not_found");
   assert.equal(classifyAnalyze({ backfilling: true }), "backfilling");
   assert.equal(
     classifyAnalyze({ history_complete: true, pending: false, queued: 42 }),

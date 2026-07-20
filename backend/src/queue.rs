@@ -31,18 +31,15 @@ use sqlx::Row;
 
 use crate::db::Db;
 
-/// Maximum number of attempts before a transiently-failing job is parked in
-/// the terminal `dead` status. Without a cap, a repo that fails every claim
-/// (e.g. a transient error that's actually permanent) would retry forever,
-/// burning the GitHub budget on every pass. 5 attempts with the worker's
-/// exponential backoff is enough to ride out a genuine blip.
-pub const MAX_ATTEMPTS: i64 = 5;
-
-/// Whether the job should be parked `dead` after this failure, given the
-/// attempt count *prior* to the failure. Mirrors the `attempts + 1 >= MAX`
-/// guard in [`fail`]'s SQL so the boundary is unit-testable without a DB.
-pub fn should_park_dead(attempts_before: i64) -> bool {
-    attempts_before + 1 >= MAX_ATTEMPTS
+/// Durable retry delay for a repository-specific transient failure.
+///
+/// Jobs never become terminal merely because an upstream service or the
+/// network failed repeatedly. The delay grows from 30 seconds to one hour,
+/// which bounds request spend without lying to readers that history can never
+/// arrive.
+pub fn retry_delay_seconds(attempts_before: i64) -> i64 {
+    let shift = attempts_before.clamp(0, 7) as u32;
+    (30_i64.saturating_mul(1_i64 << shift)).min(3_600)
 }
 
 /// A claimed job and its resumable backfill cursor.
@@ -65,14 +62,9 @@ pub struct Job {
 /// `view_count`); higher drains first.
 pub async fn enqueue(db: &Db, repo: &str, priority: i64) -> Result<()> {
     let now = Utc::now();
-    // Dedup + terminal-state protection. A `dead` row is TERMINAL: it was
-    // parked either because it exhausted its attempts, is a 404 tombstone, or
-    // is `restricted` (durable 403 / stargazer restriction). The extension
-    // re-fires enqueue on every page view, so if this upsert flipped `dead`
-    // back to `pending` the worker would re-attempt the repo forever, burning
-    // the shared GitHub budget on each view — exactly what `fail`/`mark_dead`
-    // exist to prevent. Only `in_progress` and `dead` are preserved; anything
-    // else (a `pending` row, or a fresh insert) resolves to `pending`.
+    // A `dead` row is reserved for a confirmed permanent condition (currently
+    // a 404 tombstone or the local-development legacy endpoint restriction).
+    // Transient failures stay pending with a durable `next_attempt_at`.
     sqlx::query(
         "INSERT INTO star_fetch_queue (repo, status, priority, enqueued_at) \
          VALUES ($1, 'pending', $2, $3) \
@@ -105,8 +97,7 @@ pub async fn is_active(db: &Db, repo: &str) -> Result<bool> {
 
 /// Count of jobs not yet finished (`pending` + `in_progress`). Surfaced
 /// as the `queued` field on the analyze response so the frontend can show
-/// queue depth / progress. `dead` rows are excluded — they're terminal and
-/// not "queued" in any meaningful sense.
+/// queue depth / progress.
 pub async fn pending_count(db: &Db) -> Result<i64> {
     let n: i64 = sqlx::query_scalar(
         "SELECT COUNT(*) FROM star_fetch_queue WHERE status IN ('pending', 'in_progress')",
@@ -141,18 +132,21 @@ pub async fn is_backfilling(db: &Db, repo: &str) -> Result<bool> {
     Ok(n > 0)
 }
 
-/// Whether a repo's star-history job reached a terminal failure. Restricted
-/// responses and exhausted transient retries both stop polling; 404s are
-/// reported separately through the repo tombstone.
-pub async fn history_unavailable(db: &Db, repo: &str) -> Result<bool> {
-    let unavailable: bool = sqlx::query_scalar(
+/// True when an active job has already failed at least once or was released
+/// by the shared archive provider circuit breaker. Public responses use this
+/// to distinguish a normal queue wait from a delayed retry without exposing
+/// internal error text.
+pub async fn is_retrying(db: &Db, repo: &str) -> Result<bool> {
+    let retrying: bool = sqlx::query_scalar(
         "SELECT EXISTS(SELECT 1 FROM star_fetch_queue \
-         WHERE repo = $1 AND status = 'dead')",
+         WHERE repo = $1 AND status IN ('pending', 'in_progress') \
+           AND (attempts > 0 OR last_error LIKE $2))",
     )
     .bind(repo)
+    .bind(format!("{PROVIDER_MARKER}%"))
     .fetch_one(&db.pool)
     .await?;
-    Ok(unavailable)
+    Ok(retrying)
 }
 
 /// On startup, requeue only expired `in_progress` claims. A rolling deploy can
@@ -180,7 +174,7 @@ pub async fn claim_one(db: &Db, worker_id: &str) -> Result<Option<Job>> {
          SET status = 'in_progress', worker_id = $1, claimed_at = $2 \
          WHERE repo = ( \
             SELECT repo FROM star_fetch_queue \
-            WHERE status = 'pending' \
+            WHERE (status = 'pending' AND next_attempt_at <= NOW()) \
                OR (status = 'in_progress' AND claimed_at < NOW() - INTERVAL '15 minutes') \
             ORDER BY priority DESC, enqueued_at \
             FOR UPDATE SKIP LOCKED LIMIT 1 \
@@ -207,12 +201,35 @@ pub async fn claim_one(db: &Db, worker_id: &str) -> Result<Option<Job>> {
 pub async fn claim_many(db: &Db, worker_id: &str, limit: usize) -> Result<Vec<Job>> {
     let limit = i64::try_from(limit.clamp(1, 1_000)).unwrap_or(1_000);
     let rows = sqlx::query(
-        "WITH selected AS ( \
-            SELECT repo FROM star_fetch_queue \
-            WHERE status = 'pending' \
-               OR (status = 'in_progress' AND claimed_at < NOW() - INTERVAL '15 minutes') \
-            ORDER BY priority DESC, enqueued_at \
-            FOR UPDATE SKIP LOCKED LIMIT $1 \
+        "WITH pivot AS ( \
+            SELECT COALESCE( \
+                       repos.archive_cursor, \
+                       GREATEST(DATE '2011-02-12', DATE_TRUNC('month', repos.created_at)::DATE), \
+                       DATE '2011-02-12' \
+                   ) AS archive_start \
+            FROM star_fetch_queue queue \
+            LEFT JOIN repos ON repos.repo = queue.repo \
+            WHERE (queue.status = 'pending' AND queue.next_attempt_at <= NOW()) \
+               OR (queue.status = 'in_progress' \
+                   AND queue.claimed_at < NOW() - INTERVAL '15 minutes') \
+            ORDER BY queue.priority DESC, queue.enqueued_at \
+            LIMIT 1 \
+         ), selected AS ( \
+            SELECT queue.repo FROM star_fetch_queue queue \
+            LEFT JOIN repos ON repos.repo = queue.repo \
+            CROSS JOIN pivot \
+            WHERE ( \
+                    (queue.status = 'pending' AND queue.next_attempt_at <= NOW()) \
+                    OR (queue.status = 'in_progress' \
+                        AND queue.claimed_at < NOW() - INTERVAL '15 minutes') \
+                  ) \
+              AND COALESCE( \
+                    repos.archive_cursor, \
+                    GREATEST(DATE '2011-02-12', DATE_TRUNC('month', repos.created_at)::DATE), \
+                    DATE '2011-02-12' \
+                  ) = pivot.archive_start \
+            ORDER BY queue.priority DESC, queue.enqueued_at \
+            FOR UPDATE OF queue SKIP LOCKED LIMIT $1 \
          ) \
          UPDATE star_fetch_queue AS queue \
          SET status = 'in_progress', worker_id = $2, claimed_at = $3 \
@@ -242,7 +259,8 @@ pub async fn claim_many(db: &Db, worker_id: &str, limit: usize) -> Result<Vec<Jo
 pub async fn requeue_archive_window(db: &Db, repo: &str) -> Result<()> {
     sqlx::query(
         "UPDATE star_fetch_queue SET partial = TRUE, worker_id = NULL, \
-            claimed_at = NULL, status = 'pending', last_error = NULL \
+            claimed_at = NULL, status = 'pending', attempts = 0, \
+            next_attempt_at = NOW(), last_error = NULL \
          WHERE repo = $1",
     )
     .bind(repo)
@@ -251,15 +269,50 @@ pub async fn requeue_archive_window(db: &Db, repo: &str) -> Result<()> {
     Ok(())
 }
 
-/// Re-open only jobs parked due to the retired GitHub stargazer-list
-/// restriction. Generic exhausted failures and 404 tombstones remain terminal.
-pub async fn revive_restricted_for_archive(db: &Db) -> Result<u64> {
+/// Re-open every non-missing job parked by an older release.
+///
+/// Historic versions charged shared BigQuery failures against each repository
+/// and eventually parked the entire queue. A configured archive source can
+/// retry those jobs safely; confirmed 404 tombstones remain terminal.
+pub async fn revive_retryable_for_archive(db: &Db) -> Result<u64> {
     let result = sqlx::query(
         "UPDATE star_fetch_queue SET status = 'pending', attempts = 0, \
-            partial = FALSE, next_page = 1, worker_id = NULL, claimed_at = NULL \
-         WHERE status = 'dead' AND last_error LIKE $1",
+            partial = FALSE, next_page = 1, next_attempt_at = NOW(), \
+            worker_id = NULL, claimed_at = NULL, last_error = NULL \
+         WHERE status = 'dead' \
+           AND NOT EXISTS ( \
+               SELECT 1 FROM repos \
+               WHERE repos.repo = star_fetch_queue.repo AND repos.missing = TRUE \
+           )",
     )
-    .bind(format!("{RESTRICTED_MARKER}%"))
+    .execute(&db.pool)
+    .await?;
+    Ok(result.rows_affected())
+}
+
+/// Release a whole archive batch after a shared provider/query failure.
+///
+/// The failure is not repository-specific, so it must not consume per-repo
+/// attempts. Keeping the next attempt durable prevents a restart from turning a
+/// provider outage into a hot loop.
+pub async fn release_archive_provider_error(
+    db: &Db,
+    repos: &[String],
+    err: &str,
+    delay_seconds: i64,
+) -> Result<u64> {
+    if repos.is_empty() {
+        return Ok(0);
+    }
+    let result = sqlx::query(
+        "UPDATE star_fetch_queue SET status = 'pending', worker_id = NULL, \
+            claimed_at = NULL, last_error = $1, \
+            next_attempt_at = NOW() + $2 * INTERVAL '1 second' \
+         WHERE repo = ANY($3)",
+    )
+    .bind(format!("{PROVIDER_MARKER} {err}"))
+    .bind(delay_seconds.clamp(1, 3_600))
+    .bind(repos)
     .execute(&db.pool)
     .await?;
     Ok(result.rows_affected())
@@ -281,7 +334,8 @@ pub async fn complete(db: &Db, repo: &str) -> Result<()> {
 pub async fn requeue_partial(db: &Db, repo: &str, next_page: u32) -> Result<()> {
     sqlx::query(
         "UPDATE star_fetch_queue SET partial = TRUE, \
-            next_page = $1, worker_id = NULL, claimed_at = NULL, status = 'pending' \
+            next_page = $1, worker_id = NULL, claimed_at = NULL, status = 'pending', \
+            attempts = 0, next_attempt_at = NOW(), last_error = NULL \
          WHERE repo = $2",
     )
     .bind(i64::from(next_page.max(1)))
@@ -291,35 +345,34 @@ pub async fn requeue_partial(db: &Db, repo: &str, next_page: u32) -> Result<()> 
     Ok(())
 }
 
-/// Record a transient failure: bump `attempts`, store the error, and
-/// return the row to `pending` so a later claim retries it (the worker
-/// applies exponential backoff between attempts). `partial` is preserved
-/// so a continuation that errors stays a continuation.
-///
-/// Once `attempts` reaches [`MAX_ATTEMPTS`] the row is parked in the
-/// terminal `dead` status instead of `pending`, so a permanently-failing
-/// repo stops consuming the GitHub budget. `claim_one` only selects
-/// `pending` rows, so `dead` rows are never picked up again (they're kept
-/// for debugging / the metrics surface). Returns `true` iff the job was
-/// parked dead.
-pub async fn fail(db: &Db, repo: &str, err: &str) -> Result<bool> {
-    let new_status: String = sqlx::query_scalar(
+/// Record a repository-specific transient failure and schedule a durable,
+/// exponentially delayed retry. Only explicit permanent classifications use
+/// [`mark_dead`].
+pub async fn fail(db: &Db, repo: &str, err: &str) -> Result<()> {
+    sqlx::query(
         "UPDATE star_fetch_queue SET \
             attempts = attempts + 1, \
             last_error = $1, \
             worker_id = NULL, \
             claimed_at = NULL, \
-            status = CASE WHEN attempts + 1 >= $2 THEN 'dead' ELSE 'pending' END \
-         WHERE repo = $3 \
-         RETURNING status",
+            status = 'pending', \
+            next_attempt_at = NOW() + CASE \
+                WHEN attempts <= 0 THEN INTERVAL '30 seconds' \
+                WHEN attempts = 1 THEN INTERVAL '1 minute' \
+                WHEN attempts = 2 THEN INTERVAL '2 minutes' \
+                WHEN attempts = 3 THEN INTERVAL '4 minutes' \
+                WHEN attempts = 4 THEN INTERVAL '8 minutes' \
+                WHEN attempts = 5 THEN INTERVAL '16 minutes' \
+                WHEN attempts = 6 THEN INTERVAL '32 minutes' \
+                ELSE INTERVAL '1 hour' \
+            END \
+         WHERE repo = $2",
     )
     .bind(err)
-    .bind(MAX_ATTEMPTS)
     .bind(repo)
-    .fetch_optional(&db.pool)
-    .await?
-    .unwrap_or_else(|| "pending".to_string());
-    Ok(new_status == "dead")
+    .execute(&db.pool)
+    .await?;
+    Ok(())
 }
 
 /// Park a job in the terminal `dead` status immediately, without bumping
@@ -349,6 +402,7 @@ pub async fn mark_dead(db: &Db, repo: &str, err: &str) -> Result<()> {
 /// genuine 404 by matching this prefix on a `dead` row whose `repos.missing`
 /// is `FALSE`, and present it as "restricted, not missing".
 pub const RESTRICTED_MARKER: &str = "restricted:";
+pub const PROVIDER_MARKER: &str = "provider:";
 
 /// Park a repo `dead` because its stargazer list is unavailable (empty-200
 /// or durable 403). Same terminal effect as [`mark_dead`] — the job stops
@@ -371,21 +425,12 @@ mod tests {
     use super::*;
 
     #[test]
-    fn park_dead_at_cap() {
-        // Attempts 0..=3 (→ 1..=4 after the bump) stay pending; the 5th
-        // failure (attempts_before = 4 → 5) crosses MAX_ATTEMPTS and parks.
-        assert!(!should_park_dead(0));
-        assert!(!should_park_dead(1));
-        assert!(!should_park_dead(2));
-        assert!(!should_park_dead(3));
-        assert!(should_park_dead(4));
-        assert!(should_park_dead(5));
-        assert!(should_park_dead(100));
-    }
-
-    #[test]
-    fn max_attempts_is_five() {
-        assert_eq!(MAX_ATTEMPTS, 5);
+    fn transient_retry_delay_is_bounded() {
+        assert_eq!(retry_delay_seconds(0), 30);
+        assert_eq!(retry_delay_seconds(1), 60);
+        assert_eq!(retry_delay_seconds(6), 1_920);
+        assert_eq!(retry_delay_seconds(7), 3_600);
+        assert_eq!(retry_delay_seconds(100), 3_600);
     }
 
     #[test]

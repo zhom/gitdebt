@@ -91,20 +91,19 @@ impl Drop for ClientPermit {
 enum ProgressPhase {
     Idle,
     Pending,
+    Retrying,
     Fetching,
     Backfilling,
     Analyzing,
     Complete,
     NotFound,
-    Restricted,
-    Failed,
 }
 
 impl ProgressPhase {
     fn active(self) -> bool {
         matches!(
             self,
-            Self::Pending | Self::Fetching | Self::Backfilling | Self::Analyzing
+            Self::Pending | Self::Retrying | Self::Fetching | Self::Backfilling | Self::Analyzing
         )
     }
 }
@@ -134,7 +133,9 @@ struct RawProgress {
     star_partial: bool,
     star_next_page: Option<i64>,
     star_last_error: Option<String>,
+    star_attempts: i64,
     analysis_status: Option<String>,
+    analysis_attempts: i32,
     analysis_complete: bool,
 }
 
@@ -155,26 +156,25 @@ impl ProgressSnapshot {
             };
         }
 
+        let star_retrying = raw.star_attempts > 0
+            || raw
+                .star_last_error
+                .as_deref()
+                .is_some_and(|error| error.starts_with(queue::PROVIDER_MARKER));
         let star_phase = match raw.star_status.as_deref() {
+            Some("pending") if star_retrying => ProgressPhase::Retrying,
             Some("pending" | "in_progress") if raw.star_partial => ProgressPhase::Backfilling,
             Some("pending") => ProgressPhase::Pending,
             Some("in_progress") => ProgressPhase::Fetching,
-            Some("dead")
-                if raw
-                    .star_last_error
-                    .as_deref()
-                    .is_some_and(queue::is_restricted_error) =>
-            {
-                ProgressPhase::Restricted
-            }
-            Some("dead") | Some(_) => ProgressPhase::Failed,
+            Some("dead") | Some(_) => ProgressPhase::Retrying,
             None if raw.stars_complete => ProgressPhase::Complete,
             None => ProgressPhase::Idle,
         };
         let analysis_phase = match raw.analysis_status.as_deref() {
+            Some("pending") if raw.analysis_attempts > 0 => ProgressPhase::Retrying,
             Some("pending") => ProgressPhase::Pending,
             Some("in_progress") => ProgressPhase::Analyzing,
-            Some("dead") | Some(_) => ProgressPhase::Failed,
+            Some("dead") | Some(_) => ProgressPhase::Retrying,
             None if raw.analysis_complete => ProgressPhase::Complete,
             None => ProgressPhase::Idle,
         };
@@ -187,12 +187,11 @@ impl ProgressSnapshot {
             ProgressPhase::Analyzing
         } else if star_phase == ProgressPhase::Fetching {
             ProgressPhase::Fetching
+        } else if star_phase == ProgressPhase::Retrying || analysis_phase == ProgressPhase::Retrying
+        {
+            ProgressPhase::Retrying
         } else if star_phase == ProgressPhase::Pending || analysis_phase == ProgressPhase::Pending {
             ProgressPhase::Pending
-        } else if star_phase == ProgressPhase::Restricted {
-            ProgressPhase::Restricted
-        } else if star_phase == ProgressPhase::Failed || analysis_phase == ProgressPhase::Failed {
-            ProgressPhase::Failed
         } else if star_phase == ProgressPhase::Complete || analysis_phase == ProgressPhase::Complete
         {
             // Either pipeline may be requested independently. The component
@@ -230,20 +229,23 @@ type ProgressRow = (
     Option<bool>,
     Option<i64>,
     Option<String>,
+    i64,
     Option<String>,
+    i32,
     bool,
 );
 
 async fn load_snapshot(state: &ApiState, repo: &str) -> Result<ProgressSnapshot, ApiError> {
     // One round-trip and one row: all joined columns are primary-key
-    // lookups. Error strings are read solely for restricted classification
-    // and never copied into the public payload.
+    // lookups. Error strings are read solely for retry classification and
+    // never copied into the public payload.
     let row: ProgressRow = sqlx::query_as(
         "SELECT \
             COALESCE(r.missing, FALSE), \
             COALESCE(r.history_complete, FALSE), \
             stars.status, stars.partial, stars.next_page, stars.last_error, \
-            analysis.status, \
+            COALESCE(stars.attempts, 0), analysis.status, \
+            COALESCE(analysis.attempts, 0), \
             EXISTS(SELECT 1 FROM repo_history history \
                    WHERE history.repo = $1 AND history.last_analyzed_at IS NOT NULL) \
          FROM (SELECT $1::TEXT AS repo) requested \
@@ -263,8 +265,10 @@ async fn load_snapshot(state: &ApiState, repo: &str) -> Result<ProgressSnapshot,
             star_partial: row.3.unwrap_or(false),
             star_next_page: row.4,
             star_last_error: row.5,
-            analysis_status: row.6,
-            analysis_complete: row.7,
+            star_attempts: row.6,
+            analysis_status: row.7,
+            analysis_attempts: row.8,
+            analysis_complete: row.9,
         },
     ))
 }
@@ -450,29 +454,29 @@ mod tests {
     }
 
     #[test]
-    fn restricted_marker_is_public_phase_but_error_detail_is_private() {
-        let detail = "restricted: upstream account-specific detail";
+    fn provider_retry_is_public_phase_but_error_detail_is_private() {
+        let detail = "provider: upstream account-specific detail";
         let value = snapshot(RawProgress {
-            star_status: Some("dead".into()),
+            star_status: Some("pending".into()),
             star_last_error: Some(detail.into()),
             ..RawProgress::default()
         });
-        assert_eq!(value.phase, ProgressPhase::Restricted);
-        assert!(value.terminal);
+        assert_eq!(value.phase, ProgressPhase::Retrying);
+        assert!(!value.terminal);
         let json = serde_json::to_string(&value).unwrap();
         assert!(!json.contains(detail));
         assert!(!json.contains("upstream"));
     }
 
     #[test]
-    fn generic_dead_job_is_failed_and_terminal() {
+    fn historic_dead_job_is_retrying_and_non_terminal() {
         let value = snapshot(RawProgress {
             analysis_status: Some("dead".into()),
             ..RawProgress::default()
         });
-        assert_eq!(value.phase, ProgressPhase::Failed);
-        assert_eq!(value.analysis.phase, ProgressPhase::Failed);
-        assert!(value.terminal);
+        assert_eq!(value.phase, ProgressPhase::Retrying);
+        assert_eq!(value.analysis.phase, ProgressPhase::Retrying);
+        assert!(!value.terminal);
     }
 
     #[test]

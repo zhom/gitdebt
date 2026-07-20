@@ -37,7 +37,6 @@ pub enum EnqueueOutcome {
     Enqueued,
     AlreadyActive,
     Fresh,
-    Dead,
     AtCapacity,
 }
 
@@ -73,16 +72,9 @@ pub async fn enqueue(db: &Db, repo: &str) -> Result<EnqueueOutcome> {
             .bind(repo)
             .fetch_optional(&mut *tx)
             .await?;
-    match status.as_deref() {
-        Some("pending" | "in_progress") => {
-            tx.commit().await?;
-            return Ok(EnqueueOutcome::AlreadyActive);
-        }
-        Some("dead") => {
-            tx.commit().await?;
-            return Ok(EnqueueOutcome::Dead);
-        }
-        _ => {}
+    if let Some("pending" | "in_progress") = status.as_deref() {
+        tx.commit().await?;
+        return Ok(EnqueueOutcome::AlreadyActive);
     }
 
     let fresh: bool = sqlx::query_scalar(
@@ -104,6 +96,10 @@ pub async fn enqueue(db: &Db, repo: &str) -> Result<EnqueueOutcome> {
     .fetch_one(&mut *tx)
     .await?;
     if fresh {
+        sqlx::query("DELETE FROM repo_analysis_queue WHERE repo = $1")
+            .bind(repo)
+            .execute(&mut *tx)
+            .await?;
         tx.commit().await?;
         return Ok(EnqueueOutcome::Fresh);
     }
@@ -123,8 +119,14 @@ pub async fn enqueue(db: &Db, repo: &str) -> Result<EnqueueOutcome> {
         "INSERT INTO repo_analysis_queue (repo, status, enqueued_at) \
          VALUES ($1, 'pending', $2) \
          ON CONFLICT (repo) DO UPDATE SET \
-            status = CASE WHEN repo_analysis_queue.status IN ('in_progress', 'dead') \
-                          THEN repo_analysis_queue.status ELSE 'pending' END",
+            status = CASE WHEN repo_analysis_queue.status = 'in_progress' \
+                          THEN 'in_progress' ELSE 'pending' END, \
+            attempts = CASE WHEN repo_analysis_queue.status = 'dead' \
+                            THEN 0 ELSE repo_analysis_queue.attempts END, \
+            next_attempt_at = CASE WHEN repo_analysis_queue.status = 'in_progress' \
+                                   THEN repo_analysis_queue.next_attempt_at ELSE NOW() END, \
+            last_error = CASE WHEN repo_analysis_queue.status = 'dead' \
+                              THEN NULL ELSE repo_analysis_queue.last_error END",
     )
     .bind(repo)
     .bind(now)
@@ -136,9 +138,9 @@ pub async fn enqueue(db: &Db, repo: &str) -> Result<EnqueueOutcome> {
 
 /// Enqueue up to `max_new` repositories, preserving input order.
 ///
-/// Fresh, already-active, and terminal jobs do not consume the limit. This
-/// lets discovery surfaces offer a bounded batch to the workers without
-/// cloning synchronously or letting one request monopolize the global queue.
+/// Fresh and already-active jobs do not consume the limit. This lets discovery
+/// surfaces offer a bounded batch to the workers without cloning synchronously
+/// or letting one request monopolize the global queue.
 pub async fn enqueue_many(db: &Db, repos: &[String], max_new: usize) -> Result<usize> {
     if max_new == 0 {
         return Ok(0);
@@ -153,7 +155,7 @@ pub async fn enqueue_many(db: &Db, repos: &[String], max_new: usize) -> Result<u
                 }
             }
             EnqueueOutcome::AtCapacity => break,
-            EnqueueOutcome::AlreadyActive | EnqueueOutcome::Fresh | EnqueueOutcome::Dead => {}
+            EnqueueOutcome::AlreadyActive | EnqueueOutcome::Fresh => {}
         }
     }
     Ok(enqueued)
@@ -164,6 +166,24 @@ pub async fn reset_inflight_on_startup(db: &Db) -> Result<u64> {
         "UPDATE repo_analysis_queue SET status = 'pending', worker_id = NULL, claimed_at = NULL \
          WHERE status = 'in_progress' \
            AND (claimed_at IS NULL OR claimed_at < NOW() - INTERVAL '2 hours')",
+    )
+    .execute(&db.pool)
+    .await?;
+    Ok(res.rows_affected())
+}
+
+/// Revive jobs parked by older releases after a fixed number of transient
+/// clone/process failures. New releases keep those failures pending with a
+/// durable backoff, so this is a one-way startup repair.
+pub async fn revive_retryable_on_startup(db: &Db) -> Result<u64> {
+    let res = sqlx::query(
+        "UPDATE repo_analysis_queue SET status = 'pending', attempts = 0, \
+            next_attempt_at = NOW(), worker_id = NULL, claimed_at = NULL \
+         WHERE status = 'dead' \
+           AND NOT EXISTS ( \
+               SELECT 1 FROM repos \
+               WHERE repos.repo = repo_analysis_queue.repo AND repos.missing = TRUE \
+           )",
     )
     .execute(&db.pool)
     .await?;
@@ -224,7 +244,7 @@ async fn run_worker(worker_id: String, ctx: AnalysisCtx) {
                 }
             }
             Err(e) => {
-                let msg = e.to_string();
+                let msg = compact_error(&e);
                 tracing::warn!(repo = %job, error = %msg, "analysis run failed");
                 if let Err(e2) = fail(&ctx.db, &job, &msg).await {
                     tracing::warn!(repo = %job, error = %e2, "queue fail failed");
@@ -242,7 +262,7 @@ async fn claim_one(db: &Db, worker_id: &str) -> Result<Option<String>> {
          SET status = 'in_progress', worker_id = $1, claimed_at = $2 \
          WHERE repo = ( \
             SELECT repo FROM repo_analysis_queue \
-            WHERE status = 'pending' \
+            WHERE (status = 'pending' AND next_attempt_at <= NOW()) \
                OR (status = 'in_progress' AND claimed_at < NOW() - INTERVAL '2 hours') \
             ORDER BY enqueued_at FOR UPDATE SKIP LOCKED LIMIT 1 \
          ) \
@@ -263,12 +283,6 @@ async fn complete(db: &Db, repo: &str) -> Result<()> {
     Ok(())
 }
 
-/// Max analysis attempts before a job is parked in the terminal `dead`
-/// status. Clones/walks that fail every time (e.g. a repo that's been made
-/// private, or a persistently corrupt clone) would otherwise retry forever.
-/// Mirrors `queue::MAX_ATTEMPTS`. `attempts` is an `INT` here (see schema).
-const MAX_ANALYSIS_ATTEMPTS: i32 = 5;
-
 async fn fail(db: &Db, repo: &str, err: &str) -> Result<()> {
     sqlx::query(
         "UPDATE repo_analysis_queue SET \
@@ -276,15 +290,32 @@ async fn fail(db: &Db, repo: &str, err: &str) -> Result<()> {
             last_error = $1, \
             worker_id = NULL, \
             claimed_at = NULL, \
-            status = CASE WHEN attempts + 1 >= $2 THEN 'dead' ELSE 'pending' END \
-         WHERE repo = $3",
+            status = 'pending', \
+            next_attempt_at = NOW() + CASE \
+                WHEN attempts <= 0 THEN INTERVAL '30 seconds' \
+                WHEN attempts = 1 THEN INTERVAL '1 minute' \
+                WHEN attempts = 2 THEN INTERVAL '2 minutes' \
+                WHEN attempts = 3 THEN INTERVAL '4 minutes' \
+                WHEN attempts = 4 THEN INTERVAL '8 minutes' \
+                WHEN attempts = 5 THEN INTERVAL '16 minutes' \
+                WHEN attempts = 6 THEN INTERVAL '32 minutes' \
+                ELSE INTERVAL '1 hour' \
+            END \
+         WHERE repo = $2",
     )
     .bind(err)
-    .bind(MAX_ANALYSIS_ATTEMPTS)
     .bind(repo)
     .execute(&db.pool)
     .await?;
     Ok(())
+}
+
+fn compact_error(error: &anyhow::Error) -> String {
+    format!("{error:#}")
+        .chars()
+        .filter(|character| !character.is_control())
+        .take(1_000)
+        .collect()
 }
 
 async fn process(repo: &str, ctx: &AnalysisCtx) -> Result<usize> {

@@ -3,8 +3,6 @@
 //! Start sets a CSRF cookie and redirects to GitHub; callback verifies the
 //! state, exchanges the code, stores the user, and signs a session cookie.
 
-use std::sync::Arc;
-
 use anyhow::Result;
 use axum::{
     Json, Router,
@@ -26,7 +24,6 @@ use url::Url;
 
 use crate::api::ApiState;
 use crate::crypto::Crypto;
-use crate::db::Db;
 
 const GITHUB_AUTHORIZE_URL: &str = "https://github.com/login/oauth/authorize";
 const GITHUB_TOKEN_URL: &str = "https://github.com/login/oauth/access_token";
@@ -333,8 +330,9 @@ async fn login_callback(
         .refresh_token_expires_in
         .map(|s| now + Duration::seconds(s));
 
-    // Tokens go in encrypted. The DB sees only ciphertext; decryption
-    // happens at use-time in `github_client_for_user`.
+    // Tokens go in encrypted. The DB sees only ciphertext. They are retained
+    // for explicitly user-scoped GitHub App features; shared star-history and
+    // repository-analysis workers deliberately never borrow user credentials.
     let access_enc = cfg
         .crypto
         .encrypt(&token.access_token)
@@ -539,27 +537,6 @@ fn constant_time_eq(a: &[u8], b: &[u8]) -> bool {
         diff |= x ^ y;
     }
     diff == 0
-}
-
-/// Return a GithubClient configured with the given user's access token.
-/// Decrypts the stored ciphertext at use-time. Used when handling a
-/// request from a logged-in user — calls debit *their* 5k/hr GitHub
-/// bucket instead of the app's default token.
-pub async fn github_client_for_user(
-    db: &Db,
-    user_id: i64,
-    rate: Arc<crate::rate_limit::RateLimitTracker>,
-    crypto: &Crypto,
-) -> Result<Option<crate::github::GithubClient>> {
-    let blob: Option<String> =
-        sqlx::query_scalar("SELECT access_token FROM app_users WHERE id = $1")
-            .bind(user_id)
-            .fetch_optional(&db.pool)
-            .await?;
-    let Some(blob) = blob else { return Ok(None) };
-    let token = crypto.decrypt(&blob)?;
-    let client = crate::github::GithubClient::for_user_token(&token, rate)?;
-    Ok(Some(client))
 }
 
 #[cfg(test)]

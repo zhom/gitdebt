@@ -180,6 +180,7 @@ CREATE TABLE IF NOT EXISTS star_fetch_queue (
     attempts     BIGINT NOT NULL DEFAULT 0,
     partial      BOOLEAN NOT NULL DEFAULT FALSE,
     next_page    BIGINT NOT NULL DEFAULT 1,
+    next_attempt_at TIMESTAMPTZ NOT NULL DEFAULT NOW(),
     priority     BIGINT NOT NULL DEFAULT 0,
     last_error   TEXT,
     enqueued_at  TIMESTAMPTZ NOT NULL,
@@ -187,8 +188,11 @@ CREATE TABLE IF NOT EXISTS star_fetch_queue (
     worker_id    TEXT
 );
 ALTER TABLE star_fetch_queue ADD COLUMN IF NOT EXISTS next_page BIGINT NOT NULL DEFAULT 1;
+ALTER TABLE star_fetch_queue ADD COLUMN IF NOT EXISTS next_attempt_at TIMESTAMPTZ NOT NULL DEFAULT NOW();
 CREATE INDEX IF NOT EXISTS idx_star_fetch_queue_status
     ON star_fetch_queue(status, priority DESC, enqueued_at);
+CREATE INDEX IF NOT EXISTS idx_star_fetch_queue_available
+    ON star_fetch_queue(status, next_attempt_at, priority DESC, enqueued_at);
 
 CREATE TABLE IF NOT EXISTS api_quota (
     source       TEXT PRIMARY KEY NOT NULL,
@@ -331,12 +335,16 @@ CREATE TABLE IF NOT EXISTS repo_analysis_queue (
     repo          TEXT PRIMARY KEY NOT NULL,
     status        TEXT NOT NULL DEFAULT 'pending',
     enqueued_at   TIMESTAMPTZ NOT NULL,
+    next_attempt_at TIMESTAMPTZ NOT NULL DEFAULT NOW(),
     claimed_at    TIMESTAMPTZ,
     last_error    TEXT,
     attempts      INT NOT NULL DEFAULT 0,
     worker_id     TEXT
 );
+ALTER TABLE repo_analysis_queue ADD COLUMN IF NOT EXISTS next_attempt_at TIMESTAMPTZ NOT NULL DEFAULT NOW();
 CREATE INDEX IF NOT EXISTS idx_repo_queue_status ON repo_analysis_queue(status, enqueued_at);
+CREATE INDEX IF NOT EXISTS idx_repo_queue_available
+    ON repo_analysis_queue(status, next_attempt_at, enqueued_at);
 
 -- Tokei lines-of-code aggregates per repo. One row per language.
 -- Replaced wholesale on each analysis run (truncate-then-insert in one
@@ -721,6 +729,7 @@ mod tests {
         assert!(SCHEMA.contains("ALTER TABLE repo_stargazers DROP COLUMN login"));
         assert!(SCHEMA.contains("stargazers_complete   BOOLEAN NOT NULL DEFAULT FALSE"));
         assert!(SCHEMA.contains("next_page    BIGINT NOT NULL DEFAULT 1"));
+        assert!(SCHEMA.contains("next_attempt_at TIMESTAMPTZ NOT NULL DEFAULT NOW()"));
         assert!(SCHEMA.contains("github_id             BIGINT"));
         assert!(SCHEMA.contains("history_source        TEXT"));
         assert!(SCHEMA.contains("history_observed_count BIGINT"));
@@ -732,6 +741,18 @@ mod tests {
                 "ALTER TABLE star_fetch_queue ADD COLUMN IF NOT EXISTS next_page BIGINT NOT NULL DEFAULT 1"
             ),
             "existing installations need the resumable cursor added idempotently"
+        );
+        assert!(
+            SCHEMA.contains(
+                "ALTER TABLE star_fetch_queue ADD COLUMN IF NOT EXISTS next_attempt_at TIMESTAMPTZ NOT NULL DEFAULT NOW()"
+            ),
+            "star retries need a durable availability timestamp"
+        );
+        assert!(
+            SCHEMA.contains(
+                "ALTER TABLE repo_analysis_queue ADD COLUMN IF NOT EXISTS next_attempt_at TIMESTAMPTZ NOT NULL DEFAULT NOW()"
+            ),
+            "analysis retries need a durable availability timestamp"
         );
     }
 

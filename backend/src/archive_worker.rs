@@ -10,7 +10,7 @@ use std::sync::Arc;
 use std::time::Duration;
 
 use anyhow::{Context, Result};
-use chrono::{Days, NaiveDate, Utc};
+use chrono::{DateTime, Datelike, Days, NaiveDate, Utc};
 use futures::StreamExt;
 
 use crate::cache::{ArchiveBackfillState, ArchiveStarEvent, Cache};
@@ -80,6 +80,7 @@ pub fn spawn(ctx: ArchiveWorkerCtx) {
 }
 
 async fn run(ctx: ArchiveWorkerCtx) {
+    let mut consecutive_provider_failures = 0_u32;
     loop {
         let jobs = match queue::claim_many(ctx.cache.db(), "gh-archive", ctx.batch_size).await {
             Ok(jobs) => jobs,
@@ -118,8 +119,19 @@ async fn run(ctx: ArchiveWorkerCtx) {
             .collect::<Vec<_>>()
             .await;
 
-        if let Err(error) = process_prepared(&ctx, prepared).await {
-            tracing::error!(%error, "gh-archive: batch failed");
+        let provider_delay = provider_backoff_seconds(consecutive_provider_failures + 1);
+        match process_prepared(&ctx, prepared, provider_delay).await {
+            Ok(()) => consecutive_provider_failures = 0,
+            Err(error) => {
+                consecutive_provider_failures = consecutive_provider_failures.saturating_add(1);
+                let delay_seconds = provider_backoff_seconds(consecutive_provider_failures);
+                tracing::error!(
+                    error = %format!("{error:#}"),
+                    delay_seconds,
+                    "gh-archive: provider batch failed; retry scheduled"
+                );
+                tokio::time::sleep(Duration::from_secs(delay_seconds)).await;
+            }
         }
     }
 }
@@ -175,14 +187,23 @@ async fn prepare_job(
     operation.map_err(|error| (repo, error))
 }
 
-async fn process_prepared(ctx: &ArchiveWorkerCtx, prepared: Vec<Prepared>) -> Result<()> {
+async fn process_prepared(
+    ctx: &ArchiveWorkerCtx,
+    prepared: Vec<Prepared>,
+    provider_delay_seconds: u64,
+) -> Result<()> {
     let cutoff = Utc::now()
         .date_naive()
         .pred_opt()
         .context("cannot calculate GH Archive cutoff")?;
+    let claimed_repos = prepared
+        .iter()
+        .map(|item| item.repo.clone())
+        .collect::<Vec<_>>();
     let mut by_start: BTreeMap<NaiveDate, Vec<Prepared>> = BTreeMap::new();
     for item in prepared {
-        let start = item.state.cursor.unwrap_or(ARCHIVE_START);
+        let repository_start = initial_archive_start(item.state.created_at);
+        let start = item.state.cursor.unwrap_or(repository_start);
         if start > cutoff {
             // Empty repositories still need a final atomic commit so their
             // source/provenance becomes visible.
@@ -211,13 +232,14 @@ async fn process_prepared(ctx: &ArchiveWorkerCtx, prepared: Vec<Prepared>) -> Re
             Ok(events) => commit_group(ctx, items, start, end, cutoff, events).await?,
             Err(error) => {
                 let detail = compact_error(&error);
-                for item in items {
-                    queue::fail(ctx.cache.db(), &item.repo, &detail).await?;
-                }
-                // Avoid reclaiming the same high-priority batch in a hot loop
-                // during a BigQuery outage. The client has already exhausted
-                // its bounded HTTP retries before this queue-level delay.
-                tokio::time::sleep(Duration::from_secs(5)).await;
+                queue::release_archive_provider_error(
+                    ctx.cache.db(),
+                    &claimed_repos,
+                    &detail,
+                    i64::try_from(provider_delay_seconds).unwrap_or(3_600),
+                )
+                .await?;
+                return Err(error).context("GH Archive provider query failed");
             }
         }
     }
@@ -401,12 +423,23 @@ fn split_slug(slug: &str) -> Result<(&str, &str)> {
 }
 
 fn compact_error(error: &anyhow::Error) -> String {
-    error
-        .to_string()
+    format!("{error:#}")
         .chars()
         .filter(|character| !character.is_control())
         .take(500)
         .collect()
+}
+
+fn provider_backoff_seconds(failures: u32) -> u64 {
+    let shift = failures.saturating_sub(1).min(5);
+    (30_u64 << shift).min(15 * 60)
+}
+
+fn initial_archive_start(created_at: Option<DateTime<Utc>>) -> NaiveDate {
+    created_at
+        .and_then(|created_at| NaiveDate::from_ymd_opt(created_at.year(), created_at.month(), 1))
+        .unwrap_or(ARCHIVE_START)
+        .max(ARCHIVE_START)
 }
 
 fn bounded_env(name: &str, default: usize, min: usize, max: usize) -> usize {
@@ -439,5 +472,25 @@ mod tests {
     #[test]
     fn archive_start_is_documented_boundary() {
         assert_eq!(ARCHIVE_START.to_string(), "2011-02-12");
+    }
+
+    #[test]
+    fn provider_backoff_is_bounded() {
+        assert_eq!(provider_backoff_seconds(1), 30);
+        assert_eq!(provider_backoff_seconds(2), 60);
+        assert_eq!(provider_backoff_seconds(6), 900);
+        assert_eq!(provider_backoff_seconds(100), 900);
+    }
+
+    #[test]
+    fn initial_backfill_skips_years_before_repository_creation() {
+        let created_at = DateTime::parse_from_rfc3339("2024-07-19T12:00:00Z")
+            .unwrap()
+            .with_timezone(&Utc);
+        assert_eq!(
+            initial_archive_start(Some(created_at)),
+            NaiveDate::from_ymd_opt(2024, 7, 1).unwrap()
+        );
+        assert_eq!(initial_archive_start(None), ARCHIVE_START);
     }
 }

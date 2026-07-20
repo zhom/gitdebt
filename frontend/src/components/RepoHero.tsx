@@ -15,6 +15,7 @@ export type HistoryKind =
   | "current_stargazers"
   | "public_star_actions"
   | "unavailable";
+export type HistoryStatus = "ready" | "queued" | "retrying" | "not_public";
 
 export type AnalyzeResponse = {
   repo: string;
@@ -28,6 +29,7 @@ export type AnalyzeResponse = {
   history_coverage_start: string | null;
   history_coverage_end: string | null;
   history_approximate: boolean;
+  history_status?: HistoryStatus;
   history_unavailable?: boolean;
   backfilling?: boolean;
   not_found?: boolean;
@@ -37,6 +39,7 @@ export type AnalyzeResponse = {
 type ProgressPhase =
   | "idle"
   | "pending"
+  | "retrying"
   | "fetching"
   | "backfilling"
   | "analyzing"
@@ -70,8 +73,15 @@ type Props = {
 const POLL_MS = 20_000;
 
 function needsPolling(data: AnalyzeResponse): boolean {
-  if (data.history_unavailable || data.not_found) return false;
-  return data.pending === true || data.backfilling === true || !data.history_complete;
+  if (data.not_found || data.history_status === "not_public") return false;
+  return (
+    data.pending === true ||
+    data.backfilling === true ||
+    data.history_unavailable === true ||
+    data.history_status === "queued" ||
+    data.history_status === "retrying" ||
+    !data.history_complete
+  );
 }
 
 function firstStarYear(data: AnalyzeResponse): string | null {
@@ -209,6 +219,35 @@ export function RepoHero({ owner, repo, apiBase, initialData }: Props) {
   const year = data ? firstStarYear(data) : null;
   const archiveHistory = isArchiveHistory(data);
 
+  if (data?.not_found || data?.history_status === "not_public") {
+    return (
+      <section className="space-y-6">
+        <div className="space-y-2 border-y border-border py-8">
+          <p className="font-mono text-xs tracking-wide text-muted-foreground uppercase">
+            Repository visibility
+          </p>
+          <h1 className="text-3xl font-semibold tracking-tight text-balance sm:text-4xl">
+            Repository not public or not found
+          </h1>
+          <p className="max-w-[62ch] text-base text-pretty text-muted-foreground">
+            GitHub did not expose {slug} as a public repository. Check the
+            owner and repository name, or open it on GitHub if you have private
+            access. gitdebt does not ingest private repository data.
+          </p>
+        </div>
+        <a
+          href={`https://github.com/${owner}/${repo}`}
+          target="_blank"
+          rel="noreferrer"
+          className="inline-flex min-h-11 items-center gap-2 rounded-md border border-border px-3 py-2 text-sm text-muted-foreground hover:bg-accent hover:text-foreground focus-visible:outline-2 focus-visible:outline-offset-2 focus-visible:outline-ring"
+        >
+          Check on GitHub
+          <ExternalLink className="size-3.5" strokeWidth={1.8} aria-hidden="true" />
+        </a>
+      </section>
+    );
+  }
+
   const stats = [
     {
       label: archiveHistory ? "Current GitHub stars" : "GitHub stars",
@@ -323,13 +362,6 @@ export function RepoHero({ owner, repo, apiBase, initialData }: Props) {
         </div>
       )}
 
-      {data?.not_found && (
-        <div className="border-y border-border py-4 text-sm">
-          GitHub could not find this public repository. Check the owner and
-          repository name.
-        </div>
-      )}
-
       {data?.backfilling && (
         <div className="flex items-start gap-3 border-y border-border py-4 text-base text-pretty text-muted-foreground sm:text-sm">
           <Loader2
@@ -337,19 +369,10 @@ export function RepoHero({ owner, repo, apiBase, initialData }: Props) {
             aria-hidden="true"
           />
           <p>
-            This is a large repository. Its saved history is usable now, and
-            older stars will continue filling in until the backfill settles.
+            This is a large repository. Historical windows are being collected
+            in the background; the chart appears after a complete snapshot is
+            committed.
           </p>
-        </div>
-      )}
-
-      {data?.history_unavailable && (
-        <div
-          className="border-y border-border py-4 text-base text-pretty text-muted-foreground sm:text-sm"
-          role="status"
-        >
-          Star history is unavailable for this repository. Code-health reports
-          can still complete independently.
         </div>
       )}
     </section>
@@ -409,7 +432,8 @@ function HistoryProvenance({
 function starPhaseFromAnalyze(data: AnalyzeResponse | null): ProgressPhase {
   if (!data) return "pending";
   if (data.not_found) return "not_found";
-  if (data.history_unavailable) return "restricted";
+  if (data.history_status === "retrying" || data.history_unavailable)
+    return "retrying";
   if (data.backfilling) return "backfilling";
   if (data.history_complete) return "complete";
   return data.pending ? "fetching" : "pending";
@@ -423,12 +447,13 @@ function analysisLabel(phase: ProgressPhase | undefined): string {
     case "fetching":
     case "backfilling":
       return "In progress";
+    case "retrying":
     case "failed":
       return "Retrying";
     case "not_found":
       return "Not found";
     case "restricted":
-      return "Unavailable";
+      return "Retrying";
     default:
       return "Queued";
   }
@@ -442,12 +467,13 @@ function ProgressStep({
   phase: ProgressPhase;
 }) {
   const complete = phase === "complete";
-  const stopped =
-    phase === "failed" || phase === "not_found" || phase === "restricted";
+  const stopped = phase === "not_found";
   const detail = complete
     ? "Ready"
     : stopped
       ? analysisLabel(phase)
+      : phase === "retrying" || phase === "failed" || phase === "restricted"
+        ? "Retry scheduled"
       : phase === "idle" || phase === "pending"
         ? "Queued"
         : phase === "backfilling"

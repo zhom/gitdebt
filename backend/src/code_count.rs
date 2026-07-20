@@ -484,7 +484,7 @@ fn classify_line(
 
     while i < bytes.len() {
         if let Some(close) = in_block {
-            if line[i..].starts_with(close) {
+            if bytes[i..].starts_with(close.as_bytes()) {
                 has_comment = true;
                 i += close.len();
                 in_block = None;
@@ -508,7 +508,7 @@ fn classify_line(
         // gives us the right precedence without explicit length sort.
         let mut started = false;
         for &(open, close) in spec.block_comment {
-            if line[i..].starts_with(open) {
+            if bytes[i..].starts_with(open.as_bytes()) {
                 has_comment = true;
                 in_block = Some(close);
                 i += open.len();
@@ -520,7 +520,7 @@ fn classify_line(
             continue;
         }
         for &lc in spec.line_comment {
-            if line[i..].starts_with(lc) {
+            if bytes[i..].starts_with(lc.as_bytes()) {
                 return (has_code, true, in_block); // rest of line is comment
             }
         }
@@ -557,6 +557,20 @@ mod tests {
         let src = "fn main() {\n    // hi\n    println!(\"x\");\n\n}\n";
         let (b, c, code) = count_lines_in_text(rust(), src);
         assert_eq!((b, c, code), (1, 1, 3));
+    }
+
+    #[test]
+    fn unicode_code_does_not_slice_inside_utf8() {
+        let src = "let café = \"Հայերեն\";\nprintln!(\"你好\");\n";
+        let (blank, comment, code) = count_lines_in_text(rust(), src);
+        assert_eq!((blank, comment, code), (0, 0, 2));
+    }
+
+    #[test]
+    fn unicode_inside_block_comment_is_counted_safely() {
+        let src = "/* Հայերեն\n你好 */\nfn main() {}\n";
+        let (blank, comment, code) = count_lines_in_text(rust(), src);
+        assert_eq!((blank, comment, code), (0, 2, 1));
     }
 
     #[test]

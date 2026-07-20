@@ -30,13 +30,21 @@ pub struct ArchiveStarEvent {
 #[derive(Debug, Clone)]
 pub struct ArchiveBackfillState {
     pub github_id: Option<i64>,
+    pub created_at: Option<DateTime<Utc>>,
     pub cursor: Option<NaiveDate>,
     pub complete: bool,
     pub authoritative_total: Option<i64>,
     pub exact_history_complete: bool,
 }
 
-type ArchiveBackfillRow = (Option<i64>, Option<NaiveDate>, bool, Option<i64>, bool);
+type ArchiveBackfillRow = (
+    Option<i64>,
+    Option<DateTime<Utc>>,
+    Option<NaiveDate>,
+    bool,
+    Option<i64>,
+    bool,
+);
 
 async fn upsert_stargazer_events(
     conn: &mut PgConnection,
@@ -501,7 +509,7 @@ impl Cache {
         repo: &str,
     ) -> Result<Option<ArchiveBackfillState>> {
         let row: Option<ArchiveBackfillRow> = sqlx::query_as(
-            "SELECT github_id, archive_cursor, archive_complete, star_count, \
+            "SELECT github_id, created_at, archive_cursor, archive_complete, star_count, \
                         stargazers_complete \
                  FROM repos WHERE repo = $1",
         )
@@ -509,9 +517,17 @@ impl Cache {
         .fetch_optional(&self.db.pool)
         .await?;
         Ok(row.map(
-            |(github_id, cursor, complete, authoritative_total, exact_history_complete)| {
+            |(
+                github_id,
+                created_at,
+                cursor,
+                complete,
+                authoritative_total,
+                exact_history_complete,
+            )| {
                 ArchiveBackfillState {
                     github_id,
+                    created_at,
                     cursor,
                     complete,
                     authoritative_total,

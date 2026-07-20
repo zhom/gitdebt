@@ -1,7 +1,10 @@
 import type { APIRoute } from "astro";
 import { CATEGORIES } from "@/data/categories";
+import { loadBuildCatalog } from "@/lib/build-catalog";
 
-// User pages are discovered organically because cold profiles are noindex.
+// All emitted profile routes enter this build-time sitemap. The strict
+// post-build SEO pass removes any profile whose rendered page is `noindex`, so
+// the final sitemap exactly matches the indexable output.
 export const prerender = true;
 
 function resolveSite(astroSite: URL | undefined): string {
@@ -27,8 +30,17 @@ const PAGES: { path: string; changefreq: string; priority: string }[] = [
 
 export const GET: APIRoute = async ({ site }) => {
   const SITE = resolveSite(site);
+  const catalog = await loadBuildCatalog();
+  const loginPages = [...new Set(catalog.map(({ slug }) => slug.split("/")[0]))]
+    .sort()
+    .map((login) => ({
+      path: `/u/${login}`,
+      changefreq: "daily",
+      priority: "0.6",
+    }));
+  const pages = [...PAGES, ...loginPages];
 
-  const urls = PAGES.map(
+  const urls = pages.map(
     (p) => `  <url>
     <loc>${SITE}${p.path}</loc>
     <changefreq>${p.changefreq}</changefreq>

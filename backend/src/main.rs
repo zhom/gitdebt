@@ -46,15 +46,30 @@ async fn main() -> Result<()> {
     // One worker is the right default — parallel disk thrashes the cache
     // and git CLI subprocesses already use multiple cores internally.
     let storage = std::sync::Arc::new(gitdebt::repo_history::RepoStorage::from_env());
-    let analysis_workers: usize = std::env::var("REPO_ANALYSIS_WORKERS")
+    let requested_analysis_workers: usize = std::env::var("REPO_ANALYSIS_WORKERS")
         .ok()
         .and_then(|s| s.parse().ok())
         .unwrap_or(1);
+    let analysis_workers = requested_analysis_workers.clamp(1, 2);
+    if requested_analysis_workers != analysis_workers {
+        tracing::warn!(
+            requested = requested_analysis_workers,
+            effective = analysis_workers,
+            "REPO_ANALYSIS_WORKERS capped to protect git subprocess and thread capacity"
+        );
+    }
     let reset = gitdebt::repo_analysis::reset_inflight_on_startup(cache.db()).await?;
     if reset > 0 {
         tracing::info!(
             reset_count = reset,
             "repo-analysis: reset expired in_progress leases"
+        );
+    }
+    let analysis_revived = gitdebt::repo_analysis::revive_retryable_on_startup(cache.db()).await?;
+    if analysis_revived > 0 {
+        tracing::info!(
+            revived = analysis_revived,
+            "repo-analysis: revived jobs parked by older releases"
         );
     }
     gitdebt::repo_analysis::spawn_pool(
@@ -88,9 +103,9 @@ async fn main() -> Result<()> {
         .await
         .context("GH Archive BigQuery configuration/authentication failed")?;
     if let Some(archive_client) = archive_client {
-        let revived = gitdebt::queue::revive_restricted_for_archive(cache.db()).await?;
+        let revived = gitdebt::queue::revive_retryable_for_archive(cache.db()).await?;
         if revived > 0 {
-            tracing::info!(revived, "gh-archive: revived restricted history jobs");
+            tracing::info!(revived, "gh-archive: revived retryable history jobs");
         }
         gitdebt::archive_worker::spawn(gitdebt::archive_worker::ArchiveWorkerCtx::from_env(
             Arc::new(archive_client),
@@ -104,7 +119,7 @@ async fn main() -> Result<()> {
             metadata_concurrency = worker_count,
             "GH Archive historical coordinator and hourly follower started"
         );
-    } else {
+    } else if cfg!(debug_assertions) {
         gitdebt::worker::spawn_pool(
             gitdebt::worker::WorkerCtx::new(github.clone(), cache.clone()),
             worker_count,
@@ -112,6 +127,10 @@ async fn main() -> Result<()> {
         tracing::warn!(
             worker_count,
             "GH Archive disabled; using the restricted GitHub stargazer-list fallback"
+        );
+    } else {
+        anyhow::bail!(
+            "GH_ARCHIVE_ENABLED=1 and valid BigQuery credentials are required in release deployments"
         );
     }
 

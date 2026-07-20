@@ -24,8 +24,8 @@ use tower_http::limit::RequestBodyLimitLayer;
 use tower_http::timeout::TimeoutLayer;
 use tower_http::trace::TraceLayer;
 
-use chrono::Datelike;
-use serde::Deserialize;
+use chrono::{DateTime, Datelike, Utc};
+use serde::{Deserialize, Serialize};
 use sha2::{Digest, Sha256};
 use sqlx::Row;
 
@@ -140,9 +140,17 @@ impl ApiState {
             _ => anyhow::bail!("PUBLIC_FRONTEND_ORIGIN must be set in release deployments"),
         };
         let frontend_origin = normalize_frontend_origin(&frontend_origin_raw)?;
-        let metrics_token = std::env::var("METRICS_TOKEN")
+        let metrics_token = match std::env::var("METRICS_TOKEN")
             .ok()
-            .filter(|token| !token.is_empty());
+            .filter(|token| !token.trim().is_empty())
+        {
+            Some(token) => Some(token),
+            None if cfg!(debug_assertions) => {
+                tracing::warn!("METRICS_TOKEN unset; /metrics is public in debug builds");
+                None
+            }
+            None => anyhow::bail!("METRICS_TOKEN must be set in release deployments"),
+        };
         Ok(Self {
             analyzer,
             svg_cache,
@@ -352,34 +360,112 @@ async fn health() -> &'static str {
     "ok"
 }
 
+#[derive(Debug, Serialize)]
+struct PipelineSignals {
+    histories_complete: i64,
+    histories_pending: i64,
+    star_jobs_active: i64,
+    star_jobs_retrying: i64,
+    star_jobs_provider_delayed: i64,
+    star_jobs_dead: i64,
+    analysis_jobs_active: i64,
+    analysis_jobs_retrying: i64,
+    analysis_jobs_dead: i64,
+    oldest_star_job_seconds: i64,
+    oldest_analysis_job_seconds: i64,
+    last_archive_hour: Option<DateTime<Utc>>,
+}
+
+impl PipelineSignals {
+    fn degraded(&self) -> bool {
+        self.star_jobs_provider_delayed > 0
+            || self.star_jobs_dead > 0
+            || self.analysis_jobs_dead > 0
+    }
+}
+
+async fn load_pipeline_signals(db: &crate::db::Db) -> Result<PipelineSignals, sqlx::Error> {
+    let row = sqlx::query(
+        "SELECT \
+            (SELECT COUNT(*)::BIGINT FROM repos WHERE history_complete = TRUE AND missing = FALSE) \
+                AS histories_complete, \
+            (SELECT COUNT(*)::BIGINT FROM repos WHERE history_complete = FALSE AND missing = FALSE) \
+                AS histories_pending, \
+            (SELECT COUNT(*)::BIGINT FROM star_fetch_queue \
+                WHERE status IN ('pending', 'in_progress')) AS star_jobs_active, \
+            (SELECT COUNT(*)::BIGINT FROM star_fetch_queue \
+                WHERE status IN ('pending', 'in_progress') \
+                  AND (attempts > 0 OR last_error LIKE 'provider:%')) AS star_jobs_retrying, \
+            (SELECT COUNT(*)::BIGINT FROM star_fetch_queue \
+                WHERE status IN ('pending', 'in_progress') \
+                  AND last_error LIKE 'provider:%') AS star_jobs_provider_delayed, \
+            (SELECT COUNT(*)::BIGINT FROM star_fetch_queue WHERE status = 'dead') \
+                AS star_jobs_dead, \
+            (SELECT COUNT(*)::BIGINT FROM repo_analysis_queue \
+                WHERE status IN ('pending', 'in_progress')) AS analysis_jobs_active, \
+            (SELECT COUNT(*)::BIGINT FROM repo_analysis_queue \
+                WHERE status IN ('pending', 'in_progress') AND attempts > 0) \
+                AS analysis_jobs_retrying, \
+            (SELECT COUNT(*)::BIGINT FROM repo_analysis_queue WHERE status = 'dead') \
+                AS analysis_jobs_dead, \
+            COALESCE((SELECT EXTRACT(EPOCH FROM (NOW() - MIN(enqueued_at)))::BIGINT \
+                FROM star_fetch_queue WHERE status IN ('pending', 'in_progress')), 0) \
+                AS oldest_star_job_seconds, \
+            COALESCE((SELECT EXTRACT(EPOCH FROM (NOW() - MIN(enqueued_at)))::BIGINT \
+                FROM repo_analysis_queue WHERE status IN ('pending', 'in_progress')), 0) \
+                AS oldest_analysis_job_seconds, \
+            (SELECT MAX(archive_hour) FROM gh_archive_hours WHERE status = 'complete') \
+                AS last_archive_hour",
+    )
+    .fetch_one(&db.pool)
+    .await?;
+    Ok(PipelineSignals {
+        histories_complete: row.try_get("histories_complete")?,
+        histories_pending: row.try_get("histories_pending")?,
+        star_jobs_active: row.try_get("star_jobs_active")?,
+        star_jobs_retrying: row.try_get("star_jobs_retrying")?,
+        star_jobs_provider_delayed: row.try_get("star_jobs_provider_delayed")?,
+        star_jobs_dead: row.try_get("star_jobs_dead")?,
+        analysis_jobs_active: row.try_get("analysis_jobs_active")?,
+        analysis_jobs_retrying: row.try_get("analysis_jobs_retrying")?,
+        analysis_jobs_dead: row.try_get("analysis_jobs_dead")?,
+        oldest_star_job_seconds: row.try_get::<i64, _>("oldest_star_job_seconds")?.max(0),
+        oldest_analysis_job_seconds: row.try_get::<i64, _>("oldest_analysis_job_seconds")?.max(0),
+        last_archive_hour: row.try_get("last_archive_hour")?,
+    })
+}
+
 /// Readiness probe. Unlike `/health` (liveness — "the process is up"),
 /// `/ready` verifies the dependency the server can't function without: the
-/// Postgres pool. Runs `SELECT 1` and reports the star-fetch queue depth.
-/// 200 when the DB answers, 503 when it doesn't — so Dokploy / Cloudflare
-/// can gate traffic on a real readiness signal, not just a TCP accept.
+/// Postgres pool. It also reports pipeline degradation without taking the
+/// read API offline: queued/retrying states must remain visible while a
+/// provider recovers. 503 is reserved for a database/schema failure.
 async fn ready(State(state): State<ApiState>) -> impl IntoResponse {
     let db = state.analyzer.cache.db();
-    let ok: Result<i32, _> = sqlx::query_scalar("SELECT 1").fetch_one(&db.pool).await;
     let no_store = {
         let mut h = HeaderMap::new();
         h.insert(header::CACHE_CONTROL, HeaderValue::from_static("no-store"));
         h
     };
-    match ok {
-        Ok(_) => {
-            let queue_pending = crate::queue::pending_count(db).await.unwrap_or(0);
+    match load_pipeline_signals(db).await {
+        Ok(pipeline) => {
+            let degraded = pipeline.degraded();
             (
                 StatusCode::OK,
                 no_store,
-                Json(serde_json::json!({ "ready": true, "queue_pending": queue_pending })),
+                Json(serde_json::json!({
+                    "ready": true,
+                    "degraded": degraded,
+                    "pipeline": pipeline,
+                })),
             )
         }
         Err(e) => {
-            tracing::error!(error = %e, "readiness check failed: DB unreachable");
+            tracing::error!(error = %e, "readiness check failed: database/schema unavailable");
             (
                 StatusCode::SERVICE_UNAVAILABLE,
                 no_store,
-                Json(serde_json::json!({ "ready": false, "error": "database unreachable" })),
+                Json(serde_json::json!({ "ready": false, "error": "database unavailable" })),
             )
         }
     }
@@ -387,9 +473,7 @@ async fn ready(State(state): State<ApiState>) -> impl IntoResponse {
 
 /// Operational metrics (JSON). The key signal is GitHub rate-budget
 /// exhaustion plus queue depth. Cheap: a handful of aggregate queries. When
-/// `METRICS_TOKEN` is set, requires `Authorization: Bearer <token>` —
-/// otherwise it's public (queue depths + budget remaining aren't secret,
-/// but operators may want to gate them).
+/// Requires `Authorization: Bearer <METRICS_TOKEN>` in release deployments.
 async fn metrics(
     State(state): State<ApiState>,
     headers: HeaderMap,
@@ -430,6 +514,7 @@ async fn metrics(
     let star_queue = queue_depth_by_status(db, "star_fetch_queue").await?;
     // Repo-analysis queue depth by status.
     let analysis_queue = queue_depth_by_status(db, "repo_analysis_queue").await?;
+    let pipeline = load_pipeline_signals(db).await?;
 
     // Raster saturation: how many of the CPU-bound raster permits are free.
     // `available == 0` for a sustained stretch means chart PNG/WebP encodes
@@ -453,6 +538,7 @@ async fn metrics(
         "github_budget": github_budget,
         "star_fetch_queue": star_queue,
         "repo_analysis_queue": analysis_queue,
+        "pipeline": pipeline,
         "raster": {
             "permits_total": RASTER_CONCURRENCY,
             "permits_available": raster_available,

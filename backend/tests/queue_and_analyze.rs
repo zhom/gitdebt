@@ -159,6 +159,35 @@ async fn queue_dedup_and_claim() {
 }
 
 #[tokio::test]
+async fn transient_star_failures_stay_retryable_with_a_durable_delay() {
+    let Some(db) = test_db().await else {
+        eprintln!("skipping: set GITDEBT_TEST_DATABASE_URL to run");
+        return;
+    };
+    let prefix = "gitdebt-test-retry/";
+    cleanup(&db, prefix).await;
+    let repo = format!("{prefix}repo");
+
+    queue::enqueue(&db, &repo, 0).await.unwrap();
+    queue::fail(&db, &repo, "temporary provider failure")
+        .await
+        .unwrap();
+    let row: (String, i64, bool) = sqlx::query_as(
+        "SELECT status, attempts, next_attempt_at > NOW() \
+         FROM star_fetch_queue WHERE repo = $1",
+    )
+    .bind(&repo)
+    .fetch_one(&db.pool)
+    .await
+    .unwrap();
+    assert_eq!(row, ("pending".to_string(), 1, true));
+    assert!(queue::is_active(&db, &repo).await.unwrap());
+    assert!(queue::is_retrying(&db, &repo).await.unwrap());
+
+    cleanup(&db, prefix).await;
+}
+
+#[tokio::test]
 async fn analyze_cold_repo_is_pending_and_enqueues_without_paginating() {
     let Some(db) = test_db().await else {
         eprintln!("skipping: set GITDEBT_TEST_DATABASE_URL to run");
@@ -206,7 +235,7 @@ async fn analyze_cold_repo_is_pending_and_enqueues_without_paginating() {
 }
 
 #[tokio::test]
-async fn repo_analysis_enqueue_is_freshness_bounded_and_dead_is_terminal() {
+async fn repo_analysis_enqueue_is_freshness_bounded_and_old_dead_jobs_revive() {
     let Some(db) = test_db().await else {
         eprintln!("skipping: set GITDEBT_TEST_DATABASE_URL to run");
         return;
@@ -230,8 +259,43 @@ async fn repo_analysis_enqueue_is_freshness_bounded_and_dead_is_terminal() {
         .unwrap();
     assert_eq!(
         repo_analysis::enqueue(&db, &active).await.unwrap(),
-        repo_analysis::EnqueueOutcome::Dead
+        repo_analysis::EnqueueOutcome::Enqueued
     );
+    let revived: (String, i32) =
+        sqlx::query_as("SELECT status, attempts FROM repo_analysis_queue WHERE repo = $1")
+            .bind(&active)
+            .fetch_one(&db.pool)
+            .await
+            .unwrap();
+    assert_eq!(revived, ("pending".to_string(), 0));
+
+    let missing = format!("{prefix}missing");
+    sqlx::query(
+        "INSERT INTO repos (repo, missing) VALUES ($1, TRUE) \
+         ON CONFLICT (repo) DO UPDATE SET missing = TRUE",
+    )
+    .bind(&missing)
+    .execute(&db.pool)
+    .await
+    .unwrap();
+    sqlx::query(
+        "INSERT INTO repo_analysis_queue (repo, status, enqueued_at) \
+         VALUES ($1, 'dead', NOW())",
+    )
+    .bind(&missing)
+    .execute(&db.pool)
+    .await
+    .unwrap();
+    repo_analysis::revive_retryable_on_startup(&db)
+        .await
+        .unwrap();
+    let missing_status: String =
+        sqlx::query_scalar("SELECT status FROM repo_analysis_queue WHERE repo = $1")
+            .bind(&missing)
+            .fetch_one(&db.pool)
+            .await
+            .unwrap();
+    assert_eq!(missing_status, "dead", "404 tombstones stay terminal");
 
     let fresh = format!("{prefix}fresh");
     sqlx::query(

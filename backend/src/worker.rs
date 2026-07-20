@@ -176,15 +176,8 @@ async fn run_worker(worker_id: String, ctx: WorkerCtx) {
                     consecutive_failures = 0;
                 } else {
                     tracing::warn!(repo = %job.repo, error = %msg, "star-fetch failed");
-                    match queue::fail(ctx.cache.db(), &job.repo, &msg).await {
-                        Ok(true) => tracing::warn!(
-                            repo = %job.repo,
-                            "star-fetch hit max attempts; parked dead"
-                        ),
-                        Ok(false) => {}
-                        Err(e2) => {
-                            tracing::warn!(repo = %job.repo, error = %e2, "queue fail failed")
-                        }
+                    if let Err(e2) = queue::fail(ctx.cache.db(), &job.repo, &msg).await {
+                        tracing::warn!(repo = %job.repo, error = %e2, "queue fail failed")
                     }
                     consecutive_failures = consecutive_failures.saturating_add(1);
                     let secs = backoff_secs(consecutive_failures);

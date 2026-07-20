@@ -11,7 +11,7 @@ use std::sync::Arc;
 use std::time::Duration;
 
 use async_trait::async_trait;
-use chrono::{DateTime, NaiveDate, Utc};
+use chrono::{DateTime, Datelike, NaiveDate, Utc};
 use gcp_auth::{CustomServiceAccount, TokenProvider};
 use reqwest::header::RETRY_AFTER;
 use reqwest::{Method, StatusCode, Url};
@@ -46,42 +46,6 @@ const HARD_MAX_POLL_TIMEOUT_MS: u64 = 20_000;
 const HARD_MAX_RETRIES: usize = 8;
 const HARD_MAX_REPOSITORIES: usize = 1_000;
 const HARD_MAX_RANGE_DAYS: i64 = 366;
-
-/// GoogleSQL over the official GH Archive daily tables.
-///
-/// `_TABLE_SUFFIX` keeps wildcard scans restricted to the requested day
-/// window. Repository specs are paired structs: a stable GitHub ID is
-/// authoritative, while the normalized name is used only if either side lacks
-/// an ID. The query intentionally contains no actor fields.
-const STAR_EVENTS_SQL: &str = r#"
-SELECT
-  repo.id AS github_repo_id,
-  repo.name AS repository,
-  id AS source_event_id,
-  FORMAT_TIMESTAMP('%Y-%m-%dT%H:%M:%E6SZ', created_at) AS created_at
-FROM `githubarchive.day.*`
-WHERE _TABLE_SUFFIX BETWEEN FORMAT_DATE('%Y%m%d', @start_date)
-                        AND FORMAT_DATE('%Y%m%d', @end_date)
-  AND type = 'WatchEvent'
-  AND public = TRUE
-  AND JSON_VALUE(payload, '$.action') = 'started'
-  AND EXISTS (
-    SELECT 1
-    FROM UNNEST(@repositories) AS requested
-    WHERE
-      (
-        requested.github_id > 0
-        AND repo.id = requested.github_id
-      )
-      OR
-      (
-        LOWER(repo.name) = requested.lower_name
-        AND (requested.github_id = 0 OR repo.id IS NULL)
-      )
-  )
-ORDER BY created_at ASC, github_repo_id ASC, LOWER(repository) ASC, source_event_id ASC
-LIMIT @query_limit
-"#;
 
 /// A repository to match in GH Archive.
 ///
@@ -709,7 +673,7 @@ fn is_valid_repo_name(name: &str) -> bool {
 #[derive(Debug, Serialize)]
 #[serde(rename_all = "camelCase")]
 struct QueryRequest {
-    query: &'static str,
+    query: String,
     use_legacy_sql: bool,
     parameter_mode: &'static str,
     query_parameters: Vec<QueryParameter>,
@@ -760,7 +724,7 @@ fn build_query_request(
         .to_string();
 
     QueryRequest {
-        query: STAR_EVENTS_SQL,
+        query: build_star_events_sql(start, end),
         use_legacy_sql: false,
         parameter_mode: "NAMED",
         query_parameters: vec![
@@ -790,6 +754,62 @@ fn build_query_request(
         location: config.location.clone(),
         labels: BTreeMap::from([("component", "gh_archive"), ("service", "gitdebt")]),
     }
+}
+
+/// Build GoogleSQL over exact official GH Archive month resources.
+///
+/// `githubarchive.day.*` cannot be used safely because that prefix also
+/// contains the `day.yesterday` view, and BigQuery rejects wildcard queries
+/// when any matched resource is a view. Month identifiers are derived only
+/// from validated `NaiveDate` values, so the dynamic table names cannot carry
+/// user input. The selected columns intentionally exclude actors and payloads.
+fn build_star_events_sql(start: NaiveDate, end: NaiveDate) -> String {
+    let mut year = start.year();
+    let mut month = start.month();
+    let mut selects = Vec::new();
+    loop {
+        selects.push(format!(
+            r#"SELECT
+  repo.id AS github_repo_id,
+  repo.name AS repository,
+  id AS source_event_id,
+  FORMAT_TIMESTAMP('%Y-%m-%dT%H:%M:%E6SZ', created_at) AS created_at
+FROM `githubarchive.month.{year:04}{month:02}`
+WHERE DATE(created_at) BETWEEN @start_date AND @end_date
+  AND type = 'WatchEvent'
+  AND public = TRUE
+  AND JSON_VALUE(payload, '$.action') = 'started'
+  AND EXISTS (
+    SELECT 1
+    FROM UNNEST(@repositories) AS requested
+    WHERE
+      (
+        requested.github_id > 0
+        AND repo.id = requested.github_id
+      )
+      OR
+      (
+        LOWER(repo.name) = requested.lower_name
+        AND (requested.github_id = 0 OR repo.id IS NULL)
+      )
+  )"#
+        ));
+        if year == end.year() && month == end.month() {
+            break;
+        }
+        if month == 12 {
+            year += 1;
+            month = 1;
+        } else {
+            month += 1;
+        }
+    }
+    format!(
+        "SELECT * FROM (\n{}\n)\n\
+         ORDER BY created_at ASC, github_repo_id ASC, LOWER(repository) ASC, source_event_id ASC\n\
+         LIMIT @query_limit",
+        selects.join("\nUNION ALL\n")
+    )
 }
 
 fn scalar_parameter(name: &'static str, kind: &'static str, value: String) -> QueryParameter {
@@ -1301,15 +1321,6 @@ mod tests {
 
     #[test]
     fn query_is_standard_parameterized_and_identity_only() {
-        assert!(STAR_EVENTS_SQL.contains("`githubarchive.day.*`"));
-        assert!(STAR_EVENTS_SQL.contains("_TABLE_SUFFIX"));
-        assert!(STAR_EVENTS_SQL.contains("@repositories"));
-        assert!(STAR_EVENTS_SQL.contains("repo.id"));
-        assert!(STAR_EVENTS_SQL.contains("LOWER(repo.name)"));
-        assert!(STAR_EVENTS_SQL.contains("type = 'WatchEvent'"));
-        assert!(!STAR_EVENTS_SQL.to_ascii_lowercase().contains("actor"));
-        assert!(!STAR_EVENTS_SQL.contains("owner/example"));
-
         let repositories = normalize_repositories(&[
             RepositorySpec::new(None, "Owner/Example"),
             RepositorySpec::new(Some(42), "Zhom/GitDebt"),
@@ -1322,6 +1333,16 @@ mod tests {
             NaiveDate::from_ymd_opt(2026, 1, 3).unwrap(),
         );
         let value = serde_json::to_value(request).unwrap();
+        let sql = value["query"].as_str().unwrap();
+        assert!(sql.contains("`githubarchive.month.202601`"));
+        assert!(!sql.contains("githubarchive.day.*"));
+        assert!(!sql.contains("_TABLE_SUFFIX"));
+        assert!(sql.contains("@repositories"));
+        assert!(sql.contains("repo.id"));
+        assert!(sql.contains("LOWER(repo.name)"));
+        assert!(sql.contains("type = 'WatchEvent'"));
+        assert!(!sql.to_ascii_lowercase().contains("actor"));
+        assert!(!sql.contains("owner/example"));
         assert_eq!(value["useLegacySql"], false);
         assert_eq!(value["parameterMode"], "NAMED");
         assert_eq!(value["maximumBytesBilled"], "123456789");
@@ -1354,6 +1375,19 @@ mod tests {
             repository_values[1]["structValues"]["lower_name"]["value"],
             "zhom/gitdebt"
         );
+    }
+
+    #[test]
+    fn query_unions_only_exact_months_in_the_requested_range() {
+        let sql = build_star_events_sql(
+            NaiveDate::from_ymd_opt(2025, 12, 31).unwrap(),
+            NaiveDate::from_ymd_opt(2026, 2, 1).unwrap(),
+        );
+        assert!(sql.contains("`githubarchive.month.202512`"));
+        assert!(sql.contains("`githubarchive.month.202601`"));
+        assert!(sql.contains("`githubarchive.month.202602`"));
+        assert_eq!(sql.matches("UNION ALL").count(), 2);
+        assert!(!sql.contains("day.yesterday"));
     }
 
     #[test]

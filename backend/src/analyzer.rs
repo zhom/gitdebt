@@ -95,13 +95,16 @@ pub struct AnalysisResult {
     /// a refresh can keep its prior complete snapshot visible, while a cold
     /// backfill remains `pending` with an empty history.
     pub backfilling: bool,
-    /// True when star acquisition reached a terminal failure or GitHub no
-    /// longer exposes this repo's stargazer timeline. Clients must stop
-    /// polling; this is distinct from a missing repository.
+    /// Stable public state for the history pipeline: `ready`, `queued`,
+    /// `retrying`, or `not_public`.
+    pub history_status: &'static str,
+    /// Deprecated compatibility field. Infrastructure failures are retryable,
+    /// and repository visibility is represented by `not_found` /
+    /// `history_status`, so this is always false.
     pub history_unavailable: bool,
-    /// True when GitHub reports the repo as 404 (private/deleted/typo'd) and
-    /// it's been tombstoned. The frontend renders a clear "not found" state;
-    /// the backend does NOT enqueue a fetch for a missing repo.
+    /// True when the default GitHub credentials cannot see the repository
+    /// (private/deleted/typo'd). The frontend renders a clear "not public or
+    /// not found" state; the backend does NOT re-enqueue a tombstone.
     pub not_found: bool,
     /// Cumulative total-stars series, downsampled to ≤ MAX_HISTORY_POINTS
     /// points (even sampling, always includes first + last). Empty until
@@ -150,6 +153,7 @@ pub async fn analyze_repo(owner: &str, repo: &str, ctx: &AnalyzerCtx) -> Result<
             history_approximate: false,
             pending: false,
             backfilling: false,
+            history_status: "not_public",
             history_unavailable: false,
             not_found: true,
             history: Vec::new(),
@@ -208,11 +212,7 @@ pub async fn analyze_repo(owner: &str, repo: &str, ctx: &AnalyzerCtx) -> Result<
         let priority = summary.as_ref().map(|s| s.view_count).unwrap_or(0);
         enqueue_fetch_known(ctx, &repo_full, priority).await;
     }
-    let history_unavailable = !history_complete
-        && queue::history_unavailable(ctx.cache.db(), &repo_full)
-            .await
-            .unwrap_or(false);
-    let pending = !history_complete && !history_unavailable;
+    let pending = !history_complete;
     let queued = queue::pending_count(ctx.cache.db()).await.unwrap_or(0);
 
     // A partial queue job means a large repo is moving through resumable
@@ -220,6 +220,10 @@ pub async fn analyze_repo(owner: &str, repo: &str, ctx: &AnalyzerCtx) -> Result<
     let backfilling = queue::is_backfilling(ctx.cache.db(), &repo_full)
         .await
         .unwrap_or(false);
+    let retrying = !history_complete
+        && queue::is_retrying(ctx.cache.db(), &repo_full)
+            .await
+            .unwrap_or(false);
 
     let created_at = summary.as_ref().and_then(|s| s.created_at);
 
@@ -256,7 +260,14 @@ pub async fn analyze_repo(owner: &str, repo: &str, ctx: &AnalyzerCtx) -> Result<
             == Some("gh_archive"),
         pending,
         backfilling,
-        history_unavailable,
+        history_status: if history_complete {
+            "ready"
+        } else if retrying {
+            "retrying"
+        } else {
+            "queued"
+        },
+        history_unavailable: false,
         not_found: false,
         history,
     })
@@ -435,6 +446,7 @@ mod tests {
             history_approximate: false,
             pending: false,
             backfilling: false,
+            history_status: "ready",
             history_unavailable: false,
             not_found: false,
             history: vec![Point {
@@ -493,6 +505,7 @@ mod tests {
             history_approximate: false,
             pending: true,
             backfilling: false,
+            history_status: "queued",
             history_unavailable: false,
             not_found: false,
             history: vec![],
@@ -521,6 +534,7 @@ mod tests {
             history_approximate: false,
             pending: false,
             backfilling: true,
+            history_status: "queued",
             history_unavailable: false,
             not_found: false,
             history: vec![],
@@ -546,6 +560,7 @@ mod tests {
             history_approximate: false,
             pending: false,
             backfilling: false,
+            history_status: "not_public",
             history_unavailable: false,
             not_found: true,
             history: vec![],
@@ -586,6 +601,7 @@ mod tests {
             history_approximate: false,
             pending: false,
             backfilling: false,
+            history_status: "queued",
             history_unavailable: false,
             not_found: false,
             history: vec![],

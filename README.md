@@ -173,6 +173,8 @@ GH_ARCHIVE_WINDOW_DAYS=31
 GH_ARCHIVE_CONCURRENCY=1
 GH_ARCHIVE_HOURLY_LAG_MINUTES=15
 GH_ARCHIVE_HOURLY_MAX_HOURS=24
+REPO_ANALYSIS_WORKERS=1
+METRICS_TOKEN=<random high-entropy bearer token>
 ```
 
 Instead of a credential file, `GH_ARCHIVE_GOOGLE_CREDENTIALS_JSON` accepts the
@@ -204,18 +206,42 @@ retry. A successful backend start logs
 `GH Archive historical coordinator and hourly follower started`.
 `GH_ARCHIVE_MAX_BYTES_BILLED` is a hard per-query cost guard.
 
-Historical jobs use the public BigQuery day tables. A separate bounded follower
-downloads completed hourly `.json.gz` files for forward updates. Each hour and
-its matching timestamps commit atomically in Postgres; 404 means “not
-published yet” and is retried without advancing the checkpoint. GH Archive
-event IDs deduplicate retries and the overlap with the next BigQuery refresh.
+Historical jobs use exact public BigQuery month resources. Do not switch this
+back to a `githubarchive.day.*` wildcard: that prefix includes the
+`day.yesterday` view, and BigQuery rejects wildcards that match any view. A
+separate bounded follower downloads completed hourly `.json.gz` files for
+forward updates. Each hour and its matching timestamps commit atomically in
+Postgres; 404 means “not published yet” and is retried without advancing the
+checkpoint. GH Archive event IDs deduplicate retries and the overlap with the
+next BigQuery refresh.
+
+Provider/query failures release the entire affected batch with a durable
+backoff. They do not spend a repository's retry budget or turn a public
+repository into a terminal “history unavailable” state. Repository-specific
+transient failures follow the same rule with an exponential delay capped at one
+hour. Only a confirmed GitHub 404 is terminal, and the UI describes that state
+as “not public or not found.”
 
 `WORKER_COUNT=8` is safe in archive mode: it controls concurrent GitHub
 metadata resolution, not BigQuery scans. `GH_ARCHIVE_CONCURRENCY` should stay
-at `1` initially. `REPO_ANALYSIS_WORKERS=8` is supported, but it is a
-disk/CPU-heavy setting; provision the persistent repo volume and memory for
-eight simultaneous clones. `GITHUB_MAX_IN_FLIGHT_REQUESTS` defaults to `64`
-and is hard-capped below GitHub's 100-concurrent-request guidance.
+at `1` initially. Repository analysis is intentionally capped at two workers
+per process even if `REPO_ANALYSIS_WORKERS` is set higher: clone and git-log
+subprocesses are disk-, process-, and thread-heavy. Start at `1`.
+`GITHUB_MAX_IN_FLIGHT_REQUESTS` defaults to `64` and is hard-capped below
+GitHub's 100-concurrent-request guidance.
+
+`/ready` reports pipeline degradation as well as database readiness. `/metrics`
+adds retrying/provider-delayed counts, dead-row counts, oldest-job age, the
+last completed archive hour, queue depths, GitHub rate buckets, and renderer
+saturation. Release builds require `METRICS_TOKEN`; scrape `/metrics` with
+`Authorization: Bearer <token>` and alert on `degraded`, provider-delayed jobs,
+dead rows, or a growing oldest-job age.
+
+Authenticated users' GitHub access tokens are encrypted at rest and are never
+pooled into shared star-history or repository-analysis workers. Public star
+history comes from GH Archive, and private repositories are not ingested. This
+keeps one user's repository access and GitHub quota from being spent on another
+user's request.
 
 The Cloudflare Pages refresh workflow already consumes
 `CLOUDFLARE_ACCOUNT_ID` and `CLOUDFLARE_API_TOKEN`; no Cloudflare secret is

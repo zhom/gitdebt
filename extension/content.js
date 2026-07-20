@@ -259,7 +259,10 @@
   function classifyAnalyze(data) {
     if (!data) return "pending";
     if (data.not_found === true) return "not_found";
-    if (data.history_unavailable === true) return "unavailable";
+    if (data.history_status === "not_public") return "not_found";
+    if (data.history_status === "retrying" || data.history_unavailable === true) {
+      return "retrying";
+    }
     if (data.backfilling === true) return "backfilling";
     if (data.history_complete === true && data.pending !== true) return "ready";
     return "pending";
@@ -535,7 +538,7 @@
     img.addEventListener("error", () => {
       handles.chartWrap.textContent = "";
       handles.chartWrap.appendChild(
-        el("div", { class: "gd-chart-error", text: "Star history unavailable." })
+        el("div", { class: "gd-chart-error", text: "The chart is not ready yet." })
       );
     });
     handles.chartWrap.appendChild(img);
@@ -702,10 +705,9 @@
         return;
       }
 
-      if (cls === "unavailable") {
-        setStatus(handles, "Star history is unavailable for this repository.", "error");
+      if (cls === "retrying") {
+        setStatus(handles, "Star history retry scheduled — waiting for the data provider.", "loading");
         handles.toggle.hidden = false;
-        return;
       }
 
       if (data && Number.isFinite(data.total_stars) && data.total_stars >= 0) {
@@ -717,7 +719,7 @@
       }
 
       if (cls === "backfilling") {
-        setStatus(handles, "Large repo — showing partial history while it finishes backfilling.", "loading");
+        setStatus(handles, "Large repo — collecting a complete historical snapshot.", "loading");
         renderStarChart(handles);
         return;
       }
@@ -734,7 +736,13 @@
         renderStarChart(handles);
         return;
       }
-      setStatus(handles, "Gathering data… (working)", "loading");
+      setStatus(
+        handles,
+        cls === "retrying"
+          ? "Star history retry scheduled — waiting for the data provider."
+          : "Gathering data… (working)",
+        "loading"
+      );
       await sleep(Math.min(POLL_BASE_MS + attempt * 500, POLL_MAX_MS), signal);
     }
   }

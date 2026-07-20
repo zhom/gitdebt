@@ -385,7 +385,7 @@ async fn process(repo: &str, ctx: &AnalysisCtx) -> Result<usize> {
 
     let commits = repo_history::walk_new_commits(&handle, last_sha.as_deref()).await?;
     let n = commits.len();
-    repo_stats::apply_commits(&ctx.db, repo, &commits).await?;
+    repo_stats::apply_commits_at_head(&ctx.db, repo, &commits, &handle.head_sha).await?;
 
     // Two independent post-passes, overlapped with `tokio::join!`:
     //   * author enrichment is GitHub-API-bound (network RTT, rate-limit

@@ -201,6 +201,24 @@ pub async fn apply_commits(db: &Db, repo: &str, commits: &[CommitInfo]) -> Resul
     if commits.is_empty() {
         return Ok(());
     }
+    let head_sha = commits
+        .last()
+        .map(|commit| commit.sha.as_str())
+        .unwrap_or_default();
+    apply_commits_at_head(db, repo, commits, head_sha).await
+}
+
+/// Apply a complete analyzed range and atomically advance its cursor to the
+/// actual repository HEAD. `HEAD` can be a merge commit omitted by the
+/// `--no-merges` fact walk; storing the real head prevents the next
+/// incremental run from replaying commits on merged branches. An empty fact
+/// range still advances the cursor for merge-only changes.
+pub async fn apply_commits_at_head(
+    db: &Db,
+    repo: &str,
+    commits: &[CommitInfo],
+    analyzed_head_sha: &str,
+) -> Result<()> {
     let agg = aggregate_commits(commits);
 
     let mut tx = db.pool.begin().await.context("begin tx")?;
@@ -337,7 +355,6 @@ pub async fn apply_commits(db: &Db, repo: &str, commits: &[CommitInfo]) -> Resul
     }
 
     // Bump cumulative commit count + last_analyzed metadata on repo_history.
-    let head_sha = commits.last().map(|c| c.sha.clone());
     let added = commits.len() as i64;
     sqlx::query(
         "INSERT INTO repo_history (repo, last_analyzed_sha, last_analyzed_at, head_sha, total_commits) \
@@ -349,7 +366,7 @@ pub async fn apply_commits(db: &Db, repo: &str, commits: &[CommitInfo]) -> Resul
             total_commits = repo_history.total_commits + $4",
     )
     .bind(repo)
-    .bind(&head_sha)
+    .bind(analyzed_head_sha)
     .bind(now)
     .bind(added)
     .execute(&mut *tx)

@@ -23,12 +23,15 @@ use gitdebt::{
     cache::{ArchiveStarEvent, Cache},
     db::Db,
     queue, repo_analysis,
+    repo_history::CommitInfo,
+    repo_stats,
 };
 use sqlx::postgres::PgPoolOptions;
 use tokio::sync::Mutex;
 
 static SCHEMA_READY: OnceLock<()> = OnceLock::new();
 static SCHEMA_LOCK: Mutex<()> = Mutex::const_new(());
+static STAR_CLAIM_LOCK: Mutex<()> = Mutex::const_new(());
 
 /// Returns a connected `Db` if a test database is configured, else `None`
 /// (the test then no-ops). Keeps the suite green where no DB exists.
@@ -69,6 +72,22 @@ async fn cleanup(db: &Db, prefix: &str) {
         .bind(&like)
         .execute(&db.pool)
         .await;
+    let _ = sqlx::query("DELETE FROM repo_file_stats WHERE repo LIKE $1")
+        .bind(&like)
+        .execute(&db.pool)
+        .await;
+    let _ = sqlx::query("DELETE FROM repo_commit_days WHERE repo LIKE $1")
+        .bind(&like)
+        .execute(&db.pool)
+        .await;
+    let _ = sqlx::query("DELETE FROM repo_todo_deltas WHERE repo LIKE $1")
+        .bind(&like)
+        .execute(&db.pool)
+        .await;
+    let _ = sqlx::query("DELETE FROM repo_lines WHERE repo LIKE $1")
+        .bind(&like)
+        .execute(&db.pool)
+        .await;
     let _ = sqlx::query("DELETE FROM repo_star_arrivals WHERE repo LIKE $1")
         .bind(&like)
         .execute(&db.pool)
@@ -93,6 +112,7 @@ async fn queue_dedup_and_claim() {
         eprintln!("skipping: set GITDEBT_TEST_DATABASE_URL to run");
         return;
     };
+    let _claim_guard = STAR_CLAIM_LOCK.lock().await;
     let prefix = "gitdebt-test-dedup/";
     cleanup(&db, prefix).await;
 
@@ -193,6 +213,7 @@ async fn archive_batch_claim_collects_jobs_across_repository_creation_dates() {
         eprintln!("skipping: set GITDEBT_TEST_DATABASE_URL to run");
         return;
     };
+    let _claim_guard = STAR_CLAIM_LOCK.lock().await;
     let prefix = "gitdebt-test-archive-batch/";
     cleanup(&db, prefix).await;
     let old = format!("{prefix}old");
@@ -455,6 +476,70 @@ async fn repo_analysis_startup_recovers_only_stale_leases() {
             (stale, "pending".to_string()),
         ]
     );
+
+    cleanup(&db, prefix).await;
+}
+
+#[tokio::test]
+async fn repo_analysis_commit_and_merge_head_advance_atomically() {
+    let Some(db) = test_db().await else {
+        eprintln!("skipping: set GITDEBT_TEST_DATABASE_URL to run");
+        return;
+    };
+    let prefix = "gitdebt-test-analysis-head/";
+    cleanup(&db, prefix).await;
+    let repo = format!("{prefix}repo");
+    let committed_at = Utc.timestamp_opt(1_700_000_000, 0).unwrap();
+    let commit = CommitInfo {
+        sha: "1111111111111111111111111111111111111111".to_string(),
+        author_email: "author@example.com".to_string(),
+        author_name: "Author".to_string(),
+        committed_at,
+        committed_day: committed_at.date_naive(),
+        message_first_line: "change".to_string(),
+        is_fix: false,
+        paths_changed: vec!["src/lib.rs".to_string()],
+        todo_added: 0,
+        todo_removed: 0,
+    };
+    let merge_head = "2222222222222222222222222222222222222222";
+
+    repo_stats::apply_commits_at_head(&db, &repo, &[commit], merge_head)
+        .await
+        .unwrap();
+
+    let state: (Option<String>, Option<String>, i64) = sqlx::query_as(
+        "SELECT last_analyzed_sha, head_sha, total_commits \
+         FROM repo_history WHERE repo = $1",
+    )
+    .bind(&repo)
+    .fetch_one(&db.pool)
+    .await
+    .unwrap();
+    assert_eq!(state.0.as_deref(), Some(merge_head));
+    assert_eq!(state.1.as_deref(), Some(merge_head));
+    assert_eq!(state.2, 1);
+    let file_commits: i64 = sqlx::query_scalar(
+        "SELECT commits FROM repo_file_stats WHERE repo = $1 AND path = 'src/lib.rs'",
+    )
+    .bind(&repo)
+    .fetch_one(&db.pool)
+    .await
+    .unwrap();
+    assert_eq!(file_commits, 1);
+
+    let merge_only_head = "3333333333333333333333333333333333333333";
+    repo_stats::apply_commits_at_head(&db, &repo, &[], merge_only_head)
+        .await
+        .unwrap();
+    let merge_only_state: (Option<String>, i64) =
+        sqlx::query_as("SELECT last_analyzed_sha, total_commits FROM repo_history WHERE repo = $1")
+            .bind(&repo)
+            .fetch_one(&db.pool)
+            .await
+            .unwrap();
+    assert_eq!(merge_only_state.0.as_deref(), Some(merge_only_head));
+    assert_eq!(merge_only_state.1, 1);
 
     cleanup(&db, prefix).await;
 }

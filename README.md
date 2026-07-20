@@ -245,6 +245,9 @@ GitHub's 100-concurrent-request guidance.
 Analysis workers heartbeat their durable claim every 30 seconds. A claim with
 no heartbeat for two minutes is recoverable after a crash or rolling deploy;
 active long-running clones keep their lease and are not duplicated.
+Commit patches are read in bounded batches and reduced before the atomic
+Postgres write, so large repositories cannot require one unbounded `git log`
+buffer and readers still never observe partial analysis.
 
 `/ready` reports pipeline degradation as well as database readiness. `/metrics`
 adds retrying/provider-delayed counts, unexpected dead-row counts, expected

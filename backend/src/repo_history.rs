@@ -243,10 +243,16 @@ const COMMIT_SENTINEL: &[u8] = b"\x00\x00GDCOMMIT\x00";
 /// blow up the scan; 4 MB is plenty to capture the realistic TODO churn.
 const MAX_PATCH_BYTES: usize = 4 * 1024 * 1024;
 
+/// Bound the raw `git log -p` output retained at once. Large repositories can
+/// produce gigabytes of patch text; the parsed commit facts are much smaller,
+/// so walk a fixed number of explicitly listed commits per subprocess and
+/// discard each raw batch before continuing.
+const LOG_BATCH_COMMITS: usize = 500;
+
 /// Iterate every commit reachable from HEAD that isn't an ancestor of
 /// `since_sha`. None = walk entire history. Yields oldest-first.
 ///
-/// A single streaming `git log` emits, per commit:
+/// Each bounded `git log` emits, per commit:
 ///   * the `--format` header (NUL-delimited sha/email/name/date/subject),
 ///   * `--numstat -z` changed-path triples (NUL-terminated; the path is
 ///     the 3rd tab-field, so paths with spaces are exact), and
@@ -263,35 +269,75 @@ pub async fn walk_new_commits(
     handle: &RepoHandle,
     since_sha: Option<&str>,
 ) -> Result<Vec<CommitInfo>> {
+    walk_new_commits_batched(handle, since_sha, LOG_BATCH_COMMITS).await
+}
+
+async fn walk_new_commits_batched(
+    handle: &RepoHandle,
+    since_sha: Option<&str>,
+    batch_size: usize,
+) -> Result<Vec<CommitInfo>> {
     let range = match since_sha {
         Some(sha) => format!("{sha}..HEAD"),
         None => "HEAD".to_string(),
     };
 
+    let output = Command::new("git")
+        .arg("-C")
+        .arg(&handle.path)
+        .args(["rev-list", "--reverse", "--no-merges", &range])
+        .output()
+        .await
+        .context("git rev-list")?;
+    if !output.status.success() {
+        bail!(
+            "git rev-list failed: {}",
+            String::from_utf8_lossy(&output.stderr)
+        );
+    }
+    let sha_output = std::str::from_utf8(&output.stdout).context("git rev-list non-UTF-8")?;
+    let shas: Vec<&str> = sha_output
+        .lines()
+        .map(str::trim)
+        .filter(|sha| !sha.is_empty())
+        .collect();
+    if let Some(invalid) = shas.iter().find(|sha| {
+        !(40..=64).contains(&sha.len()) || !sha.bytes().all(|byte| byte.is_ascii_hexdigit())
+    }) {
+        bail!("git rev-list returned invalid object id: {invalid}");
+    }
+
+    let mut commits = Vec::with_capacity(shas.len());
+    for batch in shas.chunks(batch_size.max(1)) {
+        commits.extend(walk_commit_batch(handle, batch).await?);
+    }
+    Ok(commits)
+}
+
+async fn walk_commit_batch(handle: &RepoHandle, shas: &[&str]) -> Result<Vec<CommitInfo>> {
+    if shas.is_empty() {
+        return Ok(Vec::new());
+    }
+
     // %H sha · %P parent hashes · %ae author email · %an name · %aI
     // iso8601 · %s subject. `%P` identifies the root commit, whose content
     // contributes TODO deltas but no changed-path aggregate.
     let log_format = "%x00%x00GDCOMMIT%x00%H%x00%P%x00%ae%x00%an%x00%aI%x00%s%x00";
-    let output = Command::new("git")
-        .arg("-C")
-        .arg(&handle.path)
-        .args([
-            "log",
-            "--reverse",
-            "--no-merges",
-            "--numstat",
-            "-z",
-            "--unified=0",
-            "-p",
-            &format!("--format={log_format}"),
-            &range,
-        ])
-        .output()
-        .await
-        .context("git log")?;
+    let mut command = Command::new("git");
+    command.arg("-C").arg(&handle.path).args([
+        "log",
+        "--no-walk=unsorted",
+        "--numstat",
+        "-z",
+        "--unified=0",
+        "-p",
+        &format!("--format={log_format}"),
+    ]);
+    command.args(shas).arg("--");
+    let output = command.output().await.context("batched git log")?;
     if !output.status.success() {
         bail!(
-            "git log failed: {}",
+            "batched git log failed: {}",
             String::from_utf8_lossy(&output.stderr)
         );
     }
@@ -952,8 +998,8 @@ mod tests {
 
     // #3 end-to-end equivalence against the OLD per-commit commands.
     //
-    // Builds a real git repo, then compares `walk_new_commits` (new single
-    // `git log` pass) against an oracle that reproduces the OLD code path
+    // Builds a real git repo, then compares the bounded batched walker
+    // against an oracle that reproduces the OLD code path
     // exactly: `git log` for the sha list + per-commit `git diff-tree
     // --name-only` (paths) + `git show --unified=0 --format=` (TODO scan,
     // 4 MB cap). Asserts identical per-file, per-day, fix, and TODO
@@ -1096,8 +1142,9 @@ mod tests {
                 head_sha,
             };
 
-            // NEW: single-pass walk.
-            let new_commits = walk_new_commits(&handle, None).await.unwrap();
+            // Force several subprocess batches so order and aggregate
+            // equivalence are covered without creating 500+ fixtures.
+            let new_commits = walk_new_commits_batched(&handle, None, 2).await.unwrap();
 
             // OLD oracle: sha list (oldest-first, no-merges) then per-commit.
             let log_out = SyncCommand::new("git")

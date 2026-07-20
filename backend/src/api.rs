@@ -368,9 +368,11 @@ struct PipelineSignals {
     star_jobs_retrying: i64,
     star_jobs_provider_delayed: i64,
     star_jobs_dead: i64,
+    star_jobs_tombstoned: i64,
     analysis_jobs_active: i64,
     analysis_jobs_retrying: i64,
     analysis_jobs_dead: i64,
+    analysis_jobs_tombstoned: i64,
     oldest_star_job_seconds: i64,
     oldest_analysis_job_seconds: i64,
     last_archive_hour: Option<DateTime<Utc>>,
@@ -399,15 +401,31 @@ async fn load_pipeline_signals(db: &crate::db::Db) -> Result<PipelineSignals, sq
             (SELECT COUNT(*)::BIGINT FROM star_fetch_queue \
                 WHERE status IN ('pending', 'in_progress') \
                   AND last_error LIKE 'provider:%') AS star_jobs_provider_delayed, \
-            (SELECT COUNT(*)::BIGINT FROM star_fetch_queue WHERE status = 'dead') \
+            (SELECT COUNT(*)::BIGINT FROM star_fetch_queue queue \
+                WHERE status = 'dead' AND NOT EXISTS ( \
+                    SELECT 1 FROM repos \
+                    WHERE repos.repo = queue.repo AND repos.missing = TRUE)) \
                 AS star_jobs_dead, \
+            (SELECT COUNT(*)::BIGINT FROM star_fetch_queue queue \
+                WHERE status = 'dead' AND EXISTS ( \
+                    SELECT 1 FROM repos \
+                    WHERE repos.repo = queue.repo AND repos.missing = TRUE)) \
+                AS star_jobs_tombstoned, \
             (SELECT COUNT(*)::BIGINT FROM repo_analysis_queue \
                 WHERE status IN ('pending', 'in_progress')) AS analysis_jobs_active, \
             (SELECT COUNT(*)::BIGINT FROM repo_analysis_queue \
                 WHERE status IN ('pending', 'in_progress') AND attempts > 0) \
                 AS analysis_jobs_retrying, \
-            (SELECT COUNT(*)::BIGINT FROM repo_analysis_queue WHERE status = 'dead') \
+            (SELECT COUNT(*)::BIGINT FROM repo_analysis_queue queue \
+                WHERE status = 'dead' AND NOT EXISTS ( \
+                    SELECT 1 FROM repos \
+                    WHERE repos.repo = queue.repo AND repos.missing = TRUE)) \
                 AS analysis_jobs_dead, \
+            (SELECT COUNT(*)::BIGINT FROM repo_analysis_queue queue \
+                WHERE status = 'dead' AND EXISTS ( \
+                    SELECT 1 FROM repos \
+                    WHERE repos.repo = queue.repo AND repos.missing = TRUE)) \
+                AS analysis_jobs_tombstoned, \
             COALESCE((SELECT EXTRACT(EPOCH FROM (NOW() - MIN(enqueued_at)))::BIGINT \
                 FROM star_fetch_queue WHERE status IN ('pending', 'in_progress')), 0) \
                 AS oldest_star_job_seconds, \
@@ -426,9 +444,11 @@ async fn load_pipeline_signals(db: &crate::db::Db) -> Result<PipelineSignals, sq
         star_jobs_retrying: row.try_get("star_jobs_retrying")?,
         star_jobs_provider_delayed: row.try_get("star_jobs_provider_delayed")?,
         star_jobs_dead: row.try_get("star_jobs_dead")?,
+        star_jobs_tombstoned: row.try_get("star_jobs_tombstoned")?,
         analysis_jobs_active: row.try_get("analysis_jobs_active")?,
         analysis_jobs_retrying: row.try_get("analysis_jobs_retrying")?,
         analysis_jobs_dead: row.try_get("analysis_jobs_dead")?,
+        analysis_jobs_tombstoned: row.try_get("analysis_jobs_tombstoned")?,
         oldest_star_job_seconds: row.try_get::<i64, _>("oldest_star_job_seconds")?.max(0),
         oldest_analysis_job_seconds: row.try_get::<i64, _>("oldest_analysis_job_seconds")?.max(0),
         last_archive_hour: row.try_get("last_archive_hour")?,
@@ -4432,5 +4452,29 @@ mod tests {
             // v4-mapped loopback normalizes to v4 and matches.
             assert!(peer_is_trusted("::ffff:127.0.0.1".parse().unwrap()));
         }
+    }
+
+    #[test]
+    fn expected_tombstones_do_not_degrade_readiness() {
+        let mut pipeline = PipelineSignals {
+            histories_complete: 0,
+            histories_pending: 0,
+            star_jobs_active: 0,
+            star_jobs_retrying: 0,
+            star_jobs_provider_delayed: 0,
+            star_jobs_dead: 0,
+            star_jobs_tombstoned: 1,
+            analysis_jobs_active: 0,
+            analysis_jobs_retrying: 0,
+            analysis_jobs_dead: 0,
+            analysis_jobs_tombstoned: 1,
+            oldest_star_job_seconds: 0,
+            oldest_analysis_job_seconds: 0,
+            last_archive_hour: None,
+        };
+        assert!(!pipeline.degraded());
+
+        pipeline.star_jobs_dead = 1;
+        assert!(pipeline.degraded());
     }
 }

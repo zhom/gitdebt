@@ -207,10 +207,12 @@ async fn archive_batch_claim_collects_jobs_across_repository_creation_dates() {
     .execute(&db.pool)
     .await
     .unwrap();
-    queue::enqueue(&db, &old, 0).await.unwrap();
-    queue::enqueue(&db, &new, 0).await.unwrap();
+    // Use a test-local high priority and an exact limit so concurrent queue
+    // tests cannot have their cold jobs swept into this global batch claim.
+    queue::enqueue(&db, &old, 10_000).await.unwrap();
+    queue::enqueue(&db, &new, 10_000).await.unwrap();
 
-    let claimed = queue::claim_many(&db, "archive-test", 10).await.unwrap();
+    let claimed = queue::claim_many(&db, "archive-test", 2).await.unwrap();
     let claimed_repos = claimed
         .into_iter()
         .map(|job| job.repo)

@@ -235,11 +235,12 @@ subprocesses are disk-, process-, and thread-heavy. Start at `1`.
 GitHub's 100-concurrent-request guidance.
 
 `/ready` reports pipeline degradation as well as database readiness. `/metrics`
-adds retrying/provider-delayed counts, dead-row counts, oldest-job age, the
-last completed archive hour, queue depths, GitHub rate buckets, and renderer
-saturation. Release builds require `METRICS_TOKEN`; scrape `/metrics` with
-`Authorization: Bearer <token>` and alert on `degraded`, provider-delayed jobs,
-dead rows, or a growing oldest-job age.
+adds retrying/provider-delayed counts, unexpected dead-row counts, expected
+404 tombstone counts, oldest-job age, the last completed archive hour, queue
+depths, GitHub rate buckets, and renderer saturation. Release builds require
+`METRICS_TOKEN`; scrape `/metrics` with `Authorization: Bearer <token>` and
+alert on `degraded`, provider-delayed jobs, unexpected dead rows, or a growing
+oldest-job age.
 
 Authenticated users' GitHub access tokens are encrypted at rest and are never
 pooled into shared star-history or repository-analysis workers. Public star

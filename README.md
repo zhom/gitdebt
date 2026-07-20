@@ -226,6 +226,10 @@ transient failures follow the same rule with an exponential delay capped at one
 hour. Only a confirmed GitHub 404 is terminal, and the UI describes that state
 as “not public or not found.”
 
+Exhausting BigQuery's monthly free query-byte quota schedules a one-hour retry
+instead of hammering the provider. Google Cloud requires a paid billing account
+to continue immediately after that free quota is exhausted.
+
 `WORKER_COUNT=8` is safe in archive mode: it controls concurrent GitHub
 metadata resolution, not BigQuery scans. `GH_ARCHIVE_CONCURRENCY` should stay
 at `1` initially. Repository analysis is intentionally capped at two workers

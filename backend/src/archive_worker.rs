@@ -14,7 +14,9 @@ use chrono::{Datelike, Days, Months, NaiveDate, Utc};
 use futures::StreamExt;
 
 use crate::cache::{ArchiveBackfillState, ArchiveStarEvent, Cache};
-use crate::gh_archive::{GhArchiveEventSource, GhArchiveFetch, GhArchiveStarEvent, RepositorySpec};
+use crate::gh_archive::{
+    GhArchiveError, GhArchiveEventSource, GhArchiveFetch, GhArchiveStarEvent, RepositorySpec,
+};
 use crate::github::GithubClient;
 use crate::queue;
 
@@ -114,7 +116,8 @@ async fn run(ctx: ArchiveWorkerCtx) {
             Ok(()) => consecutive_provider_failures = 0,
             Err(error) => {
                 consecutive_provider_failures = consecutive_provider_failures.saturating_add(1);
-                let delay_seconds = provider_backoff_seconds(consecutive_provider_failures);
+                let delay_seconds =
+                    provider_retry_delay_seconds(&error, consecutive_provider_failures);
                 tracing::error!(
                     error = %format!("{error:#}"),
                     delay_seconds,
@@ -221,6 +224,8 @@ async fn process_prepared(
             Ok(events) => commit_group(ctx, items, start, end, cutoff, events).await?,
             Err(error) => {
                 let detail = compact_error(&error);
+                let provider_delay_seconds =
+                    provider_retry_delay_seconds(&error, 1).max(provider_delay_seconds);
                 queue::release_archive_provider_error(
                     ctx.cache.db(),
                     &claimed_repos,
@@ -424,6 +429,17 @@ fn provider_backoff_seconds(failures: u32) -> u64 {
     (30_u64 << shift).min(15 * 60)
 }
 
+fn provider_retry_delay_seconds(error: &anyhow::Error, failures: u32) -> u64 {
+    if error
+        .downcast_ref::<GhArchiveError>()
+        .is_some_and(GhArchiveError::is_free_query_quota_exhausted)
+    {
+        60 * 60
+    } else {
+        provider_backoff_seconds(failures)
+    }
+}
+
 fn archive_window_end(start: NaiveDate, cutoff: NaiveDate) -> Result<NaiveDate> {
     let month_start = start
         .with_day(1)
@@ -467,6 +483,15 @@ mod tests {
         assert_eq!(provider_backoff_seconds(2), 60);
         assert_eq!(provider_backoff_seconds(6), 900);
         assert_eq!(provider_backoff_seconds(100), 900);
+    }
+
+    #[test]
+    fn free_query_quota_uses_hourly_durable_retry() {
+        let error = anyhow::Error::new(GhArchiveError::Api {
+            status: 403,
+            message: "project exceeded quota for free query bytes scanned".to_string(),
+        });
+        assert_eq!(provider_retry_delay_seconds(&error, 1), 3_600);
     }
 
     #[test]

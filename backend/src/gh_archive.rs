@@ -366,6 +366,20 @@ pub enum GhArchiveError {
     Json(#[from] serde_json::Error),
 }
 
+impl GhArchiveError {
+    pub fn is_free_query_quota_exhausted(&self) -> bool {
+        matches!(
+            self,
+            Self::Api {
+                status: 403,
+                message,
+            } if message
+                .to_ascii_lowercase()
+                .contains("exceeded quota for free query bytes scanned")
+        )
+    }
+}
+
 #[derive(Clone)]
 pub struct GhArchiveBigQueryClient {
     config: Arc<GhArchiveConfig>,
@@ -1532,5 +1546,22 @@ mod tests {
         assert_eq!(retry_delay(0, None), Duration::from_millis(200));
         assert_eq!(retry_delay(99, None), Duration::from_secs(5));
         assert_eq!(retry_delay(0, Some(90)), Duration::from_secs(30));
+    }
+
+    #[test]
+    fn free_query_quota_exhaustion_is_distinct_from_short_rate_limits() {
+        let quota = GhArchiveError::Api {
+            status: 403,
+            message: "Quota exceeded: Your project exceeded quota for free query bytes scanned."
+                .to_string(),
+        };
+        assert!(quota.is_free_query_quota_exhausted());
+        assert!(
+            !GhArchiveError::Api {
+                status: 403,
+                message: "permission denied".to_string(),
+            }
+            .is_free_query_quota_exhausted()
+        );
     }
 }

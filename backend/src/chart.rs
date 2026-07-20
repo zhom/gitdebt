@@ -20,6 +20,7 @@
 use chrono::{DateTime, Datelike, Utc};
 use serde::Serialize;
 
+use crate::brand;
 use crate::theme::Theme;
 
 #[derive(Debug, Clone, Serialize)]
@@ -253,9 +254,7 @@ fn render_single_svg(
   <path d="{path}" fill="none" stroke="{color}" stroke-width="2.5" stroke-linecap="round" stroke-linejoin="round" stroke-dasharray="{dash}" stroke-dashoffset="{dash_offset}">
 {motion}
   </path>
-  <a href="https://gitdebt.com" target="_blank" rel="noopener">
-    <text class="footer-link" x="{footer_x}" y="{footer_y}" text-anchor="end">GitDebt</text>
-  </a>
+{footer}
 </svg>"##,
         w = geom.w,
         h = geom.h,
@@ -274,8 +273,7 @@ fn render_single_svg(
         axis_lines = axis_lines,
         subtitle = escape_xml(&subtitle_text),
         metric_label = escape_xml(&cfg.metric_label),
-        footer_x = geom.w - geom.pad,
-        footer_y = geom.h - 12.0,
+        footer = brand::footer_lockup(geom.w - geom.pad, geom.h - 12.0, theme),
     )
 }
 
@@ -383,9 +381,7 @@ pub fn render_multi_svg(
 {axis_lines}
 {paths}  <g class="legend-row">
 {legend}  </g>
-  <a href="https://gitdebt.com" target="_blank" rel="noopener">
-    <text class="footer-link" x="{footer_x}" y="{footer_y}" text-anchor="end">GitDebt</text>
-  </a>
+{footer}
 </svg>"##,
         w = geom.w,
         h = geom.h,
@@ -398,8 +394,7 @@ pub fn render_multi_svg(
         axis_lines = axis_lines,
         paths = paths,
         legend = legend,
-        footer_x = geom.w - geom.pad,
-        footer_y = geom.h - 28.0,
+        footer = brand::footer_lockup(geom.w - geom.pad, geom.h - 28.0, theme),
     )
 }
 
@@ -625,9 +620,7 @@ pub fn render_overlay_svg(
   <text class="title" x="{title_x}" y="{title_y}">{title}</text>
 {note}{axis}{paths}  <g class="legend-row">
 {legend}  </g>
-  <a href="https://gitdebt.com" target="_blank" rel="noopener">
-    <text class="footer-link" x="{footer_x}" y="{footer_y}" text-anchor="end">GitDebt</text>
-  </a>
+{footer}
 </svg>"##,
         w = geom.w,
         h = geom.h,
@@ -642,8 +635,7 @@ pub fn render_overlay_svg(
         axis = axis,
         paths = paths,
         legend = legend,
-        footer_x = geom.w - geom.pad,
-        footer_y = geom.h - 28.0,
+        footer = brand::footer_lockup(geom.w - geom.pad, geom.h - 28.0, theme),
     )
 }
 
@@ -983,9 +975,13 @@ fn fmt_count_u64(n: u64) -> String {
 fn empty_svg(cfg: &ChartConfig, theme: &Theme) -> String {
     format!(
         r##"<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 {w} {h}">
+  <style><![CDATA[
+    .footer-link {{ fill: {muted}; font: 600 11px ui-sans-serif, system-ui, sans-serif; text-decoration: none; letter-spacing: 0.02em; }}
+  ]]></style>
   <rect width="{w}" height="{h}" fill="{bg}" />
   <text x="{cx}" y="{cy}" text-anchor="middle" fill="{muted}"
         font-family="ui-sans-serif, system-ui, sans-serif" font-size="14">No star history available</text>
+{footer}
 </svg>"##,
         w = cfg.width,
         h = cfg.height,
@@ -993,6 +989,11 @@ fn empty_svg(cfg: &ChartConfig, theme: &Theme) -> String {
         cx = cfg.width / 2,
         cy = cfg.height / 2,
         muted = theme.muted,
+        footer = brand::footer_lockup(
+            cfg.width as f32 - cfg.padding as f32,
+            cfg.height as f32 - 12.0,
+            theme,
+        ),
     )
 }
 
@@ -1071,6 +1072,7 @@ mod tests {
             &ChartOpts::default(),
         );
         assert!(svg.contains("No star history available"));
+        assert!(svg.contains("data-gitdebt-logo=\"true\""));
         assert!(svg.starts_with("<svg"));
     }
 
@@ -1097,6 +1099,7 @@ mod tests {
         assert!(svg.contains("owner/repo"));
         assert!(svg.contains("stars"));
         assert!(svg.contains("gitdebt.com"));
+        assert!(svg.contains("data-gitdebt-logo=\"true\""));
         // No detection language anywhere.
         assert!(!svg.contains("suspicious"));
         assert!(!svg.contains("fake"));
@@ -1221,6 +1224,7 @@ mod tests {
         // Legend carries both slugs.
         assert!(svg1.contains("o/a"));
         assert!(svg1.contains("o/b"));
+        assert!(svg1.contains("data-gitdebt-logo=\"true\""));
     }
 
     #[test]
@@ -1280,6 +1284,7 @@ mod tests {
         assert!(a.contains("npm downloads"));
         // Downloads axis humanizes into the millions.
         assert!(a.contains("2.0M"));
+        assert!(a.contains("data-gitdebt-logo=\"true\""));
     }
 
     #[test]

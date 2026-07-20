@@ -65,6 +65,8 @@ export function LiveRepoReport({ apiBase }: { apiBase: string }) {
         initialData={null}
       />
 
+      <ReportShare owner={owner} repo={repo} apiBase={apiBase} />
+
       <ChartViewer
         apiBase={apiBase}
         path={`/api/repos/${owner}/${repo}/chart.svg`}
@@ -140,8 +142,6 @@ export function LiveRepoReport({ apiBase }: { apiBase: string }) {
           showEmbed={false}
         />
       </section>
-
-      <ReportShare owner={owner} repo={repo} apiBase={apiBase} />
     </div>
   );
 }

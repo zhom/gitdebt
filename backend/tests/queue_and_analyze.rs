@@ -65,6 +65,10 @@ async fn cleanup(db: &Db, prefix: &str) {
         .bind(&like)
         .execute(&db.pool)
         .await;
+    let _ = sqlx::query("DELETE FROM repo_author_stats WHERE repo LIKE $1")
+        .bind(&like)
+        .execute(&db.pool)
+        .await;
     let _ = sqlx::query("DELETE FROM repo_star_arrivals WHERE repo LIKE $1")
         .bind(&like)
         .execute(&db.pool)
@@ -243,7 +247,82 @@ async fn repo_analysis_enqueue_is_freshness_bounded_and_dead_is_terminal() {
         repo_analysis::EnqueueOutcome::Fresh
     );
 
+    let unresolved = format!("{prefix}unresolved");
+    sqlx::query(
+        "INSERT INTO repo_history (repo, last_analyzed_sha, last_analyzed_at) \
+         VALUES ($1, 'def', NOW())",
+    )
+    .bind(&unresolved)
+    .execute(&db.pool)
+    .await
+    .unwrap();
+    sqlx::query(
+        "INSERT INTO repo_author_stats \
+            (repo, author_email, avatar_url, commits, first_commit_at, last_commit_at) \
+         VALUES ($1, 'author@example.com', \
+                 'https://www.gravatar.com/avatar/example', 1, NOW(), NOW())",
+    )
+    .bind(&unresolved)
+    .execute(&db.pool)
+    .await
+    .unwrap();
+    assert_eq!(
+        repo_analysis::enqueue(&db, &unresolved).await.unwrap(),
+        repo_analysis::EnqueueOutcome::Enqueued,
+        "fresh commits with an unattempted author mapping must retry enrichment"
+    );
+
     cleanup(&db, prefix).await;
+}
+
+#[tokio::test]
+async fn repo_analysis_enqueue_many_skips_settled_jobs_and_bounds_new_work() {
+    let Some(db) = test_db().await else {
+        eprintln!("skipping: set GITDEBT_TEST_DATABASE_URL to run");
+        return;
+    };
+    let prefix = "gitdebt-test-analysis-batch/";
+    cleanup(&db, prefix).await;
+
+    let fresh = format!("{prefix}fresh");
+    sqlx::query(
+        "INSERT INTO repo_history (repo, last_analyzed_sha, last_analyzed_at) \
+         VALUES ($1, 'abc', NOW())",
+    )
+    .bind(&fresh)
+    .execute(&db.pool)
+    .await
+    .unwrap();
+    let active = format!("{prefix}active");
+    repo_analysis::enqueue(&db, &active).await.unwrap();
+    let cold_a = format!("{prefix}cold-a");
+    let cold_b = format!("{prefix}cold-b");
+    let cold_c = format!("{prefix}cold-c");
+    let repos = vec![
+        fresh,
+        active,
+        cold_a.clone(),
+        cold_b.clone(),
+        cold_c.clone(),
+    ];
+
+    let added = repo_analysis::enqueue_many(&db, &repos, 2).await.unwrap();
+    assert_eq!(added, 2);
+    assert!(analysis_queue_row_exists(&db, &cold_a).await);
+    assert!(analysis_queue_row_exists(&db, &cold_b).await);
+    assert!(!analysis_queue_row_exists(&db, &cold_c).await);
+
+    cleanup(&db, prefix).await;
+}
+
+async fn analysis_queue_row_exists(db: &Db, repo: &str) -> bool {
+    sqlx::query_scalar::<_, bool>(
+        "SELECT EXISTS(SELECT 1 FROM repo_analysis_queue WHERE repo = $1)",
+    )
+    .bind(repo)
+    .fetch_one(&db.pool)
+    .await
+    .unwrap()
 }
 
 #[tokio::test]

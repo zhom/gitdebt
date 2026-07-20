@@ -21,6 +21,7 @@
 //! static attributes equal `to` regardless.) `animate=0` (default) emits no
 //! `<animate>` tags at all.
 
+use crate::brand;
 use crate::theme::Theme;
 
 /// Which metrics to show, in display order. Honors include/exclude: a
@@ -158,6 +159,8 @@ pub fn humanize(n: u64) -> String {
 // Layout math
 
 const HEIGHT: f32 = 28.0;
+/// Reserved trailing space for the subtle self-contained gitdebt mark.
+const BRAND_W: f32 = 20.0;
 /// Horizontal padding inside each segment.
 const SEG_PAD_X: f32 = 9.0;
 /// Width reserved for a metric glyph (icon).
@@ -361,10 +364,11 @@ fn render_flat(placed: &[Placed], width: f32, theme: &Theme, animate: bool) -> S
     let pal0 = theme.accent;
     let bg = if theme.dark { "#171717" } else { "#f5f5f5" };
     let label = aria_label(placed);
+    let total = width + BRAND_W;
     let mut body = String::new();
     // Rounded container.
     body.push_str(&format!(
-        "  <rect x=\"0\" y=\"0\" width=\"{width:.1}\" height=\"{h:.1}\" rx=\"6\" fill=\"{bg}\" stroke=\"{border}\" stroke-width=\"1\" />\n",
+        "  <rect x=\"0\" y=\"0\" width=\"{total:.1}\" height=\"{h:.1}\" rx=\"6\" fill=\"{bg}\" stroke=\"{border}\" stroke-width=\"1\" />\n",
         h = HEIGHT,
         border = theme.border,
     ));
@@ -391,9 +395,15 @@ fn render_flat(placed: &[Placed], width: f32, theme: &Theme, animate: bool) -> S
             i,
         ));
     }
+    body.push_str(&brand::themed_logo_mark(
+        width + 5.0,
+        (HEIGHT - 10.0) / 2.0,
+        10.0,
+        theme,
+    ));
     format!(
         "{header}  <style><![CDATA[ text {{ font: 600 12px ui-sans-serif, system-ui, sans-serif; }} {motion_css} ]]></style>\n{body}</svg>",
-        header = svg_header(width, &label, ""),
+        header = svg_header(total, &label, ""),
         motion_css = MOTION_CSS,
     )
 }
@@ -403,6 +413,7 @@ fn render_modern(placed: &[Placed], width: f32, theme: &Theme, animate: bool) ->
     let pal0 = theme.accent;
     let bg = if theme.dark { "#0a0a0a" } else { "#ffffff" };
     let label = aria_label(placed);
+    let total = width + 8.0 + BRAND_W;
     let defs = format!(
         "  <defs><filter id=\"mshadow\" x=\"-20%\" y=\"-20%\" width=\"140%\" height=\"160%\"><feDropShadow dx=\"0\" dy=\"1\" stdDeviation=\"1.2\" flood-color=\"{}\" flood-opacity=\"0.18\" /></filter></defs>\n",
         if theme.dark { "#000000" } else { "#737373" },
@@ -410,7 +421,7 @@ fn render_modern(placed: &[Placed], width: f32, theme: &Theme, animate: bool) ->
     let mut body = String::new();
     body.push_str(&format!(
         "  <rect x=\"0.5\" y=\"0.5\" width=\"{w:.1}\" height=\"{h:.1}\" rx=\"14\" fill=\"{bg}\" stroke=\"{border}\" stroke-width=\"1\" filter=\"url(#mshadow)\" />\n",
-        w = width - 1.0,
+        w = total - 1.0,
         h = HEIGHT - 1.0,
         border = theme.border,
     ));
@@ -435,8 +446,12 @@ fn render_modern(placed: &[Placed], width: f32, theme: &Theme, animate: bool) ->
             i,
         ));
     }
-    // Width grows by the dot inset.
-    let total = width + 8.0;
+    body.push_str(&brand::themed_logo_mark(
+        width + 13.0,
+        (HEIGHT - 10.0) / 2.0,
+        10.0,
+        theme,
+    ));
     format!(
         "{header}  <style><![CDATA[ text {{ font: 600 12px ui-sans-serif, system-ui, sans-serif; }} {motion_css} ]]></style>\n{defs}{body}</svg>",
         header = svg_header(total, &label, ""),
@@ -450,10 +465,11 @@ fn render_glass(placed: &[Placed], width: f32, theme: &Theme, animate: bool) -> 
     let pal0 = theme.accent;
     let label = aria_label(placed);
     let panel = if theme.dark { "#262626" } else { "#f5f5f5" };
+    let total = width + BRAND_W;
     let mut body = String::new();
     body.push_str(&format!(
         "  <rect x=\"0.5\" y=\"0.5\" width=\"{w:.1}\" height=\"{h:.1}\" rx=\"10\" fill=\"{panel}\" stroke=\"{border}\" stroke-width=\"1\" />\n",
-        w = width - 1.0,
+        w = total - 1.0,
         h = HEIGHT - 1.0,
         panel = panel,
         border = theme.border,
@@ -461,7 +477,7 @@ fn render_glass(placed: &[Placed], width: f32, theme: &Theme, animate: bool) -> 
     // Top glass highlight.
     body.push_str(&format!(
         "  <rect x=\"3\" y=\"2\" width=\"{w:.1}\" height=\"8\" rx=\"5\" fill=\"#ffffff\" opacity=\"{op}\" />\n",
-        w = width - 6.0,
+        w = total - 6.0,
         op = if theme.dark { "0.06" } else { "0.5" },
     ));
     for (i, p) in placed.iter().enumerate() {
@@ -488,13 +504,19 @@ fn render_glass(placed: &[Placed], width: f32, theme: &Theme, animate: bool) -> 
         body.push_str(&format!(
             "  <rect x=\"{end:.1}\" y=\"0\" width=\"12\" height=\"{h:.1}\" fill=\"#ffffff\" opacity=\"0.18\" transform=\"translate(0 0)\"><animateTransform class=\"motion\" attributeName=\"transform\" type=\"translate\" from=\"-{distance:.1} 0\" to=\"0 0\" dur=\"0.6s\" begin=\"0s\" fill=\"freeze\" calcMode=\"linear\" /></rect>\n",
             h = HEIGHT,
-            end = width,
-            distance = width + 12.0,
+            end = total,
+            distance = total + 12.0,
         ));
     }
+    body.push_str(&brand::themed_logo_mark(
+        width + 5.0,
+        (HEIGHT - 10.0) / 2.0,
+        10.0,
+        theme,
+    ));
     format!(
         "{header}  <style><![CDATA[ text {{ font: 600 12px ui-sans-serif, system-ui, sans-serif; }} {motion_css} ]]></style>\n{body}</svg>",
-        header = svg_header(width, &label, ""),
+        header = svg_header(total, &label, ""),
         motion_css = MOTION_CSS,
     )
 }
@@ -507,10 +529,11 @@ fn render_terminal(placed: &[Placed], width: f32, theme: &Theme, animate: bool) 
     let accent = "#ffffff";
     let _ = theme; // terminal style is intentionally theme-independent (always dark chip).
     let label = aria_label(placed);
+    let total = width + 14.0 + BRAND_W;
     let mut body = String::new();
     body.push_str(&format!(
         "  <rect x=\"0\" y=\"0\" width=\"{w:.1}\" height=\"{h:.1}\" rx=\"5\" fill=\"{bg}\" />\n",
-        w = width + 14.0,
+        w = total,
         h = HEIGHT,
     ));
     // Leading `›` prompt marker.
@@ -541,9 +564,16 @@ fn render_terminal(placed: &[Placed], width: f32, theme: &Theme, animate: bool) 
             y = HEIGHT / 2.0 - 6.0,
         ));
     }
+    body.push_str(&brand::logo_mark(
+        width + 19.0,
+        (HEIGHT - 10.0) / 2.0,
+        10.0,
+        fg,
+        bg,
+    ));
     format!(
         "{header}  <style><![CDATA[ .mono {{ font: 600 12px ui-monospace, SFMono-Regular, Menlo, monospace; }} {motion_css} ]]></style>\n{body}</svg>",
-        header = svg_header(width + 14.0, &label, ""),
+        header = svg_header(total, &label, ""),
         motion_css = MOTION_CSS,
     )
 }
@@ -579,18 +609,31 @@ fn empty_badge(style: BadgeStyle, theme: &Theme) -> String {
         BadgeStyle::Terminal => "#fafafa",
         _ => theme.muted,
     };
-    let w = 92.0;
+    let content_w = 92.0;
+    let w = content_w + BRAND_W;
+    let logo = match style {
+        BadgeStyle::Terminal => brand::logo_mark(
+            content_w + 5.0,
+            (HEIGHT - 10.0) / 2.0,
+            10.0,
+            "#fafafa",
+            "#0a0a0a",
+        ),
+        _ => brand::themed_logo_mark(content_w + 5.0, (HEIGHT - 10.0) / 2.0, 10.0, theme),
+    };
     format!(
         r##"<svg xmlns="http://www.w3.org/2000/svg" width="{w:.0}" height="{h:.0}" viewBox="0 0 {w:.0} {h:.0}" role="img" aria-label="no metrics">
   <rect x="0" y="0" width="{w:.0}" height="{h:.0}" rx="6" fill="{bg}" />
   <text x="{cx:.0}" y="{cy:.0}" text-anchor="middle" fill="{fg}" font-family="ui-sans-serif, system-ui, sans-serif" font-size="11">no metrics</text>
+{logo}
 </svg>"##,
         w = w,
         h = HEIGHT,
         bg = bg,
         fg = fg,
-        cx = w / 2.0,
+        cx = content_w / 2.0,
         cy = HEIGHT / 2.0 + 4.0,
+        logo = logo,
     )
 }
 
@@ -748,6 +791,7 @@ mod tests {
                 !off.contains("<animate"),
                 "{style:?} animate=0 must have no <animate>: {off}"
             );
+            assert!(off.contains("data-gitdebt-logo=\"true\""));
             let on = render_badge(&full_input(style, true), &LIGHT);
             assert!(
                 on.contains("<animate"),
@@ -829,6 +873,7 @@ mod tests {
         };
         let svg = render_badge(&input, &LIGHT);
         assert!(svg.contains("no metrics"));
+        assert!(svg.contains("data-gitdebt-logo=\"true\""));
         assert!(svg.starts_with("<svg"));
     }
 

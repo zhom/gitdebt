@@ -11,6 +11,7 @@ const navLinks = [
 ];
 
 const apiBase = staticApiBase();
+const returnTo = `${Astro.url.pathname}${Astro.url.search}`;
 ---
 
 <a
@@ -49,7 +50,7 @@ const apiBase = staticApiBase();
 
     <div class="flex shrink-0 items-center gap-1 justify-self-end sm:gap-2">
       <div data-auth-slot>
-        <AuthControl client:load apiBase={apiBase} />
+        <AuthControl client:load apiBase={apiBase} returnTo={returnTo} />
       </div>
       <details class="relative lg:hidden" data-mobile-menu data-state="closed">
         <summary

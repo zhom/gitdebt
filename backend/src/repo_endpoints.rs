@@ -26,6 +26,7 @@ use serde::Deserialize;
 use sqlx::Row;
 
 use crate::api::{ApiError, ApiState};
+use crate::brand;
 use crate::raster::RasterFormat;
 use crate::repo_analysis;
 use crate::repo_charts::{
@@ -395,14 +396,19 @@ fn render_analysis_pending(repo: &str, theme: &crate::theme::Theme) -> String {
         .replace('"', "&quot;");
     format!(
         r#"<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 760 180" role="img" aria-label="Repository analysis pending for {repo}">
+  <style><![CDATA[
+    .footer-link {{ fill: {muted}; font: 600 11px ui-sans-serif, system-ui, sans-serif; text-decoration: none; letter-spacing: 0.02em; }}
+  ]]></style>
   <rect width="760" height="180" rx="12" fill="{bg}"/>
   <text x="28" y="62" fill="{fg}" font-family="ui-sans-serif,system-ui,sans-serif" font-size="19" font-weight="600">{repo}</text>
   <text x="28" y="105" fill="{muted}" font-family="ui-sans-serif,system-ui,sans-serif" font-size="14">Repository analysis is still running</text>
   <text x="28" y="132" fill="{muted}" font-family="ui-sans-serif,system-ui,sans-serif" font-size="12">Refresh shortly for code-health data.</text>
+{footer}
 </svg>"#,
         bg = theme.track,
         fg = theme.fg,
         muted = theme.muted,
+        footer = brand::footer_lockup(732.0, 164.0, theme),
     )
 }
 
@@ -805,6 +811,9 @@ mod tests {
             stat_cache_control(true),
             HeaderValue::from_static("no-store")
         );
+        let svg = render_analysis_pending("o/r", &crate::theme::LIGHT);
+        assert!(svg.contains("data-gitdebt-logo=\"true\""));
+        assert!(svg.contains(">gitdebt</text>"));
     }
 
     #[test]

@@ -16,6 +16,7 @@
 use chrono::{Datelike, NaiveDate};
 use serde::Serialize;
 
+use crate::brand;
 use crate::theme::{Theme, contrast_on};
 
 #[derive(Debug, Clone, Serialize)]
@@ -175,9 +176,7 @@ fn horizontal_bar_chart(cfg: BarChartConfig<'_>) -> String {
   <text class="title" x="{padding}" y="36">{title}</text>
   <text class="subtitle" x="{padding}" y="58">{subtitle} · {repo}</text>
 {bars}
-  <a href="https://gitdebt.com" target="_blank" rel="noopener">
-    <text class="footer-link" x="{footer_x:.0}" y="{footer_y:.0}" text-anchor="end">GitDebt</text>
-  </a>
+{footer}
 </svg>"##,
         width = width,
         height = height,
@@ -191,8 +190,7 @@ fn horizontal_bar_chart(cfg: BarChartConfig<'_>) -> String {
         accent_dim = cfg.accent_dim,
         padding = padding,
         bars = bars,
-        footer_x = (width as f32) - padding as f32,
-        footer_y = footer_y,
+        footer = brand::footer_lockup((width as f32) - padding as f32, footer_y, cfg.theme,),
     )
 }
 
@@ -369,9 +367,7 @@ pub fn render_heatmap(
   <text class="legend" x="{legend_x:.0}" y="{legend_label_y:.0}">Less</text>
   {legend_cells}
   <text class="legend" x="{legend_more_x:.0}" y="{legend_label_y:.0}">More</text>
-  <a href="https://gitdebt.com" target="_blank" rel="noopener">
-    <text class="footer-link" x="{footer_x:.0}" y="{footer_y:.0}" text-anchor="end">GitDebt</text>
-  </a>
+{footer}
 </svg>"##,
         width = width,
         height = height,
@@ -389,8 +385,7 @@ pub fn render_heatmap(
         legend_label_y = legend_y + cell as f32 - 2.0,
         legend_cells = legend_cells,
         legend_more_x = legend_x + 60.0 + 5.0 * (cell as f32 + 2.0) + 4.0,
-        footer_x = (width as f32) - 16.0,
-        footer_y = (height - 10) as f32,
+        footer = brand::footer_lockup((width as f32) - 16.0, (height - 10) as f32, theme,),
     )
 }
 
@@ -504,9 +499,7 @@ pub fn render_contributors(repo: &str, contributors: &[ContributorRow], theme: &
   <text class="title" x="{pad_left}" y="36">{repo}</text>
   <text class="subtitle" x="{pad_left}" y="58">{total} contributor{plural}</text>
 {avatars}
-  <a href="https://gitdebt.com" target="_blank" rel="noopener">
-    <text class="footer-link" x="{footer_x:.0}" y="{footer_y:.0}" text-anchor="end">GitDebt</text>
-  </a>
+{footer}
 </svg>"##,
         width = width,
         height = height,
@@ -519,8 +512,7 @@ pub fn render_contributors(repo: &str, contributors: &[ContributorRow], theme: &
         total = total,
         plural = if total == 1 { "" } else { "s" },
         avatars = avatars,
-        footer_x = (width as f32) - pad_left as f32,
-        footer_y = footer_y,
+        footer = brand::footer_lockup((width as f32) - pad_left as f32, footer_y, theme,),
     )
 }
 
@@ -624,9 +616,7 @@ pub fn render_languages(repo: &str, rows: &[LanguageBar], theme: &Theme) -> Stri
   <text class="title" x="{padding}" y="36">Lines of code</text>
   <text class="subtitle" x="{padding}" y="58">{repo} · {total} lines · {code} code · {files} files in {n} languages</text>
 {bars}
-  <a href="https://gitdebt.com" target="_blank" rel="noopener">
-    <text class="footer-link" x="{footer_x:.0}" y="{footer_y:.0}" text-anchor="end">GitDebt</text>
-  </a>
+{footer}
 </svg>"##,
         width = width,
         height = height,
@@ -640,8 +630,7 @@ pub fn render_languages(repo: &str, rows: &[LanguageBar], theme: &Theme) -> Stri
         code = humanize(total_code),
         files = total_files,
         n = rows.len(),
-        footer_x = right_edge_x,
-        footer_y = footer_y,
+        footer = brand::footer_lockup(right_edge_x, footer_y, theme),
     )
 }
 
@@ -730,15 +719,7 @@ pub fn render_todo_trend(repo: &str, points: &[TodoPoint], theme: &Theme) -> Str
     let plot_h = height as f32 - pad_t - pad_b;
 
     if points.is_empty() {
-        return format!(
-            r##"<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 {width} {height}">
-  <text x="50%" y="50%" text-anchor="middle" fill="{muted}"
-        font-family="ui-sans-serif, system-ui, sans-serif" font-size="14">no TODO/FIXME data yet</text>
-</svg>"##,
-            width = width,
-            height = height,
-            muted = theme.muted,
-        );
+        return empty_chart(width, height, "no TODO/FIXME data yet", theme);
     }
 
     let t_min = points.first().unwrap().day;
@@ -825,9 +806,7 @@ pub fn render_todo_trend(repo: &str, points: &[TodoPoint], theme: &Theme) -> Str
     <path d="{path}" fill="none" stroke="{bug}" stroke-width="2.5" stroke-linecap="round" stroke-linejoin="round" />
     <circle cx="{peak_x:.1}" cy="{peak_y:.1}" r="5" fill="{bug}" />
   </g>
-  <a href="https://gitdebt.com" target="_blank" rel="noopener">
-    <text class="footer-link" x="{footer_x:.0}" y="{footer_y:.0}" text-anchor="end">GitDebt</text>
-  </a>
+{footer}
 </svg>"##,
         width = width,
         height = height,
@@ -844,8 +823,7 @@ pub fn render_todo_trend(repo: &str, points: &[TodoPoint], theme: &Theme) -> Str
         path = path,
         peak_x = x_at(max_day),
         peak_y = y_at(max_total as f32),
-        footer_x = (width as f32) - 24.0,
-        footer_y = footer_y,
+        footer = brand::footer_lockup((width as f32) - 24.0, footer_y, theme),
     )
 }
 
@@ -916,14 +894,7 @@ pub fn render_bus_factor(
     });
 
     if sorted.is_empty() || total_commits <= 0 {
-        return format!(
-            r##"<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 {width} 200">
-  <text x="50%" y="50%" text-anchor="middle" fill="{muted}"
-        font-family="ui-sans-serif, system-ui, sans-serif" font-size="14">no contributor data yet</text>
-</svg>"##,
-            width = width,
-            muted = theme.muted,
-        );
+        return empty_chart(width, 200, "no contributor data yet", theme);
     }
 
     let commit_counts: Vec<i64> = sorted.iter().map(|a| a.commits).collect();
@@ -1011,9 +982,7 @@ pub fn render_bus_factor(
   <text class="bf-caption" x="{right_x:.0}" y="36" text-anchor="end">BUS FACTOR</text>
   <text class="bf-number" x="{right_x:.0}" y="90" text-anchor="end">{bus_factor}</text>
 {bars}
-  <a href="https://gitdebt.com" target="_blank" rel="noopener">
-    <text class="footer-link" x="{right_x:.0}" y="{footer_y:.0}" text-anchor="end">GitDebt</text>
-  </a>
+{footer}
 </svg>"##,
         width = width,
         height = height,
@@ -1031,7 +1000,7 @@ pub fn render_bus_factor(
         legend2_text = legend2_text,
         right_x = right_x,
         bars = bars,
-        footer_y = footer_y,
+        footer = brand::footer_lockup(right_x, footer_y, theme),
     )
 }
 
@@ -1106,15 +1075,7 @@ pub fn render_commit_trend(repo: &str, days: &[DayCount], theme: &Theme) -> Stri
     let plot_h = height as f32 - pad_t - pad_b;
 
     if months.is_empty() {
-        return format!(
-            r##"<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 {width} {height}">
-  <text x="50%" y="50%" text-anchor="middle" fill="{muted}"
-        font-family="ui-sans-serif, system-ui, sans-serif" font-size="14">no commit data yet</text>
-</svg>"##,
-            width = width,
-            height = height,
-            muted = theme.muted,
-        );
+        return empty_chart(width, height, "no commit data yet", theme);
     }
 
     let y_max = months.iter().map(|m| m.commits).max().unwrap_or(1).max(1) as f32;
@@ -1200,9 +1161,7 @@ pub fn render_commit_trend(repo: &str, days: &[DayCount], theme: &Theme) -> Stri
     <circle cx="{peak_x:.1}" cy="{peak_y:.1}" r="5" fill="{accent}" />
     <text class="peak-label" x="{peak_label_x:.1}" y="{peak_label_y:.1}" text-anchor="{peak_anchor}">{peak_commits}</text>
   </g>
-  <a href="https://gitdebt.com" target="_blank" rel="noopener">
-    <text class="footer-link" x="{footer_x:.0}" y="{footer_y:.0}" text-anchor="end">GitDebt</text>
-  </a>
+{footer}
 </svg>"##,
         width = width,
         height = height,
@@ -1222,8 +1181,27 @@ pub fn render_commit_trend(repo: &str, days: &[DayCount], theme: &Theme) -> Stri
         peak_label_x = peak_label_x,
         peak_label_y = peak_y + 4.0,
         peak_anchor = peak_anchor,
-        footer_x = (width as f32) - 24.0,
-        footer_y = footer_y,
+        footer = brand::footer_lockup((width as f32) - 24.0, footer_y, theme),
+    )
+}
+
+fn empty_chart(width: u32, height: u32, message: &str, theme: &Theme) -> String {
+    format!(
+        r##"<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 {width} {height}" role="img" aria-label="{message}">
+  <style><![CDATA[
+    .footer-link {{ fill: {muted}; font: 600 11px ui-sans-serif, system-ui, sans-serif; text-decoration: none; letter-spacing: 0.02em; }}
+  ]]></style>
+  <rect width="{width}" height="{height}" fill="{bg}" />
+  <text x="50%" y="50%" text-anchor="middle" fill="{muted}"
+        font-family="ui-sans-serif, system-ui, sans-serif" font-size="14">{message}</text>
+{footer}
+</svg>"##,
+        width = width,
+        height = height,
+        bg = theme.bg,
+        muted = theme.muted,
+        message = escape_xml(message),
+        footer = brand::footer_lockup(width as f32 - 24.0, height as f32 - 12.0, theme),
     )
 }
 
@@ -1260,6 +1238,27 @@ mod tests {
             .filter(|line| !line.contains("<animate"))
             .collect::<Vec<_>>()
             .join("\n")
+    }
+
+    #[test]
+    fn every_repo_chart_surface_embeds_the_logo() {
+        let start = NaiveDate::from_ymd_opt(2026, 1, 1).unwrap();
+        let end = NaiveDate::from_ymd_opt(2026, 1, 7).unwrap();
+        let charts = [
+            render_bug_magnets("o/r", &[], &theme::LIGHT),
+            render_top_changed("o/r", &[], &theme::LIGHT),
+            render_heatmap("o/r", "Commit activity", start, end, &[], &theme::LIGHT),
+            render_contributors("o/r", &[], &theme::LIGHT),
+            render_languages("o/r", &[], &theme::LIGHT),
+            render_todo_trend("o/r", &[], &theme::LIGHT),
+            render_bus_factor("o/r", &[], 0, &theme::LIGHT),
+            render_commit_trend("o/r", &[], &theme::LIGHT),
+        ];
+
+        for svg in charts {
+            assert!(svg.contains("data-gitdebt-logo=\"true\""));
+            assert!(!svg.contains("<image"));
+        }
     }
 
     #[test]
@@ -1352,7 +1351,8 @@ mod tests {
         assert!(svg.contains("class=\"cell"));
         assert!(svg.contains("Commits in 2026"));
         assert!(svg.contains("Mon"));
-        assert!(svg.contains("GitDebt"));
+        assert!(svg.contains("data-gitdebt-logo=\"true\""));
+        assert!(svg.contains(">gitdebt</text>"));
         assert!(svg.contains("text-anchor=\"end\""));
     }
 

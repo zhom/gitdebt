@@ -2803,8 +2803,23 @@ async fn load_user_card_data(
     let owned = sqlx::query(
         "SELECT COUNT(*) AS repos_tracked, \
                 COALESCE(SUM(GREATEST(star_count, 0)), 0)::BIGINT AS stars, \
-                COALESCE(SUM(GREATEST(forks_count, 0)), 0)::BIGINT AS forks \
-         FROM repos WHERE repo LIKE $1 || '/%' AND NOT missing",
+                COALESCE(SUM(GREATEST(forks_count, 0)), 0)::BIGINT AS forks, \
+                COUNT(history.repo) FILTER \
+                    (WHERE history.last_analyzed_at IS NOT NULL \
+                       AND active.repo IS NULL \
+                       AND NOT EXISTS ( \
+                           SELECT 1 FROM repo_author_stats author \
+                           WHERE author.repo = repos.repo \
+                             AND (author.github_login IS NULL \
+                                  OR author.avatar_url LIKE 'https://www.gravatar.com/%') \
+                             AND author.enrich_attempted_at IS NULL \
+                       )) AS repos_analyzed \
+         FROM repos \
+         LEFT JOIN repo_history history ON history.repo = repos.repo \
+         LEFT JOIN repo_analysis_queue active \
+           ON active.repo = repos.repo \
+          AND active.status IN ('pending', 'in_progress') \
+         WHERE repos.repo LIKE $1 || '/%' AND NOT repos.missing",
     )
     .bind(login)
     .fetch_one(&db.pool)
@@ -2812,6 +2827,7 @@ async fn load_user_card_data(
     let repos_tracked: i64 = owned.try_get("repos_tracked")?;
     let stars: i64 = owned.try_get("stars")?;
     let forks: i64 = owned.try_get("forks")?;
+    let repos_analyzed: i64 = owned.try_get("repos_analyzed")?;
 
     let authored = sqlx::query(
         "SELECT COALESCE(SUM(commits), 0)::BIGINT AS commits, \
@@ -2834,6 +2850,7 @@ async fn load_user_card_data(
         commits: commits.max(0) as u64,
         contribs: contribs.max(0) as u64,
         repos_tracked: repos_tracked.max(0) as u64,
+        repos_analyzed: repos_analyzed.max(0) as u64,
         forks: forks.max(0) as u64,
         since_year: first_at.map(|t| t.year()),
         langs,
@@ -3036,10 +3053,16 @@ async fn ensure_user_card_svg(
     }
     let svg =
         cards::render_user_card(&data, &q.user_options(), theme).map_err(ApiError::bad_request)?;
-    state.stat_svg_cache.insert(key, svg.clone()).await;
+    // Commit/contributor totals are lower bounds while owned tracked repos
+    // are still warming. Never pin that intermediate state in the 24h cache:
+    // the embed self-heals as the durable analysis queue drains.
+    let analysis_pending = data.analysis_pending();
+    if !analysis_pending {
+        state.stat_svg_cache.insert(key, svg.clone()).await;
+    }
     Ok(RenderedCard {
         svg,
-        short_ttl: false,
+        short_ttl: analysis_pending,
     })
 }
 

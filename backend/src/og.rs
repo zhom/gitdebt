@@ -29,6 +29,7 @@
 //! card and callers may explicitly request the black dark variant.
 //! Deterministic: same input → same bytes.
 
+use crate::brand;
 use crate::chart::{Point, palette};
 use crate::theme::Theme;
 
@@ -48,7 +49,6 @@ const BRAND_INK: &str = "#0a0a0a";
 /// every generic family to the bundled Inter, so these render in PNG.
 const FONT_SANS: &str = "ui-sans-serif, system-ui, sans-serif";
 const FONT_MONO: &str = "ui-monospace, SFMono-Regular, Menlo, monospace";
-const LOGO_SVG: &str = include_str!("../../assets/gitdebt-logo.svg");
 
 /// Inputs for a single-repo OG card. All the secondary fields are
 /// best-effort — a missing piece is simply omitted from the card so the
@@ -91,7 +91,7 @@ pub fn render_repo_card(card: &RepoCard, theme: &Theme) -> String {
     let accent = card_accent(theme);
 
     let mut body = String::new();
-    body.push_str(&wordmark(fg));
+    body.push_str(&wordmark(theme));
 
     // Eyebrow: the repo slug in mono, accent-colored.
     body.push_str(&format!(
@@ -156,7 +156,7 @@ pub fn render_compare_card(entries: &[CompareEntry], theme: &Theme) -> String {
     let pal = palette(theme);
 
     let mut body = String::new();
-    body.push_str(&wordmark(fg));
+    body.push_str(&wordmark(theme));
 
     // Title: "a vs b" (vs c …). Slugs joined with " vs ".
     let title = entries
@@ -217,7 +217,7 @@ pub fn render_default_card(theme: &Theme) -> String {
     body.push_str(&grid_motif(theme));
 
     // Large centered-ish robot mark + wordmark.
-    body.push_str(&logo_mark(80.0, 172.0, 140.0));
+    body.push_str(&brand::logo_mark(80.0, 172.0, 140.0, fg, card_bg(theme)));
     body.push_str(&format!(
         "  <text x=\"248\" y=\"300\" fill=\"{fg}\" font-family=\"{FONT_SANS}\" font-size=\"120\" font-weight=\"800\" letter-spacing=\"-0.02em\">gitdebt</text>\n",
     ));
@@ -245,20 +245,12 @@ const SPARK_LEFT: f32 = 80.0;
 const SPARK_RIGHT: f32 = OG_WIDTH as f32 - 80.0;
 
 /// gitdebt wordmark top-left: monochrome robot mark + the wordmark in fg.
-fn wordmark(fg: &str) -> String {
+fn wordmark(theme: &Theme) -> String {
+    let fg = card_fg(theme);
     format!(
         "{}  <text x=\"152\" y=\"108\" fill=\"{fg}\" font-family=\"{FONT_SANS}\" font-size=\"44\" font-weight=\"800\" letter-spacing=\"-0.01em\">gitdebt</text>\n",
-        logo_mark(80.0, 52.0, 64.0),
+        brand::logo_mark(80.0, 52.0, 64.0, fg, card_bg(theme)),
     )
-}
-
-/// Inline the canonical black-and-white robot geometry into an OG card.
-fn logo_mark(x: f32, y: f32, size: f32) -> String {
-    let scale = size / 512.0;
-    let body_start = LOGO_SVG.find('>').expect("logo opening tag") + 1;
-    let body_end = LOGO_SVG.rfind("</svg>").expect("logo closing tag");
-    let body = &LOGO_SVG[body_start..body_end];
-    format!("  <g transform=\"translate({x:.1} {y:.1}) scale({scale:.5})\">{body}</g>\n")
 }
 
 /// Footer lockup, bottom-left.
@@ -608,9 +600,19 @@ mod tests {
         // Light card still renders (no panic, valid svg).
         assert!(svg.starts_with("<svg"));
         // The logo stays strictly monochrome on every card theme.
-        assert!(svg.contains("#000"));
-        assert!(svg.contains("#fff"));
+        assert!(svg.contains("data-gitdebt-logo=\"true\""));
+        assert!(svg.contains("fill=\"#0a0a0a\""));
+        assert!(svg.contains("fill=\"#ffffff\""));
         assert!(svg.contains(r##"<rect x="0" y="0" width="1200" height="630" fill="#ffffff" />"##));
+    }
+
+    #[test]
+    fn logo_reverses_for_dark_social_cards() {
+        let svg = render_default_card(&DARK);
+        assert!(svg.contains("data-gitdebt-logo=\"true\""));
+        assert!(svg.contains("fill=\"#fafafa\""));
+        assert!(svg.contains("fill=\"#0a0a0a\""));
+        assert!(!svg.contains("<image"));
     }
 
     #[test]

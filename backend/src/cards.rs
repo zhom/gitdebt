@@ -38,6 +38,7 @@
 //! ownership rows.
 
 use crate::badge::humanize;
+use crate::brand;
 use crate::chart::{Point, palette};
 use crate::theme::Theme;
 
@@ -185,14 +186,16 @@ fn svg_open(w: f32, h: f32, label: &str) -> String {
 /// Card chrome: rounded rect, 1px border (opacity 0 when hidden — the
 /// geometry stays identical so `hide_border` never reflows anything).
 fn chrome(w: f32, h: f32, theme: &Theme, hide_border: bool) -> String {
-    format!(
+    let mut out = format!(
         "  <rect x=\"0.5\" y=\"0.5\" width=\"{:.1}\" height=\"{:.1}\" rx=\"4.5\" fill=\"{}\" stroke=\"{}\" stroke-width=\"1\" stroke-opacity=\"{}\" />\n",
         w - 1.0,
         h - 1.0,
         card_bg(theme),
         theme.border,
         if hide_border { "0" } else { "1" },
-    )
+    );
+    out.push_str(&brand::themed_logo_mark(12.0, h - 19.0, 10.0, theme));
+    out
 }
 
 fn anim_group(animate: bool, index: usize) -> (String, &'static str) {
@@ -389,6 +392,8 @@ pub struct UserCardData {
     pub contribs: u64,
     /// Owned repos present in the `repos` table (the honesty headline).
     pub repos_tracked: u64,
+    /// Owned tracked repos whose git history completed at least one pass.
+    pub repos_analyzed: u64,
     pub forks: u64,
     /// Year of the earliest authored commit across tracked repos.
     pub since_year: Option<i32>,
@@ -401,6 +406,11 @@ impl UserCardData {
     /// layer serves the "no data yet" card instead.
     pub fn has_data(&self) -> bool {
         self.repos_tracked > 0 || self.commits > 0 || self.contribs > 0
+    }
+
+    /// Commit/contribution totals are still incomplete while this is true.
+    pub fn analysis_pending(&self) -> bool {
+        self.repos_tracked > self.repos_analyzed
     }
 }
 
@@ -448,6 +458,17 @@ enum UserRow {
 
 fn user_rows(data: &UserCardData, opts: &UserCardOptions) -> Vec<UserRow> {
     let fmt = |n: u64| opts.number_format.format(n);
+    let lower_bound = |n: u64| {
+        if data.analysis_pending() {
+            if n == 0 {
+                "warming".to_string()
+            } else {
+                format!("{}+", fmt(n))
+            }
+        } else {
+            fmt(n)
+        }
+    };
     let mut rows = Vec::new();
     for m in &opts.metrics {
         match m {
@@ -459,12 +480,12 @@ fn user_rows(data: &UserCardData, opts: &UserCardOptions) -> Vec<UserRow> {
             UserMetric::Commits => rows.push(UserRow::Stat {
                 glyph: GlyphKind::Commit,
                 label: "Total Commits",
-                value: fmt(data.commits),
+                value: lower_bound(data.commits),
             }),
             UserMetric::Contribs => rows.push(UserRow::Stat {
                 glyph: GlyphKind::Branch,
                 label: "Contributed To",
-                value: fmt(data.contribs),
+                value: lower_bound(data.contribs),
             }),
             UserMetric::Repos => rows.push(UserRow::Stat {
                 glyph: GlyphKind::Repo,
@@ -593,21 +614,45 @@ pub fn render_user_card(
     }
 
     if !opts.hide_rank {
-        body.push_str(&render_rank_ring(data, opts, theme, pal0, w, h));
+        if data.analysis_pending() {
+            body.push_str(&render_pending_rank(theme, w, h));
+        } else {
+            body.push_str(&render_rank_ring(data, opts, theme, pal0, w, h));
+        }
     }
 
+    let coverage = if data.analysis_pending() {
+        format!(
+            "{} / {} repos analyzed",
+            data.repos_analyzed, data.repos_tracked
+        )
+    } else {
+        format!("{} repos tracked", data.repos_tracked)
+    };
     body.push_str(&format!(
-        "  <a href=\"https://gitdebt.com/u/{login}\" target=\"_blank\" rel=\"noopener\"><text class=\"m\" x=\"{x:.1}\" y=\"{y:.1}\" text-anchor=\"end\" fill=\"{muted}\">via gitdebt · {n} repos tracked</text></a>\n",
+        "  <a href=\"https://gitdebt.com/u/{login}\" target=\"_blank\" rel=\"noopener\"><text class=\"m\" x=\"{x:.1}\" y=\"{y:.1}\" text-anchor=\"end\" fill=\"{muted}\">via gitdebt · {coverage}</text></a>\n",
         x = w - 25.0,
         y = h - 12.0,
         muted = theme.muted,
-        n = data.repos_tracked,
+        coverage = escape_xml(&coverage),
     ));
 
     Ok(format!(
         "{open}{CARD_STYLE}{body}</svg>",
         open = svg_open(w, h, &format!("{login} gitdebt stats")),
     ))
+}
+
+fn render_pending_rank(theme: &Theme, w: f32, h: f32) -> String {
+    let cx = w - 70.0;
+    let cy = h / 2.0 + 4.0;
+    format!(
+        "  <g><circle cx=\"{cx:.1}\" cy=\"{cy:.1}\" r=\"{r:.0}\" fill=\"none\" stroke=\"{track}\" stroke-width=\"6\" stroke-dasharray=\"3 7\" opacity=\"0.65\" /><text class=\"m\" x=\"{cx:.1}\" y=\"{y:.1}\" text-anchor=\"middle\" fill=\"{muted}\">warming</text></g>\n",
+        y = cy + 4.0,
+        r = RING_RADIUS,
+        track = theme.track,
+        muted = theme.muted,
+    )
 }
 
 fn render_rank_ring(
@@ -1080,6 +1125,7 @@ mod tests {
             commits: 987,
             contribs: 12,
             repos_tracked: 8,
+            repos_analyzed: 8,
             forks: 456,
             since_year: Some(2015),
             langs: vec![
@@ -1268,6 +1314,19 @@ mod tests {
         let a = render_user_card(&sample_user(), &opts, &DARK).unwrap();
         let b = render_user_card(&sample_user(), &opts, &DARK).unwrap();
         assert_eq!(a, b);
+    }
+
+    #[test]
+    fn pending_user_analysis_never_presents_zero_authorship_as_final() {
+        let mut data = sample_user();
+        data.commits = 0;
+        data.contribs = 0;
+        data.repos_analyzed = 0;
+        let svg = render_user_card(&data, &UserCardOptions::default(), &LIGHT).unwrap();
+        assert!(svg.contains("Total Commits:</text><text"));
+        assert!(svg.contains(">warming</text>"));
+        assert!(svg.contains("0 / 8 repos analyzed"));
+        assert!(!svg.contains(">0</text>"));
     }
 
     #[test]

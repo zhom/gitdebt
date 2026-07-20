@@ -6,6 +6,7 @@ pub mod archive_hourly_db;
 pub mod archive_worker;
 pub mod auth;
 pub mod badge;
+pub mod brand;
 pub mod cache;
 pub mod cards;
 pub mod chart;

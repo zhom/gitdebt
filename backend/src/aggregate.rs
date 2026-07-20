@@ -42,6 +42,7 @@ use crate::analyzer::{self, AnalyzerCtx};
 use crate::chart::{self, Point};
 use crate::db::Db;
 use crate::github::RepoListItem;
+use crate::repo_analysis;
 use crate::repo_endpoints::is_valid_slug;
 
 /// Cap on the number of repos included in a login's aggregate. Matches the
@@ -58,6 +59,11 @@ pub const MAX_AGGREGATE_REPOS: usize = 50;
 /// count as `repos_pending` and are enqueued by later builds (the
 /// aggregate is memoized ~5 min upstream) as earlier batches drain.
 pub const MAX_ENQUEUES_PER_BUILD: usize = 10;
+
+/// Repo-history work offered by one uncached profile build. Profile discovery
+/// initializes code-health data as well as star history, while clones remain
+/// background-only and globally capacity bounded.
+const MAX_ANALYSIS_ENQUEUES_PER_BUILD: usize = 8;
 
 /// How long a cached `login → repos` mapping is trusted before a live
 /// repos-list refresh is attempted. Repo lists move slowly (new repos +
@@ -332,6 +338,7 @@ pub async fn build(ctx: &AnalyzerCtx, login: &str) -> Result<UserAggregate, Aggr
     let states = load_repo_states(db, &slugs).await?;
 
     let mut included: Vec<String> = Vec::new();
+    let mut analysis_candidates: Vec<String> = Vec::new();
     let mut pending: u32 = 0;
     let mut enqueued: usize = 0;
     for slug in &slugs {
@@ -341,7 +348,7 @@ pub async fn build(ctx: &AnalyzerCtx, login: &str) -> Result<UserAggregate, Aggr
             Some((true, _)) => included.push(slug.clone()),
             // Tombstoned with no complete history: it will never complete —
             // neither included nor pending (and never re-enqueued).
-            Some((false, true)) => {}
+            Some((false, true)) => continue,
             // Cold or partial → ride the existing star-fetch queue
             // (idempotent dedup + tombstone/ceiling guards live inside),
             // capped per build ([`MAX_ENQUEUES_PER_BUILD`]) so one login
@@ -356,6 +363,23 @@ pub async fn build(ctx: &AnalyzerCtx, login: &str) -> Result<UserAggregate, Aggr
                 pending += 1;
             }
         }
+        if !states
+            .get(slug.as_str())
+            .is_some_and(|(_, missing)| *missing)
+        {
+            analysis_candidates.push(slug.clone());
+        }
+    }
+
+    // A profile report promises commit/contributor statistics as well as star
+    // history. Offer a bounded batch to the durable analysis queue so those
+    // fields cannot remain at an unexplained zero forever. This is
+    // Postgres-only on the request path; cloning and author enrichment happen
+    // asynchronously in the existing worker pool.
+    if let Err(error) =
+        repo_analysis::enqueue_many(db, &analysis_candidates, MAX_ANALYSIS_ENQUEUES_PER_BUILD).await
+    {
+        tracing::warn!(login, %error, "profile repo-analysis enqueue failed");
     }
 
     let per_repo = load_day_deltas_by_repo(db, &included).await?;

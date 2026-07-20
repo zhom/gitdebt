@@ -418,6 +418,14 @@ const vsLinks = (categoryRelated.length > 0 ? categoryRelated : FALLBACK_SUGGEST
           initialData={data}
         />
 
+        <ReportShare
+          client:load
+          owner={owner}
+          repo={repo}
+          apiBase={apiBase}
+          pageUrl={canonical}
+        />
+
         <ChartViewer
           client:load
           apiBase={apiBase}
@@ -581,13 +589,6 @@ const vsLinks = (categoryRelated.length > 0 ? categoryRelated : FALLBACK_SUGGEST
           )}
         </section>
 
-        <ReportShare
-          client:visible
-          owner={owner}
-          repo={repo}
-          apiBase={apiBase}
-          pageUrl={canonical}
-        />
         <WarmRepos
           client:load
           apiBase={apiBase}

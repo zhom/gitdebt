@@ -176,8 +176,32 @@ GH_ARCHIVE_HOURLY_MAX_HOURS=24
 ```
 
 Instead of a credential file, `GH_ARCHIVE_GOOGLE_CREDENTIALS_JSON` accepts the
-service-account JSON as a Dokploy secret. The identity needs permission to run
-BigQuery jobs in the billing project (normally `roles/bigquery.jobUser`).
+complete service-account JSON as a Dokploy secret. To create it in Google Cloud:
+
+1. [Enable the BigQuery API](https://console.cloud.google.com/apis/library/bigquery.googleapis.com)
+   and billing for the project that will run the query jobs.
+2. Grant the dedicated service account
+   [**BigQuery Job User**](https://cloud.google.com/bigquery/docs/access-control)
+   (`roles/bigquery.jobUser`) on that project from **IAM & Admin → IAM → Grant
+   access**. Use the service-account email as the principal. Do not use the
+   account's **Permissions** tab for this and do not grant BigQuery Admin.
+3. Open **IAM & Admin → Service Accounts**, select the account, open **Keys**,
+   then choose **Add key → Create new key → JSON → Create**. Google documents
+   the same flow in
+   [Create and delete service account keys](https://cloud.google.com/iam/docs/keys-create-delete).
+4. Treat the downloaded file like a password. Compact it locally with
+   `jq -c . downloaded-key.json`, paste that one-line output into Dokploy as
+   the secret `GH_ARCHIVE_GOOGLE_CREDENTIALS_JSON`, and never commit or paste
+   the value into an issue or chat.
+5. Set `GH_ARCHIVE_BIGQUERY_PROJECT` to the JSON file's `project_id` value
+   (the lowercase Google Cloud Project ID), not the service-account Unique ID
+   or project display name. Redeploy the backend.
+
+The backend validates that the secret is a JSON object containing
+`client_email`, `private_key`, and `token_uri`; it expects raw JSON, not base64.
+If the new key fails immediately after creation, wait at least 60 seconds and
+retry. A successful backend start logs
+`GH Archive historical coordinator and hourly follower started`.
 `GH_ARCHIVE_MAX_BYTES_BILLED` is a hard per-query cost guard.
 
 Historical jobs use the public BigQuery day tables. A separate bounded follower

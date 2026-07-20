@@ -86,8 +86,18 @@ pub async fn enqueue(db: &Db, repo: &str) -> Result<EnqueueOutcome> {
     }
 
     let fresh: bool = sqlx::query_scalar(
-        "SELECT EXISTS(SELECT 1 FROM repo_history \
-         WHERE repo = $1 AND last_analyzed_at >= $2)",
+        "SELECT EXISTS( \
+            SELECT 1 FROM repo_history history \
+            WHERE history.repo = $1 \
+              AND history.last_analyzed_at >= $2 \
+              AND NOT EXISTS ( \
+                  SELECT 1 FROM repo_author_stats author \
+                  WHERE author.repo = history.repo \
+                    AND (author.github_login IS NULL \
+                         OR author.avatar_url LIKE 'https://www.gravatar.com/%') \
+                    AND author.enrich_attempted_at IS NULL \
+              ) \
+         )",
     )
     .bind(repo)
     .bind(now - analysis_freshness())
@@ -122,6 +132,31 @@ pub async fn enqueue(db: &Db, repo: &str) -> Result<EnqueueOutcome> {
     .await?;
     tx.commit().await?;
     Ok(EnqueueOutcome::Enqueued)
+}
+
+/// Enqueue up to `max_new` repositories, preserving input order.
+///
+/// Fresh, already-active, and terminal jobs do not consume the limit. This
+/// lets discovery surfaces offer a bounded batch to the workers without
+/// cloning synchronously or letting one request monopolize the global queue.
+pub async fn enqueue_many(db: &Db, repos: &[String], max_new: usize) -> Result<usize> {
+    if max_new == 0 {
+        return Ok(0);
+    }
+    let mut enqueued = 0usize;
+    for repo in repos {
+        match enqueue(db, repo).await? {
+            EnqueueOutcome::Enqueued => {
+                enqueued += 1;
+                if enqueued >= max_new {
+                    break;
+                }
+            }
+            EnqueueOutcome::AtCapacity => break,
+            EnqueueOutcome::AlreadyActive | EnqueueOutcome::Fresh | EnqueueOutcome::Dead => {}
+        }
+    }
+    Ok(enqueued)
 }
 
 pub async fn reset_inflight_on_startup(db: &Db) -> Result<u64> {
@@ -269,11 +304,14 @@ async fn process(repo: &str, ctx: &AnalysisCtx) -> Result<usize> {
     repo_stats::record_clone(&ctx.db, repo, &handle.path, size).await?;
 
     if Some(handle.head_sha.as_str()) == last_sha.as_deref() {
-        // Nothing new since last analysis. Skip everything — author
-        // enrichment and tokei are both deterministic on HEAD, so
-        // re-running them would only burn CPU + GitHub API budget for
-        // an identical result. If a prior run failed mid-pass, the
-        // user's next push (which advances HEAD) will retry naturally.
+        // Commit aggregates and line counts are unchanged, but author
+        // enrichment is deliberately retried. It is TTL/negative-cache
+        // guarded, and a transient GitHub failure (or a deployment that
+        // predates enrichment) must not strand every `github_login` as NULL
+        // until the repository happens to receive another commit.
+        if let Err(e) = enrich_author_logins(&ctx.db, &handle, repo, &ctx.github).await {
+            tracing::warn!(repo, error = %e, "author-login enrichment retry failed");
+        }
         return Ok(0);
     }
 

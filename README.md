@@ -167,9 +167,8 @@ GH_ARCHIVE_ENABLED=1
 GH_ARCHIVE_BIGQUERY_PROJECT=your-google-cloud-project
 GOOGLE_APPLICATION_CREDENTIALS=/run/secrets/gitdebt-bigquery.json
 GH_ARCHIVE_BIGQUERY_LOCATION=US
-GH_ARCHIVE_MAX_BYTES_BILLED=25000000000
-GH_ARCHIVE_BATCH_SIZE=25
-GH_ARCHIVE_WINDOW_DAYS=31
+GH_ARCHIVE_MAX_BYTES_BILLED=50000000000
+GH_ARCHIVE_BATCH_SIZE=1000
 GH_ARCHIVE_CONCURRENCY=1
 GH_ARCHIVE_HOURLY_LAG_MINUTES=15
 GH_ARCHIVE_HOURLY_MAX_HOURS=24
@@ -206,14 +205,19 @@ retry. A successful backend start logs
 `GH Archive historical coordinator and hourly follower started`.
 `GH_ARCHIVE_MAX_BYTES_BILLED` is a hard per-query cost guard.
 
-Historical jobs use exact public BigQuery month resources. Do not switch this
-back to a `githubarchive.day.*` wildcard: that prefix includes the
+Historical jobs use exact public BigQuery month resources in calendar-aligned
+windows. Do not switch this back to a `githubarchive.day.*` wildcard: that prefix includes the
 `day.yesterday` view, and BigQuery rejects wildcards that match any view. A
 separate bounded follower downloads completed hourly `.json.gz` files for
 forward updates. Each hour and its matching timestamps commit atomically in
 Postgres; 404 means “not published yet” and is retried without advancing the
 checkpoint. GH Archive event IDs deduplicate retries and the overlap with the
 next BigQuery refresh.
+
+Cold repositories deliberately share the 2011-02-12 cursor and are queried in
+one large batch: BigQuery charges for scanning a month table whether one or one
+thousand requested repositories match. Starting each repository at its creation
+month would rescan the same archive months for many small cohorts.
 
 Provider/query failures release the entire affected batch with a durable
 backoff. They do not spend a repository's retry budget or turn a public

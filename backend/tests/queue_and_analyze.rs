@@ -188,6 +188,39 @@ async fn transient_star_failures_stay_retryable_with_a_durable_delay() {
 }
 
 #[tokio::test]
+async fn archive_batch_claim_collects_jobs_across_repository_creation_dates() {
+    let Some(db) = test_db().await else {
+        eprintln!("skipping: set GITDEBT_TEST_DATABASE_URL to run");
+        return;
+    };
+    let prefix = "gitdebt-test-archive-batch/";
+    cleanup(&db, prefix).await;
+    let old = format!("{prefix}old");
+    let new = format!("{prefix}new");
+
+    sqlx::query(
+        "INSERT INTO repos (repo, created_at) VALUES \
+            ($1, '2012-01-01T00:00:00Z'), ($2, '2025-01-01T00:00:00Z')",
+    )
+    .bind(&old)
+    .bind(&new)
+    .execute(&db.pool)
+    .await
+    .unwrap();
+    queue::enqueue(&db, &old, 0).await.unwrap();
+    queue::enqueue(&db, &new, 0).await.unwrap();
+
+    let claimed = queue::claim_many(&db, "archive-test", 10).await.unwrap();
+    let claimed_repos = claimed
+        .into_iter()
+        .map(|job| job.repo)
+        .collect::<std::collections::HashSet<_>>();
+    assert_eq!(claimed_repos, std::collections::HashSet::from([old, new]));
+
+    cleanup(&db, prefix).await;
+}
+
+#[tokio::test]
 async fn analyze_cold_repo_is_pending_and_enqueues_without_paginating() {
     let Some(db) = test_db().await else {
         eprintln!("skipping: set GITDEBT_TEST_DATABASE_URL to run");

@@ -25,15 +25,15 @@ const BIGQUERY_API_BASE: &str = "https://bigquery.googleapis.com/bigquery/v2/";
 const BIGQUERY_SCOPE: &str = "https://www.googleapis.com/auth/bigquery";
 const USER_AGENT: &str = concat!("gitdebt/", env!("CARGO_PKG_VERSION"));
 
-const DEFAULT_MAX_BYTES_BILLED: u64 = 25_000_000_000;
-const DEFAULT_MAX_EVENTS: usize = 100_000;
+const DEFAULT_MAX_BYTES_BILLED: u64 = 50_000_000_000;
+const DEFAULT_MAX_EVENTS: usize = 500_000;
 const DEFAULT_PAGE_SIZE: u32 = 10_000;
 const DEFAULT_CONCURRENCY: usize = 1;
 const DEFAULT_REQUEST_TIMEOUT_SECS: u64 = 30;
 const DEFAULT_QUERY_TIMEOUT_SECS: u64 = 120;
 const DEFAULT_POLL_TIMEOUT_MS: u64 = 10_000;
 const DEFAULT_MAX_RETRIES: usize = 3;
-const DEFAULT_MAX_REPOSITORIES: usize = 200;
+const DEFAULT_MAX_REPOSITORIES: usize = 1_000;
 const DEFAULT_MAX_RANGE_DAYS: i64 = 31;
 
 const HARD_MAX_BYTES_BILLED: u64 = 1_000_000_000_000;

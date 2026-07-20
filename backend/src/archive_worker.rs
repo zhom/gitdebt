@@ -10,7 +10,7 @@ use std::sync::Arc;
 use std::time::Duration;
 
 use anyhow::{Context, Result};
-use chrono::{DateTime, Datelike, Days, NaiveDate, Utc};
+use chrono::{Datelike, Days, Months, NaiveDate, Utc};
 use futures::StreamExt;
 
 use crate::cache::{ArchiveBackfillState, ArchiveStarEvent, Cache};
@@ -20,10 +20,8 @@ use crate::queue;
 
 const ARCHIVE_START: NaiveDate =
     NaiveDate::from_ymd_opt(2011, 2, 12).expect("GH Archive start date is valid");
-const DEFAULT_BATCH_SIZE: usize = 25;
-const MAX_BATCH_SIZE: usize = 200;
-const DEFAULT_WINDOW_DAYS: u64 = 31;
-const MAX_WINDOW_DAYS: u64 = 31;
+const DEFAULT_BATCH_SIZE: usize = 1_000;
+const MAX_BATCH_SIZE: usize = 1_000;
 
 #[derive(Clone)]
 pub struct ArchiveWorkerCtx {
@@ -31,7 +29,6 @@ pub struct ArchiveWorkerCtx {
     github: Arc<GithubClient>,
     cache: Cache,
     batch_size: usize,
-    window_days: u64,
     metadata_concurrency: usize,
 }
 
@@ -48,18 +45,11 @@ impl ArchiveWorkerCtx {
             1,
             MAX_BATCH_SIZE,
         );
-        let window_days = bounded_env_u64(
-            "GH_ARCHIVE_WINDOW_DAYS",
-            DEFAULT_WINDOW_DAYS,
-            1,
-            MAX_WINDOW_DAYS,
-        );
         Self {
             source,
             github,
             cache,
             batch_size,
-            window_days,
             metadata_concurrency: metadata_concurrency.clamp(1, 32),
         }
     }
@@ -202,8 +192,10 @@ async fn process_prepared(
         .collect::<Vec<_>>();
     let mut by_start: BTreeMap<NaiveDate, Vec<Prepared>> = BTreeMap::new();
     for item in prepared {
-        let repository_start = initial_archive_start(item.state.created_at);
-        let start = item.state.cursor.unwrap_or(repository_start);
+        // The table scan costs the same whether one or one thousand requested
+        // repositories match. A shared cold cursor keeps the queue in one
+        // large cohort instead of rescanning months per creation-date cohort.
+        let start = item.state.cursor.unwrap_or(ARCHIVE_START);
         if start > cutoff {
             // Empty repositories still need a final atomic commit so their
             // source/provenance becomes visible.
@@ -224,10 +216,7 @@ async fn process_prepared(
     }
 
     for (start, items) in by_start {
-        let end = start
-            .checked_add_days(Days::new(ctx.window_days.saturating_sub(1)))
-            .unwrap_or(cutoff)
-            .min(cutoff);
+        let end = archive_window_end(start, cutoff)?;
         match fetch_complete(ctx.source.as_ref(), &items, start, end).await {
             Ok(events) => commit_group(ctx, items, start, end, cutoff, events).await?,
             Err(error) => {
@@ -435,22 +424,20 @@ fn provider_backoff_seconds(failures: u32) -> u64 {
     (30_u64 << shift).min(15 * 60)
 }
 
-fn initial_archive_start(created_at: Option<DateTime<Utc>>) -> NaiveDate {
-    created_at
-        .and_then(|created_at| NaiveDate::from_ymd_opt(created_at.year(), created_at.month(), 1))
-        .unwrap_or(ARCHIVE_START)
-        .max(ARCHIVE_START)
+fn archive_window_end(start: NaiveDate, cutoff: NaiveDate) -> Result<NaiveDate> {
+    let month_start = start
+        .with_day(1)
+        .context("cannot calculate archive month start")?;
+    let next_month = month_start
+        .checked_add_months(Months::new(1))
+        .context("archive month overflow")?;
+    Ok(next_month
+        .pred_opt()
+        .context("archive month overflow")?
+        .min(cutoff))
 }
 
 fn bounded_env(name: &str, default: usize, min: usize, max: usize) -> usize {
-    std::env::var(name)
-        .ok()
-        .and_then(|value| value.parse().ok())
-        .unwrap_or(default)
-        .clamp(min, max)
-}
-
-fn bounded_env_u64(name: &str, default: u64, min: u64, max: u64) -> u64 {
     std::env::var(name)
         .ok()
         .and_then(|value| value.parse().ok())
@@ -483,14 +470,22 @@ mod tests {
     }
 
     #[test]
-    fn initial_backfill_skips_years_before_repository_creation() {
-        let created_at = DateTime::parse_from_rfc3339("2024-07-19T12:00:00Z")
-            .unwrap()
-            .with_timezone(&Utc);
+    fn archive_windows_are_calendar_aligned() {
         assert_eq!(
-            initial_archive_start(Some(created_at)),
-            NaiveDate::from_ymd_opt(2024, 7, 1).unwrap()
+            archive_window_end(
+                NaiveDate::from_ymd_opt(2011, 2, 12).unwrap(),
+                NaiveDate::from_ymd_opt(2026, 7, 19).unwrap(),
+            )
+            .unwrap(),
+            NaiveDate::from_ymd_opt(2011, 2, 28).unwrap()
         );
-        assert_eq!(initial_archive_start(None), ARCHIVE_START);
+        assert_eq!(
+            archive_window_end(
+                NaiveDate::from_ymd_opt(2026, 7, 1).unwrap(),
+                NaiveDate::from_ymd_opt(2026, 7, 19).unwrap(),
+            )
+            .unwrap(),
+            NaiveDate::from_ymd_opt(2026, 7, 19).unwrap()
+        );
     }
 }

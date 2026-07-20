@@ -201,35 +201,12 @@ pub async fn claim_one(db: &Db, worker_id: &str) -> Result<Option<Job>> {
 pub async fn claim_many(db: &Db, worker_id: &str, limit: usize) -> Result<Vec<Job>> {
     let limit = i64::try_from(limit.clamp(1, 1_000)).unwrap_or(1_000);
     let rows = sqlx::query(
-        "WITH pivot AS ( \
-            SELECT COALESCE( \
-                       repos.archive_cursor, \
-                       GREATEST(DATE '2011-02-12', DATE_TRUNC('month', repos.created_at)::DATE), \
-                       DATE '2011-02-12' \
-                   ) AS archive_start \
-            FROM star_fetch_queue queue \
-            LEFT JOIN repos ON repos.repo = queue.repo \
-            WHERE (queue.status = 'pending' AND queue.next_attempt_at <= NOW()) \
-               OR (queue.status = 'in_progress' \
-                   AND queue.claimed_at < NOW() - INTERVAL '15 minutes') \
-            ORDER BY queue.priority DESC, queue.enqueued_at \
-            LIMIT 1 \
-         ), selected AS ( \
-            SELECT queue.repo FROM star_fetch_queue queue \
-            LEFT JOIN repos ON repos.repo = queue.repo \
-            CROSS JOIN pivot \
-            WHERE ( \
-                    (queue.status = 'pending' AND queue.next_attempt_at <= NOW()) \
-                    OR (queue.status = 'in_progress' \
-                        AND queue.claimed_at < NOW() - INTERVAL '15 minutes') \
-                  ) \
-              AND COALESCE( \
-                    repos.archive_cursor, \
-                    GREATEST(DATE '2011-02-12', DATE_TRUNC('month', repos.created_at)::DATE), \
-                    DATE '2011-02-12' \
-                  ) = pivot.archive_start \
-            ORDER BY queue.priority DESC, queue.enqueued_at \
-            FOR UPDATE OF queue SKIP LOCKED LIMIT $1 \
+        "WITH selected AS ( \
+            SELECT repo FROM star_fetch_queue \
+            WHERE (status = 'pending' AND next_attempt_at <= NOW()) \
+               OR (status = 'in_progress' AND claimed_at < NOW() - INTERVAL '15 minutes') \
+            ORDER BY priority DESC, enqueued_at \
+            FOR UPDATE SKIP LOCKED LIMIT $1 \
          ) \
          UPDATE star_fetch_queue AS queue \
          SET status = 'in_progress', worker_id = $2, claimed_at = $3 \

@@ -205,6 +205,10 @@ retry. A successful backend start logs
 `GH Archive historical coordinator and hourly follower started`.
 `GH_ARCHIVE_MAX_BYTES_BILLED` is a hard per-query cost guard.
 
+Deploy the backend with the repository-root `Dockerfile`. Dokploy environment
+variables are runtime configuration; do not mirror them into Docker build
+arguments or image `ENV` layers.
+
 Historical jobs use exact public BigQuery month resources in calendar-aligned
 windows. Do not switch this back to a `githubarchive.day.*` wildcard: that prefix includes the
 `day.yesterday` view, and BigQuery rejects wildcards that match any view. A

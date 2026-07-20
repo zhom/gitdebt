@@ -414,6 +414,51 @@ async fn repo_analysis_enqueue_many_skips_settled_jobs_and_bounds_new_work() {
     cleanup(&db, prefix).await;
 }
 
+#[tokio::test]
+async fn repo_analysis_startup_recovers_only_stale_leases() {
+    let Some(db) = test_db().await else {
+        eprintln!("skipping: set GITDEBT_TEST_DATABASE_URL to run");
+        return;
+    };
+    let prefix = "gitdebt-test-analysis-lease/";
+    cleanup(&db, prefix).await;
+    let fresh = format!("{prefix}fresh");
+    let stale = format!("{prefix}stale");
+    sqlx::query(
+        "INSERT INTO repo_analysis_queue \
+            (repo, status, enqueued_at, claimed_at, worker_id) VALUES \
+            ($1, 'in_progress', NOW(), NOW(), 'old-fresh'), \
+            ($2, 'in_progress', NOW(), NOW() - INTERVAL '3 minutes', 'old-stale')",
+    )
+    .bind(&fresh)
+    .bind(&stale)
+    .execute(&db.pool)
+    .await
+    .unwrap();
+
+    assert_eq!(
+        repo_analysis::reset_inflight_on_startup(&db).await.unwrap(),
+        1
+    );
+    let statuses: Vec<(String, String)> = sqlx::query_as(
+        "SELECT repo, status FROM repo_analysis_queue \
+         WHERE repo LIKE $1 ORDER BY repo",
+    )
+    .bind(format!("{prefix}%"))
+    .fetch_all(&db.pool)
+    .await
+    .unwrap();
+    assert_eq!(
+        statuses,
+        vec![
+            (fresh, "in_progress".to_string()),
+            (stale, "pending".to_string()),
+        ]
+    );
+
+    cleanup(&db, prefix).await;
+}
+
 async fn analysis_queue_row_exists(db: &Db, repo: &str) -> bool {
     sqlx::query_scalar::<_, bool>(
         "SELECT EXISTS(SELECT 1 FROM repo_analysis_queue WHERE repo = $1)",

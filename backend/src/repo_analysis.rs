@@ -13,6 +13,7 @@ use std::time::Duration;
 use anyhow::{Context, Result};
 use chrono::Utc;
 use sqlx::Row;
+use tokio::sync::watch;
 use tokio::time::sleep;
 
 use crate::code_count;
@@ -165,7 +166,7 @@ pub async fn reset_inflight_on_startup(db: &Db) -> Result<u64> {
     let res = sqlx::query(
         "UPDATE repo_analysis_queue SET status = 'pending', worker_id = NULL, claimed_at = NULL \
          WHERE status = 'in_progress' \
-           AND (claimed_at IS NULL OR claimed_at < NOW() - INTERVAL '2 hours')",
+           AND (claimed_at IS NULL OR claimed_at < NOW() - INTERVAL '2 minutes')",
     )
     .execute(&db.pool)
     .await?;
@@ -191,9 +192,10 @@ pub async fn revive_retryable_on_startup(db: &Db) -> Result<u64> {
 }
 
 pub fn spawn_pool(ctx: AnalysisCtx, count: usize) {
+    let pool_id = format!("{}-{}", std::process::id(), Utc::now().timestamp_millis());
     for i in 0..count {
         let ctx = ctx.clone();
-        let id = format!("ra{i}");
+        let id = format!("ra-{pool_id}-{i}");
         tokio::spawn(async move {
             run_worker(id, ctx).await;
         });
@@ -227,7 +229,10 @@ async fn run_worker(worker_id: String, ctx: AnalysisCtx) {
                 continue;
             }
         };
-        match process(&job, &ctx).await {
+        let heartbeat_stop = spawn_lease_heartbeat(ctx.db.clone(), job.clone(), worker_id.clone());
+        let outcome = process(&job, &ctx).await;
+        let _ = heartbeat_stop.send(true);
+        match outcome {
             Ok(commits_applied) => {
                 tracing::info!(repo = %job, commits_applied, "analysis run complete");
                 if let Err(e) = complete(&ctx.db, &job).await {
@@ -255,6 +260,38 @@ async fn run_worker(worker_id: String, ctx: AnalysisCtx) {
     }
 }
 
+fn spawn_lease_heartbeat(db: Db, repo: String, worker_id: String) -> watch::Sender<bool> {
+    let (stop, mut stopped) = watch::channel(false);
+    tokio::spawn(async move {
+        loop {
+            tokio::select! {
+                _ = sleep(Duration::from_secs(30)) => {
+                    if *stopped.borrow() {
+                        break;
+                    }
+                    if let Err(error) = sqlx::query(
+                        "UPDATE repo_analysis_queue SET claimed_at = NOW() \
+                         WHERE repo = $1 AND status = 'in_progress' AND worker_id = $2",
+                    )
+                    .bind(&repo)
+                    .bind(&worker_id)
+                    .execute(&db.pool)
+                    .await
+                    {
+                        tracing::warn!(%repo, %worker_id, %error, "analysis lease heartbeat failed");
+                    }
+                }
+                changed = stopped.changed() => {
+                    if changed.is_err() || *stopped.borrow() {
+                        break;
+                    }
+                }
+            }
+        }
+    });
+    stop
+}
+
 async fn claim_one(db: &Db, worker_id: &str) -> Result<Option<String>> {
     let now = Utc::now();
     let row = sqlx::query(
@@ -263,7 +300,7 @@ async fn claim_one(db: &Db, worker_id: &str) -> Result<Option<String>> {
          WHERE repo = ( \
             SELECT repo FROM repo_analysis_queue \
             WHERE (status = 'pending' AND next_attempt_at <= NOW()) \
-               OR (status = 'in_progress' AND claimed_at < NOW() - INTERVAL '2 hours') \
+               OR (status = 'in_progress' AND claimed_at < NOW() - INTERVAL '2 minutes') \
             ORDER BY enqueued_at FOR UPDATE SKIP LOCKED LIMIT 1 \
          ) \
          RETURNING repo",

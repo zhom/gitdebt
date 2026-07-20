@@ -166,9 +166,9 @@ async fn main() -> Result<()> {
     tracing::info!(%addr, "gitdebt-api listening");
     // Graceful shutdown: SIGTERM (Docker stop, Dokploy redeploy) lets
     // in-flight requests finish instead of dropping connections. Workers
-    // currently exit when the runtime stops — they don't get a clean
-    // drain, but their state is durable in Postgres (queue rows persist;
-    // expired claims are reclaimed from the durable queues).
+    // exit when the runtime stops. Their state is durable in Postgres; repo
+    // analysis leases heartbeat every 30 seconds and stale claims recover
+    // after two minutes, while archive claims recover after 15 minutes.
     // `into_make_service_with_connect_info::<SocketAddr>` registers the
     // peer socket as `ConnectInfo` on each request. tower_governor's
     // SmartIpKeyExtractor falls back to that when no `X-Forwarded-For`

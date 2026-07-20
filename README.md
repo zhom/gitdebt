@@ -238,6 +238,10 @@ subprocesses are disk-, process-, and thread-heavy. Start at `1`.
 `GITHUB_MAX_IN_FLIGHT_REQUESTS` defaults to `64` and is hard-capped below
 GitHub's 100-concurrent-request guidance.
 
+Analysis workers heartbeat their durable claim every 30 seconds. A claim with
+no heartbeat for two minutes is recoverable after a crash or rolling deploy;
+active long-running clones keep their lease and are not duplicated.
+
 `/ready` reports pipeline degradation as well as database readiness. `/metrics`
 adds retrying/provider-delayed counts, unexpected dead-row counts, expected
 404 tombstone counts, oldest-job age, the last completed archive hour, queue

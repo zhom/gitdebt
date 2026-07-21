@@ -2,6 +2,7 @@ import { useEffect, useMemo, useState } from "react";
 import { ExternalLink, Loader2 } from "lucide-react";
 
 import { ChartViewer } from "@/components/ChartViewer";
+import { MEDIA_RENDER_REVISION } from "@/lib/media";
 
 type UserAnalyze = {
   login: string;
@@ -23,8 +24,18 @@ function selectedLogin(): string | null {
   return value && LOGIN_RE.test(value) ? value : null;
 }
 
-export function LiveUserProfile({ apiBase }: { apiBase: string }) {
-  const login = useMemo(selectedLogin, []);
+export function LiveUserProfile({
+  apiBase,
+  login: requestedLogin,
+}: {
+  apiBase: string;
+  login?: string;
+}) {
+  const login = useMemo(() => {
+    const normalized = requestedLogin?.trim().toLowerCase();
+    if (normalized && LOGIN_RE.test(normalized)) return normalized;
+    return selectedLogin();
+  }, [requestedLogin]);
   const [data, setData] = useState<UserAnalyze | null>(null);
   const [loading, setLoading] = useState(Boolean(login));
   const [error, setError] = useState<string | null>(null);
@@ -203,7 +214,7 @@ export function LiveUserProfile({ apiBase }: { apiBase: string }) {
         </header>
         <div className="flex justify-center border-y border-border py-5">
           <img
-            src={`${apiBase}/api/users/${login}/card.svg?theme=light&v=${revision}`}
+            src={`${apiBase}/api/users/${login}/card.svg?theme=light&v=${revision}&render=${MEDIA_RENDER_REVISION}`}
             alt={`gitdebt profile statistics for ${login}`}
             loading="lazy"
             decoding="async"

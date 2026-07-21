@@ -22,8 +22,8 @@ use crate::queue;
 
 const ARCHIVE_START: NaiveDate =
     NaiveDate::from_ymd_opt(2011, 2, 12).expect("GH Archive start date is valid");
-const DEFAULT_BATCH_SIZE: usize = 1_000;
-const MAX_BATCH_SIZE: usize = 1_000;
+const DEFAULT_BATCH_SIZE: usize = 5_000;
+const MAX_BATCH_SIZE: usize = 5_000;
 
 #[derive(Clone)]
 pub struct ArchiveWorkerCtx {

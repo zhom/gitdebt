@@ -1,6 +1,7 @@
 import { useEffect, useId, useState } from "react";
 
 import { EmbedSnippet } from "@/components/EmbedSnippet";
+import { MEDIA_RENDER_REVISION } from "@/lib/media";
 
 export type ChartType = "date" | "timeline";
 
@@ -62,6 +63,7 @@ export function ChartViewer({
   const params: string[] = [
     `type=${type}`,
     `animate=${controlsChanged ? "0" : "1"}`,
+    `render=${MEDIA_RENDER_REVISION}`,
   ];
   if (logScale) params.push("log=1");
   if (validFrom) params.push(`from=${validFrom}`);
@@ -168,6 +170,16 @@ export function ChartViewer({
               Timeline
             </button>
           </div>
+          {embedLink && label && (
+            <EmbedSnippet
+              apiBase={apiBase}
+              chartPath={path}
+              linkHref={embedLink}
+              label={label}
+              state={{ type, log: logScale, from: validFrom, to: validTo }}
+              variant="menu"
+            />
+          )}
         </div>
       </figcaption>
       <img
@@ -181,18 +193,5 @@ export function ChartViewer({
     </figure>
   );
 
-  if (!embedLink || !label) return figure;
-
-  return (
-    <div className="space-y-6">
-      {figure}
-      <EmbedSnippet
-        apiBase={apiBase}
-        chartPath={path}
-        linkHref={embedLink}
-        label={label}
-        state={{ type, log: logScale, from: validFrom, to: validTo }}
-      />
-    </div>
-  );
+  return figure;
 }

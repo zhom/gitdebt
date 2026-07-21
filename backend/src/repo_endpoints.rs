@@ -21,6 +21,7 @@ use axum::{
     response::{IntoResponse, Response},
     routing::{get, post},
 };
+use axum_extra::extract::cookie::CookieJar;
 use chrono::{Datelike, NaiveDate, Utc};
 use serde::Deserialize;
 use sqlx::Row;
@@ -131,6 +132,9 @@ pub fn mutating_router() -> Router<ApiState> {
 async fn enqueue_analysis(
     State(state): State<ApiState>,
     Path((owner, repo)): Path<(String, String)>,
+    Query(query): Query<AnalyzeHistoryQuery>,
+    headers: HeaderMap,
+    jar: CookieJar,
 ) -> Result<Response, ApiError> {
     if !is_valid_slug(&owner) || !is_valid_slug(&repo) {
         return Err(ApiError::bad_request("invalid owner/repo"));
@@ -138,6 +142,20 @@ async fn enqueue_analysis(
     // Lowercase on the same key as the star-fetch queue / cache / worker so
     // the repo-analysis queue can't fork `Owner/Repo` from `owner/repo`.
     let full = crate::analyzer::repo_key(&owner, &repo);
+    let user_id = state
+        .gh_app
+        .as_ref()
+        .and_then(|config| crate::auth::current_user_id(config, &jar));
+    let priority = if user_id.is_some() {
+        repo_analysis::INTERACTIVE_PRIORITY
+    } else {
+        state
+            .analyzer
+            .cache
+            .get_repo_view_count(&full)
+            .await
+            .unwrap_or(0)
+    };
     let summary = state.analyzer.cache.get_repo_summary(&full).await?;
     if summary.as_ref().is_some_and(|repo| repo.missing) {
         return Ok((
@@ -150,7 +168,20 @@ async fn enqueue_analysis(
         .as_ref()
         .is_some_and(|repo| repo.metadata_fetched_at.is_some() || repo.stargazers_complete);
     if !verified {
-        match state.analyzer.github.repo_metadata(&owner, &repo).await {
+        let github = if let (Some(user_id), Some(config)) = (user_id, state.gh_app.as_ref()) {
+            match crate::auth::user_access_token(state.analyzer.cache.db(), config, user_id).await {
+                Ok(Some(token)) => state
+                    .analyzer
+                    .github
+                    .for_user_token(&token)
+                    .map(Arc::new)
+                    .unwrap_or_else(|_| state.analyzer.github.clone()),
+                _ => state.analyzer.github.clone(),
+            }
+        } else {
+            state.analyzer.github.clone()
+        };
+        match github.repo_metadata(&owner, &repo).await {
             Ok(Some(metadata)) => {
                 state
                     .analyzer
@@ -183,7 +214,28 @@ async fn enqueue_analysis(
         }
     }
 
-    let outcome = repo_analysis::enqueue(state.analyzer.cache.db(), &full).await?;
+    // A report visit is the platform activity signal. Record it only after
+    // the repository has been verified as public, and keep the counter write
+    // off the enqueue request's latency path. The landing-page pulse reads
+    // these aggregate repository counters from Postgres; it never exposes a
+    // viewer identity or calls GitHub.
+    if request_is_frontend_view(&headers, &state.frontend_origin, query.view) {
+        let cache_for_view = state.analyzer.cache.clone();
+        let repo_for_view = full.clone();
+        tokio::spawn(async move {
+            if let Err(error) = cache_for_view.record_repo_view(&repo_for_view).await {
+                tracing::debug!(repo = %repo_for_view, error = %error, "record repo report view failed");
+            }
+        });
+    }
+
+    // Both pipelines receive the same popularity bump. Star history continues
+    // through the existing Postgres-backed GH Archive path; an OAuth token is
+    // never pooled into unrelated repositories or persisted on the queue.
+    crate::queue::enqueue(state.analyzer.cache.db(), &full, priority).await?;
+    let outcome =
+        repo_analysis::enqueue_prioritized(state.analyzer.cache.db(), &full, priority, user_id)
+            .await?;
     let (status, queued, reason) = match outcome {
         repo_analysis::EnqueueOutcome::Enqueued => (StatusCode::ACCEPTED, true, "enqueued"),
         repo_analysis::EnqueueOutcome::AlreadyActive => {
@@ -196,9 +248,27 @@ async fn enqueue_analysis(
     };
     Ok((
         status,
-        Json(serde_json::json!({"queued": queued, "repo": full, "reason": reason})),
+        Json(serde_json::json!({
+            "queued": queued,
+            "repo": full,
+            "reason": reason,
+            "priority": if user_id.is_some() { "interactive" } else { "standard" }
+        })),
     )
         .into_response())
+}
+
+#[derive(Debug, Default, Deserialize)]
+struct AnalyzeHistoryQuery {
+    view: Option<u8>,
+}
+
+fn request_is_frontend_view(headers: &HeaderMap, frontend_origin: &str, view: Option<u8>) -> bool {
+    view == Some(1)
+        && headers
+            .get(header::ORIGIN)
+            .and_then(|origin| origin.to_str().ok())
+            .is_some_and(|origin| origin == frontend_origin)
 }
 
 /// Mirror of the frontend slug validator. Rejects `..`, slashes, query
@@ -312,7 +382,7 @@ async fn stat_dispatcher(
         repo.to_ascii_lowercase()
     );
     let theme = theme_for(q.theme.as_deref());
-    let Some(revision) = stat_revision(&state, &full).await? else {
+    let Some(revision) = stat_revision(&state, &full, kind).await? else {
         let svg = render_analysis_pending(&full, theme);
         let Some(raster_format) = format.raster() else {
             return Ok(svg_response_with_policy(svg, true).into_response());
@@ -372,17 +442,37 @@ fn stat_svg_motion(svg: String, animate: bool) -> String {
     }
 }
 
-async fn stat_revision(state: &ApiState, repo: &str) -> Result<Option<String>, ApiError> {
-    let row: (Option<String>, bool) = sqlx::query_as(
+async fn stat_revision(
+    state: &ApiState,
+    repo: &str,
+    kind: StatKind,
+) -> Result<Option<String>, ApiError> {
+    let row: (Option<String>, Option<String>, Option<String>) = sqlx::query_as(
         "SELECT \
             (SELECT last_analyzed_sha FROM repo_history WHERE repo = $1), \
-            EXISTS(SELECT 1 FROM repo_analysis_queue \
-                   WHERE repo = $1 AND status IN ('pending', 'in_progress'))",
+            (SELECT status FROM repo_analysis_queue WHERE repo = $1), \
+            (SELECT phase FROM repo_analysis_queue WHERE repo = $1)",
     )
     .bind(repo)
     .fetch_one(&state.analyzer.cache.db().pool)
     .await?;
-    Ok(if row.1 { None } else { row.0 })
+    let active = matches!(row.1.as_deref(), Some("pending" | "in_progress"));
+    let core_saved = row.2.as_deref() == Some("finishing") && kind.ready_while_finishing();
+    Ok(if active && !core_saved { None } else { row.0 })
+}
+
+impl StatKind {
+    /// These charts read tables atomically replaced by `apply_commits_at_head`
+    /// before the worker enters its expensive language-count / contributor-
+    /// enrichment phase. Contributor and bus-factor cards wait because their
+    /// author identities are still being enriched; lines wait for the tree
+    /// count itself.
+    fn ready_while_finishing(self) -> bool {
+        matches!(
+            self,
+            Self::BugMagnets | Self::TopFiles | Self::Heatmap | Self::TodoTrend | Self::CommitTrend
+        )
+    }
 }
 
 fn render_analysis_pending(repo: &str, theme: &crate::theme::Theme) -> String {
@@ -742,7 +832,7 @@ fn svg_response_with_policy(svg: String, pending: bool) -> impl IntoResponse {
         HeaderValue::from_static("image/svg+xml; charset=utf-8"),
     );
     headers.insert(header::CACHE_CONTROL, stat_cache_control(pending));
-    (headers, svg)
+    (headers, brand::with_site_link(svg))
 }
 
 fn raster_response(format: RasterFormat, bytes: Arc<Vec<u8>>) -> impl IntoResponse {
@@ -774,6 +864,41 @@ fn stat_cache_control(pending: bool) -> HeaderValue {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn report_views_require_the_exact_frontend_origin() {
+        let mut headers = HeaderMap::new();
+        assert!(!request_is_frontend_view(
+            &headers,
+            "https://gitdebt.com",
+            Some(1)
+        ));
+
+        headers.insert(
+            header::ORIGIN,
+            HeaderValue::from_static("https://gitdebt.com"),
+        );
+        assert!(!request_is_frontend_view(
+            &headers,
+            "https://gitdebt.com",
+            None
+        ));
+        assert!(!request_is_frontend_view(
+            &headers,
+            "https://gitdebt.com",
+            Some(0)
+        ));
+        assert!(request_is_frontend_view(
+            &headers,
+            "https://gitdebt.com",
+            Some(1)
+        ));
+        assert!(!request_is_frontend_view(
+            &headers,
+            "https://preview.gitdebt.com",
+            Some(1)
+        ));
+    }
 
     #[test]
     fn parse_filename_dispatches_new_stat_kinds() {
@@ -811,6 +936,18 @@ mod tests {
         let svg = render_analysis_pending("o/r", &crate::theme::LIGHT);
         assert!(svg.contains("data-gitdebt-logo=\"true\""));
         assert!(svg.contains(">gitdebt</text>"));
+    }
+
+    #[test]
+    fn only_atomically_saved_core_charts_open_during_finishing() {
+        assert!(StatKind::BugMagnets.ready_while_finishing());
+        assert!(StatKind::TopFiles.ready_while_finishing());
+        assert!(StatKind::Heatmap.ready_while_finishing());
+        assert!(StatKind::TodoTrend.ready_while_finishing());
+        assert!(StatKind::CommitTrend.ready_while_finishing());
+        assert!(!StatKind::Contributors.ready_while_finishing());
+        assert!(!StatKind::BusFactor.ready_while_finishing());
+        assert!(!StatKind::Lines.ready_while_finishing());
     }
 
     #[test]

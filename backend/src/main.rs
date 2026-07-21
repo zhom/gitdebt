@@ -40,6 +40,17 @@ async fn main() -> Result<()> {
 
     let rate = Arc::new(RateLimitTracker::load(db).await?);
     let github = Arc::new(GithubClient::new(token.as_deref(), rate.clone())?);
+    let gh_app =
+        GithubAppConfig::from_env().context("GitHub App config invalid; refusing to start")?;
+    if gh_app.is_some() {
+        tracing::info!("GitHub App OAuth configured (tokens encrypted at rest)");
+    } else {
+        tracing::warn!(
+            "GitHub App not configured (set GITHUB_APP_CLIENT_ID, GITHUB_APP_CLIENT_SECRET, \
+             GITHUB_WEBHOOK_SECRET, SESSION_SECRET, TOKEN_ENCRYPTION_KEY); \
+             /auth/* and /webhooks/github will 503"
+        );
+    }
 
     // Repo-history analysis pool. Separate queue, separate workload
     // shape: clones are disk-heavy + CPU-heavy, not GitHub-API-bound.
@@ -77,6 +88,7 @@ async fn main() -> Result<()> {
             db: cache.db().clone(),
             storage: storage.clone(),
             github: github.clone(),
+            gh_app: gh_app.as_ref().cloned().map(Arc::new),
         },
         analysis_workers,
     );
@@ -135,17 +147,6 @@ async fn main() -> Result<()> {
     }
 
     let analyzer = AnalyzerCtx { github, cache };
-    let gh_app =
-        GithubAppConfig::from_env().context("GitHub App config invalid; refusing to start")?;
-    if gh_app.is_some() {
-        tracing::info!("GitHub App OAuth configured (tokens encrypted at rest)");
-    } else {
-        tracing::warn!(
-            "GitHub App not configured (set GITHUB_APP_CLIENT_ID, GITHUB_APP_CLIENT_SECRET, \
-             GITHUB_WEBHOOK_SECRET, SESSION_SECRET, TOKEN_ENCRYPTION_KEY); \
-             /auth/* and /webhooks/github will 503"
-        );
-    }
     let api_state = ApiState::new(analyzer, gh_app, storage.clone())?;
 
     let port: u16 = std::env::var("PORT")

@@ -17,6 +17,7 @@ import SiteHeader from "@/components/SiteHeader.astro";
 import SiteFooter from "@/components/SiteFooter.astro";
 import { ComparisonModeGraphic } from "@/components/ComparisonModeGraphic";
 import { LandingRepoLookup } from "@/components/LandingRepoLookup";
+import { PlatformPulse } from "@/components/PlatformPulse";
 import { SignalFlowGraphic } from "@/components/SignalFlowGraphic";
 import { ThemeEmbedPreview } from "@/components/ThemeEmbedPreview";
 import { WarmRepos } from "@/components/WarmRepos";
@@ -173,6 +174,29 @@ const landingWarmRepos = Array.from(
               </div>
 
               <SignalFlowGraphic client:load />
+            </div>
+          </div>
+        </section>
+
+        <section id="live" class="scroll-mt-20 border-b border-zinc-300">
+          <div class="mx-auto max-w-6xl px-6 py-20 sm:py-28">
+            <header class="grid gap-6 lg:grid-cols-[0.75fr_1.25fr] lg:items-end">
+              <p class="font-mono text-xs tracking-[0.12em] text-zinc-500 uppercase">
+                Live on gitdebt
+              </p>
+              <div>
+                <h2 class="max-w-[22ch] text-3xl font-semibold tracking-[-0.035em] text-balance sm:text-5xl">
+                  Real repositories. Real queue state. No canned showcase.
+                </h2>
+                <p class="mt-5 max-w-[62ch] text-base/7 text-pretty text-zinc-600">
+                  These are repositories people recently opened on the platform.
+                  Move through the list to inspect stored stars and whether each
+                  history and health report is ready or actively being built.
+                </p>
+              </div>
+            </header>
+            <div class="mt-12">
+              <PlatformPulse client:load apiBase={apiBase} />
             </div>
           </div>
         </section>

@@ -1,7 +1,8 @@
 import { useEffect, useRef, useState } from "react";
 import { AnimatePresence, motion, useReducedMotion } from "motion/react";
 
-import { CopyButton } from "@/components/CopyButton";
+import { EmbedSnippet } from "@/components/EmbedSnippet";
+import { MEDIA_RENDER_REVISION } from "@/lib/media";
 import {
   DURATION,
   EASE_OUT,
@@ -13,6 +14,7 @@ type Props = {
   alt: string;
   caption?: string;
   delay?: number;
+  apiBase?: string;
   embedLink?: string;
   priority?: boolean;
   liveRepo?: string;
@@ -32,6 +34,7 @@ export function StatCard({
   src,
   alt,
   caption,
+  apiBase,
   embedLink,
   priority = false,
   liveRepo,
@@ -41,7 +44,11 @@ export function StatCard({
   const timerRef = useRef<ReturnType<typeof setTimeout> | null>(null);
   const reduceMotion = useReducedMotion();
 
-  const liveSrc = appendParam(src, "animate", "1");
+  const liveSrc = appendParam(
+    appendParam(src, "animate", "1"),
+    "render",
+    MEDIA_RENDER_REVISION,
+  );
   const sep = liveSrc.includes("?") ? "&" : "?";
   const bust = attempt === 0 ? "" : `${sep}_=${attempt}`;
   const lightSrc = `${liveSrc}${sep}theme=light${bust}`;
@@ -93,19 +100,7 @@ export function StatCard({
     }, retryDelay(attempt));
   }
 
-  const page = embedLink
-    ? embedLink + (embedLink.includes("?") ? "&" : "?") + "ref=readme"
-    : "";
-  const staticSrc = appendParam(src, "animate", "0");
-  const staticSep = staticSrc.includes("?") ? "&" : "?";
-  const staticLightSrc = `${staticSrc}${staticSep}theme=light`;
-  const staticDarkSrc = `${staticSrc}${staticSep}theme=dark`;
-  const embedSnippet = `<a href="${page}">
-  <picture>
-    <source media="(prefers-color-scheme: dark)" srcset="${staticDarkSrc}" />
-    <img alt="${alt}" src="${staticLightSrc}" />
-  </picture>
-</a>`;
+  const chartPath = apiBase && src.startsWith(apiBase) ? src.slice(apiBase.length) : src;
 
   return (
     <figure className="card-panel overflow-hidden">
@@ -115,12 +110,13 @@ export function StatCard({
             <span className="size-1.5 shrink-0 rounded-full bg-signal" aria-hidden="true" />
             {caption}
           </div>
-          {embedLink && (
-            <CopyButton
-              value={embedSnippet}
-              ariaLabel={`Copy README embed for ${caption}`}
-              className="inline-flex min-h-11 items-center gap-1.5 rounded-md border border-border bg-background px-3 py-2 font-mono text-base text-muted-foreground hover:bg-accent hover:text-accent-foreground sm:min-h-0 sm:px-2.5 sm:py-1 sm:text-xs"
-              idleLabel="Embed"
+          {embedLink && apiBase && (
+            <EmbedSnippet
+              apiBase={apiBase}
+              chartPath={chartPath}
+              linkHref={embedLink}
+              label={caption}
+              variant="menu"
             />
           )}
         </figcaption>

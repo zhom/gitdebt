@@ -3,6 +3,7 @@ import { AnimatePresence, motion, useReducedMotion } from "motion/react";
 import { Check, ChevronDown } from "lucide-react";
 
 import { CopyButton } from "@/components/CopyButton";
+import { MEDIA_RENDER_REVISION } from "@/lib/media";
 import {
   DURATION,
   EASE_OUT,
@@ -60,6 +61,7 @@ function badgeQuery(opts: {
   params.set("animate", opts.animate ? "1" : "0");
   params.set("source", opts.source);
   params.set("theme", opts.theme);
+  params.set("render", MEDIA_RENDER_REVISION);
   return params.toString();
 }
 

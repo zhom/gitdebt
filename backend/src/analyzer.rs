@@ -119,6 +119,26 @@ pub struct AnalysisResult {
 ///     immediately with whatever is cached (empty when cold) and
 ///     `pending: true`.
 pub async fn analyze_repo(owner: &str, repo: &str, ctx: &AnalyzerCtx) -> Result<AnalysisResult> {
+    analyze_repo_with_enqueue(owner, repo, ctx, true).await
+}
+
+/// Read the same report snapshot without refreshing metadata or adding queue
+/// work. Static-site builds use this so publishing cached pages cannot crowd
+/// real report visits out of the durable queues.
+pub async fn analyze_repo_readonly(
+    owner: &str,
+    repo: &str,
+    ctx: &AnalyzerCtx,
+) -> Result<AnalysisResult> {
+    analyze_repo_with_enqueue(owner, repo, ctx, false).await
+}
+
+async fn analyze_repo_with_enqueue(
+    owner: &str,
+    repo: &str,
+    ctx: &AnalyzerCtx,
+    enqueue: bool,
+) -> Result<AnalysisResult> {
     // Case-normalize at the single chokepoint the cache / queue / worker
     // key on. Every other surface (ext_ping, export, cards, usage,
     // stat-charts, overlay, aggregate) already lowercases the slug; keying
@@ -163,7 +183,9 @@ pub async fn analyze_repo(owner: &str, repo: &str, ctx: &AnalyzerCtx) -> Result<
     // Fire-and-forget repo-metadata refresh on TTL miss. Surfaces the
     // authoritative star count + creation date without blocking; the
     // frontend polls so it appears within a tick.
-    maybe_refresh_metadata(&owner, &repo, ctx);
+    if enqueue {
+        maybe_refresh_metadata(&owner, &repo, ctx);
+    }
 
     // Read-side completeness gate: the cache returns the set only when the
     // fetch previously completed.
@@ -208,7 +230,7 @@ pub async fn analyze_repo(owner: &str, repo: &str, ctx: &AnalyzerCtx) -> Result<
     // the refresh happens out of band. We already know the repo isn't
     // missing (short-circuited above) and its view_count (priority), so use
     // the priority-carrying enqueue to avoid two more single-row reads.
-    if !history_complete || !fresh {
+    if enqueue && (!history_complete || !fresh) {
         let priority = summary.as_ref().map(|s| s.view_count).unwrap_or(0);
         enqueue_fetch_known(ctx, &repo_full, priority).await;
     }

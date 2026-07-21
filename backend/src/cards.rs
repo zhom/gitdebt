@@ -1,12 +1,9 @@
 //! Profile + repo stat cards (`/api/users/:login/card.svg`,
 //! `/api/repos/:owner/:repo/card.svg`, plus `.png` / `.webp` variants).
 //!
-//! gitdebt's answer to github-readme-stats: the same URL muscle memory
-//! (`hide=`, `show=`, `card_width=`, `hide_rank=`, `rank_icon=`,
-//! `custom_title=`, `show_icons=`, `number_format=`) but rendered
-//! entirely from our own Postgres (the star-fetch + clone-analysis
-//! pipelines) — zero GitHub API calls on the request path, so no
-//! shared-PAT rate-limit exposure and no forced 6-hour stale cache.
+//! The user card uses gitdebt's own maintainer-footprint composition. Legacy
+//! query parameters remain accepted for stable URLs, but the visual system is
+//! intentionally independent rather than imitating another stats-card project.
 //!
 //! Every render function here is pure (`data + options + &Theme → SVG
 //! String`) and bytes-deterministic. Theme colors are baked hex — no CSS
@@ -14,9 +11,8 @@
 //! `<picture>` light/dark pattern for theme-aware embeds). Animation
 //! follows the `badge.rs` SMIL discipline: `animate=0` (default) emits no
 //! `<animate>` tags at all; `animate=1` uses `<animate … fill="freeze">`
-//! and the rank ring's *static* `stroke-dashoffset` already equals the
-//! animation's `to` value, so a SMIL-stripped embed (and
-//! `raster::freeze_svg_animations`) shows the correct final frame.
+//! so a SMIL-stripped embed (and `raster::freeze_svg_animations`) shows the
+//! correct final frame.
 //!
 //! ## Deliberately-unsupported github-readme-stats params
 //!
@@ -44,22 +40,16 @@ use crate::theme::Theme;
 
 // Shared option plumbing
 
-/// GRS-familiar defaults / clamps for the user card. 287 is the GRS
-/// `hide_rank` shrink width.
-pub const USER_CARD_DEFAULT_WIDTH: u32 = 450;
-pub const USER_CARD_NORANK_WIDTH: u32 = 287;
+/// Maintainer cards need enough width for the mark, editorial header, and
+/// paired metrics without collapsing into a borrowed single-column layout.
+pub const USER_CARD_DEFAULT_WIDTH: u32 = 560;
+pub const USER_CARD_NORANK_WIDTH: u32 = 420;
 pub const REPO_CARD_DEFAULT_WIDTH: u32 = 400;
 
-/// Clamp a requested user-card width. With the rank ring the minimum is
-/// 420 (the ring needs its ~120px right zone); `hide_rank` allows the
-/// GRS-compatible 287 minimum.
-pub fn clamp_user_width(requested: Option<u32>, hide_rank: bool) -> u32 {
-    match (requested, hide_rank) {
-        (Some(w), false) => w.clamp(420, 1000),
-        (Some(w), true) => w.clamp(USER_CARD_NORANK_WIDTH, 1000),
-        (None, false) => USER_CARD_DEFAULT_WIDTH,
-        (None, true) => USER_CARD_NORANK_WIDTH,
-    }
+/// Clamp a requested user-card width. `hide_rank` is retained in the API as a
+/// legacy spelling for hiding the coverage rail, not as a second composition.
+pub fn clamp_user_width(requested: Option<u32>, _hide_rank: bool) -> u32 {
+    requested.map_or(USER_CARD_DEFAULT_WIDTH, |width| width.clamp(420, 1000))
 }
 
 /// Clamp a requested repo-card width to [320, 800] (default 400).
@@ -156,9 +146,6 @@ fn brand(theme: &Theme) -> &'static str {
     palette(theme)[0]
 }
 
-/// Approx px/char at the 14px value font — used for chip advance and
-/// label offsets (deterministic estimate, same approach as `badge.rs`).
-const LABEL_CHAR_W: f32 = 6.6;
 /// Approx px/char at the 12px repo-card value font.
 const VALUE_CHAR_W: f32 = 7.0;
 
@@ -166,6 +153,9 @@ const VALUE_CHAR_W: f32 = 7.0;
 /// baked hex; classes carry no color so no CSS-variable leakage).
 const CARD_STYLE: &str = "  <style><![CDATA[ \
 .t { font: 600 18px ui-sans-serif, system-ui, sans-serif; } \
+.ey { font: 700 9px ui-monospace, SFMono-Regular, monospace; letter-spacing: 1.1px; } \
+.ml { font: 600 9px ui-monospace, SFMono-Regular, monospace; letter-spacing: 0.7px; } \
+.mv { font: 650 22px ui-sans-serif, system-ui, sans-serif; letter-spacing: -0.5px; } \
 .rt { font: 600 15px ui-sans-serif, system-ui, sans-serif; } \
 .l { font: 400 14px ui-sans-serif, system-ui, sans-serif; } \
 .v { font: 600 14px ui-sans-serif, system-ui, sans-serif; } \
@@ -479,7 +469,7 @@ fn user_rows(data: &UserCardData, opts: &UserCardOptions) -> Vec<UserRow> {
             }),
             UserMetric::Commits => rows.push(UserRow::Stat {
                 glyph: GlyphKind::Commit,
-                label: "Total Commits",
+                label: "Commits Analyzed",
                 value: lower_bound(data.commits),
             }),
             UserMetric::Contribs => rows.push(UserRow::Stat {
@@ -522,19 +512,19 @@ fn user_rows(data: &UserCardData, opts: &UserCardOptions) -> Vec<UserRow> {
     rows
 }
 
-/// Card height for a row count. Mirrors the GRS formula
-/// (`max(45 + (rows+1)*line_height, 150)`) with our footer zone; the
-/// rank ring imposes a 195px floor so it never clips.
+/// Card height for the maintainer-footprint composition. Metrics form a
+/// two-column grid; the optional legacy `hide_rank` switch hides the analysis
+/// coverage rail rather than changing the card into a different layout.
 pub fn user_card_height(rows: usize, hide_title: bool, hide_rank: bool) -> u32 {
-    let title: u32 = if hide_title { 12 } else { 45 };
-    let h = title + (rows as u32 + 1) * 25 + 24;
-    if hide_rank { h.max(110) } else { h.max(195) }
+    let header: u32 = if hide_title { 66 } else { 88 };
+    let metric_rows = (rows as u32).div_ceil(2);
+    let coverage: u32 = if hide_rank { 0 } else { 45 };
+    (header + metric_rows * 58 + coverage + 34).max(184)
 }
 
 /// Render the user profile card. Pure + deterministic. `Err` when the
-/// selection leaves nothing to draw (all stats hidden AND `hide_rank`) —
-/// the API layer maps it to a 400, matching GRS's "Either stats or rank
-/// are required".
+/// selection leaves nothing to draw (all stats hidden AND the analysis
+/// coverage rail hidden).
 pub fn render_user_card(
     data: &UserCardData,
     opts: &UserCardOptions,
@@ -542,157 +532,143 @@ pub fn render_user_card(
 ) -> Result<String, &'static str> {
     let rows = user_rows(data, opts);
     if rows.is_empty() && opts.hide_rank {
-        return Err("either stats or rank are required");
+        return Err("either metrics or analysis coverage are required");
     }
     let w = opts.width as f32;
     let h = user_card_height(rows.len(), opts.hide_title, opts.hide_rank) as f32;
     let pal0 = brand(theme);
     let login = escape_xml(&data.login);
-    let title = display_title(
-        opts.custom_title.as_deref(),
-        &format!("{}'s gitdebt Stats", data.login),
-    );
+    let title = display_title(opts.custom_title.as_deref(), &format!("@{}", data.login));
 
     let mut body = String::new();
-    body.push_str(&chrome(w, h, theme, opts.hide_border));
+    body.push_str(&format!(
+        "  <rect x=\"0.5\" y=\"0.5\" width=\"{rw:.1}\" height=\"{rh:.1}\" rx=\"12\" fill=\"{bg}\" stroke=\"{border}\" stroke-width=\"1\" stroke-opacity=\"{stroke_opacity}\" />\n",
+        rw = w - 1.0,
+        rh = h - 1.0,
+        bg = card_bg(theme),
+        border = theme.border,
+        stroke_opacity = if opts.hide_border { "0" } else { "1" },
+    ));
+    body.push_str(&brand::themed_logo_mark(24.0, 20.0, 34.0, theme));
+    body.push_str(&format!(
+        "  <text class=\"ey\" x=\"70\" y=\"32\" fill=\"{pal0}\">GITDEBT / MAINTAINER FOOTPRINT</text>\n",
+    ));
     if !opts.hide_title {
         body.push_str(&format!(
-            "  <text class=\"t\" x=\"25\" y=\"35\" fill=\"{}\">{title}</text>\n",
+            "  <text class=\"t\" x=\"70\" y=\"57\" fill=\"{}\">{title}</text>\n",
             theme.fg
+        ));
+    } else {
+        body.push_str(&format!(
+            "  <text class=\"m\" x=\"70\" y=\"52\" fill=\"{}\">@{login}</text>\n",
+            theme.muted
         ));
     }
 
-    let y0 = if opts.hide_title { 37.0 } else { 63.0 };
-    let value_x = if opts.hide_rank { w - 25.0 } else { w - 140.0 };
+    let grid_y = if opts.hide_title { 66.0 } else { 88.0 };
+    let gap = 12.0;
+    let cell_w = (w - 48.0 - gap) / 2.0;
     for (i, row) in rows.iter().enumerate() {
-        let y = y0 + i as f32 * 25.0;
+        let col = (i % 2) as f32;
+        let row_index = (i / 2) as f32;
+        let x = 24.0 + col * (cell_w + gap);
+        let y = grid_y + row_index * 58.0;
         let (open, close) = anim_group(opts.animate, i);
         body.push_str(&open);
+        body.push_str(&format!(
+            "    <rect x=\"{x:.1}\" y=\"{y:.1}\" width=\"{cell_w:.1}\" height=\"46\" rx=\"7\" fill=\"{track}\" opacity=\"0.22\" />\n",
+            track = theme.track,
+        ));
         match row {
             UserRow::Stat {
                 glyph,
                 label,
                 value,
             } => {
-                let mut x = 25.0;
+                let mut label_x = x + 12.0;
                 if opts.show_icons {
-                    body.push_str(&glyph_svg(*glyph, x, y - 12.0, pal0));
-                    x += 24.0;
+                    body.push_str(&glyph_svg(*glyph, label_x, y + 7.0, pal0));
+                    label_x += 21.0;
                 }
                 body.push_str(&format!(
-                    "<text class=\"l\" x=\"{x:.1}\" y=\"{y:.1}\" fill=\"{fg}\">{label}:</text><text class=\"v\" x=\"{value_x:.1}\" y=\"{y:.1}\" text-anchor=\"end\" fill=\"{fg}\">{value}</text>",
+                    "    <text class=\"ml\" x=\"{label_x:.1}\" y=\"{label_y:.1}\" fill=\"{muted}\">{label}</text><text class=\"mv\" x=\"{value_x:.1}\" y=\"{value_y:.1}\" text-anchor=\"end\" fill=\"{fg}\">{value}</text>\n",
+                    label_y = y + 18.0,
+                    value_x = x + cell_w - 12.0,
+                    value_y = y + 36.0,
                     fg = theme.fg,
+                    muted = theme.muted,
                     value = escape_xml(value),
                 ));
             }
             UserRow::Langs(names) => {
-                let mut x = 25.0;
+                let mut label_x = x + 12.0;
                 if opts.show_icons {
-                    body.push_str(&glyph_svg(GlyphKind::Code, x, y - 12.0, pal0));
-                    x += 24.0;
+                    body.push_str(&glyph_svg(GlyphKind::Code, label_x, y + 7.0, pal0));
+                    label_x += 21.0;
                 }
-                let pal = palette(theme);
-                for (j, name) in names.iter().enumerate() {
-                    let advance = 14.0 + name.chars().count() as f32 * LABEL_CHAR_W + 12.0;
-                    if x + advance > value_x {
-                        break;
-                    }
-                    body.push_str(&format!(
-                        "<circle cx=\"{cx:.1}\" cy=\"{cy:.1}\" r=\"4\" fill=\"{color}\" /><text class=\"c\" x=\"{tx:.1}\" y=\"{y:.1}\" fill=\"{fg}\">{name}</text>",
-                        cx = x + 4.0,
-                        cy = y - 4.0,
-                        color = pal[j % pal.len()],
-                        tx = x + 13.0,
-                        fg = theme.fg,
-                        name = escape_xml(name),
-                    ));
-                    x += advance;
-                }
+                let joined = truncate_chars(
+                    &names
+                        .iter()
+                        .take(3)
+                        .cloned()
+                        .collect::<Vec<_>>()
+                        .join(" · "),
+                    24,
+                );
+                body.push_str(&format!(
+                    "    <text class=\"ml\" x=\"{label_x:.1}\" y=\"{label_y:.1}\" fill=\"{muted}\">TOP LANGUAGES</text><text class=\"rv\" x=\"{value_x:.1}\" y=\"{value_y:.1}\" text-anchor=\"end\" fill=\"{fg}\">{joined}</text>\n",
+                    label_y = y + 18.0,
+                    value_x = x + cell_w - 12.0,
+                    value_y = y + 36.0,
+                    muted = theme.muted,
+                    fg = theme.fg,
+                    joined = escape_xml(&joined),
+                ));
             }
         }
         body.push_str(close);
     }
 
+    let metric_rows = rows.len().div_ceil(2) as f32;
+    let mut footer_y = grid_y + metric_rows * 58.0;
     if !opts.hide_rank {
-        if data.analysis_pending() {
-            body.push_str(&render_pending_rank(theme, w, h));
+        let completion = if data.repos_tracked == 0 {
+            0.0
         } else {
-            body.push_str(&render_rank_ring(data, opts, theme, pal0, w, h));
-        }
+            (data.repos_analyzed as f64 / data.repos_tracked as f64).clamp(0.0, 1.0)
+        };
+        let rail_w = w - 48.0;
+        let fill_w = rail_w * completion as f32;
+        let status = if data.analysis_pending() {
+            "ANALYSIS COVERAGE"
+        } else {
+            "ANALYSIS COMPLETE"
+        };
+        body.push_str(&format!(
+            "  <g><text class=\"ml\" x=\"24\" y=\"{label_y:.1}\" fill=\"{muted}\">{status}</text><text class=\"ml\" x=\"{right:.1}\" y=\"{label_y:.1}\" text-anchor=\"end\" fill=\"{fg}\">{analyzed} / {tracked} REPOS</text><rect x=\"24\" y=\"{rail_y:.1}\" width=\"{rail_w:.1}\" height=\"5\" rx=\"2.5\" fill=\"{track}\" /><rect x=\"24\" y=\"{rail_y:.1}\" width=\"{fill_w:.1}\" height=\"5\" rx=\"2.5\" fill=\"{pal0}\" /></g>\n",
+            label_y = footer_y + 13.0,
+            rail_y = footer_y + 23.0,
+            right = w - 24.0,
+            muted = theme.muted,
+            fg = theme.fg,
+            analyzed = data.repos_analyzed,
+            tracked = data.repos_tracked,
+            track = theme.track,
+        ));
+        footer_y += 45.0;
     }
 
-    let coverage = if data.analysis_pending() {
-        format!(
-            "{} / {} repos analyzed",
-            data.repos_analyzed, data.repos_tracked
-        )
-    } else {
-        format!("{} repos tracked", data.repos_tracked)
-    };
     body.push_str(&format!(
-        "  <a href=\"https://gitdebt.com/u/{login}\" target=\"_blank\" rel=\"noopener\"><text class=\"m\" x=\"{x:.1}\" y=\"{y:.1}\" text-anchor=\"end\" fill=\"{muted}\">via gitdebt · {coverage}</text></a>\n",
+        "  <a href=\"https://gitdebt.com/u/{login}\" target=\"_blank\" rel=\"noopener\"><text class=\"m\" x=\"{x:.1}\" y=\"{y:.1}\" text-anchor=\"end\" fill=\"{muted}\">gitdebt.com/u/{login} ↗</text></a>\n",
         x = w - 25.0,
-        y = h - 12.0,
+        y = footer_y + 20.0,
         muted = theme.muted,
-        coverage = escape_xml(&coverage),
     ));
 
     Ok(format!(
         "{open}{CARD_STYLE}{body}</svg>",
         open = svg_open(w, h, &format!("{login} gitdebt stats")),
     ))
-}
-
-fn render_pending_rank(theme: &Theme, w: f32, h: f32) -> String {
-    let cx = w - 70.0;
-    let cy = h / 2.0 + 4.0;
-    format!(
-        "  <g><circle cx=\"{cx:.1}\" cy=\"{cy:.1}\" r=\"{r:.0}\" fill=\"none\" stroke=\"{track}\" stroke-width=\"6\" stroke-dasharray=\"3 7\" opacity=\"0.65\" /><text class=\"m\" x=\"{cx:.1}\" y=\"{y:.1}\" text-anchor=\"middle\" fill=\"{muted}\">warming</text></g>\n",
-        y = cy + 4.0,
-        r = RING_RADIUS,
-        track = theme.track,
-        muted = theme.muted,
-    )
-}
-
-fn render_rank_ring(
-    data: &UserCardData,
-    opts: &UserCardOptions,
-    theme: &Theme,
-    pal0: &str,
-    w: f32,
-    h: f32,
-) -> String {
-    let (level, pct) = rank(data.stars, data.commits, data.contribs, data.forks);
-    let cx = w - 70.0;
-    let cy = h / 2.0 + 4.0;
-    let circ = ring_circumference();
-    let offset = ring_dashoffset(pct);
-    // Ring geometry is always final. The cohesive card reveal fades the
-    // complete group instead of animating stroke geometry.
-    let anim = if opts.animate {
-        "<animate class=\"motion\" attributeName=\"opacity\" from=\"0\" to=\"1\" begin=\"0.08s\" dur=\"0.2s\" fill=\"freeze\" />".to_string()
-    } else {
-        String::new()
-    };
-    let label = if opts.rank_icon_percentile {
-        format!(
-            "<text class=\"p\" x=\"{cx:.1}\" y=\"{y:.1}\" text-anchor=\"middle\" fill=\"{fg}\">{pct:.0}</text>",
-            y = cy + 6.0,
-            fg = theme.fg,
-        )
-    } else {
-        format!(
-            "<text class=\"g\" x=\"{cx:.1}\" y=\"{y:.1}\" text-anchor=\"middle\" fill=\"{fg}\">{level}</text>",
-            y = cy + 8.0,
-            fg = theme.fg,
-        )
-    };
-    format!(
-        "  <g opacity=\"1\">{anim}<circle cx=\"{cx:.1}\" cy=\"{cy:.1}\" r=\"{r:.0}\" fill=\"none\" stroke=\"{track}\" stroke-width=\"6\" opacity=\"0.35\" /><circle cx=\"{cx:.1}\" cy=\"{cy:.1}\" r=\"{r:.0}\" fill=\"none\" stroke=\"{pal0}\" stroke-width=\"6\" stroke-linecap=\"round\" stroke-dasharray=\"{circ:.2}\" stroke-dashoffset=\"{offset:.2}\" transform=\"rotate(-90 {cx:.1} {cy:.1})\" />{label}</g>\n",
-        r = RING_RADIUS,
-        track = theme.track,
-    )
 }
 
 /// Placeholder for a login gitdebt knows nothing about. Static; the API
@@ -892,7 +868,7 @@ fn repo_cells(data: &RepoCardData, opts: &RepoCardOptions) -> Vec<RepoCell> {
             RepoMetric::Commits => data.commits.map(|v| RepoCell {
                 glyph: GlyphKind::Commit,
                 value: fmt(v),
-                label: "commits",
+                label: "commits analyzed",
             }),
             RepoMetric::Age => data.created_year.map(|y| RepoCell {
                 glyph: GlyphKind::Clock,
@@ -1210,10 +1186,10 @@ mod tests {
 
     #[test]
     fn width_clamps() {
-        assert_eq!(clamp_user_width(None, false), 450);
-        assert_eq!(clamp_user_width(None, true), 287);
+        assert_eq!(clamp_user_width(None, false), 560);
+        assert_eq!(clamp_user_width(None, true), 560);
         assert_eq!(clamp_user_width(Some(100), false), 420);
-        assert_eq!(clamp_user_width(Some(100), true), 287);
+        assert_eq!(clamp_user_width(Some(100), true), 420);
         assert_eq!(clamp_user_width(Some(5_000), false), 1000);
         assert_eq!(clamp_repo_width(None), 400);
         assert_eq!(clamp_repo_width(Some(10)), 320);
@@ -1323,9 +1299,9 @@ mod tests {
         data.contribs = 0;
         data.repos_analyzed = 0;
         let svg = render_user_card(&data, &UserCardOptions::default(), &LIGHT).unwrap();
-        assert!(svg.contains("Total Commits:</text><text"));
+        assert!(svg.contains("Commits Analyzed"));
         assert!(svg.contains(">warming</text>"));
-        assert!(svg.contains("0 / 8 repos analyzed"));
+        assert!(svg.contains("0 / 8 REPOS"));
         assert!(!svg.contains(">0</text>"));
     }
 
@@ -1391,16 +1367,11 @@ mod tests {
     #[test]
     fn height_grows_with_rows() {
         assert!(user_card_height(6, false, false) > user_card_height(3, false, false));
-        // Title delta shows once the rank-ring floor is out of play
-        // (hide_rank drops the floor to 110).
         assert!(user_card_height(3, true, true) < user_card_height(3, false, true));
-        // With the ring shown, the 195 floor masks the delta at small row
-        // counts — equal is fine, inverted never is.
-        assert!(user_card_height(3, true, false) <= user_card_height(3, false, false));
+        assert!(user_card_height(3, true, false) < user_card_height(3, false, false));
         assert!(repo_card_height(4, false, false) > repo_card_height(1, false, false));
         assert!(repo_card_height(1, false, true) > repo_card_height(1, false, false));
-        // Rank floor.
-        assert_eq!(user_card_height(0, false, false), 195);
+        assert_eq!(user_card_height(0, false, false), 184);
     }
 
     #[test]
@@ -1439,34 +1410,31 @@ mod tests {
     }
 
     #[test]
-    fn ring_geometry_is_final_and_group_reveal_is_brief() {
+    fn profile_card_uses_native_footprint_layout_and_brief_reveal() {
         let opts = UserCardOptions {
             animate: true,
             ..UserCardOptions::default()
         };
         let svg = render_user_card(&sample_user(), &opts, &LIGHT).unwrap();
-        let (_, pct) = rank(12_345, 987, 12, 456);
-        let final_offset = format!("{:.2}", ring_dashoffset(pct));
-        assert!(
-            svg.contains(&format!("stroke-dashoffset=\"{final_offset}\"")),
-            "static dashoffset must be the final value"
-        );
-        assert!(!svg.contains("attributeName=\"stroke-dashoffset\""));
+        assert!(svg.contains("MAINTAINER FOOTPRINT"));
+        assert!(svg.contains("data-gitdebt-logo=\"true\""));
+        assert!(svg.contains("ANALYSIS COMPLETE"));
+        assert!(!svg.contains("stroke-dashoffset"));
         assert!(svg.contains("dur=\"0.2s\""));
         assert!(svg.contains("begin=\"0.08s\""));
         assert!(svg.contains("prefers-reduced-motion: reduce"));
     }
 
     #[test]
-    fn rank_icon_percentile_shows_number() {
+    fn legacy_rank_icon_does_not_change_native_layout() {
         let opts = UserCardOptions {
             rank_icon_percentile: true,
             ..UserCardOptions::default()
         };
         let svg = render_user_card(&sample_user(), &opts, &LIGHT).unwrap();
-        let (_, pct) = rank(12_345, 987, 12, 456);
-        assert!(svg.contains(&format!(">{pct:.0}</text>")));
-        assert!(!svg.contains("class=\"g\""), "grade letter hidden");
+        assert!(svg.contains("MAINTAINER FOOTPRINT"));
+        assert!(svg.contains("ANALYSIS COMPLETE"));
+        assert!(!svg.contains("class=\"g\""));
     }
 
     #[test]
@@ -1584,7 +1552,7 @@ mod tests {
     fn footer_links_to_matching_pages() {
         let user = render_user_card(&sample_user(), &UserCardOptions::default(), &LIGHT).unwrap();
         assert!(user.contains("https://gitdebt.com/u/octocat"));
-        assert!(user.contains("8 repos tracked"));
+        assert!(user.contains("8 / 8 REPOS"));
         let repo = render_repo_card(&sample_repo(), &full_repo_opts(false), &LIGHT).unwrap();
         assert!(repo.contains("https://gitdebt.com/rust-lang/rust"));
         assert!(repo.contains("https://github.com/rust-lang/rust"));

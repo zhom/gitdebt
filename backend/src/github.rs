@@ -71,6 +71,13 @@ impl GithubClient {
         Self::with_token("default", token, rate)
     }
 
+    /// Request-scoped client for a logged-in user's OAuth credential. It uses
+    /// the same persistent tracker but a token-derived `github:user:*` bucket,
+    /// so the user's allowance is never conflated with the shared worker PAT.
+    pub fn for_user_token(&self, token: &str) -> Result<Self, GithubError> {
+        Self::with_token("user", Some(token), self.rate.clone())
+    }
+
     fn with_token(
         kind: &str,
         token: Option<&str>,
@@ -305,7 +312,13 @@ impl GithubClient {
         let url = format!("{API_BASE}/repos/{owner}/{repo}");
         let resp = self.send(&url, None).await?;
         match resp.status().as_u16() {
-            200 => Ok(Some(resp.json().await?)),
+            200 => {
+                let metadata: RepoMetadata = resp.json().await?;
+                // A user OAuth token may be able to see a private repository,
+                // but gitdebt is a public-data product. Treat it exactly like
+                // an inaccessible repo and never enqueue or persist it.
+                Ok((!metadata.private).then_some(metadata))
+            }
             404 => Ok(None),
             403 | 429 => Err(GithubError::RateLimited(None)),
             s => Err(GithubError::Api {
@@ -470,6 +483,8 @@ pub struct User {
 /// authoritative star count, the fork count, and the repo creation date.
 #[derive(Debug, Clone, Deserialize)]
 pub struct RepoMetadata {
+    #[serde(default)]
+    pub private: bool,
     #[serde(default)]
     pub id: Option<u64>,
     #[serde(default)]

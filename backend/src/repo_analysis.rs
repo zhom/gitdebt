@@ -8,7 +8,7 @@
 //! tokio can multiplex.
 
 use std::sync::Arc;
-use std::time::Duration;
+use std::time::{Duration, Instant};
 
 use anyhow::{Context, Result};
 use chrono::Utc;
@@ -25,12 +25,14 @@ use crate::repo_stats;
 const DEFAULT_MAX_PENDING_ANALYSES: i64 = 500;
 const DEFAULT_ANALYSIS_FRESH_HOURS: i64 = 24;
 const ENQUEUE_LOCK_ID: i64 = 6_794_738_132_977;
+pub const INTERACTIVE_PRIORITY: i64 = 1_000_000_000_000;
 
 #[derive(Clone)]
 pub struct AnalysisCtx {
     pub db: Db,
     pub storage: Arc<RepoStorage>,
     pub github: Arc<GithubClient>,
+    pub gh_app: Option<Arc<crate::auth::GithubAppConfig>>,
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -39,6 +41,12 @@ pub enum EnqueueOutcome {
     AlreadyActive,
     Fresh,
     AtCapacity,
+}
+
+#[derive(Debug, Clone)]
+struct AnalysisJob {
+    repo: String,
+    requested_by_user_id: Option<i64>,
 }
 
 fn max_pending_analyses() -> i64 {
@@ -59,6 +67,18 @@ fn analysis_freshness() -> chrono::Duration {
 }
 
 pub async fn enqueue(db: &Db, repo: &str) -> Result<EnqueueOutcome> {
+    enqueue_prioritized(db, repo, 0, None).await
+}
+
+/// Queue repository health work with a durable priority. An authenticated
+/// report view uses [`INTERACTIVE_PRIORITY`] and carries only the requesting
+/// user's database id; OAuth plaintext is never written to a queue row.
+pub async fn enqueue_prioritized(
+    db: &Db,
+    repo: &str,
+    priority: i64,
+    requested_by_user_id: Option<i64>,
+) -> Result<EnqueueOutcome> {
     let now = Utc::now();
     let mut tx = db.pool.begin().await?;
     // A process-wide count check is not a hard ceiling under concurrency.
@@ -74,6 +94,19 @@ pub async fn enqueue(db: &Db, repo: &str) -> Result<EnqueueOutcome> {
             .fetch_optional(&mut *tx)
             .await?;
     if let Some("pending" | "in_progress") = status.as_deref() {
+        sqlx::query(
+            "UPDATE repo_analysis_queue SET \
+                priority = GREATEST(priority, $2), \
+                requested_by_user_id = COALESCE($3, requested_by_user_id), \
+                next_attempt_at = CASE WHEN status = 'pending' THEN NOW() ELSE next_attempt_at END, \
+                updated_at = NOW() \
+             WHERE repo = $1",
+        )
+        .bind(repo)
+        .bind(priority.max(0))
+        .bind(requested_by_user_id)
+        .execute(&mut *tx)
+        .await?;
         tx.commit().await?;
         return Ok(EnqueueOutcome::AlreadyActive);
     }
@@ -111,25 +144,37 @@ pub async fn enqueue(db: &Db, repo: &str) -> Result<EnqueueOutcome> {
     )
     .fetch_one(&mut *tx)
     .await?;
-    if active >= max_pending_analyses() {
+    if active >= max_pending_analyses() && priority < INTERACTIVE_PRIORITY {
         tx.commit().await?;
         return Ok(EnqueueOutcome::AtCapacity);
     }
 
     sqlx::query(
-        "INSERT INTO repo_analysis_queue (repo, status, enqueued_at) \
-         VALUES ($1, 'pending', $2) \
+        "INSERT INTO repo_analysis_queue \
+            (repo, status, phase, priority, requested_by_user_id, enqueued_at, updated_at) \
+         VALUES ($1, 'pending', 'queued', $2, $3, $4, $4) \
          ON CONFLICT (repo) DO UPDATE SET \
             status = CASE WHEN repo_analysis_queue.status = 'in_progress' \
                           THEN 'in_progress' ELSE 'pending' END, \
+            phase = CASE WHEN repo_analysis_queue.status = 'in_progress' \
+                         THEN repo_analysis_queue.phase ELSE 'queued' END, \
+            priority = GREATEST(repo_analysis_queue.priority, EXCLUDED.priority), \
+            requested_by_user_id = COALESCE(EXCLUDED.requested_by_user_id, repo_analysis_queue.requested_by_user_id), \
             attempts = CASE WHEN repo_analysis_queue.status = 'dead' \
                             THEN 0 ELSE repo_analysis_queue.attempts END, \
             next_attempt_at = CASE WHEN repo_analysis_queue.status = 'in_progress' \
                                    THEN repo_analysis_queue.next_attempt_at ELSE NOW() END, \
+            total_units = CASE WHEN repo_analysis_queue.status = 'in_progress' \
+                               THEN repo_analysis_queue.total_units ELSE NULL END, \
+            completed_units = CASE WHEN repo_analysis_queue.status = 'in_progress' \
+                                   THEN repo_analysis_queue.completed_units ELSE 0 END, \
+            updated_at = NOW(), \
             last_error = CASE WHEN repo_analysis_queue.status = 'dead' \
                               THEN NULL ELSE repo_analysis_queue.last_error END",
     )
     .bind(repo)
+    .bind(priority.max(0))
+    .bind(requested_by_user_id)
     .bind(now)
     .execute(&mut *tx)
     .await?;
@@ -164,7 +209,8 @@ pub async fn enqueue_many(db: &Db, repos: &[String], max_new: usize) -> Result<u
 
 pub async fn reset_inflight_on_startup(db: &Db) -> Result<u64> {
     let res = sqlx::query(
-        "UPDATE repo_analysis_queue SET status = 'pending', worker_id = NULL, claimed_at = NULL \
+        "UPDATE repo_analysis_queue SET status = 'pending', phase = 'queued', \
+         worker_id = NULL, claimed_at = NULL, started_at = NULL, updated_at = NOW() \
          WHERE status = 'in_progress' \
            AND (claimed_at IS NULL OR claimed_at < NOW() - INTERVAL '2 minutes')",
     )
@@ -179,7 +225,8 @@ pub async fn reset_inflight_on_startup(db: &Db) -> Result<u64> {
 pub async fn revive_retryable_on_startup(db: &Db) -> Result<u64> {
     let res = sqlx::query(
         "UPDATE repo_analysis_queue SET status = 'pending', attempts = 0, \
-            next_attempt_at = NOW(), worker_id = NULL, claimed_at = NULL \
+            phase = 'queued', next_attempt_at = NOW(), worker_id = NULL, \
+            claimed_at = NULL, started_at = NULL, updated_at = NOW() \
          WHERE status = 'dead' \
            AND NOT EXISTS ( \
                SELECT 1 FROM repos \
@@ -229,14 +276,16 @@ async fn run_worker(worker_id: String, ctx: AnalysisCtx) {
                 continue;
             }
         };
-        let heartbeat_stop = spawn_lease_heartbeat(ctx.db.clone(), job.clone(), worker_id.clone());
+        tracing::info!(repo = %job.repo, interactive = job.requested_by_user_id.is_some(), "analysis run started");
+        let heartbeat_stop =
+            spawn_lease_heartbeat(ctx.db.clone(), job.repo.clone(), worker_id.clone());
         let outcome = process(&job, &ctx).await;
         let _ = heartbeat_stop.send(true);
         match outcome {
             Ok(commits_applied) => {
-                tracing::info!(repo = %job, commits_applied, "analysis run complete");
-                if let Err(e) = complete(&ctx.db, &job).await {
-                    tracing::warn!(repo = %job, error = %e, "queue complete failed");
+                tracing::info!(repo = %job.repo, commits_applied, "analysis run complete");
+                if let Err(e) = complete(&ctx.db, &job.repo).await {
+                    tracing::warn!(repo = %job.repo, error = %e, "queue complete failed");
                 }
                 // Eviction off the per-job critical path: only sweep every
                 // EVICT_EVERY_N_JOBS completions.
@@ -250,9 +299,9 @@ async fn run_worker(worker_id: String, ctx: AnalysisCtx) {
             }
             Err(e) => {
                 let msg = compact_error(&e);
-                tracing::warn!(repo = %job, error = %msg, "analysis run failed");
-                if let Err(e2) = fail(&ctx.db, &job, &msg).await {
-                    tracing::warn!(repo = %job, error = %e2, "queue fail failed");
+                tracing::warn!(repo = %job.repo, error = %msg, "analysis run failed");
+                if let Err(e2) = fail(&ctx.db, &job.repo, &msg).await {
+                    tracing::warn!(repo = %job.repo, error = %e2, "queue fail failed");
                 }
                 sleep(Duration::from_secs(30)).await;
             }
@@ -270,7 +319,7 @@ fn spawn_lease_heartbeat(db: Db, repo: String, worker_id: String) -> watch::Send
                         break;
                     }
                     if let Err(error) = sqlx::query(
-                        "UPDATE repo_analysis_queue SET claimed_at = NOW() \
+                        "UPDATE repo_analysis_queue SET claimed_at = NOW(), updated_at = NOW() \
                          WHERE repo = $1 AND status = 'in_progress' AND worker_id = $2",
                     )
                     .bind(&repo)
@@ -292,24 +341,29 @@ fn spawn_lease_heartbeat(db: Db, repo: String, worker_id: String) -> watch::Send
     stop
 }
 
-async fn claim_one(db: &Db, worker_id: &str) -> Result<Option<String>> {
+async fn claim_one(db: &Db, worker_id: &str) -> Result<Option<AnalysisJob>> {
     let now = Utc::now();
     let row = sqlx::query(
         "UPDATE repo_analysis_queue \
-         SET status = 'in_progress', worker_id = $1, claimed_at = $2 \
+         SET status = 'in_progress', phase = 'cloning', worker_id = $1, \
+             claimed_at = $2, started_at = $2, updated_at = $2, \
+             total_units = NULL, completed_units = 0 \
          WHERE repo = ( \
             SELECT repo FROM repo_analysis_queue \
             WHERE (status = 'pending' AND next_attempt_at <= NOW()) \
                OR (status = 'in_progress' AND claimed_at < NOW() - INTERVAL '2 minutes') \
-            ORDER BY enqueued_at FOR UPDATE SKIP LOCKED LIMIT 1 \
+            ORDER BY priority DESC, enqueued_at FOR UPDATE SKIP LOCKED LIMIT 1 \
          ) \
-         RETURNING repo",
+         RETURNING repo, requested_by_user_id",
     )
     .bind(worker_id)
     .bind(now)
     .fetch_optional(&db.pool)
     .await?;
-    Ok(row.map(|r| r.try_get::<String, _>("repo").unwrap_or_default()))
+    Ok(row.map(|row| AnalysisJob {
+        repo: row.try_get::<String, _>("repo").unwrap_or_default(),
+        requested_by_user_id: row.try_get("requested_by_user_id").ok().flatten(),
+    }))
 }
 
 async fn complete(db: &Db, repo: &str) -> Result<()> {
@@ -328,6 +382,8 @@ async fn fail(db: &Db, repo: &str, err: &str) -> Result<()> {
             worker_id = NULL, \
             claimed_at = NULL, \
             status = 'pending', \
+            phase = 'retrying', \
+            updated_at = NOW(), \
             next_attempt_at = NOW() + CASE \
                 WHEN attempts <= 0 THEN INTERVAL '30 seconds' \
                 WHEN attempts = 1 THEN INTERVAL '1 minute' \
@@ -355,7 +411,9 @@ fn compact_error(error: &anyhow::Error) -> String {
         .collect()
 }
 
-async fn process(repo: &str, ctx: &AnalysisCtx) -> Result<usize> {
+async fn process(job: &AnalysisJob, ctx: &AnalysisCtx) -> Result<usize> {
+    let repo = job.repo.as_str();
+    let started = Instant::now();
     // Pull last_analyzed_sha to drive incremental walking.
     let last_sha: Option<String> =
         sqlx::query_scalar("SELECT last_analyzed_sha FROM repo_history WHERE repo = $1")
@@ -377,14 +435,30 @@ async fn process(repo: &str, ctx: &AnalysisCtx) -> Result<usize> {
         // guarded, and a transient GitHub failure (or a deployment that
         // predates enrichment) must not strand every `github_login` as NULL
         // until the repository happens to receive another commit.
-        if let Err(e) = enrich_author_logins(&ctx.db, &handle, repo, &ctx.github).await {
+        let github = user_scoped_github(job, ctx).await;
+        if let Err(e) = enrich_author_logins(&ctx.db, &handle, repo, &github).await {
             tracing::warn!(repo, error = %e, "author-login enrichment retry failed");
         }
         return Ok(0);
     }
 
-    let commits = repo_history::walk_new_commits(&handle, last_sha.as_deref()).await?;
+    let limit = repo_history::analysis_commit_limit();
+    let plan = repo_history::plan_recent_commits(&handle, last_sha.as_deref(), limit).await?;
+    update_work_progress(&ctx.db, repo, "scanning_history", Some(plan.shas.len()), 0).await?;
+    let mut commits = Vec::with_capacity(plan.shas.len());
+    for batch in plan.shas.chunks(repo_history::LOG_BATCH_COMMITS) {
+        commits.extend(repo_history::walk_commit_batch(&handle, batch).await?);
+        update_work_progress(
+            &ctx.db,
+            repo,
+            "scanning_history",
+            Some(plan.shas.len()),
+            commits.len(),
+        )
+        .await?;
+    }
     let n = commits.len();
+    update_work_progress(&ctx.db, repo, "saving_history", Some(n), n).await?;
     repo_stats::apply_commits_at_head(&ctx.db, repo, &commits, &handle.head_sha).await?;
 
     // Two independent post-passes, overlapped with `tokio::join!`:
@@ -397,8 +471,10 @@ async fn process(repo: &str, ctx: &AnalysisCtx) -> Result<usize> {
     // instead of serializing them. Each logs + swallows its own error so a
     // failure in one never aborts the other (matching the prior best-effort
     // behavior).
+    update_work_progress(&ctx.db, repo, "finishing", Some(n), n).await?;
+    let github = user_scoped_github(job, ctx).await;
     let enrich = async {
-        if let Err(e) = enrich_author_logins(&ctx.db, &handle, repo, &ctx.github).await {
+        if let Err(e) = enrich_author_logins(&ctx.db, &handle, repo, &github).await {
             tracing::warn!(repo, error = %e, "author-login enrichment failed");
         }
     };
@@ -408,7 +484,59 @@ async fn process(repo: &str, ctx: &AnalysisCtx) -> Result<usize> {
         }
     };
     tokio::join!(enrich, line_counts);
+    repo_stats::record_analysis_details(
+        &ctx.db,
+        repo,
+        i64::try_from(started.elapsed().as_millis()).unwrap_or(i64::MAX),
+        n,
+        plan.truncated,
+    )
+    .await?;
     Ok(n)
+}
+
+async fn user_scoped_github(job: &AnalysisJob, ctx: &AnalysisCtx) -> Arc<GithubClient> {
+    let Some(user_id) = job.requested_by_user_id else {
+        return ctx.github.clone();
+    };
+    let Some(config) = ctx.gh_app.as_deref() else {
+        return ctx.github.clone();
+    };
+    match crate::auth::user_access_token(&ctx.db, config, user_id).await {
+        Ok(Some(token)) => match ctx.github.for_user_token(&token) {
+            Ok(client) => Arc::new(client),
+            Err(error) => {
+                tracing::warn!(user_id, %error, "user OAuth client construction failed");
+                ctx.github.clone()
+            }
+        },
+        Ok(None) => ctx.github.clone(),
+        Err(error) => {
+            tracing::warn!(user_id, %error, "user OAuth token unavailable");
+            ctx.github.clone()
+        }
+    }
+}
+
+async fn update_work_progress(
+    db: &Db,
+    repo: &str,
+    phase: &str,
+    total_units: Option<usize>,
+    completed_units: usize,
+) -> Result<()> {
+    sqlx::query(
+        "UPDATE repo_analysis_queue SET phase = $1, total_units = $2, \
+         completed_units = $3, updated_at = NOW() \
+         WHERE repo = $4 AND status = 'in_progress'",
+    )
+    .bind(phase)
+    .bind(total_units.map(|value| i64::try_from(value).unwrap_or(i64::MAX)))
+    .bind(i64::try_from(completed_units).unwrap_or(i64::MAX))
+    .bind(repo)
+    .execute(&db.pool)
+    .await?;
+    Ok(())
 }
 
 async fn run_line_counts(db: &Db, handle: &RepoHandle, repo: &str) -> Result<()> {
@@ -427,6 +555,7 @@ async fn run_line_counts(db: &Db, handle: &RepoHandle, repo: &str) -> Result<()>
 /// run. 30 days is long enough to make the burn negligible while still
 /// letting a since-created GitHub account eventually resolve.
 const AUTHOR_ENRICH_TTL: chrono::Duration = chrono::Duration::days(30);
+const AUTHOR_ENRICH_MAX_PER_RUN: i64 = 24;
 
 /// For every author row whose `github_login` is null (or whose avatar is
 /// still a gravatar fallback) AND that hasn't been attempted within
@@ -448,10 +577,13 @@ async fn enrich_author_logins(
         "SELECT author_email FROM repo_author_stats \
          WHERE repo = $1 \
            AND (github_login IS NULL OR avatar_url LIKE 'https://www.gravatar.com/%') \
-           AND (enrich_attempted_at IS NULL OR enrich_attempted_at < $2)",
+           AND (enrich_attempted_at IS NULL OR enrich_attempted_at < $2) \
+         ORDER BY commits DESC, author_email \
+         LIMIT $3",
     )
     .bind(repo)
     .bind(cutoff)
+    .bind(AUTHOR_ENRICH_MAX_PER_RUN)
     .fetch_all(&db.pool)
     .await?;
 

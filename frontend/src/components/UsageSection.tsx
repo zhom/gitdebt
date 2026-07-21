@@ -4,6 +4,7 @@ import { ChevronDown, Loader2 } from "lucide-react";
 
 import { EmbedSnippet } from "@/components/EmbedSnippet";
 import type { ChartType } from "@/components/ChartViewer";
+import { MEDIA_RENDER_REVISION } from "@/lib/media";
 import {
   DURATION,
   EASE_OUT,
@@ -300,7 +301,7 @@ export function UsageSection({
 
           {hasDownloadSeries ? (
             <img
-              src={`${apiBase}${chartPath}&theme=light`}
+              src={`${apiBase}${chartPath}&theme=light&render=${MEDIA_RENDER_REVISION}`}
               alt={`Star growth versus download volume for ${owner}/${repo}`}
               loading={priority ? "eager" : "lazy"}
               fetchPriority={priority ? "high" : "auto"}

@@ -199,7 +199,7 @@ pub async fn claim_one(db: &Db, worker_id: &str) -> Result<Option<Job>> {
 /// serve many repositories, so the archive coordinator uses this instead of
 /// multiplying identical corpus scans across `WORKER_COUNT` tasks.
 pub async fn claim_many(db: &Db, worker_id: &str, limit: usize) -> Result<Vec<Job>> {
-    let limit = i64::try_from(limit.clamp(1, 1_000)).unwrap_or(1_000);
+    let limit = i64::try_from(limit.clamp(1, 5_000)).unwrap_or(5_000);
     let rows = sqlx::query(
         "WITH selected AS ( \
             SELECT repo FROM star_fetch_queue \

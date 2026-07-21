@@ -332,6 +332,35 @@ pub async fn load_repo_states(db: &Db, repos: &[String]) -> Result<HashMap<Strin
 pub async fn build(ctx: &AnalyzerCtx, login: &str) -> Result<UserAggregate, AggregateError> {
     let login = login.to_ascii_lowercase();
     let repos = resolve_login_repos(ctx, &login).await?;
+    build_from_repos(ctx, login, repos, true).await
+}
+
+/// Build an aggregate exclusively from cached Postgres state. Static-site
+/// generation uses this path so it neither spends GitHub budget nor creates
+/// star/code-health jobs for pages nobody has opened.
+pub async fn build_readonly(
+    ctx: &AnalyzerCtx,
+    login: &str,
+) -> Result<UserAggregate, AggregateError> {
+    let login = login.to_ascii_lowercase();
+    let meta = ctx.cache.get_login_repos_meta(&login).await?;
+    if meta.as_ref().is_some_and(|value| value.missing) {
+        return Err(AggregateError::LoginNotFound);
+    }
+    let repos = ctx
+        .cache
+        .get_login_repos(&login)
+        .await?
+        .ok_or(AggregateError::Busy)?;
+    build_from_repos(ctx, login, repos, false).await
+}
+
+async fn build_from_repos(
+    ctx: &AnalyzerCtx,
+    login: String,
+    repos: Vec<(String, i64)>,
+    enqueue: bool,
+) -> Result<UserAggregate, AggregateError> {
     let slugs: Vec<String> = repos.into_iter().map(|(slug, _)| slug).collect();
 
     let db = ctx.cache.db();
@@ -356,7 +385,7 @@ pub async fn build(ctx: &AnalyzerCtx, login: &str) -> Result<UserAggregate, Aggr
             // still count as pending — "no complete history yet" — and get
             // enqueued by later builds as earlier batches drain.
             _ => {
-                if enqueued < MAX_ENQUEUES_PER_BUILD {
+                if enqueue && enqueued < MAX_ENQUEUES_PER_BUILD {
                     analyzer::enqueue_fetch(ctx, slug).await;
                     enqueued += 1;
                 }
@@ -376,8 +405,10 @@ pub async fn build(ctx: &AnalyzerCtx, login: &str) -> Result<UserAggregate, Aggr
     // fields cannot remain at an unexplained zero forever. This is
     // Postgres-only on the request path; cloning and author enrichment happen
     // asynchronously in the existing worker pool.
-    if let Err(error) =
-        repo_analysis::enqueue_many(db, &analysis_candidates, MAX_ANALYSIS_ENQUEUES_PER_BUILD).await
+    if enqueue
+        && let Err(error) =
+            repo_analysis::enqueue_many(db, &analysis_candidates, MAX_ANALYSIS_ENQUEUES_PER_BUILD)
+                .await
     {
         tracing::warn!(login, %error, "profile repo-analysis enqueue failed");
     }

@@ -19,8 +19,10 @@ use axum::{
         sse::{Event, KeepAlive, Sse},
     },
 };
+use chrono::{DateTime, Datelike, NaiveDate, Utc};
 use futures::stream;
 use serde::Serialize;
+use sqlx::Row;
 use tokio::sync::SemaphorePermit;
 use tokio::time::{Instant, Interval, MissedTickBehavior};
 
@@ -114,6 +116,26 @@ struct WorkProgress {
     complete: bool,
     #[serde(skip_serializing_if = "Option::is_none")]
     next_page: Option<u32>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    detail: Option<&'static str>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    queue_position: Option<u32>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    processed_units: Option<u64>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    total_units: Option<u64>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    percent: Option<u8>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    elapsed_seconds: Option<u64>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    eta_seconds: Option<u64>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    retry_at: Option<DateTime<Utc>>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    priority: Option<&'static str>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    blocked_reason: Option<&'static str>,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize)]
@@ -134,9 +156,22 @@ struct RawProgress {
     star_next_page: Option<i64>,
     star_last_error: Option<String>,
     star_attempts: i64,
+    star_priority: i64,
+    star_position: Option<i64>,
+    star_next_attempt_at: Option<DateTime<Utc>>,
+    archive_cursor: Option<NaiveDate>,
     analysis_status: Option<String>,
     analysis_attempts: i32,
+    analysis_phase: Option<String>,
+    analysis_priority: i64,
+    analysis_position: Option<i64>,
+    analysis_started_at: Option<DateTime<Utc>>,
+    analysis_total_units: Option<i64>,
+    analysis_completed_units: i64,
+    analysis_average_ms: i64,
     analysis_complete: bool,
+    analysis_scope_commits: Option<i64>,
+    analysis_truncated: bool,
 }
 
 impl ProgressSnapshot {
@@ -146,6 +181,16 @@ impl ProgressSnapshot {
                 phase: ProgressPhase::NotFound,
                 complete: false,
                 next_page: None,
+                detail: Some("not_public"),
+                queue_position: None,
+                processed_units: None,
+                total_units: None,
+                percent: None,
+                elapsed_seconds: None,
+                eta_seconds: None,
+                retry_at: None,
+                priority: None,
+                blocked_reason: None,
             };
             return Self {
                 repo,
@@ -204,6 +249,79 @@ impl ProgressSnapshot {
         let next_page = star_phase
             .active()
             .then(|| raw.star_next_page.unwrap_or(1).clamp(1, u32::MAX as i64) as u32);
+        let (star_processed, star_total, star_percent) = archive_month_progress(raw.archive_cursor);
+        let provider_quota = raw.star_last_error.as_deref().is_some_and(|error| {
+            error
+                .to_ascii_lowercase()
+                .contains("free query bytes scanned")
+        });
+        let star_eta = if provider_quota {
+            raw.star_next_attempt_at
+                .map(|retry| (retry - Utc::now()).num_seconds().max(0) as u64)
+        } else {
+            star_total
+                .zip(star_processed)
+                .map(|(total, done)| total.saturating_sub(done).saturating_mul(45))
+                .filter(|seconds| *seconds > 0)
+        };
+
+        let analysis_detail = match raw.analysis_phase.as_deref() {
+            Some("cloning") => Some("cloning"),
+            Some("scanning_history") => Some("scanning_history"),
+            Some("saving_history") => Some("saving_history"),
+            Some("finishing") => Some("finishing"),
+            Some("retrying") => Some("retrying"),
+            _ if raw.analysis_complete && raw.analysis_truncated => Some("recent_window"),
+            _ => None,
+        };
+        let elapsed = raw
+            .analysis_started_at
+            .map(|started| (Utc::now() - started).num_seconds().max(0) as u64);
+        let completed_scope = raw
+            .analysis_complete
+            .then_some(raw.analysis_scope_commits)
+            .flatten()
+            .map(|value| value.max(0) as u64);
+        let analysis_processed = raw
+            .analysis_total_units
+            .map(|_| raw.analysis_completed_units.max(0) as u64)
+            .or(completed_scope);
+        let analysis_total = raw
+            .analysis_total_units
+            .map(|value| value.max(0) as u64)
+            .or(completed_scope);
+        let scan_ratio = analysis_processed
+            .zip(analysis_total)
+            .and_then(|(done, total)| (total > 0).then_some(done as f64 / total as f64));
+        let analysis_percent = match analysis_detail {
+            Some("cloning") => Some(5),
+            Some("scanning_history") => {
+                Some((10.0 + scan_ratio.unwrap_or(0.0).clamp(0.0, 1.0) * 70.0).round() as u8)
+            }
+            Some("saving_history") => Some(84),
+            Some("finishing") => Some(92),
+            Some("retrying") => None,
+            _ if raw.analysis_complete => Some(100),
+            _ => Some(0),
+        };
+        let analysis_eta = if raw.analysis_status.as_deref() == Some("in_progress") {
+            match (elapsed, analysis_processed, analysis_total) {
+                (Some(elapsed), Some(done), Some(total)) if done > 0 && total > done => Some(
+                    elapsed
+                        .saturating_mul(total.saturating_sub(done))
+                        .saturating_div(done)
+                        .saturating_add(60),
+                ),
+                _ if matches!(analysis_detail, Some("saving_history" | "finishing")) => Some(60),
+                _ => None,
+            }
+        } else {
+            raw.analysis_position.map(|position| {
+                let workers = configured_analysis_workers() as u64;
+                let waves = (position.max(1) as u64).div_ceil(workers);
+                waves.saturating_mul((raw.analysis_average_ms.max(1) as u64).div_ceil(1_000))
+            })
+        };
         Self {
             repo,
             phase,
@@ -212,46 +330,113 @@ impl ProgressSnapshot {
                 phase: star_phase,
                 complete: raw.stars_complete,
                 next_page,
+                detail: None,
+                queue_position: bounded_position(raw.star_position),
+                processed_units: star_processed,
+                total_units: star_total,
+                percent: star_percent,
+                elapsed_seconds: None,
+                eta_seconds: star_eta,
+                retry_at: provider_quota.then_some(raw.star_next_attempt_at).flatten(),
+                priority: (raw.star_priority >= crate::repo_analysis::INTERACTIVE_PRIORITY)
+                    .then_some("interactive"),
+                blocked_reason: provider_quota.then_some("provider_quota"),
             },
             analysis: WorkProgress {
                 phase: analysis_phase,
                 complete: raw.analysis_complete,
                 next_page: None,
+                detail: analysis_detail,
+                queue_position: bounded_position(raw.analysis_position),
+                processed_units: analysis_processed,
+                total_units: analysis_total,
+                percent: analysis_percent,
+                elapsed_seconds: elapsed,
+                eta_seconds: analysis_eta,
+                retry_at: None,
+                priority: (raw.analysis_priority >= crate::repo_analysis::INTERACTIVE_PRIORITY)
+                    .then_some("interactive"),
+                blocked_reason: None,
             },
         }
     }
 }
 
-type ProgressRow = (
-    bool,
-    bool,
-    Option<String>,
-    Option<bool>,
-    Option<i64>,
-    Option<String>,
-    i64,
-    Option<String>,
-    i32,
-    bool,
-);
+fn bounded_position(position: Option<i64>) -> Option<u32> {
+    position.map(|value| value.clamp(1, u32::MAX as i64) as u32)
+}
+
+fn configured_analysis_workers() -> usize {
+    std::env::var("REPO_ANALYSIS_WORKERS")
+        .ok()
+        .and_then(|value| value.parse().ok())
+        .unwrap_or(1)
+        .clamp(1, 2)
+}
+
+fn archive_month_progress(cursor: Option<NaiveDate>) -> (Option<u64>, Option<u64>, Option<u8>) {
+    let start_index = 2011_i64 * 12 + 1; // February 2011, zero-based month index.
+    let today = Utc::now().date_naive();
+    let end_index = i64::from(today.year()) * 12 + i64::from(today.month0());
+    let total = end_index.saturating_sub(start_index).saturating_add(1) as u64;
+    let done = cursor
+        .map(|date| {
+            let index = i64::from(date.year()) * 12 + i64::from(date.month0());
+            index.saturating_sub(start_index).clamp(0, total as i64) as u64
+        })
+        .unwrap_or(0);
+    let percent = (total > 0).then_some(((done as f64 / total as f64) * 100.0).round() as u8);
+    (Some(done), Some(total), percent)
+}
 
 async fn load_snapshot(state: &ApiState, repo: &str) -> Result<ProgressSnapshot, ApiError> {
     // One round-trip and one row: all joined columns are primary-key
     // lookups. Error strings are read solely for retry classification and
     // never copied into the public payload.
-    let row: ProgressRow = sqlx::query_as(
+    let row = sqlx::query(
         "SELECT \
-            COALESCE(r.missing, FALSE), \
-            COALESCE(r.history_complete, FALSE), \
-            stars.status, stars.partial, stars.next_page, stars.last_error, \
-            COALESCE(stars.attempts, 0), analysis.status, \
-            COALESCE(analysis.attempts, 0), \
-            EXISTS(SELECT 1 FROM repo_history history \
-                   WHERE history.repo = $1 AND history.last_analyzed_at IS NOT NULL) \
+            COALESCE(r.missing, FALSE) AS missing, \
+            COALESCE(r.history_complete, FALSE) AS stars_complete, \
+            r.archive_cursor, \
+            stars.status AS star_status, stars.partial AS star_partial, \
+            stars.next_page AS star_next_page, stars.last_error AS star_last_error, \
+            COALESCE(stars.attempts, 0) AS star_attempts, \
+            COALESCE(stars.priority, 0) AS star_priority, \
+            stars.next_attempt_at AS star_next_attempt_at, \
+            CASE WHEN stars.status = 'pending' THEN ( \
+                SELECT COUNT(*)::BIGINT + 1 FROM star_fetch_queue ahead \
+                WHERE ahead.status = 'pending' \
+                  AND (ahead.priority > stars.priority OR \
+                       (ahead.priority = stars.priority AND ahead.enqueued_at < stars.enqueued_at)) \
+            ) END AS star_position, \
+            analysis.status AS analysis_status, \
+            COALESCE(analysis.attempts, 0) AS analysis_attempts, \
+            analysis.phase AS analysis_phase, \
+            COALESCE(analysis.priority, 0) AS analysis_priority, \
+            analysis.started_at AS analysis_started_at, \
+            analysis.total_units AS analysis_total_units, \
+            COALESCE(analysis.completed_units, 0) AS analysis_completed_units, \
+            CASE WHEN analysis.status = 'pending' THEN ( \
+                SELECT COUNT(*)::BIGINT + 1 FROM repo_analysis_queue ahead \
+                WHERE ahead.status = 'pending' \
+                  AND (ahead.priority > analysis.priority OR \
+                       (ahead.priority = analysis.priority AND ahead.enqueued_at < analysis.enqueued_at)) \
+            ) END AS analysis_position, \
+            COALESCE(( \
+                SELECT AVG(sample.analysis_duration_ms)::BIGINT FROM ( \
+                    SELECT analysis_duration_ms FROM repo_history \
+                    WHERE analysis_duration_ms IS NOT NULL \
+                    ORDER BY last_analyzed_at DESC NULLS LAST LIMIT 20 \
+                ) sample \
+            ), 300000) AS analysis_average_ms, \
+            (history.last_analyzed_at IS NOT NULL) AS analysis_complete, \
+            history.analysis_scope_commits, \
+            COALESCE(history.analysis_truncated, FALSE) AS analysis_truncated \
          FROM (SELECT $1::TEXT AS repo) requested \
          LEFT JOIN repos r ON r.repo = requested.repo \
          LEFT JOIN star_fetch_queue stars ON stars.repo = requested.repo \
-         LEFT JOIN repo_analysis_queue analysis ON analysis.repo = requested.repo",
+         LEFT JOIN repo_analysis_queue analysis ON analysis.repo = requested.repo \
+         LEFT JOIN repo_history history ON history.repo = requested.repo",
     )
     .bind(repo)
     .fetch_one(&state.analyzer.cache.db().pool)
@@ -259,16 +444,31 @@ async fn load_snapshot(state: &ApiState, repo: &str) -> Result<ProgressSnapshot,
     Ok(ProgressSnapshot::from_raw(
         repo.to_string(),
         RawProgress {
-            missing: row.0,
-            stars_complete: row.1,
-            star_status: row.2,
-            star_partial: row.3.unwrap_or(false),
-            star_next_page: row.4,
-            star_last_error: row.5,
-            star_attempts: row.6,
-            analysis_status: row.7,
-            analysis_attempts: row.8,
-            analysis_complete: row.9,
+            missing: row.try_get("missing")?,
+            stars_complete: row.try_get("stars_complete")?,
+            star_status: row.try_get("star_status")?,
+            star_partial: row
+                .try_get::<Option<bool>, _>("star_partial")?
+                .unwrap_or(false),
+            star_next_page: row.try_get("star_next_page")?,
+            star_last_error: row.try_get("star_last_error")?,
+            star_attempts: row.try_get("star_attempts")?,
+            star_priority: row.try_get("star_priority")?,
+            star_position: row.try_get("star_position")?,
+            star_next_attempt_at: row.try_get("star_next_attempt_at")?,
+            archive_cursor: row.try_get("archive_cursor")?,
+            analysis_status: row.try_get("analysis_status")?,
+            analysis_attempts: row.try_get("analysis_attempts")?,
+            analysis_phase: row.try_get("analysis_phase")?,
+            analysis_priority: row.try_get("analysis_priority")?,
+            analysis_position: row.try_get("analysis_position")?,
+            analysis_started_at: row.try_get("analysis_started_at")?,
+            analysis_total_units: row.try_get("analysis_total_units")?,
+            analysis_completed_units: row.try_get("analysis_completed_units")?,
+            analysis_average_ms: row.try_get("analysis_average_ms")?,
+            analysis_complete: row.try_get("analysis_complete")?,
+            analysis_scope_commits: row.try_get("analysis_scope_commits")?,
+            analysis_truncated: row.try_get("analysis_truncated")?,
         },
     ))
 }
@@ -494,6 +694,20 @@ mod tests {
         });
         assert_eq!(analysis.phase, ProgressPhase::Complete);
         assert!(analysis.terminal);
+    }
+
+    #[test]
+    fn completed_bounded_analysis_reports_its_exact_scope() {
+        let value = snapshot(RawProgress {
+            analysis_complete: true,
+            analysis_scope_commits: Some(500),
+            analysis_truncated: true,
+            ..RawProgress::default()
+        });
+        assert_eq!(value.analysis.detail, Some("recent_window"));
+        assert_eq!(value.analysis.processed_units, Some(500));
+        assert_eq!(value.analysis.total_units, Some(500));
+        assert_eq!(value.analysis.percent, Some(100));
     }
 
     #[test]

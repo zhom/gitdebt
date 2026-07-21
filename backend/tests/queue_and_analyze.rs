@@ -291,6 +291,40 @@ async fn analyze_cold_repo_is_pending_and_enqueues_without_paginating() {
 }
 
 #[tokio::test]
+async fn readonly_cold_repo_is_pending_without_enqueuing() {
+    let Some(db) = test_db().await else {
+        eprintln!("skipping: set GITDEBT_TEST_DATABASE_URL to run");
+        return;
+    };
+    let prefix = "gitdebt-test-readonly/";
+    cleanup(&db, prefix).await;
+
+    let cache = Cache::new(db.clone());
+    let rate = std::sync::Arc::new(
+        gitdebt::rate_limit::RateLimitTracker::load(db.clone())
+            .await
+            .unwrap(),
+    );
+    let github = std::sync::Arc::new(gitdebt::github::GithubClient::new(None, rate).unwrap());
+    let ctx = analyzer::AnalyzerCtx { github, cache };
+    let owner = "gitdebt-test-readonly";
+    let repo = "x";
+    let full = format!("{owner}/{repo}");
+
+    let result = analyzer::analyze_repo_readonly(owner, repo, &ctx)
+        .await
+        .expect("readonly analyze succeeds");
+    assert!(result.pending);
+    assert!(result.history.is_empty());
+    assert!(
+        !queue::is_active(&db, &full).await.unwrap(),
+        "static snapshot reads must not create queue work"
+    );
+
+    cleanup(&db, prefix).await;
+}
+
+#[tokio::test]
 async fn repo_analysis_enqueue_is_freshness_bounded_and_old_dead_jobs_revive() {
     let Some(db) = test_db().await else {
         eprintln!("skipping: set GITDEBT_TEST_DATABASE_URL to run");

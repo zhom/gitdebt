@@ -48,19 +48,28 @@ type ProgressPhase =
   | "restricted"
   | "failed";
 
+type ProgressWork = {
+  phase: ProgressPhase;
+  complete: boolean;
+  next_page?: number | null;
+  detail?: string;
+  queue_position?: number;
+  processed_units?: number;
+  total_units?: number;
+  percent?: number;
+  elapsed_seconds?: number;
+  eta_seconds?: number;
+  retry_at?: string;
+  priority?: "interactive";
+  blocked_reason?: "provider_quota";
+};
+
 export type RepoProgress = {
   repo: string;
   phase: ProgressPhase;
   terminal: boolean;
-  stars: {
-    phase: ProgressPhase;
-    complete: boolean;
-    next_page: number | null;
-  };
-  analysis: {
-    phase: ProgressPhase;
-    complete: boolean;
-  };
+  stars: ProgressWork;
+  analysis: ProgressWork;
 };
 
 type Props = {
@@ -150,10 +159,10 @@ export function RepoHero({ owner, repo, apiBase, initialData }: Props) {
     async function enqueueAnalysis() {
       try {
         await fetch(
-          `${apiBase}/api/repos/${owner}/${repo}/analyze-history`,
+          `${apiBase}/api/repos/${owner}/${repo}/analyze-history?view=1`,
           {
             method: "POST",
-            credentials: "omit",
+            credentials: "include",
             signal: AbortSignal.timeout(8_000),
           },
         );
@@ -184,6 +193,7 @@ export function RepoHero({ owner, repo, apiBase, initialData }: Props) {
       if (cancelled) return;
       events = new EventSource(
         `${apiBase}/api/repos/${owner}/${repo}/progress`,
+        { withCredentials: true },
       );
       events.addEventListener("progress", handleProgress as EventListener);
       events.addEventListener("open", () => setLiveProgress(true));
@@ -348,11 +358,22 @@ export function RepoHero({ owner, repo, apiBase, initialData }: Props) {
           <div className="mt-4 grid gap-3 sm:grid-cols-2">
             <ProgressStep
               label="Star history"
-              phase={progress?.stars.phase ?? starPhaseFromAnalyze(data)}
+              work={
+                progress?.stars ?? {
+                  phase: starPhaseFromAnalyze(data),
+                  complete: data?.history_complete ?? false,
+                  next_page: null,
+                }
+              }
             />
             <ProgressStep
               label="Repository health"
-              phase={progress?.analysis.phase ?? "pending"}
+              work={
+                progress?.analysis ?? {
+                  phase: "pending",
+                  complete: false,
+                }
+              }
             />
           </div>
           <p className="mt-3 text-sm leading-relaxed text-muted-foreground">
@@ -461,29 +482,21 @@ function analysisLabel(phase: ProgressPhase | undefined): string {
 
 function ProgressStep({
   label,
-  phase,
+  work,
 }: {
   label: string;
-  phase: ProgressPhase;
+  work: ProgressWork;
 }) {
+  const phase = work.phase;
   const complete = phase === "complete";
   const stopped = phase === "not_found";
-  const detail = complete
-    ? "Ready"
-    : stopped
-      ? analysisLabel(phase)
-      : phase === "retrying" || phase === "failed" || phase === "restricted"
-        ? "Retry scheduled"
-      : phase === "idle" || phase === "pending"
-        ? "Queued"
-        : phase === "backfilling"
-          ? "Filling older data"
-          : phase === "analyzing"
-            ? "Walking commit history"
-            : "Collecting data";
+  const reduceMotion = useReducedMotion();
+  const detail = progressDetail(work);
+  const percent = work.percent;
 
   return (
-    <div className="flex items-center gap-3">
+    <div className="min-w-0 rounded-lg border border-border p-3">
+      <div className="flex items-center gap-3">
       <span
         className={`grid size-6 shrink-0 place-items-center rounded-full border text-xs ${
           complete
@@ -497,13 +510,94 @@ function ProgressStep({
         {complete ? "✓" : "·"}
       </span>
       <div>
-        <p className="text-sm font-medium">{label}</p>
-        <p className="font-mono text-xs tracking-wide text-muted-foreground uppercase">
+        <p className="flex flex-wrap items-center gap-2 text-sm font-medium">
+          {label}
+          {work.priority === "interactive" && (
+            <span className="rounded-full bg-primary px-2 py-0.5 font-mono text-[10px] tracking-wide text-primary-foreground uppercase">
+              priority
+            </span>
+          )}
+        </p>
+        <p className="mt-0.5 text-xs leading-relaxed text-muted-foreground">
           {detail}
         </p>
       </div>
+      </div>
+      {percent !== undefined && !complete && !stopped && (
+        <div
+          className="mt-3 h-1.5 overflow-hidden rounded-full bg-muted"
+          role="progressbar"
+          aria-label={`${label} progress`}
+          aria-valuemin={0}
+          aria-valuemax={100}
+          aria-valuenow={percent}
+        >
+          <motion.div
+            initial={false}
+            animate={{ scaleX: Math.max(0.015, Math.min(1, percent / 100)) }}
+            transition={
+              reduceMotion
+                ? { duration: 0.12 }
+                : { type: "spring", bounce: 0, duration: 0.4 }
+            }
+            className="h-full origin-left rounded-full bg-signal"
+          />
+        </div>
+      )}
     </div>
   );
+}
+
+function progressDetail(
+  work: ProgressWork,
+): string {
+  if (
+    (work.complete || work.phase === "complete") &&
+    work.detail === "recent_window" &&
+    work.total_units !== undefined
+  ) {
+    return `Ready · newest ${work.total_units.toLocaleString()} commits analyzed`;
+  }
+  if (work.complete || work.phase === "complete") return "Ready";
+  if (work.phase === "not_found") return "Not public or not found";
+  if (work.blocked_reason === "provider_quota") {
+    const retry = work.retry_at ? new Date(work.retry_at) : null;
+    const retryLabel =
+      retry && !Number.isNaN(retry.getTime())
+        ? ` Next attempt ${retry.toLocaleTimeString([], { hour: "2-digit", minute: "2-digit" })}.`
+        : "";
+    return `Waiting for BigQuery billing or quota.${retryLabel}`;
+  }
+  const eta = work.eta_seconds ? ` · about ${formatDuration(work.eta_seconds)} left` : "";
+  if (work.detail === "cloning") return `Cloning the default branch${eta}`;
+  if (work.detail === "scanning_history") {
+    const units =
+      work.processed_units !== undefined && work.total_units !== undefined
+        ? `${work.processed_units.toLocaleString()} / ${work.total_units.toLocaleString()} commits`
+        : "Walking recent commit history";
+    return `${units}${eta}`;
+  }
+  if (work.detail === "saving_history") return `Saving repository signals${eta}`;
+  if (work.detail === "finishing") return `Counting languages and resolving top contributors${eta}`;
+  if (work.phase === "retrying" || work.phase === "failed" || work.phase === "restricted") {
+    return `Retry scheduled${eta}`;
+  }
+  if (work.queue_position) {
+    return `Queue position ${work.queue_position.toLocaleString()}${eta}`;
+  }
+  if (work.phase === "backfilling" && work.processed_units !== undefined && work.total_units) {
+    return `${work.processed_units} / ${work.total_units} archive months${eta}`;
+  }
+  if (work.phase === "analyzing") return `Walking recent commit history${eta}`;
+  return `Queued${eta}`;
+}
+
+function formatDuration(seconds: number): string {
+  if (seconds < 60) return "under a minute";
+  const minutes = Math.ceil(seconds / 60);
+  if (minutes < 60) return `${minutes} min`;
+  const hours = Math.ceil(minutes / 60);
+  return `${hours} hr`;
 }
 
 function AnimatedNumber({

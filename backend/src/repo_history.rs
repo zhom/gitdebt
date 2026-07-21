@@ -13,6 +13,18 @@ use chrono::{DateTime, NaiveDate, Utc};
 use serde::Serialize;
 use tokio::process::Command;
 
+const DEFAULT_ANALYSIS_COMMIT_LIMIT: usize = 5_000;
+const MIN_ANALYSIS_COMMIT_LIMIT: usize = 100;
+const HARD_ANALYSIS_COMMIT_LIMIT: usize = 20_000;
+
+pub(crate) fn analysis_commit_limit() -> usize {
+    std::env::var("REPO_ANALYSIS_COMMIT_LIMIT")
+        .ok()
+        .and_then(|value| value.parse().ok())
+        .unwrap_or(DEFAULT_ANALYSIS_COMMIT_LIMIT)
+        .clamp(MIN_ANALYSIS_COMMIT_LIMIT, HARD_ANALYSIS_COMMIT_LIMIT)
+}
+
 #[derive(Clone, Debug)]
 pub struct RepoStorage {
     pub root: PathBuf,
@@ -116,6 +128,7 @@ async fn clone_bare(repo: &str, path: &Path, last_analyzed_sha: Option<&str>) ->
     }
     // Analysis only needs the default branch's commits and trees; blobs are
     // fetched on demand by git show/archive.
+    let depth = format!("--depth={}", analysis_commit_limit());
     let output = Command::new("git")
         .args([
             "clone",
@@ -123,6 +136,7 @@ async fn clone_bare(repo: &str, path: &Path, last_analyzed_sha: Option<&str>) ->
             "--no-tags",
             "--single-branch",
             "--filter=blob:none",
+            &depth,
             "--",
         ])
         .arg(&url)
@@ -247,7 +261,80 @@ const MAX_PATCH_BYTES: usize = 4 * 1024 * 1024;
 /// produce gigabytes of patch text; the parsed commit facts are much smaller,
 /// so walk a fixed number of explicitly listed commits per subprocess and
 /// discard each raw batch before continuing.
-const LOG_BATCH_COMMITS: usize = 500;
+// Keep progress and cancellation responsive on large repositories. A large
+// `git log -p` batch can run for several minutes without emitting a durable
+// progress update; 100 still amortizes process startup while giving the UI
+// five measured checkpoints across the production first-pass window.
+pub(crate) const LOG_BATCH_COMMITS: usize = 100;
+
+/// Bounded newest-history plan used by the production worker. Large projects
+/// such as Linux have more than a million reachable commits; repository-health
+/// signals are useful over a recent, explicitly reported window and must not
+/// require an unbounded full-history walk before anything becomes visible.
+#[derive(Clone, Debug, Eq, PartialEq)]
+pub(crate) struct CommitWalkPlan {
+    pub shas: Vec<String>,
+    pub truncated: bool,
+}
+
+/// Select at most `limit` newest non-merge commits, returned oldest-first.
+/// Asking git for `limit + 1` lets us report that the analysis window was
+/// capped without ever materializing a million-SHA rev-list in memory.
+pub(crate) async fn plan_recent_commits(
+    handle: &RepoHandle,
+    since_sha: Option<&str>,
+    limit: usize,
+) -> Result<CommitWalkPlan> {
+    let range = match since_sha {
+        Some(sha) => format!("{sha}..HEAD"),
+        None => "HEAD".to_string(),
+    };
+    let bounded = limit.max(1);
+    let probe = bounded.saturating_add(1);
+    let max_count = format!("--max-count={probe}");
+    let output = Command::new("git")
+        .arg("-C")
+        .arg(&handle.path)
+        .args(["rev-list", "--no-merges", &max_count, &range])
+        .output()
+        .await
+        .context("git bounded rev-list")?;
+    if !output.status.success() {
+        bail!(
+            "git rev-list failed: {}",
+            String::from_utf8_lossy(&output.stderr)
+        );
+    }
+    let sha_output = std::str::from_utf8(&output.stdout).context("git rev-list non-UTF-8")?;
+    let mut shas: Vec<String> = sha_output
+        .lines()
+        .map(str::trim)
+        .filter(|sha| !sha.is_empty())
+        .map(str::to_string)
+        .collect();
+    validate_shas(&shas)?;
+    let truncated = shas.len() > bounded || is_shallow_repository(&handle.path).await?;
+    shas.truncate(bounded);
+    shas.reverse();
+    Ok(CommitWalkPlan { shas, truncated })
+}
+
+async fn is_shallow_repository(path: &Path) -> Result<bool> {
+    let output = Command::new("git")
+        .arg("-C")
+        .arg(path)
+        .args(["rev-parse", "--is-shallow-repository"])
+        .output()
+        .await
+        .context("git shallow-repository probe")?;
+    if !output.status.success() {
+        bail!(
+            "git shallow-repository probe failed: {}",
+            String::from_utf8_lossy(&output.stderr)
+        );
+    }
+    Ok(String::from_utf8_lossy(&output.stdout).trim() == "true")
+}
 
 /// Iterate every commit reachable from HEAD that isn't an ancestor of
 /// `since_sha`. None = walk entire history. Yields oldest-first.
@@ -296,16 +383,13 @@ async fn walk_new_commits_batched(
         );
     }
     let sha_output = std::str::from_utf8(&output.stdout).context("git rev-list non-UTF-8")?;
-    let shas: Vec<&str> = sha_output
+    let shas: Vec<String> = sha_output
         .lines()
         .map(str::trim)
         .filter(|sha| !sha.is_empty())
+        .map(str::to_string)
         .collect();
-    if let Some(invalid) = shas.iter().find(|sha| {
-        !(40..=64).contains(&sha.len()) || !sha.bytes().all(|byte| byte.is_ascii_hexdigit())
-    }) {
-        bail!("git rev-list returned invalid object id: {invalid}");
-    }
+    validate_shas(&shas)?;
 
     let mut commits = Vec::with_capacity(shas.len());
     for batch in shas.chunks(batch_size.max(1)) {
@@ -314,7 +398,10 @@ async fn walk_new_commits_batched(
     Ok(commits)
 }
 
-async fn walk_commit_batch(handle: &RepoHandle, shas: &[&str]) -> Result<Vec<CommitInfo>> {
+pub(crate) async fn walk_commit_batch(
+    handle: &RepoHandle,
+    shas: &[String],
+) -> Result<Vec<CommitInfo>> {
     if shas.is_empty() {
         return Ok(Vec::new());
     }
@@ -342,6 +429,15 @@ async fn walk_commit_batch(handle: &RepoHandle, shas: &[&str]) -> Result<Vec<Com
         );
     }
     Ok(parse_log_records(&output.stdout))
+}
+
+fn validate_shas(shas: &[String]) -> Result<()> {
+    if let Some(invalid) = shas.iter().find(|sha| {
+        !(40..=64).contains(&sha.len()) || !sha.bytes().all(|byte| byte.is_ascii_hexdigit())
+    }) {
+        bail!("git rev-list returned invalid object id: {invalid}");
+    }
+    Ok(())
 }
 
 /// Pure parser for the streamed `git log --numstat -z -p` output. Splits
@@ -1145,6 +1241,14 @@ mod tests {
             // Force several subprocess batches so order and aggregate
             // equivalence are covered without creating 500+ fixtures.
             let new_commits = walk_new_commits_batched(&handle, None, 2).await.unwrap();
+
+            let recent = plan_recent_commits(&handle, None, 3).await.unwrap();
+            assert_eq!(recent.shas.len(), 3);
+            assert!(recent.truncated);
+            assert_eq!(recent.shas.last(), Some(&handle.head_sha));
+            let complete = plan_recent_commits(&handle, None, 20).await.unwrap();
+            assert_eq!(complete.shas.len(), 7);
+            assert!(!complete.truncated);
 
             // OLD oracle: sha list (oldest-first, no-merges) then per-commit.
             let log_out = SyncCommand::new("git")

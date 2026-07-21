@@ -10,3 +10,7 @@ export const DURATION = {
 } as const;
 
 export const REDUCED_MOTION_DURATION = 0.12;
+
+export const SPRING = {
+  snappy: { type: "spring", stiffness: 420, damping: 34, mass: 0.72 },
+} as const;

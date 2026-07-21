@@ -25,26 +25,26 @@ const BIGQUERY_API_BASE: &str = "https://bigquery.googleapis.com/bigquery/v2/";
 const BIGQUERY_SCOPE: &str = "https://www.googleapis.com/auth/bigquery";
 const USER_AGENT: &str = concat!("gitdebt/", env!("CARGO_PKG_VERSION"));
 
-const DEFAULT_MAX_BYTES_BILLED: u64 = 50_000_000_000;
-const DEFAULT_MAX_EVENTS: usize = 500_000;
+const DEFAULT_MAX_BYTES_BILLED: u64 = 500_000_000_000;
+const DEFAULT_MAX_EVENTS: usize = 1_000_000;
 const DEFAULT_PAGE_SIZE: u32 = 10_000;
 const DEFAULT_CONCURRENCY: usize = 1;
 const DEFAULT_REQUEST_TIMEOUT_SECS: u64 = 30;
 const DEFAULT_QUERY_TIMEOUT_SECS: u64 = 120;
 const DEFAULT_POLL_TIMEOUT_MS: u64 = 10_000;
 const DEFAULT_MAX_RETRIES: usize = 3;
-const DEFAULT_MAX_REPOSITORIES: usize = 1_000;
+const DEFAULT_MAX_REPOSITORIES: usize = 5_000;
 const DEFAULT_MAX_RANGE_DAYS: i64 = 31;
 
 const HARD_MAX_BYTES_BILLED: u64 = 1_000_000_000_000;
-const HARD_MAX_EVENTS: usize = 500_000;
+const HARD_MAX_EVENTS: usize = 2_000_000;
 const HARD_MAX_PAGE_SIZE: u32 = 10_000;
 const HARD_MAX_CONCURRENCY: usize = 8;
 const HARD_MAX_REQUEST_TIMEOUT_SECS: u64 = 120;
 const HARD_MAX_QUERY_TIMEOUT_SECS: u64 = 600;
 const HARD_MAX_POLL_TIMEOUT_MS: u64 = 20_000;
 const HARD_MAX_RETRIES: usize = 8;
-const HARD_MAX_REPOSITORIES: usize = 1_000;
+const HARD_MAX_REPOSITORIES: usize = 5_000;
 const HARD_MAX_RANGE_DAYS: i64 = 366;
 
 /// A repository to match in GH Archive.
@@ -104,6 +104,10 @@ pub trait GhArchiveEventSource: Send + Sync {
 pub struct GhArchiveConfig {
     pub project_id: String,
     pub location: String,
+    /// Optional project-owned, partitioned WatchEvent table. Once populated,
+    /// historical lookups scan only the requested date partitions instead of
+    /// repeatedly scanning the complete public GH Archive month resources.
+    pub source_table: Option<String>,
     pub max_bytes_billed: u64,
     pub max_events: usize,
     pub page_size: u32,
@@ -122,6 +126,7 @@ impl fmt::Debug for GhArchiveConfig {
         f.debug_struct("GhArchiveConfig")
             .field("project_id", &self.project_id)
             .field("location", &self.location)
+            .field("source_table", &self.source_table)
             .field("max_bytes_billed", &self.max_bytes_billed)
             .field("max_events", &self.max_events)
             .field("page_size", &self.page_size)
@@ -145,6 +150,7 @@ impl GhArchiveConfig {
         let config = Self {
             project_id: project_id.into(),
             location: "US".to_string(),
+            source_table: None,
             max_bytes_billed: DEFAULT_MAX_BYTES_BILLED,
             max_events: DEFAULT_MAX_EVENTS,
             page_size: DEFAULT_PAGE_SIZE,
@@ -167,6 +173,7 @@ impl GhArchiveConfig {
     /// Optional settings:
     /// - `GH_ARCHIVE_GOOGLE_CREDENTIALS_JSON` (inline service-account JSON)
     /// - `GH_ARCHIVE_BIGQUERY_LOCATION` (default `US`)
+    /// - `GH_ARCHIVE_SOURCE_TABLE` (`project.dataset.table`, optional optimized mirror)
     /// - `GH_ARCHIVE_MAX_BYTES_BILLED`
     /// - `GH_ARCHIVE_MAX_EVENTS`
     /// - `GH_ARCHIVE_PAGE_SIZE`
@@ -201,6 +208,10 @@ impl GhArchiveConfig {
 
         if let Some(value) = nonempty(lookup("GH_ARCHIVE_BIGQUERY_LOCATION")) {
             config.location = value;
+        }
+        if let Some(value) = nonempty(lookup("GH_ARCHIVE_SOURCE_TABLE")) {
+            validate_source_table(&value)?;
+            config.source_table = Some(value);
         }
         config.max_bytes_billed = parse_u64_env(
             "GH_ARCHIVE_MAX_BYTES_BILLED",
@@ -285,6 +296,9 @@ impl GhArchiveConfig {
     fn validate(&self) -> Result<(), GhArchiveError> {
         validate_project_id(&self.project_id)?;
         validate_location(&self.location)?;
+        if let Some(source_table) = self.source_table.as_deref() {
+            validate_source_table(source_table)?;
+        }
         validate_range(
             "GH_ARCHIVE_MAX_BYTES_BILLED",
             self.max_bytes_billed,
@@ -738,7 +752,7 @@ fn build_query_request(
         .to_string();
 
     QueryRequest {
-        query: build_star_events_sql(start, end),
+        query: build_star_events_sql(config.source_table.as_deref(), start, end),
         use_legacy_sql: false,
         parameter_mode: "NAMED",
         query_parameters: vec![
@@ -777,7 +791,33 @@ fn build_query_request(
 /// when any matched resource is a view. Month identifiers are derived only
 /// from validated `NaiveDate` values, so the dynamic table names cannot carry
 /// user input. The selected columns intentionally exclude actors and payloads.
-fn build_star_events_sql(start: NaiveDate, end: NaiveDate) -> String {
+fn build_star_events_sql(source_table: Option<&str>, start: NaiveDate, end: NaiveDate) -> String {
+    if let Some(source_table) = source_table {
+        return format!(
+            r#"SELECT
+  github_repo_id,
+  repository,
+  source_event_id,
+  FORMAT_TIMESTAMP('%Y-%m-%dT%H:%M:%E6SZ', created_at) AS created_at
+FROM `{source_table}`
+WHERE created_at >= TIMESTAMP(@start_date)
+  AND created_at < TIMESTAMP(DATE_ADD(@end_date, INTERVAL 1 DAY))
+  AND EXISTS (
+    SELECT 1
+    FROM UNNEST(@repositories) AS requested
+    WHERE
+      (requested.github_id > 0 AND github_repo_id = requested.github_id)
+      OR
+      (
+        lower_repository = requested.lower_name
+        AND (requested.github_id = 0 OR github_repo_id IS NULL)
+      )
+  )
+ORDER BY created_at ASC, github_repo_id ASC, lower_repository ASC, source_event_id ASC
+LIMIT @query_limit"#
+        );
+    }
+
     let mut year = start.year();
     let mut month = start.month();
     let mut selects = Vec::new();
@@ -792,7 +832,6 @@ FROM `githubarchive.month.{year:04}{month:02}`
 WHERE DATE(created_at) BETWEEN @start_date AND @end_date
   AND type = 'WatchEvent'
   AND public = TRUE
-  AND JSON_VALUE(payload, '$.action') = 'started'
   AND EXISTS (
     SELECT 1
     FROM UNNEST(@repositories) AS requested
@@ -1200,6 +1239,34 @@ fn validate_location(location: &str) -> Result<(), GhArchiveError> {
     Ok(())
 }
 
+fn validate_source_table(table: &str) -> Result<(), GhArchiveError> {
+    let parts: Vec<&str> = table.split('.').collect();
+    let valid_project = parts.first().is_some_and(|part| {
+        (6..=63).contains(&part.len())
+            && part
+                .bytes()
+                .all(|byte| byte.is_ascii_lowercase() || byte.is_ascii_digit() || byte == b'-')
+    });
+    let valid_object = |part: &&str| {
+        !part.is_empty()
+            && part.len() <= 1_024
+            && part
+                .bytes()
+                .all(|byte| byte.is_ascii_alphanumeric() || byte == b'_')
+    };
+    if parts.len() != 3
+        || !valid_project
+        || !parts.get(1).is_some_and(valid_object)
+        || !parts.get(2).is_some_and(valid_object)
+    {
+        return Err(invalid_config(
+            "GH_ARCHIVE_SOURCE_TABLE",
+            "expected a fully qualified project.dataset.table identifier",
+        ));
+    }
+    Ok(())
+}
+
 fn validate_credentials_json(credentials: &str) -> Result<(), GhArchiveError> {
     if credentials.len() > 128 * 1_024 {
         return Err(invalid_config(
@@ -1288,6 +1355,10 @@ mod tests {
             ("GH_ARCHIVE_MAX_EVENTS", "4321"),
             ("GH_ARCHIVE_CONCURRENCY", "3"),
             ("GH_ARCHIVE_MAX_RANGE_DAYS", "14"),
+            (
+                "GH_ARCHIVE_SOURCE_TABLE",
+                "gitdebt-prod.archive.star_events",
+            ),
         ]))
         .unwrap()
         .unwrap();
@@ -1295,6 +1366,10 @@ mod tests {
         assert_eq!(config.max_events, 4_321);
         assert_eq!(config.concurrency, 3);
         assert_eq!(config.max_range_days, 14);
+        assert_eq!(
+            config.source_table.as_deref(),
+            Some("gitdebt-prod.archive.star_events")
+        );
         assert!(config.credentials_json.is_none());
 
         let invalid = GhArchiveConfig::from_lookup(env(&[
@@ -1364,6 +1439,7 @@ mod tests {
         assert!(sql.contains("LOWER(repo.name)"));
         assert!(sql.contains("type = 'WatchEvent'"));
         assert!(!sql.to_ascii_lowercase().contains("actor"));
+        assert!(!sql.to_ascii_lowercase().contains("payload"));
         assert!(!sql.contains("owner/example"));
         assert_eq!(value["useLegacySql"], false);
         assert_eq!(value["parameterMode"], "NAMED");
@@ -1402,6 +1478,7 @@ mod tests {
     #[test]
     fn query_unions_only_exact_months_in_the_requested_range() {
         let sql = build_star_events_sql(
+            None,
             NaiveDate::from_ymd_opt(2025, 12, 31).unwrap(),
             NaiveDate::from_ymd_opt(2026, 2, 1).unwrap(),
         );
@@ -1410,6 +1487,50 @@ mod tests {
         assert!(sql.contains("`githubarchive.month.202602`"));
         assert_eq!(sql.matches("UNION ALL").count(), 2);
         assert!(!sql.contains("day.yesterday"));
+    }
+
+    #[test]
+    fn optimized_source_is_validated_and_partition_filtered() {
+        let mut config = config();
+        config.source_table = Some("gitdebt-prod.archive.star_events".to_string());
+        let repositories =
+            normalize_repositories(&[RepositorySpec::new(Some(42), "Zhom/GitDebt")]).unwrap();
+        let request = build_query_request(
+            &config,
+            &repositories,
+            NaiveDate::from_ymd_opt(2026, 1, 2).unwrap(),
+            NaiveDate::from_ymd_opt(2026, 1, 3).unwrap(),
+        );
+        assert!(request.query.contains("`gitdebt-prod.archive.star_events`"));
+        assert!(
+            request
+                .query
+                .contains("created_at >= TIMESTAMP(@start_date)")
+        );
+        assert!(
+            request
+                .query
+                .contains("created_at < TIMESTAMP(DATE_ADD(@end_date, INTERVAL 1 DAY))")
+        );
+        assert!(request.query.contains("lower_repository"));
+        assert!(!request.query.contains("githubarchive.month"));
+
+        let invalid = GhArchiveConfig::from_lookup(env(&[
+            ("GH_ARCHIVE_ENABLED", "true"),
+            ("GH_ARCHIVE_BIGQUERY_PROJECT", "gitdebt-prod"),
+            (
+                "GH_ARCHIVE_SOURCE_TABLE",
+                "project.dataset.table`; DROP TABLE x",
+            ),
+        ]))
+        .unwrap_err();
+        assert!(matches!(
+            invalid,
+            GhArchiveError::InvalidConfig {
+                name: "GH_ARCHIVE_SOURCE_TABLE",
+                ..
+            }
+        ));
     }
 
     #[test]

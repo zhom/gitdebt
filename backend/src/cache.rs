@@ -146,6 +146,28 @@ pub struct LoginReposMeta {
     pub missing: bool,
 }
 
+/// A privacy-safe row for the landing-page activity pulse. This is derived
+/// entirely from repository counters already stored in Postgres; no viewer,
+/// account, or request metadata leaves the backend.
+#[derive(Debug, Clone)]
+pub struct PlatformActivity {
+    pub repo: String,
+    pub stars: i64,
+    pub views: i64,
+    pub viewed_at: DateTime<Utc>,
+    pub history_ready: bool,
+    pub analysis_ready: bool,
+}
+
+const PLATFORM_ACTIVITY_SQL: &str = "SELECT r.repo, COALESCE(r.star_count, 0), r.view_count, \
+            r.last_viewed_at, r.history_complete, \
+            (h.last_analyzed_at IS NOT NULL) \
+     FROM repos r \
+     LEFT JOIN repo_history h ON h.repo = r.repo \
+     WHERE r.last_viewed_at IS NOT NULL AND NOT r.missing \
+     ORDER BY r.last_viewed_at DESC, r.repo ASC \
+     LIMIT $1";
+
 impl LoginReposMeta {
     /// Whether this meta row was fetched within `ttl`. A row without a
     /// timestamp is never fresh.
@@ -157,6 +179,31 @@ impl LoginReposMeta {
 impl Cache {
     pub fn new(db: Db) -> Self {
         Self { db }
+    }
+
+    /// Recently viewed public repositories for the landing page. The result
+    /// deliberately contains repository-level activity only and never calls
+    /// GitHub on the request path.
+    pub async fn list_platform_activity(&self, limit: i64) -> Result<Vec<PlatformActivity>> {
+        let rows: Vec<(String, i64, i64, DateTime<Utc>, bool, bool)> =
+            sqlx::query_as(PLATFORM_ACTIVITY_SQL)
+                .bind(limit.clamp(1, 12))
+                .fetch_all(&self.db.pool)
+                .await
+                .context("list platform activity")?;
+        Ok(rows
+            .into_iter()
+            .map(
+                |(repo, stars, views, viewed_at, history_ready, analysis_ready)| PlatformActivity {
+                    repo,
+                    stars,
+                    views,
+                    viewed_at,
+                    history_ready,
+                    analysis_ready,
+                },
+            )
+            .collect())
     }
 
     /// Underlying database handle. Other modules (auth, webhook,
@@ -1096,6 +1143,7 @@ impl Cache {
 
 #[cfg(test)]
 mod tests {
+    use super::PLATFORM_ACTIVITY_SQL;
     // The cache functions require a live Postgres pool, so they're
     // exercised by integration smoke tests rather than unit tests here.
     // What we *can* assert without a DB is the read-side completeness
@@ -1110,5 +1158,14 @@ mod tests {
         // Placeholder to keep the module's test surface present and make
         // the invariant visible to future editors. The real coverage is
         // the `complete != Some(true)` guard in `get_repo_stargazers`.
+    }
+
+    #[test]
+    fn platform_activity_is_postgres_only_and_excludes_tombstones() {
+        assert!(PLATFORM_ACTIVITY_SQL.contains("NOT r.missing"));
+        assert!(PLATFORM_ACTIVITY_SQL.contains("r.history_complete"));
+        assert!(PLATFORM_ACTIVITY_SQL.contains("h.last_analyzed_at IS NOT NULL"));
+        assert!(PLATFORM_ACTIVITY_SQL.contains("ORDER BY r.last_viewed_at DESC"));
+        assert!(!PLATFORM_ACTIVITY_SQL.to_ascii_lowercase().contains("actor"));
     }
 }

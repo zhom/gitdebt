@@ -261,8 +261,14 @@ CREATE TABLE IF NOT EXISTS repo_history (
     clone_path           TEXT,
     clone_size_bytes     BIGINT,
     last_visited_at      TIMESTAMPTZ,
-    total_commits        BIGINT NOT NULL DEFAULT 0
+    total_commits        BIGINT NOT NULL DEFAULT 0,
+    analysis_duration_ms BIGINT,
+    analysis_scope_commits BIGINT,
+    analysis_truncated   BOOLEAN NOT NULL DEFAULT FALSE
 );
+ALTER TABLE repo_history ADD COLUMN IF NOT EXISTS analysis_duration_ms BIGINT;
+ALTER TABLE repo_history ADD COLUMN IF NOT EXISTS analysis_scope_commits BIGINT;
+ALTER TABLE repo_history ADD COLUMN IF NOT EXISTS analysis_truncated BOOLEAN NOT NULL DEFAULT FALSE;
 
 -- Per-file aggregates. fix_commits = commit count where the message
 -- matches /\b(fix|bug|hotfix|patch)\b/i; commits = total commits touching
@@ -334,17 +340,33 @@ CREATE TABLE IF NOT EXISTS repo_todo_deltas (
 CREATE TABLE IF NOT EXISTS repo_analysis_queue (
     repo          TEXT PRIMARY KEY NOT NULL,
     status        TEXT NOT NULL DEFAULT 'pending',
+    phase         TEXT NOT NULL DEFAULT 'queued',
+    priority      BIGINT NOT NULL DEFAULT 0,
+    requested_by_user_id BIGINT REFERENCES app_users(id) ON DELETE SET NULL,
     enqueued_at   TIMESTAMPTZ NOT NULL,
     next_attempt_at TIMESTAMPTZ NOT NULL DEFAULT NOW(),
     claimed_at    TIMESTAMPTZ,
+    started_at    TIMESTAMPTZ,
+    updated_at    TIMESTAMPTZ NOT NULL DEFAULT NOW(),
+    total_units   BIGINT,
+    completed_units BIGINT NOT NULL DEFAULT 0,
     last_error    TEXT,
     attempts      INT NOT NULL DEFAULT 0,
     worker_id     TEXT
 );
 ALTER TABLE repo_analysis_queue ADD COLUMN IF NOT EXISTS next_attempt_at TIMESTAMPTZ NOT NULL DEFAULT NOW();
+ALTER TABLE repo_analysis_queue ADD COLUMN IF NOT EXISTS phase TEXT NOT NULL DEFAULT 'queued';
+ALTER TABLE repo_analysis_queue ADD COLUMN IF NOT EXISTS priority BIGINT NOT NULL DEFAULT 0;
+ALTER TABLE repo_analysis_queue ADD COLUMN IF NOT EXISTS requested_by_user_id BIGINT REFERENCES app_users(id) ON DELETE SET NULL;
+ALTER TABLE repo_analysis_queue ADD COLUMN IF NOT EXISTS started_at TIMESTAMPTZ;
+ALTER TABLE repo_analysis_queue ADD COLUMN IF NOT EXISTS updated_at TIMESTAMPTZ NOT NULL DEFAULT NOW();
+ALTER TABLE repo_analysis_queue ADD COLUMN IF NOT EXISTS total_units BIGINT;
+ALTER TABLE repo_analysis_queue ADD COLUMN IF NOT EXISTS completed_units BIGINT NOT NULL DEFAULT 0;
 CREATE INDEX IF NOT EXISTS idx_repo_queue_status ON repo_analysis_queue(status, enqueued_at);
 CREATE INDEX IF NOT EXISTS idx_repo_queue_available
     ON repo_analysis_queue(status, next_attempt_at, enqueued_at);
+CREATE INDEX IF NOT EXISTS idx_repo_queue_priority_available
+    ON repo_analysis_queue(status, next_attempt_at, priority DESC, enqueued_at);
 
 -- Tokei lines-of-code aggregates per repo. One row per language.
 -- Replaced wholesale on each analysis run (truncate-then-insert in one
@@ -843,5 +865,28 @@ mod tests {
             !SCHEMA.contains("actor.login"),
             "archive storage must never retain stargazer identities"
         );
+    }
+
+    #[test]
+    fn analysis_progress_and_priority_survive_restart() {
+        for column in [
+            "phase         TEXT NOT NULL DEFAULT 'queued'",
+            "priority      BIGINT NOT NULL DEFAULT 0",
+            "requested_by_user_id BIGINT REFERENCES app_users(id) ON DELETE SET NULL",
+            "started_at    TIMESTAMPTZ",
+            "updated_at    TIMESTAMPTZ NOT NULL DEFAULT NOW()",
+            "total_units   BIGINT",
+            "completed_units BIGINT NOT NULL DEFAULT 0",
+            "analysis_duration_ms BIGINT",
+            "analysis_scope_commits BIGINT",
+            "analysis_truncated   BOOLEAN NOT NULL DEFAULT FALSE",
+        ] {
+            assert!(
+                SCHEMA.contains(column),
+                "missing durable analysis column: {column}"
+            );
+        }
+        assert!(SCHEMA.contains("idx_repo_queue_priority_available"));
+        assert!(SCHEMA.contains("priority DESC, enqueued_at"));
     }
 }

@@ -409,6 +409,29 @@ pub async fn record_clone(db: &Db, repo: &str, path: &std::path::Path, size: u64
     Ok(())
 }
 
+/// Persist the user-visible scope and wall time of the last successful run.
+/// The aggregate/head transaction remains the correctness boundary; this is
+/// operational metadata used for honest progress estimates and coverage copy.
+pub async fn record_analysis_details(
+    db: &Db,
+    repo: &str,
+    duration_ms: i64,
+    scope_commits: usize,
+    truncated: bool,
+) -> Result<()> {
+    sqlx::query(
+        "UPDATE repo_history SET analysis_duration_ms = $1, analysis_scope_commits = $2, \
+         analysis_truncated = $3 WHERE repo = $4",
+    )
+    .bind(duration_ms.max(0))
+    .bind(i64::try_from(scope_commits).unwrap_or(i64::MAX))
+    .bind(truncated)
+    .bind(repo)
+    .execute(&db.pool)
+    .await?;
+    Ok(())
+}
+
 /// Eviction pass. Sorts repos by `score = bytes / max(1, days_idle)` and
 /// removes biggest+stalest clones until we're under the high-watermark.
 /// Run after every analysis (cheap when nothing's near full).

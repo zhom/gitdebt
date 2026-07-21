@@ -47,6 +47,25 @@ pub fn footer_lockup(right_x: f32, baseline_y: f32, theme: &Theme) -> String {
     )
 }
 
+/// Add a transparent full-surface link to the public site. Rasterizers ignore
+/// the link semantics and zero-opacity rectangle, while directly opened SVGs
+/// remain attributable and navigable from any generated media surface.
+pub fn with_site_link(mut svg: String) -> String {
+    if svg.contains("data-gitdebt-surface-link=\"true\"") {
+        return svg;
+    }
+    let link = concat!(
+        "  <a data-gitdebt-surface-link=\"true\" href=\"https://gitdebt.com\" ",
+        "target=\"_blank\" rel=\"noopener\" aria-label=\"Open gitdebt.com\">",
+        "<rect width=\"100%\" height=\"100%\" fill=\"#ffffff\" fill-opacity=\"0\" ",
+        "pointer-events=\"all\" /></a>\n"
+    );
+    if let Some(index) = svg.rfind("</svg>") {
+        svg.insert_str(index, link);
+    }
+    svg
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -73,5 +92,13 @@ mod tests {
         assert!(footer.contains("https://gitdebt.com"));
         assert!(footer.contains("data-gitdebt-logo=\"true\""));
         assert!(footer.contains(">gitdebt</text>"));
+    }
+
+    #[test]
+    fn site_link_is_full_surface_and_idempotent() {
+        let linked = with_site_link("<svg><rect /></svg>".to_string());
+        assert!(linked.contains("data-gitdebt-surface-link=\"true\""));
+        assert!(linked.contains("href=\"https://gitdebt.com\""));
+        assert_eq!(with_site_link(linked.clone()), linked);
     }
 }

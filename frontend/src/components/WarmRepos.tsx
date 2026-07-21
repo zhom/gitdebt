@@ -151,10 +151,12 @@ export function WarmRepos({
   repos: string[];
 }) {
   useEffect(() => {
-    warmRepos(apiBase, repos);
+    const allowed = new Set(normalizeRepos(repos));
 
     function prioritize(event: Event) {
-      const targeted = reposFromTarget(event.target);
+      const targeted = reposFromTarget(event.target).filter((repo) =>
+        allowed.has(repo.toLowerCase()),
+      );
       if (targeted.length > 0) warmRepos(apiBase, targeted, true);
     }
 

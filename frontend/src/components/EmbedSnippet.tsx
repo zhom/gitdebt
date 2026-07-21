@@ -1,7 +1,14 @@
-import { useState } from "react";
-import { ChevronDown } from "lucide-react";
+import { useEffect, useRef, useState } from "react";
+import { ChevronDown, Code2 } from "lucide-react";
+import { AnimatePresence, motion, useReducedMotion } from "motion/react";
 
 import { CopyButton } from "@/components/CopyButton";
+import {
+  DURATION,
+  EASE_OUT,
+  REDUCED_MOTION_DURATION,
+} from "@/lib/motion";
+import { MEDIA_RENDER_REVISION } from "@/lib/media";
 
 export type EmbedState = {
   type?: "date" | "timeline";
@@ -16,6 +23,7 @@ type Props = {
   linkHref: string;
   label: string;
   state?: EmbedState;
+  variant?: "panel" | "menu";
 };
 
 type Mode = "markdown" | "html";
@@ -64,10 +72,39 @@ function withRef(href: string, ref: string): string {
   return href + (href.includes("?") ? "&" : "?") + `ref=${ref}`;
 }
 
-export function EmbedSnippet({ apiBase, chartPath, linkHref, label, state }: Props) {
+export function EmbedSnippet({
+  apiBase,
+  chartPath,
+  linkHref,
+  label,
+  state,
+  variant = "panel",
+}: Props) {
   const [mode, setMode] = useState<Mode>("markdown");
   const [format, setFormat] = useState<Format>("svg");
   const [theme, setTheme] = useState<ThemeChoice>("auto");
+  const [open, setOpen] = useState(false);
+  const rootRef = useRef<HTMLDivElement>(null);
+  const triggerRef = useRef<HTMLButtonElement>(null);
+  const reduceMotion = useReducedMotion();
+
+  useEffect(() => {
+    if (!open || variant !== "menu") return;
+    function closeOnOutside(event: PointerEvent) {
+      if (!rootRef.current?.contains(event.target as Node)) setOpen(false);
+    }
+    function closeOnEscape(event: KeyboardEvent) {
+      if (event.key !== "Escape") return;
+      setOpen(false);
+      triggerRef.current?.focus();
+    }
+    window.addEventListener("pointerdown", closeOnOutside);
+    window.addEventListener("keydown", closeOnEscape);
+    return () => {
+      window.removeEventListener("pointerdown", closeOnOutside);
+      window.removeEventListener("keydown", closeOnEscape);
+    };
+  }, [open, variant]);
 
   const supportsGif =
     /^\/api\/repos\/[^/]+\/[^/]+\/chart\.svg(?:\?|$)/.test(chartPath);
@@ -84,7 +121,7 @@ export function EmbedSnippet({ apiBase, chartPath, linkHref, label, state }: Pro
         : [];
   const base = appendParams(
     `${apiBase}${withFormat(chartPath, selectedFormat)}`,
-    [...stateParams(state), ...formatParams],
+    [...stateParams(state), ...formatParams, `render=${MEDIA_RENDER_REVISION}`],
   );
   const lightUrl = appendParams(base, ["theme=light"]);
   const darkUrl = appendParams(base, ["theme=dark"]);
@@ -115,6 +152,127 @@ export function EmbedSnippet({ apiBase, chartPath, linkHref, label, state }: Pro
         : "text-muted-foreground hover:bg-accent/60 hover:text-accent-foreground"
     }`;
 
+  const controls = (
+    <div className="flex flex-wrap items-center gap-3">
+      <div className="grid grid-cols-1">
+        <select
+          name="theme"
+          value={theme}
+          onChange={(e) => setTheme(e.target.value as ThemeChoice)}
+          aria-label="Embed theme"
+          className="col-start-1 row-start-1 min-h-11 appearance-none rounded-md border border-input bg-background py-2 pr-8 pl-3 font-mono text-base text-foreground outline-none focus-visible:outline-2 focus-visible:-outline-offset-1 focus-visible:outline-ring sm:min-h-0 sm:py-1 sm:pr-7 sm:pl-2 sm:text-xs"
+        >
+          {THEMES.map((t) => (
+            <option key={t.id} value={t.id}>
+              {t.label}
+            </option>
+          ))}
+        </select>
+        <ChevronDown
+          className="pointer-events-none col-start-1 row-start-1 mr-2 size-3.5 self-center justify-self-end text-muted-foreground"
+          strokeWidth={2}
+          aria-hidden="true"
+        />
+      </div>
+      <div className="flex items-center gap-1" role="group" aria-label="Image format">
+        {formats.map((f) => (
+          <button
+            key={f}
+            type="button"
+            aria-pressed={selectedFormat === f}
+            onClick={() => setFormat(f)}
+            className={tabClass(selectedFormat === f)}
+          >
+            {f}
+          </button>
+        ))}
+      </div>
+      <div className="flex items-center gap-1" role="group" aria-label="Embed format">
+        <button
+          type="button"
+          aria-pressed={mode === "markdown"}
+          onClick={() => setMode("markdown")}
+          className={tabClass(mode === "markdown")}
+        >
+          Markdown
+        </button>
+        <button
+          type="button"
+          aria-pressed={mode === "html"}
+          onClick={() => setMode("html")}
+          className={tabClass(mode === "html")}
+        >
+          HTML
+        </button>
+      </div>
+    </div>
+  );
+
+  const snippetBody = (
+    <>
+      <div className="relative border-t border-border">
+        <pre className="max-h-48 overflow-auto px-5 py-4 pr-24 font-mono text-xs leading-relaxed text-foreground">
+          <code>{snippet}</code>
+        </pre>
+        <CopyButton
+          value={snippet}
+          ariaLabel="Copy embed snippet"
+          className="absolute top-3 right-3 inline-flex min-h-11 items-center gap-1.5 rounded-md border border-border bg-background/95 px-3 py-2 font-mono text-base text-muted-foreground backdrop-blur hover:bg-accent hover:text-accent-foreground sm:min-h-0 sm:px-2.5 sm:py-1 sm:text-xs"
+          idleLabel="Copy"
+        />
+      </div>
+      {selectedFormat === "gif" && (
+        <p className="border-t border-border px-5 py-3 text-sm text-pretty text-muted-foreground">
+          GIF draws once and uses more bandwidth. Auto emits separate light and dark assets.
+        </p>
+      )}
+    </>
+  );
+
+  if (variant === "menu") {
+    return (
+      <div ref={rootRef} className="relative ml-auto">
+        <button
+          ref={triggerRef}
+          type="button"
+          aria-expanded={open}
+          onClick={() => setOpen((value) => !value)}
+          className="inline-flex min-h-11 items-center gap-2 rounded-md border border-border bg-background px-3 py-2 font-mono text-sm text-foreground shadow-sm transition-colors duration-150 hover:bg-accent focus-visible:outline-2 focus-visible:outline-offset-2 focus-visible:outline-ring sm:min-h-0 sm:text-xs"
+        >
+          <Code2 className="size-4" strokeWidth={1.75} aria-hidden="true" />
+          Add to README
+          <ChevronDown
+            className={`size-3.5 text-muted-foreground transition-transform duration-150 motion-reduce:transition-none ${open ? "rotate-180" : ""}`}
+            aria-hidden="true"
+          />
+        </button>
+        <AnimatePresence>
+          {open && (
+            <motion.div
+              initial={{ opacity: 0, y: reduceMotion ? 0 : -4, scale: reduceMotion ? 1 : 0.98 }}
+              animate={{ opacity: 1, y: 0, scale: 1 }}
+              exit={{ opacity: 0, y: reduceMotion ? 0 : -3, scale: reduceMotion ? 1 : 0.985 }}
+              transition={{
+                duration: reduceMotion ? REDUCED_MOTION_DURATION : DURATION.enter,
+                ease: EASE_OUT,
+              }}
+              className="absolute top-[calc(100%+0.65rem)] right-0 z-40 w-[min(42rem,calc(100vw-3rem))] origin-top-right overflow-hidden rounded-xl border border-border bg-card text-left shadow-xl"
+            >
+              <div className="space-y-3 px-5 py-4">
+                <div>
+                  <p className="text-sm font-semibold text-foreground">Put this media in your GitHub README</p>
+                  <p className="mt-1 text-sm text-muted-foreground">Choose a format, copy the snippet, then paste it into README.md.</p>
+                </div>
+                {controls}
+              </div>
+              {snippetBody}
+            </motion.div>
+          )}
+        </AnimatePresence>
+      </div>
+    );
+  }
+
   return (
     <figure className="card-panel overflow-hidden">
       <figcaption className="flex flex-wrap items-center justify-between gap-3 border-b border-border bg-muted/40 px-5 py-3">
@@ -122,77 +280,9 @@ export function EmbedSnippet({ apiBase, chartPath, linkHref, label, state }: Pro
           <span className="size-1.5 shrink-0 rounded-full bg-signal" aria-hidden="true" />
           Embed
         </div>
-        <div className="flex flex-wrap items-center gap-3">
-          <div className="grid grid-cols-1">
-            <select
-              name="theme"
-              value={theme}
-              onChange={(e) => setTheme(e.target.value as ThemeChoice)}
-              aria-label="Embed theme"
-              className="col-start-1 row-start-1 min-h-11 appearance-none rounded-md border border-input bg-background py-2 pr-8 pl-3 font-mono text-base text-foreground outline-none focus-visible:outline-2 focus-visible:-outline-offset-1 focus-visible:outline-ring sm:min-h-0 sm:py-1 sm:pr-7 sm:pl-2 sm:text-xs"
-            >
-              {THEMES.map((t) => (
-                <option key={t.id} value={t.id}>
-                  {t.label}
-                </option>
-              ))}
-            </select>
-            <ChevronDown
-              className="pointer-events-none col-start-1 row-start-1 mr-2 size-3.5 self-center justify-self-end text-muted-foreground"
-              strokeWidth={2}
-              aria-hidden="true"
-            />
-          </div>
-          <div className="flex items-center gap-1" role="group" aria-label="Image format">
-            {formats.map((f) => (
-              <button
-                key={f}
-                type="button"
-                aria-pressed={selectedFormat === f}
-                onClick={() => setFormat(f)}
-                className={tabClass(selectedFormat === f)}
-              >
-                {f}
-              </button>
-            ))}
-          </div>
-          <div className="flex items-center gap-1" role="group" aria-label="Embed format">
-            <button
-              type="button"
-              aria-pressed={mode === "markdown"}
-              onClick={() => setMode("markdown")}
-              className={tabClass(mode === "markdown")}
-            >
-              Markdown
-            </button>
-            <button
-              type="button"
-              aria-pressed={mode === "html"}
-              onClick={() => setMode("html")}
-              className={tabClass(mode === "html")}
-            >
-              HTML
-            </button>
-          </div>
-        </div>
+        {controls}
       </figcaption>
-
-      <div className="relative">
-        <pre className="overflow-x-auto px-5 py-4 font-mono text-sm leading-relaxed text-foreground">
-          <code>{snippet}</code>
-        </pre>
-        <CopyButton
-          value={snippet}
-          ariaLabel="Copy embed snippet"
-          className="absolute top-3 right-3 inline-flex min-h-11 items-center gap-1.5 rounded-md border border-border bg-background/90 px-3 py-2 font-mono text-base text-muted-foreground backdrop-blur hover:bg-accent hover:text-accent-foreground sm:min-h-0 sm:px-2.5 sm:py-1 sm:text-xs"
-        />
-      </div>
-      {selectedFormat === "gif" && (
-        <p className="border-t border-border px-5 py-3 text-base text-pretty text-muted-foreground sm:text-sm">
-          GIF is the animated README option and uses more bandwidth. It plays
-          the chart draw once; Auto emits separate light and dark assets.
-        </p>
-      )}
+      {snippetBody}
     </figure>
   );
 }

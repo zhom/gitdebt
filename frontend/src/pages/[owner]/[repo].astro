@@ -11,7 +11,7 @@ import SiteHeader from "@/components/SiteHeader.astro";
 import SiteFooter from "@/components/SiteFooter.astro";
 import { RepoHero } from "@/components/RepoHero";
 import { ChartViewer } from "@/components/ChartViewer";
-import { ReportShare } from "@/components/ReportShare";
+import { SecondarySignals } from "@/components/LiveRepoReport";
 import { StatCard } from "@/components/StatCard";
 import { UsageSection, type UsageResponse } from "@/components/UsageSection";
 import { WarmRepos } from "@/components/WarmRepos";
@@ -76,7 +76,7 @@ async function fetchAnalysis() {
   for (let attempt = 0; attempt < maxAttempts; attempt += 1) {
     try {
       const response = await fetch(
-        `${apiBase}/api/repos/${owner}/${repo}/analyze`,
+        `${apiBase}/api/repos/${owner}/${repo}/analyze?enqueue=0`,
         {
           headers: { accept: "application/json" },
           signal: AbortSignal.timeout(5_000),
@@ -155,15 +155,6 @@ if (
       fetchError ?? "missing analysis data"
     }`,
   );
-}
-
-if (!repoNotFound) {
-  try {
-    await fetch(`${apiBase}/api/repos/${owner}/${repo}/analyze-history`, {
-      method: "POST",
-      signal: AbortSignal.timeout(2_000),
-    });
-  } catch {}
 }
 
 const repoSlug = `${owner}/${repo}`;
@@ -328,7 +319,7 @@ const stats = [
   {
     name: "top-files",
     label: "Most-changed files",
-    desc: "Files with the most commits all-time",
+    desc: "Files with the most commits in the analyzed window",
   },
   {
     name: "contributors",
@@ -368,7 +359,6 @@ const primaryStatNames = new Set([
   "commit-trend",
 ]);
 const primaryStats = stats.filter((stat) => primaryStatNames.has(stat.name));
-const secondaryStats = stats.filter((stat) => !primaryStatNames.has(stat.name));
 
 const repoCategories = categoriesForRepo(repoSlug);
 const categoryRelated = relatedRepos(repoSlug, 6);
@@ -418,14 +408,6 @@ const vsLinks = (categoryRelated.length > 0 ? categoryRelated : FALLBACK_SUGGEST
           initialData={data}
         />
 
-        <ReportShare
-          client:load
-          owner={owner}
-          repo={repo}
-          apiBase={apiBase}
-          pageUrl={canonical}
-        />
-
         <ChartViewer
           client:load
           apiBase={apiBase}
@@ -434,6 +416,8 @@ const vsLinks = (categoryRelated.length > 0 ? categoryRelated : FALLBACK_SUGGEST
           caption={archiveHistory ? "Approximate public star activity" : "Cumulative star history"}
           priority={true}
           liveRepo={repoSlug}
+          embedLink={canonical}
+          label={repoSlug}
         />
 
         {faqs.length > 0 && (
@@ -496,33 +480,20 @@ const vsLinks = (categoryRelated.length > 0 ? categoryRelated : FALLBACK_SUGGEST
                 src={`${apiBase}/api/repos/${owner}/${repo}/stats/${s.name}.svg`}
                 alt={`${s.label} for ${repoSlug}`}
                 caption={s.label}
+                apiBase={apiBase}
+                embedLink={canonical}
                 priority={true}
                 liveRepo={repoSlug}
               />
             ))}
           </div>
-          <details class="group border-y border-border">
-            <summary class="flex min-h-14 cursor-pointer list-none items-center justify-between gap-4 py-3 text-sm font-medium focus-visible:outline-2 focus-visible:-outline-offset-2 focus-visible:outline-ring [&::-webkit-details-marker]:hidden">
-              Four more repository signals
-              <span
-                class="font-mono text-lg text-muted-foreground transition-transform duration-150 group-open:rotate-45 motion-reduce:transition-none"
-                aria-hidden="true"
-              >
-                +
-              </span>
-            </summary>
-            <div class="grid gap-6 border-t border-border py-5 sm:grid-cols-2">
-              {secondaryStats.map((s) => (
-                <StatCard
-                  client:visible
-                  src={`${apiBase}/api/repos/${owner}/${repo}/stats/${s.name}.svg`}
-                  alt={`${s.label} for ${repoSlug}`}
-                  caption={s.label}
-                  liveRepo={repoSlug}
-                />
-              ))}
-            </div>
-          </details>
+          <SecondarySignals
+            client:visible
+            apiBase={apiBase}
+            repoBase={`${apiBase}/api/repos/${owner}/${repo}`}
+            slug={repoSlug}
+            embedLink={canonical}
+          />
         </section>
 
         <section class="space-y-6">

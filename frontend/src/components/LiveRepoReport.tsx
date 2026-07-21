@@ -1,10 +1,11 @@
-import { useMemo } from "react";
+import { useMemo, useState } from "react";
+import { AnimatePresence, motion, useReducedMotion } from "motion/react";
 
 import { ChartViewer } from "@/components/ChartViewer";
-import { ReportShare } from "@/components/ReportShare";
 import { RepoHero } from "@/components/RepoHero";
 import { StatCard } from "@/components/StatCard";
 import { UsageSection } from "@/components/UsageSection";
+import { DURATION, EASE_OUT, REDUCED_MOTION_DURATION } from "@/lib/motion";
 
 const SLUG_RE = /^([A-Za-z0-9._-]+)\/([A-Za-z0-9._-]+)$/;
 
@@ -28,6 +29,68 @@ function selectedRepo(): { owner: string; repo: string } | null {
   const match = raw.trim().match(SLUG_RE);
   if (!match) return null;
   return { owner: match[1].toLowerCase(), repo: match[2].toLowerCase() };
+}
+
+export function SecondarySignals({
+  apiBase,
+  repoBase,
+  slug,
+  embedLink,
+}: {
+  apiBase: string;
+  repoBase: string;
+  slug: string;
+  embedLink: string;
+}) {
+  const [open, setOpen] = useState(false);
+  const reduceMotion = useReducedMotion();
+
+  return (
+    <div className="border-y border-border">
+      <button
+        type="button"
+        aria-expanded={open}
+        onClick={() => setOpen((value) => !value)}
+        className="flex min-h-14 w-full items-center justify-between gap-4 px-5 py-3 text-left text-sm font-medium focus-visible:outline-2 focus-visible:-outline-offset-2 focus-visible:outline-ring"
+      >
+        Four more repository signals
+        <span
+          className={`font-mono text-lg text-muted-foreground transition-transform duration-150 motion-reduce:transition-none ${open ? "rotate-45" : ""}`}
+          aria-hidden="true"
+        >
+          +
+        </span>
+      </button>
+      <AnimatePresence initial={false}>
+        {open && (
+          <motion.div
+            initial={{ height: 0, opacity: 0 }}
+            animate={{ height: "auto", opacity: 1 }}
+            exit={{ height: 0, opacity: 0 }}
+            transition={{
+              duration: reduceMotion ? REDUCED_MOTION_DURATION : DURATION.enter,
+              ease: EASE_OUT,
+            }}
+            className="overflow-hidden border-t border-border"
+          >
+            <div className="grid gap-5 py-5 lg:grid-cols-2">
+              {SECONDARY_STATS.map(([name, label]) => (
+                <StatCard
+                  key={name}
+                  src={`${repoBase}/stats/${name}.svg`}
+                  alt={`${label} for ${slug}`}
+                  caption={label}
+                  apiBase={apiBase}
+                  embedLink={embedLink}
+                  liveRepo={slug}
+                />
+              ))}
+            </div>
+          </motion.div>
+        )}
+      </AnimatePresence>
+    </div>
+  );
 }
 
 export function LiveRepoReport({ apiBase }: { apiBase: string }) {
@@ -55,6 +118,7 @@ export function LiveRepoReport({ apiBase }: { apiBase: string }) {
   const { owner, repo } = selected;
   const slug = `${owner}/${repo}`;
   const repoBase = `${apiBase}/api/repos/${owner}/${repo}`;
+  const embedLink = `https://gitdebt.com/${slug}`;
 
   return (
     <div className="space-y-14">
@@ -65,8 +129,6 @@ export function LiveRepoReport({ apiBase }: { apiBase: string }) {
         initialData={null}
       />
 
-      <ReportShare owner={owner} repo={repo} apiBase={apiBase} />
-
       <ChartViewer
         apiBase={apiBase}
         path={`/api/repos/${owner}/${repo}/chart.svg`}
@@ -74,6 +136,8 @@ export function LiveRepoReport({ apiBase }: { apiBase: string }) {
         caption="Cumulative star activity"
         priority
         liveRepo={slug}
+        embedLink={embedLink}
+        label={slug}
       />
 
       <section className="space-y-6">
@@ -97,33 +161,19 @@ export function LiveRepoReport({ apiBase }: { apiBase: string }) {
               src={`${repoBase}/stats/${name}.svg`}
               alt={`${label} for ${slug}`}
               caption={label}
+              apiBase={apiBase}
+              embedLink={embedLink}
               priority
               liveRepo={slug}
             />
           ))}
         </div>
-        <details className="group border-y border-border">
-          <summary className="flex min-h-14 cursor-pointer list-none items-center justify-between gap-4 px-5 py-3 text-sm font-medium focus-visible:outline-2 focus-visible:-outline-offset-2 focus-visible:outline-ring [&::-webkit-details-marker]:hidden">
-            Four more repository signals
-            <span
-              className="font-mono text-lg text-muted-foreground transition-transform duration-150 group-open:rotate-45 motion-reduce:transition-none"
-              aria-hidden="true"
-            >
-              +
-            </span>
-          </summary>
-          <div className="grid gap-5 border-t border-border py-5 lg:grid-cols-2">
-            {SECONDARY_STATS.map(([name, label]) => (
-              <StatCard
-                key={name}
-                src={`${repoBase}/stats/${name}.svg`}
-                alt={`${label} for ${slug}`}
-                caption={label}
-                liveRepo={slug}
-              />
-            ))}
-          </div>
-        </details>
+        <SecondarySignals
+          apiBase={apiBase}
+          repoBase={repoBase}
+          slug={slug}
+          embedLink={embedLink}
+        />
       </section>
 
       <section className="space-y-6">

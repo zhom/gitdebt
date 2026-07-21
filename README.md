@@ -167,8 +167,9 @@ GH_ARCHIVE_ENABLED=1
 GH_ARCHIVE_BIGQUERY_PROJECT=your-google-cloud-project
 GOOGLE_APPLICATION_CREDENTIALS=/run/secrets/gitdebt-bigquery.json
 GH_ARCHIVE_BIGQUERY_LOCATION=US
-GH_ARCHIVE_MAX_BYTES_BILLED=50000000000
-GH_ARCHIVE_BATCH_SIZE=1000
+GH_ARCHIVE_MAX_BYTES_BILLED=500000000000
+GH_ARCHIVE_MAX_EVENTS=1000000
+GH_ARCHIVE_BATCH_SIZE=5000
 GH_ARCHIVE_CONCURRENCY=1
 GH_ARCHIVE_HOURLY_LAG_MINUTES=15
 GH_ARCHIVE_HOURLY_MAX_HOURS=24
@@ -204,6 +205,14 @@ If the new key fails immediately after creation, wait at least 60 seconds and
 retry. A successful backend start logs
 `GH Archive historical coordinator and hourly follower started`.
 `GH_ARCHIVE_MAX_BYTES_BILLED` is a hard per-query cost guard.
+
+For sustained operation, `GH_ARCHIVE_SOURCE_TABLE` may point at an independently
+provisioned, time-partitioned WatchEvent index with `github_repo_id`,
+`repository`, `lower_repository`, `source_event_id`, and `created_at` columns.
+The index needs only repository identity, the opaque event ID required for
+idempotency, and the star timestamp. BigQuery is the acquisition/index layer;
+completed repository series are still written transactionally to the server's
+Postgres volume and all public read surfaces use Postgres.
 
 Deploy the backend with the repository-root `Dockerfile`. Dokploy environment
 variables are runtime configuration; do not mirror them into Docker build

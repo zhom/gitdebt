@@ -8,6 +8,8 @@ import SiteHeader from "@/components/SiteHeader.astro";
 import SiteFooter from "@/components/SiteFooter.astro";
 import { ChartViewer } from "@/components/ChartViewer";
 import { EmbedSnippet } from "@/components/EmbedSnippet";
+import { LiveUserProfile } from "@/components/LiveUserProfile";
+import { MEDIA_RENDER_REVISION } from "@/lib/media";
 import { firstStarYear, gainedInTrailingDays } from "@/lib/star-insights";
 
 export async function getStaticPaths() {
@@ -38,7 +40,7 @@ type UserAnalyze = {
 let data: UserAnalyze | null = null;
 let fetchError: string | null = null;
 try {
-  const res = await fetch(`${apiBase}/api/users/${login}/analyze`, {
+  const res = await fetch(`${apiBase}/api/users/${login}/analyze?enqueue=0`, {
     headers: { accept: "application/json" },
     signal: AbortSignal.timeout(5_000),
   });
@@ -197,12 +199,7 @@ const jsonLd: Record<string, unknown>[] = [
             </p>
           </header>
         ) : (
-          <div class="card-panel p-6" role="alert">
-            <p class="font-mono text-xs tracking-wide text-destructive uppercase">Error</p>
-            <p class="mt-1.5 text-base text-muted-foreground sm:text-sm">
-              Profile data is temporarily unavailable. Try again in a moment.
-            </p>
-          </div>
+          <LiveUserProfile client:load apiBase={apiBase} login={login} />
         )}
 
         {data && (
@@ -219,30 +216,33 @@ const jsonLd: Record<string, unknown>[] = [
 
         {data && (
           <section class="space-y-4">
-            <header class="space-y-1">
-              <h2 class="flex items-center gap-2 text-xl font-semibold tracking-tight">
-                <span class="size-1.5 shrink-0 rounded-full bg-signal" aria-hidden="true"></span>
-                README profile card
-              </h2>
-              <p class="max-w-[60ch] text-base text-pretty text-muted-foreground sm:text-sm">
-                A compact stats card for {login}'s GitHub profile README — stars,
-                forks, tracked repos and recent activity, rendered from cached data.
-              </p>
+            <header class="flex flex-wrap items-start justify-between gap-4">
+              <div class="space-y-1">
+                <h2 class="flex items-center gap-2 text-xl font-semibold tracking-tight">
+                  <span class="size-1.5 shrink-0 rounded-full bg-signal" aria-hidden="true"></span>
+                  README profile card
+                </h2>
+                <p class="max-w-[60ch] text-base text-pretty text-muted-foreground sm:text-sm">
+                  A gitdebt-native maintainer footprint with stars, commits,
+                  tracked repositories, and analysis coverage.
+                </p>
+              </div>
+              <EmbedSnippet
+                client:visible
+                apiBase={apiBase}
+                chartPath={`/api/users/${login}/card.svg`}
+                linkHref={canonical}
+                label={`${login}'s profile card`}
+                variant="menu"
+              />
             </header>
             <div class="flex justify-center border-y border-border py-6">
               <img
-                src={`${apiBase}/api/users/${login}/card.svg?theme=light`}
+                src={`${apiBase}/api/users/${login}/card.svg?theme=light&render=${MEDIA_RENDER_REVISION}`}
                 alt={`gitdebt profile stats card for ${login}`}
                 loading="lazy"
               />
             </div>
-            <EmbedSnippet
-              client:visible
-              apiBase={apiBase}
-              chartPath={`/api/users/${login}/card.svg`}
-              linkHref={canonical}
-              label={`${login}'s profile card`}
-            />
           </section>
         )}
 

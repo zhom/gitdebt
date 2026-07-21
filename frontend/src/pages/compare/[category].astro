@@ -47,7 +47,7 @@ type AnalyzeResponse = {
 
 const results = await Promise.allSettled(
   category.repos.map(async (slug) => {
-    const res = await fetch(`${apiBase}/api/repos/${slug}/analyze`, {
+    const res = await fetch(`${apiBase}/api/repos/${slug}/analyze?enqueue=0`, {
       headers: { accept: "application/json" },
       signal: AbortSignal.timeout(5_000),
     });

@@ -217,6 +217,7 @@ pub fn router(state: ApiState) -> Router {
         .route("/api/repos/{owner}/{repo}/stars.json", get(stars_json))
         .route("/api/users/{login}/analyze", get(user_analyze))
         .route("/api/leaderboard.json", get(leaderboard_json))
+        .route("/api/activity.json", get(platform_activity))
         .route("/api/sitemap/repos", get(sitemap_repos))
         .layer(GovernorLayer::new(analyze_governor.clone()));
 
@@ -330,12 +331,15 @@ pub fn router(state: ApiState) -> Router {
         .merge(crate::repo_endpoints::mutating_router())
         .layer(GovernorLayer::new(governor_conf))
         .layer(
-            CorsLayer::new().allow_methods([Method::POST]).allow_origin(
-                state
-                    .frontend_origin
-                    .parse::<HeaderValue>()
-                    .expect("PUBLIC_FRONTEND_ORIGIN must be a valid origin URL"),
-            ),
+            CorsLayer::new()
+                .allow_methods([Method::POST])
+                .allow_origin(
+                    state
+                        .frontend_origin
+                        .parse::<HeaderValue>()
+                        .expect("PUBLIC_FRONTEND_ORIGIN must be a valid origin URL"),
+                )
+                .allow_credentials(true),
         );
 
     let timed = Router::new()
@@ -634,6 +638,7 @@ async fn queue_depth_by_status(
 async fn analyze(
     State(state): State<ApiState>,
     Path((owner, repo)): Path<(String, String)>,
+    Query(query): Query<AnalyzeQuery>,
 ) -> Result<impl IntoResponse, ApiError> {
     if !is_valid_slug(&owner) || !is_valid_slug(&repo) {
         return Err(ApiError::bad_request("invalid owner/repo"));
@@ -644,7 +649,12 @@ async fn analyze(
     let owner = owner.to_ascii_lowercase();
     let repo = repo.to_ascii_lowercase();
     let key = format!("{owner}/{repo}");
-    let (json, live) = if let Some(json) = state.analyze_cache.get(&key).await {
+    let enqueue = query.enqueue != Some(0);
+    let (json, live) = if !enqueue {
+        let result = crate::analyzer::analyze_repo_readonly(&owner, &repo, &state.analyzer).await?;
+        let live = result.pending || result.backfilling;
+        (serde_json::to_string(&result)?, live)
+    } else if let Some(json) = state.analyze_cache.get(&key).await {
         (json, false)
     } else {
         let result = analyze_repo(&owner, &repo, &state.analyzer).await?;
@@ -662,6 +672,11 @@ async fn analyze(
     );
     headers.insert(header::CACHE_CONTROL, analyze_cache_control(live));
     Ok((headers, json))
+}
+
+#[derive(Debug, Default, Deserialize)]
+struct AnalyzeQuery {
+    enqueue: Option<u8>,
 }
 
 fn analyze_cache_control(live: bool) -> HeaderValue {
@@ -849,16 +864,24 @@ fn map_aggregate_err(e: aggregate::AggregateError) -> ApiError {
 async fn user_analyze(
     State(state): State<ApiState>,
     Path(login): Path<String>,
+    Query(query): Query<AnalyzeQuery>,
 ) -> Result<impl IntoResponse, ApiError> {
     if !aggregate::is_valid_login(&login) {
         return Err(ApiError::bad_request("invalid login"));
     }
-    let key = format!("user:{}", login.to_ascii_lowercase());
-    let json = single_flight(&state.analyze_cache, key, async {
-        let agg = build_user_aggregate(&state, &login).await?;
-        Ok(serde_json::to_string(&agg.to_json())?)
-    })
-    .await?;
+    let json = if query.enqueue == Some(0) {
+        let agg = aggregate::build_readonly(&state.analyzer, &login)
+            .await
+            .map_err(map_aggregate_err)?;
+        serde_json::to_string(&agg.to_json())?
+    } else {
+        let key = format!("user:{}", login.to_ascii_lowercase());
+        single_flight(&state.analyze_cache, key, async {
+            let agg = build_user_aggregate(&state, &login).await?;
+            Ok(serde_json::to_string(&agg.to_json())?)
+        })
+        .await?
+    };
     let mut headers = HeaderMap::new();
     headers.insert(
         header::CONTENT_TYPE,
@@ -2867,7 +2890,7 @@ fn card_svg_response(card: RenderedCard) -> (HeaderMap, String) {
         HeaderValue::from_static("image/svg+xml; charset=utf-8"),
     );
     headers.insert(header::CACHE_CONTROL, card_cache_control(card.short_ttl));
-    (headers, card.svg)
+    (headers, crate::brand::with_site_link(card.svg))
 }
 
 fn card_raster_response(
@@ -3616,6 +3639,45 @@ async fn leaderboard_json(
         HeaderValue::from_static("public, s-maxage=300, max-age=60"),
     );
     Ok((headers, json))
+}
+
+#[derive(Serialize)]
+struct PlatformActivityResponse {
+    repos: Vec<PlatformActivityItem>,
+}
+
+#[derive(Serialize)]
+struct PlatformActivityItem {
+    repo: String,
+    stars: i64,
+    views: i64,
+    viewed_at: DateTime<Utc>,
+    history_ready: bool,
+    analysis_ready: bool,
+}
+
+/// A short-lived, Postgres-only pulse of repositories people are actually
+/// opening on gitdebt. It reveals no viewer identity and performs no GitHub
+/// request, making it safe for a public landing-page surface.
+async fn platform_activity(State(state): State<ApiState>) -> Result<impl IntoResponse, ApiError> {
+    let rows = state.analyzer.cache.list_platform_activity(8).await?;
+    let repos = rows
+        .into_iter()
+        .map(|row| PlatformActivityItem {
+            repo: row.repo,
+            stars: row.stars,
+            views: row.views,
+            viewed_at: row.viewed_at,
+            history_ready: row.history_ready,
+            analysis_ready: row.analysis_ready,
+        })
+        .collect();
+    let mut headers = HeaderMap::new();
+    headers.insert(
+        header::CACHE_CONTROL,
+        HeaderValue::from_static("public, s-maxage=60, max-age=30"),
+    );
+    Ok((headers, Json(PlatformActivityResponse { repos })))
 }
 
 /// Rasterize `svg` on the blocking pool at the default chart scale

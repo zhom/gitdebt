@@ -24,6 +24,7 @@ use url::Url;
 
 use crate::api::ApiState;
 use crate::crypto::Crypto;
+use crate::db::Db;
 
 const GITHUB_AUTHORIZE_URL: &str = "https://github.com/login/oauth/authorize";
 const GITHUB_TOKEN_URL: &str = "https://github.com/login/oauth/access_token";
@@ -453,6 +454,28 @@ fn no_store(mut response: Response) -> Response {
 pub fn current_user_id(cfg: &GithubAppConfig, jar: &CookieJar) -> Option<i64> {
     let cookie = jar.get(SESSION_COOKIE)?;
     verify_session(&cfg.session_secret, cookie.value())
+}
+
+/// Decrypt a still-valid OAuth access token for an explicitly user-scoped
+/// request or queue job. Tokens never enter logs or durable work payloads;
+/// callers persist only the user id and load the credential just-in-time.
+pub async fn user_access_token(
+    db: &Db,
+    cfg: &GithubAppConfig,
+    user_id: i64,
+) -> anyhow::Result<Option<String>> {
+    let row: Option<(String, Option<DateTime<Utc>>)> =
+        sqlx::query_as("SELECT access_token, token_expires_at FROM app_users WHERE id = $1")
+            .bind(user_id)
+            .fetch_optional(&db.pool)
+            .await?;
+    let Some((encrypted, expires_at)) = row else {
+        return Ok(None);
+    };
+    if expires_at.is_some_and(|expiry| expiry <= Utc::now() + Duration::minutes(1)) {
+        return Ok(None);
+    }
+    Ok(Some(cfg.crypto.decrypt(&encrypted)?))
 }
 
 // Session cookie format:

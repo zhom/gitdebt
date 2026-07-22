@@ -238,7 +238,14 @@ const jsonLd: Record<string, unknown>[] = [
             </header>
             <div class="flex justify-center border-y border-border py-6">
               <img
+                class="theme-image-light"
                 src={`${apiBase}/api/users/${login}/card.svg?theme=light&render=${MEDIA_RENDER_REVISION}`}
+                alt={`gitdebt profile stats card for ${login}`}
+                loading="lazy"
+              />
+              <img
+                class="theme-image-dark"
+                src={`${apiBase}/api/users/${login}/card.svg?theme=dark&render=${MEDIA_RENDER_REVISION}`}
                 alt={`gitdebt profile stats card for ${login}`}
                 loading="lazy"
               />

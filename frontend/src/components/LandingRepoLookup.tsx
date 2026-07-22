@@ -41,11 +41,11 @@ export function LandingRepoLookup() {
 
   return (
     <div className="w-full">
-      <form onSubmit={submit} className="border-y border-black">
+      <form onSubmit={submit} className="border-y border-foreground">
         <div className="flex min-h-14 items-stretch sm:min-h-16">
           <label
             htmlFor="landing-repo"
-            className="flex shrink-0 items-center pl-4 font-mono text-sm text-zinc-500 sm:pl-5"
+            className="flex shrink-0 items-center pl-4 font-mono text-sm text-muted-foreground sm:pl-5"
           >
             github.com/
           </label>
@@ -62,11 +62,11 @@ export function LandingRepoLookup() {
             aria-label="GitHub repository, as owner/repo"
             aria-invalid={error ? true : undefined}
             aria-describedby={error ? "landing-repo-error" : undefined}
-            className="min-w-0 flex-1 bg-white px-1 py-3 font-mono text-base text-black outline-none placeholder:text-zinc-400 focus-visible:bg-zinc-50 sm:text-sm"
+            className="min-w-0 flex-1 bg-background px-1 py-3 font-mono text-base text-foreground outline-none placeholder:text-muted-foreground/65 focus-visible:bg-muted sm:text-sm"
           />
           <button
             type="submit"
-            className="group inline-flex min-h-14 shrink-0 items-center justify-center gap-2 bg-black px-4 text-sm font-medium text-white outline-none hover:bg-zinc-800 focus-visible:outline-2 focus-visible:outline-offset-2 focus-visible:outline-black sm:min-h-16 sm:px-6"
+            className="group inline-flex min-h-14 shrink-0 items-center justify-center gap-2 bg-primary px-4 text-sm font-medium text-primary-foreground outline-none hover:opacity-85 focus-visible:outline-2 focus-visible:outline-offset-2 focus-visible:outline-ring sm:min-h-16 sm:px-6"
           >
             <span className="hidden sm:inline">Analyze repository</span>
             <span className="sm:hidden">Analyze</span>
@@ -93,7 +93,7 @@ export function LandingRepoLookup() {
                 : DURATION.feedback,
               ease: EASE_OUT,
             }}
-            className="mt-2 text-sm text-black"
+            className="mt-2 text-sm text-foreground"
             role="alert"
           >
             {error}
@@ -102,7 +102,7 @@ export function LandingRepoLookup() {
       </AnimatePresence>
 
       <div className="mt-4 flex flex-wrap items-center gap-x-4 gap-y-2">
-        <p className="font-mono text-xs tracking-wide text-zinc-500 uppercase">
+        <p className="font-mono text-xs tracking-wide text-muted-foreground uppercase">
           Try
         </p>
         {EXAMPLES.map((example) => (
@@ -110,7 +110,7 @@ export function LandingRepoLookup() {
             key={example}
             type="button"
             onClick={() => chooseExample(example)}
-            className="min-h-11 border-b border-zinc-300 font-mono text-sm text-zinc-700 outline-none hover:border-black hover:text-black focus-visible:outline-2 focus-visible:outline-offset-4 focus-visible:outline-black sm:min-h-0"
+            className="min-h-11 border-b border-border font-mono text-sm text-muted-foreground outline-none hover:border-foreground hover:text-foreground focus-visible:outline-2 focus-visible:outline-offset-4 focus-visible:outline-ring sm:min-h-0"
           >
             {example}
           </button>

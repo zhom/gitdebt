@@ -1,150 +1,232 @@
-import { useRef, useState } from "react";
-import { motion, useInView, useReducedMotion } from "motion/react";
-import { RotateCcw } from "lucide-react";
+import { useEffect, useMemo, useState } from "react";
+import { Activity, ArrowUpRight, Eye, Star } from "lucide-react";
+import { AnimatePresence, motion, useReducedMotion } from "motion/react";
 
+import { MEDIA_RENDER_REVISION } from "@/lib/media";
 import {
   DURATION,
   EASE_OUT,
   REDUCED_MOTION_DURATION,
+  SPRING,
 } from "@/lib/motion";
+import { useRenderedTheme } from "@/lib/rendered-theme";
 
-const STEPS = [
-  {
-    source: "Star timestamps",
-    result: "Growth over time",
-    detail: "Calendar and equal-start views",
-  },
-  {
-    source: "Commit history",
-    result: "Maintenance pressure",
-    detail: "Churn, bug magnets, bus factor",
-  },
-  {
-    source: "Package registries",
-    result: "Adoption signal",
-    detail: "Downloads beside attention",
-  },
-];
+type LiveRepo = {
+  repo: string;
+  stars: number;
+  views: number;
+  viewed_at: string;
+  history_ready: boolean;
+  analysis_ready: boolean;
+};
 
-export function SignalFlowGraphic() {
-  const figureRef = useRef<HTMLElement>(null);
-  const inView = useInView(figureRef, { once: true, margin: "-15% 0px" });
+function formatNumber(value: number): string {
+  return new Intl.NumberFormat("en").format(value);
+}
+
+function viewedLabel(value: string): string {
+  const elapsed = Math.max(0, Date.now() - new Date(value).getTime());
+  const minutes = Math.floor(elapsed / 60_000);
+  if (minutes < 1) return "opened just now";
+  if (minutes < 60) return `opened ${minutes}m ago`;
+  const hours = Math.floor(minutes / 60);
+  return hours < 24 ? `opened ${hours}h ago` : `opened ${Math.floor(hours / 24)}d ago`;
+}
+
+export function SignalFlowGraphic({ apiBase }: { apiBase: string }) {
+  const [repos, setRepos] = useState<LiveRepo[]>([]);
+  const [index, setIndex] = useState(0);
+  const [paused, setPaused] = useState(false);
   const reduceMotion = useReducedMotion();
-  const [run, setRun] = useState(0);
-  const active = reduceMotion || inView;
+  const theme = useRenderedTheme();
+
+  useEffect(() => {
+    let active = true;
+    async function refresh() {
+      try {
+        const response = await fetch(`${apiBase}/api/activity.json`, {
+          cache: "no-store",
+          headers: { accept: "application/json" },
+        });
+        if (!response.ok) return;
+        const data = (await response.json()) as { repos?: LiveRepo[] };
+        if (active && Array.isArray(data.repos)) setRepos(data.repos.slice(0, 6));
+      } catch {
+        // The lookup remains the primary action if the live pulse is offline.
+      }
+    }
+    void refresh();
+    const timer = window.setInterval(refresh, 30_000);
+    return () => {
+      active = false;
+      window.clearInterval(timer);
+    };
+  }, [apiBase]);
+
+  useEffect(() => {
+    if (reduceMotion || paused || repos.length < 2) return;
+    const timer = window.setInterval(
+      () => setIndex((value) => (value + 1) % repos.length),
+      5_000,
+    );
+    return () => window.clearInterval(timer);
+  }, [paused, reduceMotion, repos.length]);
+
+  useEffect(() => {
+    if (index >= repos.length) setIndex(0);
+  }, [index, repos.length]);
+
+  const selected = repos[index];
+  const duration = reduceMotion ? REDUCED_MOTION_DURATION : DURATION.enter + 0.08;
+  const readySignals = useMemo(
+    () =>
+      selected
+        ? [selected.history_ready, selected.analysis_ready].filter(Boolean).length
+        : 0,
+    [selected],
+  );
 
   return (
     <figure
-      ref={figureRef}
-      className="w-full min-w-0 border-y border-black bg-white text-black"
-      aria-labelledby="signal-flow-caption"
+      className="w-full min-w-0 overflow-hidden border-y border-foreground bg-card text-card-foreground"
+      aria-labelledby="live-repo-caption"
+      onMouseEnter={() => setPaused(true)}
+      onMouseLeave={() => setPaused(false)}
+      onFocusCapture={() => setPaused(true)}
+      onBlurCapture={(event) => {
+        if (!event.currentTarget.contains(event.relatedTarget)) setPaused(false);
+      }}
     >
       <figcaption
-        id="signal-flow-caption"
-        className="flex min-h-14 items-center justify-between gap-4 border-b border-zinc-200 px-4 sm:px-5"
+        id="live-repo-caption"
+        className="flex min-h-14 items-center justify-between gap-4 border-b border-border px-4 sm:px-5"
       >
-        <p className="font-mono text-xs tracking-wide text-zinc-600 uppercase">
-          What one repository becomes
+        <p className="inline-flex items-center gap-2 font-mono text-xs tracking-wide text-muted-foreground uppercase">
+          <span className="relative flex size-2" aria-hidden="true">
+            <span className="absolute inline-flex size-full motion-safe:animate-ping rounded-full bg-emerald-500 opacity-35" />
+            <span className="relative inline-flex size-2 rounded-full bg-emerald-500" />
+          </span>
+          Live repository
         </p>
-        <button
-          type="button"
-          onClick={() => setRun((value) => value + 1)}
-          className="inline-flex min-h-11 items-center gap-2 text-sm text-zinc-600 outline-none hover:text-black focus-visible:outline-2 focus-visible:outline-offset-2 focus-visible:outline-black sm:min-h-0"
-        >
-          Replay
-          <RotateCcw className="size-3.5" strokeWidth={1.75} aria-hidden="true" />
-        </button>
+        <p className="font-mono text-xs text-muted-foreground">
+          {selected ? viewedLabel(selected.viewed_at) : "connecting…"}
+        </p>
       </figcaption>
 
-      <div className="px-4 py-6 sm:px-5 sm:py-8">
-        <div className="flex items-center justify-between gap-4 border-b border-black pb-4">
-          <p className="font-mono text-sm">facebook/react</p>
-          <p className="font-mono text-xs text-zinc-500">public inputs</p>
-        </div>
-
-        <div key={run} className="divide-y divide-zinc-200">
-          {STEPS.map((step, index) => {
-            const delay = reduceMotion ? 0 : index * 0.12;
-            return (
-              <div
-                key={step.source}
-                className="grid gap-3 py-5 sm:grid-cols-[0.8fr_4rem_1.2fr] sm:items-center"
-              >
-                <div>
-                  <p className="font-mono text-xs text-zinc-500">
-                    0{index + 1}
-                  </p>
-                  <p className="mt-1 text-sm font-medium">{step.source}</p>
+      <div className="min-h-[30rem] p-4 sm:p-5">
+        <AnimatePresence mode="wait" initial={false}>
+          {selected ? (
+            <motion.div
+              key={selected.repo}
+              initial={{ opacity: 0, x: reduceMotion ? 0 : 10 }}
+              animate={{ opacity: 1, x: 0 }}
+              exit={{ opacity: 0, x: reduceMotion ? 0 : -7 }}
+              transition={{ duration, ease: EASE_OUT }}
+            >
+              <div className="flex items-start justify-between gap-4 border-b border-foreground pb-4">
+                <div className="min-w-0">
+                  <p className="font-mono text-xs text-muted-foreground uppercase">Now inspecting</p>
+                  <p className="mt-1 truncate font-mono text-base font-medium">{selected.repo}</p>
                 </div>
-
-                <div className="relative hidden h-px overflow-hidden bg-zinc-200 sm:block">
-                  <motion.span
-                    initial={{ scaleX: reduceMotion ? 1 : 0 }}
-                    animate={{ scaleX: active ? 1 : 0 }}
-                    transition={{
-                      duration: reduceMotion
-                        ? REDUCED_MOTION_DURATION
-                        : DURATION.move + 0.16,
-                      delay,
-                      ease: EASE_OUT,
-                    }}
-                    className="absolute inset-0 origin-left bg-black"
+                <a
+                  href={`/${selected.repo}`}
+                  className="group inline-flex min-h-11 shrink-0 items-center gap-1.5 text-sm text-muted-foreground outline-none hover:text-foreground focus-visible:outline-2 focus-visible:outline-offset-2 focus-visible:outline-ring sm:min-h-0"
+                >
+                  Full report
+                  <ArrowUpRight
+                    className="size-3.5 transition-transform duration-150 group-hover:-translate-y-0.5 group-hover:translate-x-0.5 motion-reduce:transition-none"
                     aria-hidden="true"
                   />
-                </div>
-
-                <motion.div
-                  initial={
-                    run > 0
-                      ? {
-                          opacity: reduceMotion ? 1 : 0,
-                          x: reduceMotion ? 0 : -6,
-                        }
-                      : false
-                  }
-                  animate={{
-                    opacity: 1,
-                    x: 0,
-                  }}
-                  transition={{
-                    duration: reduceMotion
-                      ? REDUCED_MOTION_DURATION
-                      : DURATION.enter + 0.08,
-                    delay: delay + (reduceMotion ? 0 : 0.14),
-                    ease: EASE_OUT,
-                  }}
-                  className="border-l border-black pl-3 sm:border-l-0 sm:pl-0"
-                >
-                  <p className="text-sm font-medium">{step.result}</p>
-                  <p className="mt-1 text-sm text-zinc-500">{step.detail}</p>
-                </motion.div>
+                </a>
               </div>
-            );
-          })}
-        </div>
 
-        <motion.div
-          key={`output-${run}`}
-          initial={
-            run > 0
-              ? { opacity: reduceMotion ? 1 : 0, y: reduceMotion ? 0 : 6 }
-              : false
-          }
-          animate={{ opacity: 1, y: 0 }}
-          transition={{
-            duration: reduceMotion
-              ? REDUCED_MOTION_DURATION
-              : DURATION.enter + 0.08,
-            delay: reduceMotion ? 0 : 0.5,
-            ease: EASE_OUT,
-          }}
-          className="flex flex-col justify-between gap-2 border-t border-black pt-4 sm:flex-row sm:items-center"
-        >
-          <p className="font-medium">One public report</p>
-          <p className="font-mono text-xs text-zinc-500">
-            web · SVG · GIF · extension
-          </p>
-        </motion.div>
+              <div className="grid grid-cols-2 border-b border-border">
+                <div className="py-5 pr-4">
+                  <p className="flex items-center gap-2 font-mono text-xs text-muted-foreground uppercase">
+                    <Star className="size-3.5" aria-hidden="true" /> Current stars
+                  </p>
+                  <motion.p
+                    key={`stars-${selected.repo}`}
+                    initial={{ opacity: 0, y: reduceMotion ? 0 : 6 }}
+                    animate={{ opacity: 1, y: 0 }}
+                    transition={{ duration, ease: EASE_OUT }}
+                    className="mt-2 text-3xl font-semibold tracking-[-0.035em] tabular-nums"
+                  >
+                    {formatNumber(selected.stars)}
+                  </motion.p>
+                </div>
+                <div className="border-l border-border py-5 pl-4">
+                  <p className="flex items-center gap-2 font-mono text-xs text-muted-foreground uppercase">
+                    <Eye className="size-3.5" aria-hidden="true" /> Report views
+                  </p>
+                  <motion.p
+                    key={`views-${selected.repo}`}
+                    initial={{ opacity: 0, y: reduceMotion ? 0 : 6 }}
+                    animate={{ opacity: 1, y: 0 }}
+                    transition={{ duration, delay: reduceMotion ? 0 : 0.04, ease: EASE_OUT }}
+                    className="mt-2 text-3xl font-semibold tracking-[-0.035em] tabular-nums"
+                  >
+                    {formatNumber(selected.views)}
+                  </motion.p>
+                </div>
+              </div>
+
+              <div className="mt-4 overflow-hidden border border-border bg-background">
+                {selected.history_ready ? (
+                  <motion.img
+                    key={`${selected.repo}-${theme}`}
+                    initial={{ opacity: 0, scale: reduceMotion ? 1 : 0.995 }}
+                    animate={{ opacity: 1, scale: 1 }}
+                    transition={{ duration, ease: EASE_OUT }}
+                    src={`${apiBase}/api/repos/${selected.repo}/chart.svg?theme=${theme}&animate=1&render=${MEDIA_RENDER_REVISION}`}
+                    alt={`Live star history for ${selected.repo}`}
+                    className="block w-full"
+                  />
+                ) : (
+                  <div className="flex min-h-44 flex-col justify-center px-6">
+                    <p className="inline-flex items-center gap-2 text-sm font-medium">
+                      <Activity className="size-4" aria-hidden="true" />
+                      Building star history
+                    </p>
+                    <div className="mt-4 h-1.5 overflow-hidden rounded-full bg-muted">
+                      <motion.span
+                        initial={{ x: "-65%" }}
+                        animate={{ x: "260%" }}
+                        transition={
+                          reduceMotion
+                            ? { duration: 0 }
+                            : { duration: 1.4, repeat: Infinity, ease: EASE_OUT }
+                        }
+                        className="block h-full w-1/3 rounded-full bg-foreground"
+                      />
+                    </div>
+                    <p className="mt-3 text-sm text-muted-foreground">A measured ETA replaces this as soon as work starts.</p>
+                  </div>
+                )}
+              </div>
+
+              <div className="mt-4 flex items-center gap-3">
+                <div className="flex flex-1 gap-1" aria-label={`${readySignals} of 2 report layers ready`}>
+                  {[selected.history_ready, selected.analysis_ready].map((ready, signalIndex) => (
+                    <span key={signalIndex} className="h-1 flex-1 overflow-hidden rounded-full bg-muted">
+                      <motion.span
+                        initial={false}
+                        animate={{ scaleX: ready ? 1 : 0.08 }}
+                        transition={reduceMotion ? { duration: 0.12 } : SPRING.snappy}
+                        className="block h-full origin-left rounded-full bg-foreground"
+                      />
+                    </span>
+                  ))}
+                </div>
+                <p className="font-mono text-xs text-muted-foreground">stars · health</p>
+              </div>
+            </motion.div>
+          ) : (
+            <div className="grid min-h-[27rem] place-items-center text-sm text-muted-foreground" aria-live="polite">
+              Connecting to live repository activity…
+            </div>
+          )}
+        </AnimatePresence>
       </div>
     </figure>
   );

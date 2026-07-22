@@ -31,9 +31,9 @@ import { staticApiBase } from "@/lib/static-api-base";
 const apiBase = staticApiBase();
 const site = (Astro.site ?? new URL("https://gitdebt.com")).href.replace(/\/$/, "");
 
-const title = "gitdebt — GitHub star history & repository health";
+const title = "Cool GitHub repo stats: star history & code health | gitdebt";
 const description =
-  "Chart any GitHub repository's star history, compare growth on one timeline, and inspect churn, contributors, bug magnets, and maintenance debt. Free, open source, and README-ready.";
+  "Get GitHub repository stats in one live report: star history, growth, churn, contributors, bus factor, bug magnets, package usage, and README-ready charts.";
 const ogImage = `${apiBase}/api/og.png`;
 
 const jsonLd = [
@@ -71,22 +71,22 @@ const jsonLd = [
 const reportLayers = [
   {
     number: "01",
-    title: "See attention accumulate",
-    desc: "Read cumulative GitHub star history by calendar date or days since the first star. Window the series, export the raw data, or overlay up to eight repositories.",
+    title: "Star history",
+    desc: "See when attention arrived. Compare launches by calendar date or from day zero.",
     link: "/compare",
     linkLabel: "Open the comparison tool",
   },
   {
     number: "02",
-    title: "Find the maintenance pressure",
-    desc: "Inspect churn, bug-magnet files, contributor concentration, commit activity, TODO/FIXME trends, language weight, and bus factor from the repository's history.",
+    title: "Repository health",
+    desc: "Find churn, bug magnets, bus factor, contributor concentration, and TODO drift.",
     link: "/report?repo=facebook/react",
     linkLabel: "Open an example report",
   },
   {
     number: "03",
-    title: "Keep the evidence portable",
-    desc: "Publish static or animated charts, README stat cards, badges, and raster assets. Theme-aware snippets use separate light and dark files for dependable embeds.",
+    title: "README stats",
+    desc: "Embed theme-aware SVG, PNG, WebP, and GIF charts that link to the live report.",
     link: "/badges",
     linkLabel: "Build a README asset",
   },
@@ -136,62 +136,60 @@ const landingWarmRepos = Array.from(
     <div class="isolate flex min-h-dvh flex-col">
       <SiteHeader />
 
-      <main id="main-content" class="flex-1 bg-white text-zinc-950">
-        <section id="top" class="border-b border-zinc-300">
+      <main id="main-content" class="flex-1 bg-background text-foreground">
+        <section id="top" class="border-b border-border">
           <div class="mx-auto max-w-6xl px-6 py-16 sm:py-24 lg:py-28">
             <div class="grid gap-14 lg:grid-cols-[minmax(0,1.08fr)_minmax(24rem,0.92fr)] lg:items-center">
               <div class="min-w-0">
-                <p class="font-mono text-xs tracking-[0.12em] text-zinc-600 uppercase">
-                  Open-source repository intelligence
+                <p class="font-mono text-xs tracking-[0.12em] text-muted-foreground uppercase">
+                  GitHub repository stats
                 </p>
-                <h1 class="mt-5 max-w-[16ch] text-4xl font-semibold tracking-[-0.04em] text-balance sm:text-6xl lg:text-7xl">
-                  Growth is visible. Maintenance cost usually isn’t.
+                <h1 class="mt-5 max-w-[14ch] text-4xl font-semibold tracking-[-0.045em] text-balance sm:text-6xl lg:text-7xl">
+                  Cool stats for your GitHub repo.
                 </h1>
-                <p class="mt-6 max-w-[56ch] text-lg/8 text-pretty text-zinc-600">
-                  gitdebt puts GitHub star history, repository health, and
-                  package adoption in one public report—then makes every signal
-                  easy to compare, export, and embed.
+                <p class="mt-6 max-w-[54ch] text-lg/8 text-pretty text-muted-foreground">
+                  Star history, growth, churn, contributors, bus factor, and
+                  bug magnets—live, shareable, and README-ready.
                 </p>
 
                 <div id="lookup" class="mt-9 scroll-mt-24">
                   <LandingRepoLookup client:load />
                 </div>
 
-                <dl class="mt-8 grid grid-cols-3 border-t border-zinc-300 pt-4">
+                <dl class="mt-8 grid grid-cols-3 border-t border-border pt-4">
                   <div class="min-w-0">
-                    <dt class="font-mono text-xs text-zinc-500 uppercase">Access</dt>
-                    <dd class="mt-1 text-sm font-medium">No login</dd>
+                    <dt class="font-mono text-xs text-muted-foreground uppercase">Stars</dt>
+                    <dd class="mt-1 text-sm font-medium">Full history</dd>
                   </div>
-                  <div class="min-w-0 border-l border-zinc-200 pl-4">
-                    <dt class="font-mono text-xs text-zinc-500 uppercase">Output</dt>
-                    <dd class="mt-1 text-sm font-medium">README-ready</dd>
+                  <div class="min-w-0 border-l border-border pl-4">
+                    <dt class="font-mono text-xs text-muted-foreground uppercase">Code</dt>
+                    <dd class="mt-1 text-sm font-medium">Health signals</dd>
                   </div>
-                  <div class="min-w-0 border-l border-zinc-200 pl-4">
-                    <dt class="font-mono text-xs text-zinc-500 uppercase">License</dt>
-                    <dd class="mt-1 text-sm font-medium">Open source</dd>
+                  <div class="min-w-0 border-l border-border pl-4">
+                    <dt class="font-mono text-xs text-muted-foreground uppercase">Share</dt>
+                    <dd class="mt-1 text-sm font-medium">README embeds</dd>
                   </div>
                 </dl>
               </div>
 
-              <SignalFlowGraphic client:load />
+              <SignalFlowGraphic client:load apiBase={apiBase} />
             </div>
           </div>
         </section>
 
-        <section id="live" class="scroll-mt-20 border-b border-zinc-300">
+        <section id="live" class="scroll-mt-20 border-b border-border">
           <div class="mx-auto max-w-6xl px-6 py-20 sm:py-28">
             <header class="grid gap-6 lg:grid-cols-[0.75fr_1.25fr] lg:items-end">
-              <p class="font-mono text-xs tracking-[0.12em] text-zinc-500 uppercase">
+              <p class="font-mono text-xs tracking-[0.12em] text-muted-foreground uppercase">
                 Live on gitdebt
               </p>
               <div>
                 <h2 class="max-w-[22ch] text-3xl font-semibold tracking-[-0.035em] text-balance sm:text-5xl">
-                  Real repositories. Real queue state. No canned showcase.
+                  What people are looking at right now.
                 </h2>
-                <p class="mt-5 max-w-[62ch] text-base/7 text-pretty text-zinc-600">
-                  These are repositories people recently opened on the platform.
-                  Move through the list to inspect stored stars and whether each
-                  history and health report is ready or actively being built.
+                <p class="mt-5 max-w-[62ch] text-base/7 text-pretty text-muted-foreground">
+                  Live GitHub star totals, report views, history progress, and
+                  repository-health status—straight from gitdebt’s stored data.
                 </p>
               </div>
             </header>
@@ -201,37 +199,36 @@ const landingWarmRepos = Array.from(
           </div>
         </section>
 
-        <section id="how-it-works" class="scroll-mt-20 border-b border-zinc-300">
+        <section id="how-it-works" class="scroll-mt-20 border-b border-border">
           <div class="mx-auto max-w-6xl px-6 py-20 sm:py-28">
             <header class="grid gap-6 lg:grid-cols-[0.75fr_1.25fr] lg:items-end">
-              <p class="font-mono text-xs tracking-[0.12em] text-zinc-500 uppercase">
-                One repository, read in layers
+              <p class="font-mono text-xs tracking-[0.12em] text-muted-foreground uppercase">
+                One repo, three answers
               </p>
               <div>
                 <h2 class="max-w-[24ch] text-3xl font-semibold tracking-[-0.035em] text-balance sm:text-5xl">
-                  A star count tells you what is popular. The history tells you why it matters.
+                  Popularity, momentum, and maintenance.
                 </h2>
-                <p class="mt-5 max-w-[64ch] text-base/7 text-pretty text-zinc-600">
-                  Popularity, adoption, and maintenance are different signals.
-                  gitdebt keeps them separate so a dependency review, project
-                  comparison, or launch retrospective starts with evidence.
+                <p class="mt-5 max-w-[64ch] text-base/7 text-pretty text-muted-foreground">
+                  Current stars show size. Star history shows growth. Commit
+                  history shows where maintaining the code gets expensive.
                 </p>
               </div>
             </header>
 
-            <ol id="features" role="list" class="mt-14 scroll-mt-24 border-y border-black">
+            <ol id="features" role="list" class="mt-14 scroll-mt-24 border-y border-foreground">
               {reportLayers.map((layer) => (
-                <li class="grid gap-5 border-b border-zinc-300 py-8 last:border-b-0 md:grid-cols-[4rem_0.8fr_1.2fr_auto] md:items-start">
-                  <p class="font-mono text-xs text-zinc-500">{layer.number}</p>
+                <li class="grid gap-5 border-b border-border py-8 last:border-b-0 md:grid-cols-[4rem_0.8fr_1.2fr_auto] md:items-start">
+                  <p class="font-mono text-xs text-muted-foreground">{layer.number}</p>
                   <h3 class="max-w-[18ch] text-xl font-medium tracking-tight">
                     {layer.title}
                   </h3>
-                  <p class="max-w-[62ch] text-base/7 text-pretty text-zinc-600 sm:text-sm/6">
+                  <p class="max-w-[62ch] text-base/7 text-pretty text-muted-foreground sm:text-sm/6">
                     {layer.desc}
                   </p>
                   <a
                     href={layer.link}
-                    class="group inline-flex min-h-11 items-center gap-2 self-start border-b border-zinc-300 font-mono text-sm outline-none hover:border-black focus-visible:outline-2 focus-visible:outline-offset-4 focus-visible:outline-black sm:min-h-0"
+                    class="group inline-flex min-h-11 items-center gap-2 self-start border-b border-border font-mono text-sm outline-none hover:border-foreground focus-visible:outline-2 focus-visible:outline-offset-4 focus-visible:outline-ring sm:min-h-0"
                   >
                     {layer.linkLabel}
                     <ArrowRight
@@ -246,25 +243,24 @@ const landingWarmRepos = Array.from(
           </div>
         </section>
 
-        <section id="compare" class="scroll-mt-20 border-b border-zinc-300">
+        <section id="compare" class="scroll-mt-20 border-b border-border">
           <div class="mx-auto max-w-6xl px-6 py-20 sm:py-28">
             <div class="grid gap-12 lg:grid-cols-[0.82fr_1.18fr] lg:items-start">
               <header class="lg:sticky lg:top-24">
-                <GitCompareArrows className="size-7 text-black" strokeWidth={1.5} aria-hidden="true" />
-                <p class="mt-6 font-mono text-xs tracking-[0.12em] text-zinc-500 uppercase">
-                  Compare without flattening
+                <GitCompareArrows className="size-7 text-foreground" strokeWidth={1.5} aria-hidden="true" />
+                <p class="mt-6 font-mono text-xs tracking-[0.12em] text-muted-foreground uppercase">
+                  Compare repositories
                 </p>
                 <h2 class="mt-4 max-w-[18ch] text-3xl font-semibold tracking-[-0.035em] text-balance sm:text-5xl">
-                  Totals reward age. Trajectories reveal momentum.
+                  Compare growth, not just totals.
                 </h2>
-                <p class="mt-5 max-w-[48ch] text-base/7 text-pretty text-zinc-600">
-                  Switch between real calendar time and an equal-start view.
-                  The same star timestamps answer two different questions:
-                  who grew when, and who grew fastest after launch.
+                <p class="mt-5 max-w-[48ch] text-base/7 text-pretty text-muted-foreground">
+                  Put up to eight GitHub star histories on one chart. Switch
+                  between calendar time and equal-start growth.
                 </p>
                 <a
                   href="/compare"
-                  class="group mt-7 inline-flex min-h-12 items-center gap-2 bg-black px-5 text-sm font-medium text-white outline-none hover:bg-zinc-800 focus-visible:outline-2 focus-visible:outline-offset-4 focus-visible:outline-black"
+                  class="group mt-7 inline-flex min-h-12 items-center gap-2 bg-primary px-5 text-sm font-medium text-primary-foreground outline-none hover:opacity-85 focus-visible:outline-2 focus-visible:outline-offset-4 focus-visible:outline-ring"
                 >
                   Build a comparison
                   <ArrowRight
@@ -280,20 +276,20 @@ const landingWarmRepos = Array.from(
 
                 <div class="mt-10 grid gap-10 sm:grid-cols-2">
                   <section>
-                    <h3 class="font-mono text-xs tracking-wide text-zinc-500 uppercase">
+                    <h3 class="font-mono text-xs tracking-wide text-muted-foreground uppercase">
                       Head to head
                     </h3>
-                    <ul role="list" class="mt-4 border-y border-black">
+                    <ul role="list" class="mt-4 border-y border-foreground">
                       {popularPairs.map((pair) => (
-                        <li class="border-b border-zinc-200 last:border-b-0">
+                        <li class="border-b border-border last:border-b-0">
                           <a
                             href={`/vs/${pair.repos[0]}/${pair.repos[1]}`}
                             data-warm-repos={pair.repos.join(",")}
-                            class="group flex min-h-14 items-center justify-between gap-4 py-3 font-mono text-sm outline-none focus-visible:outline-2 focus-visible:-outline-offset-2 focus-visible:outline-black"
+                            class="group flex min-h-14 items-center justify-between gap-4 py-3 font-mono text-sm outline-none focus-visible:outline-2 focus-visible:-outline-offset-2 focus-visible:outline-ring"
                           >
                             <span>{pair.label}</span>
                             <ArrowRight
-                              className="size-4 shrink-0 text-zinc-400 transition-transform duration-150 group-hover:translate-x-0.5 group-hover:text-black motion-reduce:transition-none"
+                              className="size-4 shrink-0 text-muted-foreground transition-transform duration-150 group-hover:translate-x-0.5 group-hover:text-foreground motion-reduce:transition-none"
                               strokeWidth={1.75}
                               aria-hidden="true"
                             />
@@ -304,25 +300,25 @@ const landingWarmRepos = Array.from(
                   </section>
 
                   <section>
-                    <h3 class="font-mono text-xs tracking-wide text-zinc-500 uppercase">
+                    <h3 class="font-mono text-xs tracking-wide text-muted-foreground uppercase">
                       Curated fields
                     </h3>
-                    <ul role="list" class="mt-4 border-y border-black">
+                    <ul role="list" class="mt-4 border-y border-foreground">
                       {featuredCategories.map((category) => (
-                        <li class="border-b border-zinc-200 last:border-b-0">
+                        <li class="border-b border-border last:border-b-0">
                           <a
                             href={`/compare/${category.slug}`}
                             data-warm-repos={category.repos.join(",")}
-                            class="group flex min-h-14 items-center justify-between gap-4 py-3 outline-none focus-visible:outline-2 focus-visible:-outline-offset-2 focus-visible:outline-black"
+                            class="group flex min-h-14 items-center justify-between gap-4 py-3 outline-none focus-visible:outline-2 focus-visible:-outline-offset-2 focus-visible:outline-ring"
                           >
                             <div class="text-sm">
                               <span class="font-medium">{category.name}</span>
-                              <div class="mt-0.5 text-zinc-500">
+                              <div class="mt-0.5 text-muted-foreground">
                                 {category.repos.length} repositories
                               </div>
                             </div>
                             <ArrowRight
-                              className="size-4 shrink-0 text-zinc-400 transition-transform duration-150 group-hover:translate-x-0.5 group-hover:text-black motion-reduce:transition-none"
+                              className="size-4 shrink-0 text-muted-foreground transition-transform duration-150 group-hover:translate-x-0.5 group-hover:text-foreground motion-reduce:transition-none"
                               strokeWidth={1.75}
                               aria-hidden="true"
                             />
@@ -337,28 +333,28 @@ const landingWarmRepos = Array.from(
           </div>
         </section>
 
-        <section id="share" class="scroll-mt-20 border-b border-zinc-300">
+        <section id="share" class="scroll-mt-20 border-b border-border">
           <div class="mx-auto max-w-6xl px-6 py-20 sm:py-28">
             <div class="grid gap-12 lg:grid-cols-[1.08fr_0.92fr] lg:items-start">
               <ThemeEmbedPreview client:idle />
 
               <div>
-                <Code2 className="size-7 text-black" strokeWidth={1.5} aria-hidden="true" />
-                <p class="mt-6 font-mono text-xs tracking-[0.12em] text-zinc-500 uppercase">
+                <Code2 className="size-7 text-foreground" strokeWidth={1.5} aria-hidden="true" />
+                <p class="mt-6 font-mono text-xs tracking-[0.12em] text-muted-foreground uppercase">
                   Share the evidence
                 </p>
                 <h2 class="mt-4 max-w-[18ch] text-3xl font-semibold tracking-[-0.035em] text-balance sm:text-5xl">
-                  A report is more useful when it travels.
+                  Stats that ship with your repo.
                 </h2>
-                <p class="mt-5 max-w-[50ch] text-base/7 text-pretty text-zinc-600">
-                  Every chart, stat card, and badge has stable light and dark
-                  assets. Copy a GitHub-ready <code class="font-mono text-black"
+                <p class="mt-5 max-w-[50ch] text-base/7 text-pretty text-muted-foreground">
+                  Add star history, health cards, and badges to any GitHub
+                  README with a theme-aware <code class="font-mono text-foreground"
                     >&lt;picture&gt;</code
-                  > snippet or choose GIF when an animated raster is the better fit.
+                  > snippet.
                 </p>
                 <a
                   href="/badges"
-                  class="group mt-7 inline-flex min-h-11 items-center gap-2 border-b border-zinc-300 font-mono text-sm outline-none hover:border-black focus-visible:outline-2 focus-visible:outline-offset-4 focus-visible:outline-black sm:min-h-0"
+                  class="group mt-7 inline-flex min-h-11 items-center gap-2 border-b border-border font-mono text-sm outline-none hover:border-foreground focus-visible:outline-2 focus-visible:outline-offset-4 focus-visible:outline-ring sm:min-h-0"
                 >
                   Open the badge studio
                   <ArrowRight
@@ -370,13 +366,13 @@ const landingWarmRepos = Array.from(
               </div>
             </div>
 
-            <section id="extension" class="mt-16 scroll-mt-20 border-y border-black">
+            <section id="extension" class="mt-16 scroll-mt-20 border-y border-foreground">
               <div class="grid gap-6 py-8 md:grid-cols-[3rem_0.8fr_1.2fr_auto] md:items-start">
-                <AppWindow className="size-6 text-black" strokeWidth={1.5} aria-hidden="true" />
+                <AppWindow className="size-6 text-foreground" strokeWidth={1.5} aria-hidden="true" />
                 <h3 class="text-xl font-medium tracking-tight">
                   Read gitdebt without leaving GitHub
                 </h3>
-                <p class="max-w-[62ch] text-base/7 text-pretty text-zinc-600 sm:text-sm/6">
+                <p class="max-w-[62ch] text-base/7 text-pretty text-muted-foreground sm:text-sm/6">
                   The browser extension places star history and repository
                   health on the GitHub pages you already use. It follows
                   GitHub’s light or dark appearance and requires no gitdebt account.
@@ -385,7 +381,7 @@ const landingWarmRepos = Array.from(
                   <a
                     href={EXTENSION_CHROME_URL}
                     rel="noopener"
-                    class="inline-flex min-h-11 items-center gap-2 border-b border-zinc-300 font-mono text-sm outline-none hover:border-black focus-visible:outline-2 focus-visible:outline-offset-4 focus-visible:outline-black sm:min-h-0"
+                    class="inline-flex min-h-11 items-center gap-2 border-b border-border font-mono text-sm outline-none hover:border-foreground focus-visible:outline-2 focus-visible:outline-offset-4 focus-visible:outline-ring sm:min-h-0"
                   >
                     Chrome
                     <AppWindow className="size-4" strokeWidth={1.5} aria-hidden="true" />
@@ -393,7 +389,7 @@ const landingWarmRepos = Array.from(
                   <a
                     href={EXTENSION_FIREFOX_URL}
                     rel="noopener"
-                    class="inline-flex min-h-11 items-center gap-2 border-b border-zinc-300 font-mono text-sm outline-none hover:border-black focus-visible:outline-2 focus-visible:outline-offset-4 focus-visible:outline-black sm:min-h-0"
+                    class="inline-flex min-h-11 items-center gap-2 border-b border-border font-mono text-sm outline-none hover:border-foreground focus-visible:outline-2 focus-visible:outline-offset-4 focus-visible:outline-ring sm:min-h-0"
                   >
                     Firefox
                     <Globe className="size-4" strokeWidth={1.5} aria-hidden="true" />
@@ -404,20 +400,20 @@ const landingWarmRepos = Array.from(
           </div>
         </section>
 
-        <section class="bg-black text-white">
+        <section class="bg-primary text-primary-foreground dark:border-y dark:border-border dark:bg-background dark:text-foreground">
           <div class="mx-auto grid max-w-6xl gap-8 px-6 py-16 sm:py-20 md:grid-cols-[1fr_auto] md:items-end">
             <div>
-              <ChartNoAxesCombined className="size-7 text-white" strokeWidth={1.5} aria-hidden="true" />
+              <ChartNoAxesCombined className="size-7 text-current" strokeWidth={1.5} aria-hidden="true" />
               <h2 class="mt-6 max-w-[18ch] text-3xl font-semibold tracking-[-0.035em] text-balance sm:text-5xl">
-                Start with a repository you already know.
+                Pick a repo. See the whole story.
               </h2>
-              <p class="mt-4 max-w-[52ch] text-base/7 text-zinc-400">
-                The public report is free to view, compare, export, and share.
+              <p class="mt-4 max-w-[52ch] text-base/7 opacity-65">
+                Free, public, open source, and ready to embed.
               </p>
             </div>
             <a
               href="#lookup"
-              class="group inline-flex min-h-12 items-center justify-center gap-2 border border-white px-5 text-sm font-medium text-white outline-none hover:bg-white hover:text-black focus-visible:outline-2 focus-visible:outline-offset-4 focus-visible:outline-white"
+              class="group inline-flex min-h-12 items-center justify-center gap-2 border border-primary-foreground px-5 text-sm font-medium text-primary-foreground outline-none hover:bg-primary-foreground hover:text-primary focus-visible:outline-2 focus-visible:outline-offset-4 focus-visible:outline-primary-foreground dark:border-foreground dark:text-foreground dark:hover:bg-foreground dark:hover:text-background dark:focus-visible:outline-ring"
             >
               Analyze a repository
               <ArrowRight

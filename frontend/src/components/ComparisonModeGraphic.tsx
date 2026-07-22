@@ -29,24 +29,24 @@ export function ComparisonModeGraphic() {
 
   return (
     <figure
-      className="border-y border-black bg-white text-black"
+      className="border-y border-foreground bg-card text-card-foreground"
       aria-labelledby="comparison-graphic-caption"
     >
-      <div className="flex flex-col justify-between gap-4 border-b border-zinc-200 px-4 py-4 sm:flex-row sm:items-center sm:px-5">
+      <div className="flex flex-col justify-between gap-4 border-b border-border px-4 py-4 sm:flex-row sm:items-center sm:px-5">
         <figcaption id="comparison-graphic-caption">
           <p className="font-medium">Change the question, not the data</p>
-          <p className="mt-1 text-sm text-zinc-500">
+          <p className="mt-1 text-sm text-muted-foreground">
             Illustrative axes — no repository values
           </p>
         </figcaption>
-        <div className="flex border-b border-zinc-300" aria-label="Comparison axis">
+        <div className="flex border-b border-border" aria-label="Comparison axis">
           {(["calendar", "timeline"] as const).map((option) => (
             <button
               key={option}
               type="button"
               onClick={() => setMode(option)}
               aria-pressed={mode === option}
-              className="relative min-h-11 px-3 font-mono text-xs text-zinc-500 outline-none hover:text-black focus-visible:outline-2 focus-visible:outline-offset-2 focus-visible:outline-black aria-pressed:text-black sm:min-h-9"
+              className="relative min-h-11 px-3 font-mono text-xs text-muted-foreground outline-none hover:text-foreground focus-visible:outline-2 focus-visible:outline-offset-2 focus-visible:outline-ring aria-pressed:text-foreground sm:min-h-9"
             >
               {option === "calendar" ? "Calendar date" : "Equal start"}
               {mode === option && (
@@ -58,7 +58,7 @@ export function ComparisonModeGraphic() {
                       : DURATION.move,
                     ease: EASE_IN_OUT,
                   }}
-                  className="absolute inset-x-0 -bottom-px h-px bg-black"
+                  className="absolute inset-x-0 -bottom-px h-px bg-foreground"
                   aria-hidden="true"
                 />
               )}
@@ -78,13 +78,13 @@ export function ComparisonModeGraphic() {
           }
           className="block h-auto w-full"
         >
-          <path d="M20 24V188H336" fill="none" stroke="#d4d4d8" />
+          <path d="M20 24V188H336" fill="none" stroke="var(--border)" />
           {[76, 132].map((y) => (
             <path
               key={y}
               d={`M20 ${y}H336`}
               fill="none"
-              stroke="#e4e4e7"
+              stroke="var(--border)"
               strokeDasharray="3 5"
             />
           ))}
@@ -98,7 +98,7 @@ export function ComparisonModeGraphic() {
               ease: EASE_IN_OUT,
             }}
             fill="none"
-            stroke="#09090b"
+            stroke="var(--foreground)"
             strokeLinecap="round"
             strokeWidth="2.5"
           />
@@ -112,7 +112,7 @@ export function ComparisonModeGraphic() {
               ease: EASE_IN_OUT,
             }}
             fill="none"
-            stroke="#71717a"
+            stroke="var(--muted-foreground)"
             strokeDasharray="5 5"
             strokeLinecap="round"
             strokeWidth="2"
@@ -130,7 +130,7 @@ export function ComparisonModeGraphic() {
               }}
               x={[20, 176, 336][index]}
               y="210"
-              fill="#71717a"
+              fill="var(--muted-foreground)"
               fontFamily="ui-monospace, monospace"
               fontSize="9"
               textAnchor={index === 0 ? "start" : index === 2 ? "end" : "middle"}
@@ -140,13 +140,13 @@ export function ComparisonModeGraphic() {
           ))}
         </svg>
 
-        <div className="flex flex-wrap gap-x-6 gap-y-2 border-t border-zinc-200 pt-4 text-sm">
+        <div className="flex flex-wrap gap-x-6 gap-y-2 border-t border-border pt-4 text-sm">
           <span className="inline-flex items-center gap-2">
-            <span className="h-0.5 w-5 bg-black" aria-hidden="true" />
+            <span className="h-0.5 w-5 bg-foreground" aria-hidden="true" />
             Repository A
           </span>
-          <span className="inline-flex items-center gap-2 text-zinc-600">
-            <span className="w-5 border-t border-dashed border-zinc-500" aria-hidden="true" />
+          <span className="inline-flex items-center gap-2 text-muted-foreground">
+            <span className="w-5 border-t border-dashed border-muted-foreground" aria-hidden="true" />
             Repository B
           </span>
         </div>

@@ -3,6 +3,7 @@ import { ExternalLink, Loader2 } from "lucide-react";
 
 import { ChartViewer } from "@/components/ChartViewer";
 import { MEDIA_RENDER_REVISION } from "@/lib/media";
+import { useRenderedTheme } from "@/lib/rendered-theme";
 
 type UserAnalyze = {
   login: string;
@@ -39,6 +40,7 @@ export function LiveUserProfile({
   const [data, setData] = useState<UserAnalyze | null>(null);
   const [loading, setLoading] = useState(Boolean(login));
   const [error, setError] = useState<string | null>(null);
+  const theme = useRenderedTheme();
 
   useEffect(() => {
     if (!login) return;
@@ -214,7 +216,7 @@ export function LiveUserProfile({
         </header>
         <div className="flex justify-center border-y border-border py-5">
           <img
-            src={`${apiBase}/api/users/${login}/card.svg?theme=light&v=${revision}&render=${MEDIA_RENDER_REVISION}`}
+            src={`${apiBase}/api/users/${login}/card.svg?theme=${theme}&v=${revision}&render=${MEDIA_RENDER_REVISION}`}
             alt={`gitdebt profile statistics for ${login}`}
             loading="lazy"
             decoding="async"

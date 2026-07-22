@@ -10,6 +10,7 @@ import {
   EASE_OUT,
   REDUCED_MOTION_DURATION,
 } from "@/lib/motion";
+import { useRenderedTheme } from "@/lib/rendered-theme";
 
 type DownloadSeriesPoint = { date: string; downloads: number };
 type RegistryDownloads = { total: number; series: DownloadSeriesPoint[] };
@@ -79,6 +80,7 @@ export function UsageSection({
   const [errored, setErrored] = useState(false);
   const [type, setType] = useState<ChartType>("date");
   const [source, setSource] = useState<UsageSource>("auto");
+  const theme = useRenderedTheme();
 
   useEffect(() => {
     if (initialData) return;
@@ -301,7 +303,7 @@ export function UsageSection({
 
           {hasDownloadSeries ? (
             <img
-              src={`${apiBase}${chartPath}&theme=light&render=${MEDIA_RENDER_REVISION}`}
+              src={`${apiBase}${chartPath}&theme=${theme}&render=${MEDIA_RENDER_REVISION}`}
               alt={`Star growth versus download volume for ${owner}/${repo}`}
               loading={priority ? "eager" : "lazy"}
               fetchPriority={priority ? "high" : "auto"}

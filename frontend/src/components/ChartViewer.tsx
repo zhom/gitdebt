@@ -2,6 +2,7 @@ import { useEffect, useId, useState } from "react";
 
 import { EmbedSnippet } from "@/components/EmbedSnippet";
 import { MEDIA_RENDER_REVISION } from "@/lib/media";
+import { useRenderedTheme } from "@/lib/rendered-theme";
 
 export type ChartType = "date" | "timeline";
 
@@ -35,6 +36,7 @@ export function ChartViewer({
   const [to, setTo] = useState("");
   const [controlsChanged, setControlsChanged] = useState(false);
   const [revision, setRevision] = useState(0);
+  const theme = useRenderedTheme();
   const id = useId();
 
   useEffect(() => {
@@ -83,7 +85,7 @@ export function ChartViewer({
     }`;
 
   const dateInputClass =
-    "min-h-11 w-full rounded-md border border-input bg-background px-2 py-2 font-mono text-base text-foreground outline-none scheme-light focus-visible:outline-2 focus-visible:-outline-offset-1 focus-visible:outline-ring sm:min-h-0 sm:w-[8.5rem] sm:py-1 sm:text-xs";
+    "min-h-11 w-full rounded-md border border-input bg-background px-2 py-2 font-mono text-base text-foreground outline-none scheme-light dark:scheme-dark focus-visible:outline-2 focus-visible:-outline-offset-1 focus-visible:outline-ring sm:min-h-0 sm:w-[8.5rem] sm:py-1 sm:text-xs";
 
   const figure = (
     <figure className="card-panel overflow-hidden">
@@ -183,7 +185,7 @@ export function ChartViewer({
         </div>
       </figcaption>
       <img
-        src={withParams("light")}
+        src={withParams(theme)}
         alt={alt}
         loading={priority ? "eager" : "lazy"}
         fetchPriority={priority ? "high" : "auto"}

@@ -116,20 +116,17 @@ const jsonLd = {
         <section class="space-y-4">
           <h2 class="text-xl font-semibold tracking-tight">Freshness & caching</h2>
           <p class="max-w-[68ch] text-base text-pretty text-muted-foreground sm:text-sm">
-            The first time a repo is requested it's cold: star pages are queued
-            and drained by background workers under strict GitHub rate-limit
-            discipline, and the git clone is analyzed to fill the repo-debt
-            charts. Because of that, a brand-new repo's stat charts show a
-            "gathering" state for a few moments and then fill in on their own —
-            no reload needed.
+            The first time a repo is requested it's cold: star history starts
+            in the background while the git clone is analyzed for repo-health
+            charts. The report shows a measured live ETA, then fills each
+            finished section on its own—no reload needed.
           </p>
           <p class="max-w-[68ch] text-base text-pretty text-muted-foreground sm:text-sm">
             Once analyzed, results are cached and served from the edge, so
             repeat views are near-instant. Popular repos refresh more often;
             our browser extension reports the repos people are actively viewing
-            so their data stays current. Very large repos keep backfilling their
-            full history in the background — their numbers climb until the
-            backfill settles.
+            so their data stays current. Very large histories build in durable
+            windows and appear only after the complete snapshot is stored.
           </p>
         </section>
 

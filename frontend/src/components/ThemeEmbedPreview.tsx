@@ -16,24 +16,24 @@ export function ThemeEmbedPreview() {
 
   return (
     <figure
-      className="border-y border-black bg-white text-black"
+      className="border-y border-foreground bg-card text-card-foreground"
       aria-labelledby="theme-preview-caption"
     >
-      <div className="flex flex-col justify-between gap-4 border-b border-zinc-200 px-4 py-4 sm:flex-row sm:items-center sm:px-5">
+      <div className="flex flex-col justify-between gap-4 border-b border-border px-4 py-4 sm:flex-row sm:items-center sm:px-5">
         <figcaption id="theme-preview-caption">
           <p className="font-medium">One snippet, both README themes</p>
-          <p className="mt-1 text-sm text-zinc-500">
+          <p className="mt-1 text-sm text-muted-foreground">
             The matching asset is selected by GitHub
           </p>
         </figcaption>
-        <div className="flex border-b border-zinc-300" aria-label="README theme preview">
+        <div className="flex border-b border-border" aria-label="README theme preview">
           {(["light", "dark"] as const).map((option) => (
             <button
               key={option}
               type="button"
               onClick={() => setTheme(option)}
               aria-pressed={theme === option}
-              className="relative min-h-11 px-3 font-mono text-xs text-zinc-500 outline-none hover:text-black focus-visible:outline-2 focus-visible:outline-offset-2 focus-visible:outline-black aria-pressed:text-black sm:min-h-9"
+              className="relative min-h-11 px-3 font-mono text-xs text-muted-foreground outline-none hover:text-foreground focus-visible:outline-2 focus-visible:outline-offset-2 focus-visible:outline-ring aria-pressed:text-foreground sm:min-h-9"
             >
               {option === "light" ? "Light README" : "Dark README"}
               {theme === option && (
@@ -45,7 +45,7 @@ export function ThemeEmbedPreview() {
                       : DURATION.move,
                     ease: EASE_OUT,
                   }}
-                  className="absolute inset-x-0 -bottom-px h-px bg-black"
+                  className="absolute inset-x-0 -bottom-px h-px bg-foreground"
                   aria-hidden="true"
                 />
               )}

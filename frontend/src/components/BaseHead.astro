@@ -7,7 +7,7 @@ import geistMonoLatin from "@fontsource-variable/geist-mono/files/geist-mono-lat
 
 <meta charset="UTF-8" />
 <meta name="viewport" content="width=device-width, initial-scale=1" />
-<meta name="color-scheme" content="only light" />
+<meta name="color-scheme" content="light dark" />
 <meta name="referrer" content="strict-origin-when-cross-origin" />
 <meta name="format-detection" content="telephone=no" />
 <meta name="generator" content={Astro.generator} />
@@ -24,4 +24,17 @@ import geistMonoLatin from "@fontsource-variable/geist-mono/files/geist-mono-lat
 <meta name="apple-mobile-web-app-capable" content="yes" />
 <meta name="apple-mobile-web-app-status-bar-style" content="default" />
 
-<meta name="theme-color" content="#ffffff" />
+<meta name="theme-color" content="#ffffff" media="(prefers-color-scheme: light)" />
+<meta name="theme-color" content="#111313" media="(prefers-color-scheme: dark)" />
+
+<script is:inline>
+  (() => {
+    const root = document.documentElement;
+    const preference = window.matchMedia("(prefers-color-scheme: dark)");
+    const apply = () => {
+      root.dataset.theme = preference.matches ? "dark" : "light";
+    };
+    apply();
+    preference.addEventListener?.("change", apply);
+  })();
+</script>

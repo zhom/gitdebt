@@ -9,6 +9,7 @@ import {
   EASE_OUT,
   REDUCED_MOTION_DURATION,
 } from "@/lib/motion";
+import { useRenderedTheme } from "@/lib/rendered-theme";
 
 type Metric = "stars" | "forks" | "downloads";
 type BadgeStyle = "flat" | "modern" | "glass" | "terminal";
@@ -72,6 +73,7 @@ export function BadgeStudio({ apiBase, owner, repo }: Props) {
   const [source, setSource] = useState<BadgeSource>("auto");
   const [theme, setTheme] = useState<ThemeChoice>("auto");
   const reduceMotion = useReducedMotion();
+  const renderedTheme = useRenderedTheme();
 
   const badgeBase = `${apiBase}/api/repos/${owner}/${repo}/badge.svg`;
 
@@ -92,7 +94,14 @@ export function BadgeStudio({ apiBase, owner, repo }: Props) {
     [badgeBase, metrics, style, animate, source],
   );
 
-  const resolvedThemeUrl = theme === "dark" ? darkUrl : lightUrl;
+  const resolvedThemeUrl =
+    theme === "auto"
+      ? renderedTheme === "dark"
+        ? darkUrl
+        : lightUrl
+      : theme === "dark"
+        ? darkUrl
+        : lightUrl;
 
   const label = `${owner}/${repo}`;
   const alt = `${label} stats badge`;
@@ -359,17 +368,12 @@ export function BadgeStudio({ apiBase, owner, repo }: Props) {
                 Pick a metric to preview your badge.
               </p>
             ) : (
-              <picture>
-                {theme === "auto" && (
-                  <source media="(prefers-color-scheme: dark)" srcSet={darkUrl} />
-                )}
-                <img
-                  src={resolvedThemeUrl}
-                  alt={alt}
-                  decoding="async"
-                  className="block h-auto max-w-full"
-                />
-              </picture>
+              <img
+                src={resolvedThemeUrl}
+                alt={alt}
+                decoding="async"
+                className="block h-auto max-w-full"
+              />
             )}
           </div>
 

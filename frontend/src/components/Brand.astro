@@ -11,13 +11,12 @@ const {
 ---
 
 <span class="inline-flex min-w-0 items-center gap-2">
-  <img
-    src="/logo.svg"
-    alt=""
-    width="32"
-    height="32"
-    class={markClass}
-    decoding="async"
-  />
+  <span
+    class:list={[
+      markClass,
+      "inline-block shrink-0 bg-current [mask-image:url('/logo.svg')] [mask-position:center] [mask-repeat:no-repeat] [mask-size:contain]",
+    ]}
+    aria-hidden="true"
+  ></span>
   <span class={wordmarkClass}>gitdebt</span>
 </span>

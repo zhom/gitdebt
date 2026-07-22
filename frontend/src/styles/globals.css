@@ -96,6 +96,46 @@
   --shadow-card: none;
 }
 
+:root[data-theme="dark"] {
+  color-scheme: dark;
+
+  --background: oklch(0.155 0.004 240);
+  --foreground: oklch(0.94 0.003 240);
+  --card: oklch(0.185 0.004 240);
+  --card-foreground: oklch(0.94 0.003 240);
+  --popover: oklch(0.2 0.004 240);
+  --popover-foreground: oklch(0.94 0.003 240);
+
+  --primary: oklch(0.94 0.003 240);
+  --primary-foreground: oklch(0.155 0.004 240);
+  --signal: oklch(0.94 0.003 240);
+  --signal-foreground: oklch(0.155 0.004 240);
+
+  --secondary: oklch(0.23 0.004 240);
+  --secondary-foreground: oklch(0.91 0.003 240);
+  --muted: oklch(0.225 0.004 240);
+  --muted-foreground: oklch(0.69 0.005 240);
+  --accent: oklch(0.255 0.004 240);
+  --accent-foreground: oklch(0.95 0.003 240);
+
+  --destructive: oklch(0.77 0.13 24);
+  --destructive-foreground: oklch(0.15 0.02 24);
+
+  --chart-1: #f2f2f2;
+  --chart-2: #d5d5d5;
+  --chart-3: #b8b8b8;
+  --chart-4: #9d9d9d;
+  --chart-5: #858585;
+  --chart-6: #c8c8c8;
+  --chart-7: #aaaaaa;
+  --chart-8: #939393;
+
+  --border: oklch(1 0 0 / 0.14);
+  --input: oklch(1 0 0 / 0.2);
+  --ring: oklch(0.94 0.003 240);
+  --grid: oklch(1 0 0 / 0.06);
+}
+
 @layer base {
   * {
     @apply border-border outline-ring/50;
@@ -244,4 +284,18 @@ details[open][data-state="open"] .mobile-nav-panel {
   :focus-visible {
     outline-width: 3px;
   }
+}
+
+:root[data-theme="dark"] .theme-image-light,
+:root[data-darkreader-scheme="dark"] .theme-image-light {
+  display: none;
+}
+
+.theme-image-dark {
+  display: none;
+}
+
+:root[data-theme="dark"] .theme-image-dark,
+:root[data-darkreader-scheme="dark"] .theme-image-dark {
+  display: block;
 }

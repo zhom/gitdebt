@@ -9,6 +9,7 @@ import {
 import { ExternalLink, Loader2 } from "lucide-react";
 
 import { DURATION, EASE_OUT } from "@/lib/motion";
+import { formatCountdown, useLiveCountdown } from "@/lib/live-eta";
 
 export type StarPoint = { date: string; stars: number };
 export type HistoryKind =
@@ -476,7 +477,7 @@ function analysisLabel(phase: ProgressPhase | undefined): string {
     case "restricted":
       return "Retrying";
     default:
-      return "Queued";
+      return "Starting";
   }
 }
 
@@ -491,7 +492,11 @@ function ProgressStep({
   const complete = phase === "complete";
   const stopped = phase === "not_found";
   const reduceMotion = useReducedMotion();
-  const detail = progressDetail(work);
+  const remaining = useLiveCountdown(
+    work.eta_seconds,
+    `${work.phase}:${work.processed_units ?? ""}:${work.queue_position ?? ""}`,
+  );
+  const detail = progressDetail(work, remaining);
   const percent = work.percent;
 
   return (
@@ -550,6 +555,7 @@ function ProgressStep({
 
 function progressDetail(
   work: ProgressWork,
+  remaining: number | undefined,
 ): string {
   if (
     (work.complete || work.phase === "complete") &&
@@ -568,7 +574,7 @@ function progressDetail(
         : "";
     return `Waiting for BigQuery billing or quota.${retryLabel}`;
   }
-  const eta = work.eta_seconds ? ` · about ${formatDuration(work.eta_seconds)} left` : "";
+  const eta = remaining !== undefined ? ` · about ${formatCountdown(remaining)} left` : "";
   if (work.detail === "cloning") return `Cloning the default branch${eta}`;
   if (work.detail === "scanning_history") {
     const units =
@@ -583,21 +589,16 @@ function progressDetail(
     return `Retry scheduled${eta}`;
   }
   if (work.queue_position) {
-    return `Queue position ${work.queue_position.toLocaleString()}${eta}`;
+    return remaining !== undefined
+      ? `About ${formatCountdown(remaining)} left · ${work.queue_position.toLocaleString()} ahead`
+      : `${work.queue_position.toLocaleString()} reports ahead · measuring wait`;
   }
   if (work.phase === "backfilling" && work.processed_units !== undefined && work.total_units) {
     return `${work.processed_units} / ${work.total_units} archive months${eta}`;
   }
   if (work.phase === "analyzing") return `Walking recent commit history${eta}`;
-  return `Queued${eta}`;
-}
-
-function formatDuration(seconds: number): string {
-  if (seconds < 60) return "under a minute";
-  const minutes = Math.ceil(seconds / 60);
-  if (minutes < 60) return `${minutes} min`;
-  const hours = Math.ceil(minutes / 60);
-  return `${hours} hr`;
+  if (remaining !== undefined) return `About ${formatCountdown(remaining)} left`;
+  return "Starting · measuring wait";
 }
 
 function AnimatedNumber({

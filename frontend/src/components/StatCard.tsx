@@ -8,6 +8,7 @@ import {
   EASE_OUT,
   REDUCED_MOTION_DURATION,
 } from "@/lib/motion";
+import { useRenderedTheme } from "@/lib/rendered-theme";
 
 type Props = {
   src: string;
@@ -43,6 +44,7 @@ export function StatCard({
   const [phase, setPhase] = useState<Phase>("gathering");
   const timerRef = useRef<ReturnType<typeof setTimeout> | null>(null);
   const reduceMotion = useReducedMotion();
+  const theme = useRenderedTheme();
 
   const liveSrc = appendParam(
     appendParam(src, "animate", "1"),
@@ -51,7 +53,7 @@ export function StatCard({
   );
   const sep = liveSrc.includes("?") ? "&" : "?";
   const bust = attempt === 0 ? "" : `${sep}_=${attempt}`;
-  const lightSrc = `${liveSrc}${sep}theme=light${bust}`;
+  const themedSrc = `${liveSrc}${sep}theme=${theme}${bust}`;
 
   useEffect(() => {
     return () => {
@@ -138,7 +140,7 @@ export function StatCard({
         >
           <img
             key={attempt}
-            src={lightSrc}
+            src={themedSrc}
             alt={alt}
             loading={priority ? "eager" : "lazy"}
             fetchPriority={priority ? "high" : "auto"}

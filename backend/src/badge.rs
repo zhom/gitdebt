@@ -323,23 +323,28 @@ pub fn render_signal_badge(
         )
     };
     let logo = brand::themed_logo_mark(width - 20.0, 8.0, 14.0, theme);
+    let texture_defs = crate::texture::defs(theme);
 
     format!(
         r##"<svg xmlns="http://www.w3.org/2000/svg" width="{width:.0}" height="{H:.0}" viewBox="0 0 {width:.0} {H:.0}" role="img" aria-label="{label}: {detail}, {status}">
+{texture_defs}
   <style><![CDATA[
     text {{ font: 600 11px ui-sans-serif, system-ui, sans-serif; }}
     .detail {{ font-weight: 500; }}
     {MOTION_CSS}
   ]]></style>
   <rect x="0.5" y="0.5" width="{panel_width:.1}" height="29" rx="7" fill="{panel}" stroke="{border}" />
+  <rect x="1" y="1" width="{texture_width:.1}" height="28" rx="6" fill="url(#gd-pixel-fill)" opacity="0.24" />
   <rect x="0" y="6" width="3" height="18" rx="1.5" fill="{signal}" />
 {check}  <text x="31" y="19" fill="{fg}">{label}</text>
   <text class="detail" x="{detail_x:.1}" y="19" fill="{muted}">· {detail}</text>
 {logo}</svg>"##,
         panel_width = width - 1.0,
+        texture_width = width - 2.0,
         border = theme.border,
         fg = theme.fg,
         muted = theme.muted,
+        texture_defs = texture_defs,
     )
 }
 
@@ -749,6 +754,7 @@ mod tests {
         assert!(first.contains("18 commits · 30d"));
         assert!(first.contains("aria-label=\"actively maintained: 18 commits · 30d, earned\""));
         assert!(first.contains("data-gitdebt-logo=\"true\""));
+        assert!(first.contains("fill=\"url(#gd-pixel-fill)\""));
         assert!(first.contains("<animateTransform"));
         assert!(!first.contains("var("));
 

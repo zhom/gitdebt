@@ -101,18 +101,18 @@ export function EarnedBadges({
   }
 
   return (
-    <div className="grid gap-4 lg:grid-cols-2">
+    <div className="grid border-y border-border sm:grid-cols-3">
       {earned.map((badge) => {
         const chartPath = `/api/repos/${owner}/${repo}/badge.svg?signal=${badge.id}`;
         const alt = `${slug}: ${badge.label}, ${badge.detail}`;
         return (
-          <figure key={badge.id} className="signal-panel relative">
-            <figcaption className="flex flex-wrap items-center justify-between gap-3 border-b border-border bg-muted/40 px-4 py-3">
+          <figure key={badge.id} className="relative border-b border-border last:border-b-0 sm:border-r sm:border-b-0 sm:last:border-r-0">
+            <figcaption className="flex min-h-16 items-center justify-between gap-2 px-3 py-2">
               <div>
                 <p className="font-mono text-xs tracking-wide text-foreground uppercase">
                   {badge.label}
                 </p>
-                <p className="mt-0.5 text-sm text-muted-foreground">{badge.detail}</p>
+                <p className="mt-0.5 text-xs text-muted-foreground">{badge.detail}</p>
               </div>
               <EmbedSnippet
                 apiBase={apiBase}
@@ -123,7 +123,7 @@ export function EarnedBadges({
                 variant="menu"
               />
             </figcaption>
-            <div className="flex min-h-24 items-center justify-center p-5">
+            <div className="dither-badge-bed flex min-h-16 items-center justify-center border-t border-border px-3 py-3">
               <img
                 src={`${apiBase}${chartPath}&theme=${theme}&animate=1&render=${MEDIA_RENDER_REVISION}`}
                 alt={alt}

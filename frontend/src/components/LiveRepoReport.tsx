@@ -70,6 +70,17 @@ export function LiveRepoReport({ apiBase }: { apiBase: string }) {
         initialData={null}
       />
 
+      <section className="space-y-4">
+        <header className="flex flex-wrap items-end justify-between gap-3">
+          <div>
+            <p className="font-mono text-xs tracking-wide text-muted-foreground uppercase">Earned badges</p>
+            <h2 className="mt-1 text-xl font-semibold tracking-tight">Claims backed by repository data</h2>
+          </div>
+          <p className="max-w-md text-sm text-muted-foreground">Embeddable maintenance, ownership, and star-momentum signals.</p>
+        </header>
+        <EarnedBadges owner={owner} repo={repo} apiBase={apiBase} embedLink={embedLink} />
+      </section>
+
       <ChartViewer
         apiBase={apiBase}
         path={`/api/repos/${owner}/${repo}/chart.svg`}
@@ -116,27 +127,6 @@ export function LiveRepoReport({ apiBase }: { apiBase: string }) {
           repo={repo}
           apiBase={apiBase}
           showEmbed={false}
-        />
-      </section>
-
-      <section className="space-y-6">
-        <header className="max-w-2xl space-y-2">
-          <p className="font-mono text-xs tracking-wide text-muted-foreground uppercase">
-            Earned badges
-          </p>
-          <h2 className="text-2xl font-semibold tracking-tight text-balance sm:text-3xl">
-            Claims backed by repository data
-          </h2>
-          <p className="text-base leading-relaxed text-pretty text-muted-foreground">
-            Embeddable signals for current maintenance, shared ownership, and
-            recent star momentum. A badge appears only when the data qualifies.
-          </p>
-        </header>
-        <EarnedBadges
-          owner={owner}
-          repo={repo}
-          apiBase={apiBase}
-          embedLink={embedLink}
         />
       </section>
 

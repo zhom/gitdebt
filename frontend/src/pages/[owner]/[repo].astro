@@ -377,6 +377,17 @@ const vsLinks = (categoryRelated.length > 0 ? categoryRelated : FALLBACK_SUGGEST
           initialData={data}
         />
 
+        <section class="space-y-4">
+          <header class="flex flex-wrap items-end justify-between gap-3">
+            <div>
+              <p class="font-mono text-xs tracking-wide text-muted-foreground uppercase">Earned badges</p>
+              <h2 class="mt-1 text-xl font-semibold tracking-tight">Claims backed by repository data</h2>
+            </div>
+            <p class="max-w-md text-sm text-muted-foreground">Embeddable maintenance, ownership, and star-momentum signals.</p>
+          </header>
+          <EarnedBadges client:visible owner={owner} repo={repo} apiBase={apiBase} embedLink={canonical} />
+        </section>
+
         <ChartViewer
           client:load
           apiBase={apiBase}
@@ -467,28 +478,6 @@ const vsLinks = (categoryRelated.length > 0 ? categoryRelated : FALLBACK_SUGGEST
             apiBase={apiBase}
             initialData={usage}
             showEmbed={false}
-          />
-        </section>
-
-        <section class="space-y-6">
-          <header class="max-w-2xl space-y-2">
-            <p class="font-mono text-xs tracking-wide text-muted-foreground uppercase">
-              Earned badges
-            </p>
-            <h2 class="text-2xl font-semibold tracking-tight text-balance sm:text-3xl">
-              Claims backed by repository data
-            </h2>
-            <p class="text-base leading-relaxed text-pretty text-muted-foreground">
-              Embeddable signals for current maintenance, shared ownership, and
-              recent star momentum. A badge appears only when the data qualifies.
-            </p>
-          </header>
-          <EarnedBadges
-            client:visible
-            owner={owner}
-            repo={repo}
-            apiBase={apiBase}
-            embedLink={canonical}
           />
         </section>
 

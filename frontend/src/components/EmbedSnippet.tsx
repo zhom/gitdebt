@@ -1,6 +1,7 @@
 import { useEffect, useRef, useState } from "react";
 import { ChevronDown, Code2 } from "lucide-react";
 import { AnimatePresence, motion, useReducedMotion } from "motion/react";
+import { createPortal } from "react-dom";
 
 import { CopyButton } from "@/components/CopyButton";
 import {
@@ -89,12 +90,15 @@ export function EmbedSnippet({
   const [open, setOpen] = useState(false);
   const rootRef = useRef<HTMLDivElement>(null);
   const triggerRef = useRef<HTMLButtonElement>(null);
+  const panelRef = useRef<HTMLDivElement>(null);
+  const [position, setPosition] = useState({ top: 0, left: 0, width: 384, above: false });
   const reduceMotion = useReducedMotion();
 
   useEffect(() => {
     if (!open || variant !== "menu") return;
     function closeOnOutside(event: PointerEvent) {
-      if (!rootRef.current?.contains(event.target as Node)) setOpen(false);
+      const target = event.target as Node;
+      if (!rootRef.current?.contains(target) && !panelRef.current?.contains(target)) setOpen(false);
     }
     function closeOnEscape(event: KeyboardEvent) {
       if (event.key !== "Escape") return;
@@ -106,6 +110,33 @@ export function EmbedSnippet({
     return () => {
       window.removeEventListener("pointerdown", closeOnOutside);
       window.removeEventListener("keydown", closeOnEscape);
+    };
+  }, [open, variant]);
+
+  useEffect(() => {
+    if (!open || variant !== "menu") return;
+    const place = () => {
+      const trigger = triggerRef.current;
+      if (!trigger) return;
+      const rect = trigger.getBoundingClientRect();
+      const width = Math.min(384, window.innerWidth - 16);
+      const panelHeight = panelRef.current?.getBoundingClientRect().height ?? 230;
+      const above = rect.bottom + 8 + panelHeight > window.innerHeight && rect.top > panelHeight + 8;
+      setPosition({
+        width,
+        left: Math.max(8, Math.min(window.innerWidth - width - 8, rect.right - width)),
+        top: above ? Math.max(8, rect.top - panelHeight - 8) : rect.bottom + 8,
+        above,
+      });
+    };
+    place();
+    const frame = window.requestAnimationFrame(place);
+    window.addEventListener("resize", place);
+    window.addEventListener("scroll", place, true);
+    return () => {
+      window.cancelAnimationFrame(frame);
+      window.removeEventListener("resize", place);
+      window.removeEventListener("scroll", place, true);
     };
   }, [open, variant]);
 
@@ -148,22 +179,15 @@ export function EmbedSnippet({
 
   const snippet = mode === "markdown" ? markdown : html;
 
-  const tabClass = (active: boolean) =>
-    `dither-control min-h-11 rounded-md px-3 py-2 font-mono text-base tracking-wide uppercase sm:min-h-0 sm:px-2.5 sm:py-1 sm:text-xs ${
-      active
-        ? "bg-accent text-accent-foreground"
-        : "text-muted-foreground hover:bg-accent/60 hover:text-accent-foreground"
-    }`;
-
   const controls = (
-    <div className="flex flex-wrap items-center gap-3">
-      <div className="grid grid-cols-1">
+    <div className="grid grid-cols-3 gap-2">
+      <label className="grid gap-1 font-mono text-[10px] tracking-wide text-muted-foreground uppercase">
+        Theme
         <select
           name="theme"
           value={theme}
           onChange={(e) => setTheme(e.target.value as ThemeChoice)}
-          aria-label="Embed theme"
-          className="dither-control col-start-1 row-start-1 min-h-11 appearance-none rounded-md border border-input bg-background py-2 pr-8 pl-3 font-mono text-base text-foreground outline-none focus-visible:outline-2 focus-visible:-outline-offset-1 focus-visible:outline-ring sm:min-h-0 sm:py-1 sm:pr-7 sm:pl-2 sm:text-xs"
+          className="dither-control min-h-9 appearance-none bg-background px-2 font-mono text-xs text-foreground outline-none"
         >
           {THEMES.map((t) => (
             <option key={t.id} value={t.id}>
@@ -171,67 +195,50 @@ export function EmbedSnippet({
             </option>
           ))}
         </select>
-        <ChevronDown
-          className="pointer-events-none col-start-1 row-start-1 mr-2 size-3.5 self-center justify-self-end text-muted-foreground"
-          strokeWidth={2}
-          aria-hidden="true"
-        />
-      </div>
-      <div className="flex items-center gap-1" role="group" aria-label="Image format">
-        {formats.map((f) => (
-          <button
-            key={f}
-            type="button"
-            aria-pressed={selectedFormat === f}
-            onClick={() => setFormat(f)}
-            className={tabClass(selectedFormat === f)}
-          >
-            {f}
-          </button>
-        ))}
-      </div>
-      {selectedFormat === "svg" && (
-        <button
+      </label>
+      <label className="grid gap-1 font-mono text-[10px] tracking-wide text-muted-foreground uppercase">
+        Image
+        <select
+          value={selectedFormat}
+          onChange={(event) => setFormat(event.target.value as Format)}
+          className="dither-control min-h-9 appearance-none bg-background px-2 font-mono text-xs text-foreground outline-none"
+        >
+          {formats.map((value) => <option key={value} value={value}>{value.toUpperCase()}</option>)}
+        </select>
+      </label>
+      <label className="grid gap-1 font-mono text-[10px] tracking-wide text-muted-foreground uppercase">
+        Snippet
+        <select
+          value={mode}
+          onChange={(event) => setMode(event.target.value as Mode)}
+          className="dither-control min-h-9 appearance-none bg-background px-2 font-mono text-xs text-foreground outline-none"
+        >
+          <option value="markdown">Markdown</option>
+          <option value="html">HTML</option>
+        </select>
+      </label>
+      {selectedFormat === "svg" && <button
           type="button"
           aria-pressed={animatedSvg}
           onClick={() => setAnimatedSvg((value) => !value)}
-          className={tabClass(animatedSvg)}
+          className={`dither-control col-span-3 min-h-9 px-3 text-left font-mono text-xs ${animatedSvg ? "text-foreground" : "text-muted-foreground"}`}
         >
-          {animatedSvg ? "Animated SVG" : "Static SVG"}
-        </button>
-      )}
-      <div className="flex items-center gap-1" role="group" aria-label="Embed format">
-        <button
-          type="button"
-          aria-pressed={mode === "markdown"}
-          onClick={() => setMode("markdown")}
-          className={tabClass(mode === "markdown")}
-        >
-          Markdown
-        </button>
-        <button
-          type="button"
-          aria-pressed={mode === "html"}
-          onClick={() => setMode("html")}
-          className={tabClass(mode === "html")}
-        >
-          HTML
-        </button>
-      </div>
+          {animatedSvg ? "● Animated SVG" : "○ Static SVG"}
+        </button>}
     </div>
   );
 
   const snippetBody = (
     <>
-      <div className="relative border-t border-border">
-        <pre className="max-h-48 overflow-auto px-5 py-4 pr-24 font-mono text-xs leading-relaxed text-foreground">
-          <code>{snippet}</code>
-        </pre>
+      <div className="flex items-center justify-between gap-4 border-t border-border px-4 py-3">
+        <p className="min-w-0 truncate font-mono text-xs text-muted-foreground">
+          {mode === "markdown" ? "README.md" : "HTML"} · {selectedFormat.toUpperCase()} · {theme}
+        </p>
         <CopyButton
           value={snippet}
           ariaLabel="Copy embed snippet"
-          className="dither-control absolute top-3 right-3 inline-flex min-h-11 items-center gap-1.5 rounded-md border border-border bg-background/95 px-3 py-2 font-mono text-base text-muted-foreground backdrop-blur hover:bg-accent hover:text-accent-foreground sm:min-h-0 sm:px-2.5 sm:py-1 sm:text-xs"
-          idleLabel="Copy"
+          className="dither-control inline-flex min-h-9 shrink-0 items-center gap-1.5 bg-foreground px-3 py-2 font-mono text-xs text-background hover:opacity-85"
+          idleLabel="Copy embed"
         />
       </div>
       {selectedFormat === "gif" && (
@@ -262,9 +269,11 @@ export function EmbedSnippet({
             aria-hidden="true"
           />
         </button>
-        <AnimatePresence>
+        {typeof document !== "undefined" && createPortal(
+          <AnimatePresence>
           {open && (
             <motion.div
+              ref={panelRef}
               initial={{ opacity: 0, y: reduceMotion ? 0 : -4, scale: reduceMotion ? 1 : 0.98 }}
               animate={{ opacity: 1, y: 0, scale: 1 }}
               exit={{ opacity: 0, y: reduceMotion ? 0 : -3, scale: reduceMotion ? 1 : 0.985 }}
@@ -272,25 +281,26 @@ export function EmbedSnippet({
                 duration: reduceMotion ? REDUCED_MOTION_DURATION : DURATION.enter,
                 ease: EASE_OUT,
               }}
-              className="dither-menu absolute top-[calc(100%+0.65rem)] right-0 z-40 w-[min(38rem,calc(100vw-2rem))] origin-top-right overflow-hidden rounded-xl text-left"
+              style={{ top: position.top, left: position.left, width: position.width, transformOrigin: position.above ? "bottom right" : "top right" }}
+              className="dither-menu fixed z-[100] overflow-hidden text-left"
             >
-              <div className="space-y-3 px-5 py-4">
+              <div className="space-y-3 px-4 py-3">
                 <div>
                   <p className="text-sm font-semibold text-foreground">Put this media in your GitHub README</p>
-                  <p className="mt-1 text-sm text-muted-foreground">Choose a format, copy the snippet, then paste it into README.md.</p>
+                  <p className="mt-0.5 text-xs text-muted-foreground">Choose once, copy, paste into README.md.</p>
                 </div>
                 {controls}
               </div>
               {snippetBody}
             </motion.div>
           )}
-        </AnimatePresence>
+          </AnimatePresence>, document.body)}
       </div>
     );
   }
 
   return (
-    <figure className="card-panel overflow-hidden">
+    <figure className="overflow-hidden border-y border-border">
       <figcaption className="flex flex-wrap items-center justify-between gap-3 border-b border-border bg-muted/40 px-5 py-3">
         <div className="inline-flex items-center gap-2 font-mono text-xs tracking-wide text-muted-foreground uppercase">
           <span className="size-1.5 shrink-0 rounded-full bg-signal" aria-hidden="true" />

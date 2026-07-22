@@ -119,6 +119,10 @@ export function PlatformPulse({ apiBase }: { apiBase: string }) {
     () => repos.find((entry) => entry.repo === selectedRepo) ?? repos[0],
     [repos, selectedRepo],
   );
+  const chartPoints = useMemo(
+    () => history.map((point) => ({ date: point.date, value: point.stars })),
+    [history],
+  );
   const duration = reduceMotion ? REDUCED_MOTION_DURATION : DURATION.enter;
   const remaining = useLiveCountdown(
     starProgress?.eta_seconds,
@@ -241,8 +245,10 @@ export function PlatformPulse({ apiBase }: { apiBase: string }) {
       <div className="min-h-[26rem] bg-muted/45 p-5 sm:p-7">
         <AnimatePresence mode="wait" initial={false}>
           {selected && (
-            <motion.div
+            <motion.a
               key={selected.repo}
+              href={`/${selected.repo}`}
+              aria-label={`Open the ${selected.repo} repository report`}
               initial={{ opacity: 0, x: reduceMotion ? 0 : 8 }}
               animate={{ opacity: 1, x: 0 }}
               exit={{ opacity: 0, x: reduceMotion ? 0 : -5 }}
@@ -286,7 +292,7 @@ export function PlatformPulse({ apiBase }: { apiBase: string }) {
               <div className="mt-6 flex flex-1 items-center justify-center overflow-hidden border-y border-border bg-card">
                 {history.length > 1 ? (
                   <DitherAreaChart
-                    points={history.map((point) => ({ date: point.date, value: point.stars }))}
+                    points={chartPoints}
                     height={230}
                     valueLabel="stars"
                   />
@@ -316,7 +322,7 @@ export function PlatformPulse({ apiBase }: { apiBase: string }) {
                   </div>
                 )}
               </div>
-            </motion.div>
+            </motion.a>
           )}
         </AnimatePresence>
       </div>

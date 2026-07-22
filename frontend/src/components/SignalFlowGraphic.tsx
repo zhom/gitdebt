@@ -88,6 +88,10 @@ export function SignalFlowGraphic({ apiBase }: { apiBase: string }) {
         : 0,
     [selected],
   );
+  const chartPoints = useMemo(
+    () => history.map((point) => ({ date: point.date, value: point.stars })),
+    [history],
+  );
 
   useEffect(() => {
     if (!selected?.history_ready) {
@@ -140,28 +144,28 @@ export function SignalFlowGraphic({ apiBase }: { apiBase: string }) {
       <div className="min-h-[27rem] p-4 sm:p-5">
         <AnimatePresence mode="wait" initial={false}>
           {selected ? (
-            <motion.div
+            <motion.a
               key={selected.repo}
+              href={`/${selected.repo}`}
+              aria-label={`Open the ${selected.repo} repository report`}
               initial={{ opacity: 0, x: reduceMotion ? 0 : 10 }}
               animate={{ opacity: 1, x: 0 }}
               exit={{ opacity: 0, x: reduceMotion ? 0 : -7 }}
               transition={{ duration, ease: EASE_OUT }}
+              className="group block outline-none focus-visible:outline-2 focus-visible:outline-offset-2 focus-visible:outline-ring"
             >
               <div className="flex items-start justify-between gap-4 border-b border-foreground pb-4">
                 <div className="min-w-0">
                   <p className="font-mono text-xs text-muted-foreground uppercase">Now inspecting</p>
                   <p className="mt-1 truncate font-mono text-base font-medium">{selected.repo}</p>
                 </div>
-                <a
-                  href={`/${selected.repo}`}
-                  className="group inline-flex min-h-11 shrink-0 items-center gap-1.5 text-sm text-muted-foreground outline-none hover:text-foreground focus-visible:outline-2 focus-visible:outline-offset-2 focus-visible:outline-ring sm:min-h-0"
-                >
+                <span className="group inline-flex min-h-11 shrink-0 items-center gap-1.5 text-sm text-muted-foreground group-hover:text-foreground sm:min-h-0">
                   Full report
                   <ArrowUpRight
                     className="size-3.5 transition-transform duration-150 group-hover:-translate-y-0.5 group-hover:translate-x-0.5 motion-reduce:transition-none"
                     aria-hidden="true"
                   />
-                </a>
+                </span>
               </div>
 
               <div className="grid grid-cols-3 border-b border-border">
@@ -210,7 +214,7 @@ export function SignalFlowGraphic({ apiBase }: { apiBase: string }) {
               <div className="mt-4 overflow-hidden border-y border-border bg-background">
                 {history.length > 1 ? (
                   <DitherAreaChart
-                    points={history.map((point) => ({ date: point.date, value: point.stars }))}
+                    points={chartPoints}
                     height={190}
                     valueLabel="stars"
                   />
@@ -252,7 +256,7 @@ export function SignalFlowGraphic({ apiBase }: { apiBase: string }) {
                 </div>
                 <p className="font-mono text-xs text-muted-foreground">stars · health</p>
               </div>
-            </motion.div>
+            </motion.a>
           ) : (
             <div className="grid min-h-[27rem] place-items-center text-sm text-muted-foreground" aria-live="polite">
               Connecting to live repository activity…

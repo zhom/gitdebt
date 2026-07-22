@@ -138,7 +138,6 @@ export function DitherAreaChart({
     const plotWidth = Math.max(1, right - left);
     const plotHeight = Math.max(1, bottom - top);
     let intensity = reducedMotion ? (hoverRef.current ? 1 : 0) : 0;
-    let reveal = reducedMotion ? 1 : 0;
     let phase = 0;
     let previous = performance.now();
     let raf = 0;
@@ -148,7 +147,6 @@ export function DitherAreaChart({
       previous = now;
       const target = hoverRef.current ? 1 : 0;
       intensity += (target - intensity) * (reducedMotion ? 1 : 0.17);
-      reveal += (1 - reveal) * (reducedMotion ? 1 : Math.min(0.24, elapsed / 360));
       if (hoverRef.current && !reducedMotion) phase += elapsed * 0.0045;
       ctx.clearRect(0, 0, cols, rows);
       const styles = getComputedStyle(root);
@@ -165,10 +163,7 @@ export function DitherAreaChart({
         1,
         styles.getPropertyValue("--dither-wave-3").trim() || styles.color,
       );
-      const revealEdge = left + plotWidth * reveal;
-
       for (let x = left; x <= right; x += 1) {
-        if (x > revealEdge) break;
         const fraction = (x - left) / plotWidth;
         const sample = sampleAt(parsed, fraction, axis);
         const lineY = Math.max(
@@ -188,8 +183,7 @@ export function DitherAreaChart({
           );
           const threshold = BAYER[y & 3][x & 3];
           if (density <= threshold) continue;
-          const edgeFade = Math.min(1, Math.max(0, revealEdge - x));
-          ctx.globalAlpha = (0.62 + density * 0.34) * edgeFade;
+          ctx.globalAlpha = 0.62 + density * 0.34;
           ctx.fillStyle = wave;
           ctx.fillRect(x, y, 1, 1);
         }
@@ -199,7 +193,6 @@ export function DitherAreaChart({
       }
       ctx.globalAlpha = 1;
       if (
-        reveal < 0.998 ||
         Math.abs(intensity - target) > 0.002 ||
         (hoverRef.current && !reducedMotion)
       ) {

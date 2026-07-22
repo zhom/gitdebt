@@ -190,8 +190,8 @@ export function RepoHero({ owner, repo, apiBase, initialData }: Props) {
       void tick(false);
     }
 
-    async function pollProgress() {
-      if (cancelled) return;
+    async function pollProgress(schedule = true): Promise<RepoProgress | null> {
+      if (cancelled) return null;
       try {
         const response = await fetch(
           `${apiBase}/api/repos/${owner}/${repo}/progress.json`,
@@ -204,11 +204,14 @@ export function RepoHero({ owner, repo, apiBase, initialData }: Props) {
         if (!response.ok) throw new Error(`progress ${response.status}`);
         const next = (await response.json()) as RepoProgress;
         applyProgress(next, false);
-        if (next.terminal) return;
+        if (next.terminal) return next;
+        if (schedule) progressTimer = setTimeout(pollProgress, PROGRESS_POLL_MS);
+        return next;
       } catch {
         setLiveProgress(false);
       }
-      progressTimer = setTimeout(pollProgress, PROGRESS_POLL_MS);
+      if (schedule) progressTimer = setTimeout(pollProgress, PROGRESS_POLL_MS);
+      return null;
     }
 
     function startProgressPolling() {
@@ -252,13 +255,15 @@ export function RepoHero({ owner, repo, apiBase, initialData }: Props) {
       // the read-only stream so a cold repo cannot report idle and close before
       // its durable work rows exist.
       void Promise.allSettled([tick(), enqueueAnalysis()]).then(() => {
-        void pollProgress();
-        connectProgress();
+        void pollProgress(false).then((snapshot) => {
+          if (!snapshot?.terminal) connectProgress();
+        });
       });
     } else {
       void enqueueAnalysis().finally(() => {
-        void pollProgress();
-        connectProgress();
+        void pollProgress(false).then((snapshot) => {
+          if (!snapshot?.terminal) connectProgress();
+        });
       });
     }
     return () => {

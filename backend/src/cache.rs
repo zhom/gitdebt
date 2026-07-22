@@ -157,13 +157,23 @@ pub struct PlatformActivity {
     pub viewed_at: DateTime<Utc>,
     pub history_ready: bool,
     pub analysis_ready: bool,
+    pub gained_7d: i64,
+    pub gained_30d: i64,
 }
+
+type PlatformActivityRow = (String, i64, i64, DateTime<Utc>, bool, bool, i64, i64);
 
 const PLATFORM_ACTIVITY_SQL: &str = "SELECT r.repo, COALESCE(r.star_count, 0), r.view_count, \
             r.last_viewed_at, r.history_complete, \
-            (h.last_analyzed_at IS NOT NULL) \
+            (h.last_analyzed_at IS NOT NULL), \
+            COALESCE(g.gained_7d, 0), COALESCE(g.gained_30d, 0) \
      FROM repos r \
      LEFT JOIN repo_history h ON h.repo = r.repo \
+     LEFT JOIN LATERAL ( \
+         SELECT COUNT(*) FILTER (WHERE starred_at >= NOW() - INTERVAL '7 days')::BIGINT AS gained_7d, \
+                COUNT(*) FILTER (WHERE starred_at >= NOW() - INTERVAL '30 days')::BIGINT AS gained_30d \
+         FROM active_repo_star_history stars WHERE stars.repo = r.repo \
+     ) g ON TRUE \
      WHERE r.last_viewed_at IS NOT NULL AND NOT r.missing \
      ORDER BY r.last_viewed_at DESC, r.repo ASC \
      LIMIT $1";
@@ -185,22 +195,32 @@ impl Cache {
     /// deliberately contains repository-level activity only and never calls
     /// GitHub on the request path.
     pub async fn list_platform_activity(&self, limit: i64) -> Result<Vec<PlatformActivity>> {
-        let rows: Vec<(String, i64, i64, DateTime<Utc>, bool, bool)> =
-            sqlx::query_as(PLATFORM_ACTIVITY_SQL)
-                .bind(limit.clamp(1, 12))
-                .fetch_all(&self.db.pool)
-                .await
-                .context("list platform activity")?;
+        let rows: Vec<PlatformActivityRow> = sqlx::query_as(PLATFORM_ACTIVITY_SQL)
+            .bind(limit.clamp(1, 12))
+            .fetch_all(&self.db.pool)
+            .await
+            .context("list platform activity")?;
         Ok(rows
             .into_iter()
             .map(
-                |(repo, stars, views, viewed_at, history_ready, analysis_ready)| PlatformActivity {
+                |(
                     repo,
                     stars,
                     views,
                     viewed_at,
                     history_ready,
                     analysis_ready,
+                    gained_7d,
+                    gained_30d,
+                )| PlatformActivity {
+                    repo,
+                    stars,
+                    views,
+                    viewed_at,
+                    history_ready,
+                    analysis_ready,
+                    gained_7d,
+                    gained_30d,
                 },
             )
             .collect())

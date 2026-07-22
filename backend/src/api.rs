@@ -3988,6 +3988,8 @@ struct PlatformActivityItem {
     viewed_at: DateTime<Utc>,
     history_ready: bool,
     analysis_ready: bool,
+    gained_7d: i64,
+    gained_30d: i64,
 }
 
 /// A short-lived, Postgres-only pulse of repositories people are actually
@@ -4004,6 +4006,8 @@ async fn platform_activity(State(state): State<ApiState>) -> Result<impl IntoRes
             viewed_at: row.viewed_at,
             history_ready: row.history_ready,
             analysis_ready: row.analysis_ready,
+            gained_7d: row.gained_7d,
+            gained_30d: row.gained_30d,
         })
         .collect();
     let mut headers = HeaderMap::new();

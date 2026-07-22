@@ -17,6 +17,7 @@ import SiteHeader from "@/components/SiteHeader.astro";
 import SiteFooter from "@/components/SiteFooter.astro";
 import { ComparisonModeGraphic } from "@/components/ComparisonModeGraphic";
 import { LandingRepoLookup } from "@/components/LandingRepoLookup";
+import { GrowthTicker } from "@/components/GrowthTicker";
 import { PlatformPulse } from "@/components/PlatformPulse";
 import { SignalFlowGraphic } from "@/components/SignalFlowGraphic";
 import { ThemeEmbedPreview } from "@/components/ThemeEmbedPreview";
@@ -137,13 +138,14 @@ const landingWarmRepos = Array.from(
       <SiteHeader />
 
       <main id="main-content" class="flex-1 bg-background text-foreground">
-        <section id="top" class="border-b border-border">
+        <section id="top" class="dither-depth border-b border-border">
           <div class="mx-auto max-w-6xl px-6 py-16 sm:py-24 lg:py-28">
             <div class="grid gap-14 lg:grid-cols-[minmax(0,1.08fr)_minmax(24rem,0.92fr)] lg:items-center">
               <div class="min-w-0">
-                <p class="font-mono text-xs tracking-[0.12em] text-muted-foreground uppercase">
-                  GitHub repository stats
-                </p>
+                <div class="evidence-band inline-flex items-center gap-2 border-y border-border px-3 py-2 font-mono text-xs tracking-[0.12em] text-muted-foreground uppercase">
+                  <span class="size-1.5 bg-foreground" aria-hidden="true"></span>
+                  Claims backed by repository data
+                </div>
                 <h1 class="mt-5 max-w-[14ch] text-4xl font-semibold tracking-[-0.045em] text-balance sm:text-6xl lg:text-7xl">
                   Cool stats for your GitHub repo.
                 </h1>
@@ -175,6 +177,7 @@ const landingWarmRepos = Array.from(
               <SignalFlowGraphic client:load apiBase={apiBase} />
             </div>
           </div>
+          <GrowthTicker client:load apiBase={apiBase} />
         </section>
 
         <section id="live" class="scroll-mt-20 border-b border-border">

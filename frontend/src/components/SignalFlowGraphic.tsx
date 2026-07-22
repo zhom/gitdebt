@@ -2,14 +2,13 @@ import { useEffect, useMemo, useState } from "react";
 import { Activity, ArrowUpRight, Eye, Star } from "lucide-react";
 import { AnimatePresence, motion, useReducedMotion } from "motion/react";
 
-import { MEDIA_RENDER_REVISION } from "@/lib/media";
 import {
   DURATION,
   EASE_OUT,
   REDUCED_MOTION_DURATION,
   SPRING,
 } from "@/lib/motion";
-import { useRenderedTheme } from "@/lib/rendered-theme";
+import { DitherAreaChart } from "@/components/DitherAreaChart";
 
 type LiveRepo = {
   repo: string;
@@ -18,7 +17,11 @@ type LiveRepo = {
   viewed_at: string;
   history_ready: boolean;
   analysis_ready: boolean;
+  gained_7d: number;
+  gained_30d: number;
 };
+
+type HistoryPoint = { date: string; stars: number };
 
 function formatNumber(value: number): string {
   return new Intl.NumberFormat("en").format(value);
@@ -37,8 +40,8 @@ export function SignalFlowGraphic({ apiBase }: { apiBase: string }) {
   const [repos, setRepos] = useState<LiveRepo[]>([]);
   const [index, setIndex] = useState(0);
   const [paused, setPaused] = useState(false);
+  const [history, setHistory] = useState<HistoryPoint[]>([]);
   const reduceMotion = useReducedMotion();
-  const theme = useRenderedTheme();
 
   useEffect(() => {
     let active = true;
@@ -86,6 +89,27 @@ export function SignalFlowGraphic({ apiBase }: { apiBase: string }) {
     [selected],
   );
 
+  useEffect(() => {
+    if (!selected?.history_ready) {
+      setHistory([]);
+      return;
+    }
+    let active = true;
+    fetch(`${apiBase}/api/repos/${selected.repo}/analyze?enqueue=0`, {
+      headers: { accept: "application/json" },
+    })
+      .then((response) => (response.ok ? response.json() : null))
+      .then((body: { history?: HistoryPoint[] } | null) => {
+        if (active) setHistory(Array.isArray(body?.history) ? body.history : []);
+      })
+      .catch(() => {
+        if (active) setHistory([]);
+      });
+    return () => {
+      active = false;
+    };
+  }, [apiBase, selected?.history_ready, selected?.repo]);
+
   return (
     <figure
       className="w-full min-w-0 overflow-hidden border-y border-foreground bg-card text-card-foreground"
@@ -113,7 +137,7 @@ export function SignalFlowGraphic({ apiBase }: { apiBase: string }) {
         </p>
       </figcaption>
 
-      <div className="min-h-[30rem] p-4 sm:p-5">
+      <div className="min-h-[27rem] p-4 sm:p-5">
         <AnimatePresence mode="wait" initial={false}>
           {selected ? (
             <motion.div
@@ -140,7 +164,7 @@ export function SignalFlowGraphic({ apiBase }: { apiBase: string }) {
                 </a>
               </div>
 
-              <div className="grid grid-cols-2 border-b border-border">
+              <div className="grid grid-cols-3 border-b border-border">
                 <div className="py-5 pr-4">
                   <p className="flex items-center gap-2 font-mono text-xs text-muted-foreground uppercase">
                     <Star className="size-3.5" aria-hidden="true" /> Current stars
@@ -169,18 +193,26 @@ export function SignalFlowGraphic({ apiBase }: { apiBase: string }) {
                     {formatNumber(selected.views)}
                   </motion.p>
                 </div>
+                <div className="border-l border-border py-5 pl-4">
+                  <p className="font-mono text-xs text-muted-foreground uppercase">30d gain</p>
+                  <motion.p
+                    key={`gain-${selected.repo}`}
+                    initial={{ opacity: 0, y: reduceMotion ? 0 : 6 }}
+                    animate={{ opacity: 1, y: 0 }}
+                    transition={{ duration, delay: reduceMotion ? 0 : 0.06, ease: EASE_OUT }}
+                    className="mt-2 text-3xl font-semibold tracking-[-0.035em] tabular-nums"
+                  >
+                    +{formatNumber(selected.gained_30d)}
+                  </motion.p>
+                </div>
               </div>
 
-              <div className="mt-4 overflow-hidden border border-border bg-background">
-                {selected.history_ready ? (
-                  <motion.img
-                    key={`${selected.repo}-${theme}`}
-                    initial={{ opacity: 0, scale: reduceMotion ? 1 : 0.995 }}
-                    animate={{ opacity: 1, scale: 1 }}
-                    transition={{ duration, ease: EASE_OUT }}
-                    src={`${apiBase}/api/repos/${selected.repo}/chart.svg?theme=${theme}&animate=1&render=${MEDIA_RENDER_REVISION}`}
-                    alt={`Live star history for ${selected.repo}`}
-                    className="block w-full"
+              <div className="mt-4 overflow-hidden border-y border-border bg-background">
+                {history.length > 1 ? (
+                  <DitherAreaChart
+                    points={history.map((point) => ({ date: point.date, value: point.stars }))}
+                    height={190}
+                    valueLabel="stars"
                   />
                 ) : (
                   <div className="flex min-h-44 flex-col justify-center px-6">

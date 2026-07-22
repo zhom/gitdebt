@@ -4,8 +4,7 @@ import { AnimatePresence, motion, useReducedMotion } from "motion/react";
 
 import { formatCountdown, useLiveCountdown } from "@/lib/live-eta";
 import { DURATION, EASE_OUT, REDUCED_MOTION_DURATION, SPRING } from "@/lib/motion";
-import { MEDIA_RENDER_REVISION } from "@/lib/media";
-import { useRenderedTheme } from "@/lib/rendered-theme";
+import { DitherAreaChart } from "@/components/DitherAreaChart";
 
 type ActivityRepo = {
   repo: string;
@@ -14,6 +13,8 @@ type ActivityRepo = {
   viewed_at: string;
   history_ready: boolean;
   analysis_ready: boolean;
+  gained_7d: number;
+  gained_30d: number;
 };
 
 type ActivityResponse = { repos: ActivityRepo[] };
@@ -48,8 +49,8 @@ export function PlatformPulse({ apiBase }: { apiBase: string }) {
   const [loaded, setLoaded] = useState(false);
   const [starProgress, setStarProgress] = useState<StarProgress | null>(null);
   const [paused, setPaused] = useState(false);
+  const [history, setHistory] = useState<{ date: string; stars: number }[]>([]);
   const reduceMotion = useReducedMotion();
-  const theme = useRenderedTheme();
 
   useEffect(() => {
     let active = true;
@@ -129,6 +130,27 @@ export function PlatformPulse({ apiBase }: { apiBase: string }) {
     : remaining !== undefined
       ? `${formatCountdown(remaining)} left`
       : "measuring wait";
+
+  useEffect(() => {
+    if (!selected?.history_ready) {
+      setHistory([]);
+      return;
+    }
+    let active = true;
+    fetch(`${apiBase}/api/repos/${selected.repo}/analyze?enqueue=0`, {
+      headers: { accept: "application/json" },
+    })
+      .then((response) => (response.ok ? response.json() : null))
+      .then((body: { history?: { date: string; stars: number }[] } | null) => {
+        if (active) setHistory(Array.isArray(body?.history) ? body.history : []);
+      })
+      .catch(() => {
+        if (active) setHistory([]);
+      });
+    return () => {
+      active = false;
+    };
+  }, [apiBase, selected?.history_ready, selected?.repo]);
 
   return (
     <div
@@ -242,7 +264,7 @@ export function PlatformPulse({ apiBase }: { apiBase: string }) {
                 </div>
               </div>
 
-              <div className="mt-6 grid grid-cols-2 border-y border-border py-4">
+              <div className="mt-6 grid grid-cols-3 border-y border-border py-4">
                 <div>
                   <p className="flex items-center gap-2 font-mono text-xs text-muted-foreground uppercase">
                     <Star className="size-3.5" aria-hidden="true" /> current stars
@@ -255,15 +277,18 @@ export function PlatformPulse({ apiBase }: { apiBase: string }) {
                   </p>
                   <p className="mt-2 text-2xl font-semibold tabular-nums">{compact(selected.views)}</p>
                 </div>
+                <div className="border-l border-border pl-5">
+                  <p className="font-mono text-xs text-muted-foreground uppercase">30d gain</p>
+                  <p className="mt-2 text-2xl font-semibold tabular-nums">+{compact(selected.gained_30d)}</p>
+                </div>
               </div>
 
-              <div className="mt-6 flex flex-1 items-center justify-center overflow-hidden border border-border bg-card">
-                {historyReady ? (
-                  <img
-                    src={`${apiBase}/api/repos/${selected.repo}/chart.svg?theme=${theme}&animate=1&render=${MEDIA_RENDER_REVISION}`}
-                    alt={`Star history for ${selected.repo}`}
-                    loading="lazy"
-                    className="block w-full"
+              <div className="mt-6 flex flex-1 items-center justify-center overflow-hidden border-y border-border bg-card">
+                {history.length > 1 ? (
+                  <DitherAreaChart
+                    points={history.map((point) => ({ date: point.date, value: point.stars }))}
+                    height={230}
+                    valueLabel="stars"
                   />
                 ) : (
                   <div className="max-w-sm px-8 py-12 text-center">

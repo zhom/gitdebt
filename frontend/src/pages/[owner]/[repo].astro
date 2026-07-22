@@ -89,9 +89,23 @@ async function fetchAnalysis() {
         response.status === 429 ||
         response.status >= 500;
 
-      if (!transient || attempt === maxAttempts - 1) return response;
+      if (!transient || attempt === maxAttempts - 1) {
+        const result = response.ok
+          ? ((await response.json()) as AnalyzeResponse)
+          : null;
+        return { status: response.status, result };
+      }
 
-      await response.body?.cancel();
+      // Astro/Undici can hand us a transient response whose body has already
+      // been consumed by the time the retry branch runs. Draining it helps
+      // connection reuse, but a locked/used body must not abort the retry.
+      if (response.body && !response.bodyUsed && !response.body.locked) {
+        try {
+          await response.arrayBuffer();
+        } catch {
+          // The retry is more important than retaining a transient response.
+        }
+      }
       const retryAfter = Number(response.headers.get("retry-after"));
       const delayMs =
         Number.isFinite(retryAfter) && retryAfter > 0
@@ -109,28 +123,33 @@ async function fetchAnalysis() {
   throw new Error("analysis request exhausted its retry budget");
 }
 
+async function fetchUsage() {
+  const response = await fetch(`${apiBase}/api/repos/${owner}/${repo}/usage`, {
+    headers: { accept: "application/json" },
+    signal: AbortSignal.timeout(5_000),
+  });
+
+  return response.ok ? ((await response.json()) as UsageResponse) : null;
+}
+
 try {
   const [analyzeRes, usageRes] = await Promise.allSettled([
     fetchAnalysis(),
-    fetch(`${apiBase}/api/repos/${owner}/${repo}/usage`, {
-      headers: { accept: "application/json" },
-      signal: AbortSignal.timeout(5_000),
-    }),
+    fetchUsage(),
   ]);
 
   if (analyzeRes.status === "fulfilled") {
-    const res = analyzeRes.value;
-    if (res.ok) {
-      const result = (await res.json()) as AnalyzeResponse;
+    const { status, result } = analyzeRes.value;
+    if (result) {
       if (result.not_found) {
         repoNotFound = true;
       } else {
         data = result;
       }
-    } else if (res.status === 404) {
+    } else if (status === 404) {
       repoNotFound = true;
     } else {
-      fetchError = `backend returned ${res.status}`;
+      fetchError = `backend returned ${status}`;
     }
   } else {
     fetchError =
@@ -139,8 +158,8 @@ try {
         : String(analyzeRes.reason);
   }
 
-  if (usageRes.status === "fulfilled" && usageRes.value.ok) {
-    usage = (await usageRes.value.json()) as UsageResponse;
+  if (usageRes.status === "fulfilled") {
+    usage = usageRes.value;
   }
 } catch (err) {
   fetchError = err instanceof Error ? err.message : String(err);

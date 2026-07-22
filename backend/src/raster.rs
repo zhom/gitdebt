@@ -372,6 +372,21 @@ mod tests {
     }
 
     #[test]
+    fn rasterize_draws_embedded_avatar_data() {
+        const RED_JPEG: &str = "/9j/4AAQSkZJRgABAgAAAQABAAD//gAQTGF2YzYyLjI4LjEwMgD/2wBDAAgEBAQEBAUFBQUFBQYGBgYGBgYGBgYGBgYHBwcICAgHBwcGBgcHCAgICAkJCQgICAgJCQoKCgwMCwsODg4RERT/xABMAAEBAAAAAAAAAAAAAAAAAAAABgEBAQAAAAAAAAAAAAAAAAAABgcQAQAAAAAAAAAAAAAAAAAAAAARAQAAAAAAAAAAAAAAAAAAAAD/wAARCAACAAIDASIAAhEAAxEA/9oADAMBAAIRAxEAPwCLAE1/f//Z";
+        let svg = format!(
+            r#"<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 2 2"><image href="data:image/jpeg;base64,{RED_JPEG}" width="2" height="2" /></svg>"#
+        );
+        let (rgba, width, height) = rasterize_rgba(&svg, 1.0).expect("embedded avatar");
+        assert_eq!((width, height), (2, 2));
+        assert!(
+            rgba.chunks_exact(4).all(|pixel| {
+                pixel[0] > 200 && pixel[1] < 40 && pixel[2] < 40 && pixel[3] == 255
+            })
+        );
+    }
+
+    #[test]
     fn rasterize_emits_webp_bytes() {
         let svg = r##"<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 100 50"><rect width="100" height="50" fill="#3b82f6" /></svg>"##;
         let webp = rasterize(svg, RasterFormat::Webp, 1.0).expect("webp");

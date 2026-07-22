@@ -22,7 +22,9 @@ use axum::{
     routing::{get, post},
 };
 use axum_extra::extract::cookie::CookieJar;
+use base64::Engine as _;
 use chrono::{Datelike, NaiveDate, Utc};
+use futures::{StreamExt, stream};
 use serde::Deserialize;
 use sqlx::Row;
 
@@ -39,6 +41,96 @@ use crate::theme::theme_for;
 /// SVG's CSS size — sharp on high-DPI screens, still reasonable file
 /// size after lossless PNG / WebP encoding.
 const RASTER_SCALE: f32 = 2.0;
+const MAX_AVATAR_BYTES: usize = 128 * 1024;
+const AVATAR_FETCH_CONCURRENCY: usize = 8;
+
+fn trusted_avatar_url(raw: &str) -> bool {
+    let Ok(url) = url::Url::parse(raw) else {
+        return false;
+    };
+    url.scheme() == "https"
+        && url.username().is_empty()
+        && url.password().is_none()
+        && url.port().is_none()
+        && matches!(
+            url.host_str(),
+            Some(
+                "avatars.githubusercontent.com"
+                    | "gravatar.com"
+                    | "www.gravatar.com"
+                    | "secure.gravatar.com"
+            )
+        )
+}
+
+async fn fetch_avatar_data_uri(client: &reqwest::Client, raw: &str) -> anyhow::Result<String> {
+    if !trusted_avatar_url(raw) {
+        anyhow::bail!("untrusted avatar URL");
+    }
+    let mut response = client.get(raw).send().await?.error_for_status()?;
+    if response
+        .content_length()
+        .is_some_and(|length| length > MAX_AVATAR_BYTES as u64)
+    {
+        anyhow::bail!("avatar exceeds size limit");
+    }
+    let mime = response
+        .headers()
+        .get(header::CONTENT_TYPE)
+        .and_then(|value| value.to_str().ok())
+        .and_then(|value| value.split(';').next())
+        .filter(|value| matches!(*value, "image/png" | "image/jpeg" | "image/webp"))
+        .ok_or_else(|| anyhow::anyhow!("unsupported avatar content type"))?
+        .to_string();
+    let mut bytes = Vec::new();
+    while let Some(chunk) = response.chunk().await? {
+        if bytes.len().saturating_add(chunk.len()) > MAX_AVATAR_BYTES {
+            anyhow::bail!("avatar exceeds size limit");
+        }
+        bytes.extend_from_slice(&chunk);
+    }
+    if bytes.is_empty() {
+        anyhow::bail!("empty avatar response");
+    }
+    Ok(format!(
+        "data:{mime};base64,{}",
+        base64::engine::general_purpose::STANDARD.encode(bytes)
+    ))
+}
+
+async fn self_contained_avatar(state: &ApiState, raw: String) -> Option<String> {
+    if raw.starts_with("data:image/") {
+        return Some(raw);
+    }
+    if !trusted_avatar_url(&raw) {
+        return None;
+    }
+    let client = state.avatar_http.clone();
+    let fetch_url = raw.clone();
+    state
+        .avatar_data_cache
+        .try_get_with(raw, async move {
+            fetch_avatar_data_uri(&client, &fetch_url).await
+        })
+        .await
+        .ok()
+}
+
+async fn self_contained_avatars(
+    state: &ApiState,
+    avatars: impl IntoIterator<Item = Option<String>>,
+) -> Vec<Option<String>> {
+    stream::iter(avatars)
+        .map(|avatar| async move {
+            match avatar {
+                Some(raw) => self_contained_avatar(state, raw).await,
+                None => None,
+            }
+        })
+        .buffered(AVATAR_FETCH_CONCURRENCY)
+        .collect()
+        .await
+}
 
 /// Postgres regex matching dependency manifests + lockfiles across the
 /// major language ecosystems. Excluded from "bug-magnet" / "top-changed"
@@ -650,7 +742,7 @@ async fn ensure_contributors_svg(
             .bind(BOT_LOGINS)
             .fetch_all(&state.analyzer.cache.db().pool)
             .await?;
-        let rows: Vec<ContributorRow> = rows
+        let mut rows: Vec<ContributorRow> = rows
             .into_iter()
             .map(|r| ContributorRow {
                 login: r
@@ -661,6 +753,15 @@ async fn ensure_contributors_svg(
                 commits: r.try_get("commits").unwrap_or(0),
             })
             .collect();
+        let avatar_urls: Vec<Option<String>> = rows
+            .iter()
+            .take(16)
+            .map(|row| row.avatar_url.clone())
+            .collect();
+        let avatars = self_contained_avatars(state, avatar_urls).await;
+        for (row, avatar) in rows.iter_mut().zip(avatars) {
+            row.avatar_url = avatar;
+        }
         Ok(repo_charts::render_contributors(full, &rows, theme))
     })
     .await?;
@@ -768,7 +869,7 @@ async fn ensure_bus_factor_svg(
             .first()
             .and_then(|r| r.try_get::<Option<i64>, _>("total").ok().flatten())
             .unwrap_or(0);
-        let authors: Vec<AuthorShare> = rows
+        let mut authors: Vec<AuthorShare> = rows
             .into_iter()
             .map(|r| AuthorShare {
                 label: r.try_get("label").unwrap_or_default(),
@@ -777,6 +878,15 @@ async fn ensure_bus_factor_svg(
                 commits: r.try_get("commits").unwrap_or(0),
             })
             .collect();
+        let avatar_urls: Vec<Option<String>> = authors
+            .iter()
+            .take(8)
+            .map(|author| author.avatar_url.clone())
+            .collect();
+        let avatars = self_contained_avatars(state, avatar_urls).await;
+        for (author, avatar) in authors.iter_mut().zip(avatars) {
+            author.avatar_url = avatar;
+        }
         Ok(repo_charts::render_bus_factor(full, &authors, total_commits, theme))
     })
     .await?;
@@ -867,6 +977,26 @@ fn stat_cache_control(pending: bool) -> HeaderValue {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn avatar_media_only_reads_known_https_cdns() {
+        assert!(trusted_avatar_url(
+            "https://avatars.githubusercontent.com/u/1?s=80&v=4"
+        ));
+        assert!(trusted_avatar_url(
+            "https://www.gravatar.com/avatar/abc?d=identicon&s=80"
+        ));
+        assert!(!trusted_avatar_url(
+            "http://avatars.githubusercontent.com/u/1"
+        ));
+        assert!(!trusted_avatar_url(
+            "https://avatars.githubusercontent.com.evil.example/u/1"
+        ));
+        assert!(!trusted_avatar_url("https://127.0.0.1/avatar.png"));
+        assert!(!trusted_avatar_url(
+            "https://avatars.githubusercontent.com:8443/u/1"
+        ));
+    }
 
     #[test]
     fn report_views_require_the_exact_frontend_origin() {

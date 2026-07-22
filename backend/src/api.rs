@@ -72,6 +72,12 @@ pub struct ApiState {
     /// naturally because the analyze JSON is also re-derived. Keys:
     /// `{endpoint}:{owner}/{repo}|{theme}|{format}[|extra]`.
     pub raster_cache: MokaCache<String, std::sync::Arc<Vec<u8>>>,
+    /// Self-contained avatar data URIs used by contributor media. SVGs loaded
+    /// through an `<img>` and the server-side rasterizer cannot reliably load
+    /// remote subresources, so the first trusted CDN read is cached here and
+    /// baked into every SVG/PNG/WebP variant.
+    pub(crate) avatar_data_cache: MokaCache<String, String>,
+    pub(crate) avatar_http: reqwest::Client,
     /// Built user aggregates (`aggregate::build` results), keyed by
     /// lowercased login. 5-min TTL like the analyze bodies. This is the
     /// single expensive step behind BOTH `/api/users/:login/analyze` and
@@ -127,6 +133,16 @@ impl ApiState {
             .max_capacity(1_000)
             .time_to_live(Duration::from_secs(24 * 60 * 60))
             .build();
+        let avatar_data_cache = MokaCache::builder()
+            .max_capacity(10_000)
+            .time_to_live(Duration::from_secs(24 * 60 * 60))
+            .build();
+        let avatar_http = reqwest::Client::builder()
+            .user_agent("gitdebt-avatar-media/1")
+            .redirect(reqwest::redirect::Policy::none())
+            .connect_timeout(Duration::from_secs(3))
+            .timeout(Duration::from_secs(8))
+            .build()?;
         let user_agg_cache = MokaCache::builder()
             .max_capacity(500)
             .time_to_live(Duration::from_secs(5 * 60))
@@ -158,6 +174,8 @@ impl ApiState {
             analyze_cache,
             stat_svg_cache,
             raster_cache,
+            avatar_data_cache,
+            avatar_http,
             user_agg_cache,
             leaderboard_cache,
             gh_app,

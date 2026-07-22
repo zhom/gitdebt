@@ -940,7 +940,6 @@ fn render_bus_factor_inner(
     theme: &Theme,
 ) -> String {
     let width = 900u32;
-    let height = 360u32;
     let padding = 56u32;
 
     let mut sorted: Vec<&AuthorShare> = authors.iter().filter(|a| a.commits > 0).collect();
@@ -968,6 +967,7 @@ fn render_bus_factor_inner(
         .filter(|author| author.commits.saturating_mul(100) >= total_commits)
         .take(8)
         .collect();
+    let height = 230u32 + (shown.len().saturating_sub(1) / 4) as u32 * 100;
 
     let mut people = String::new();
     for (i, a) in shown.iter().enumerate() {

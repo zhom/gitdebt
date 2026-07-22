@@ -207,10 +207,147 @@ const NON_BOT_AUTHOR_FILTER: &str = "author_name NOT LIKE '%[bot]%' \
 /// Read-only stat endpoints. One route, dispatched on
 /// `{name}.{svg|png|webp}` in the filename segment. Public CORS in api.rs.
 pub fn public_router() -> Router<ApiState> {
-    Router::new().route(
-        "/api/repos/{owner}/{repo}/stats/{filename}",
-        get(stat_dispatcher),
+    Router::new()
+        .route(
+            "/api/repos/{owner}/{repo}/stats/{filename}",
+            get(stat_dispatcher),
+        )
+        .route("/api/repos/{owner}/{repo}/stats.json", get(repo_stats_json))
+}
+
+/// Postgres-only data contract for the interactive in-app charts. Embedded
+/// assets continue through the deterministic SVG/raster renderers; the site
+/// consumes these complete aggregate rows directly so hover, focus and scrub
+/// interactions do not need to reverse-engineer pixels from an image.
+async fn repo_stats_json(
+    State(state): State<ApiState>,
+    Path((owner, repo)): Path<(String, String)>,
+) -> Result<Response, ApiError> {
+    if !is_valid_slug(&owner) || !is_valid_slug(&repo) {
+        return Err(ApiError::bad_request("invalid owner/repo"));
+    }
+    let full = crate::analyzer::repo_key(&owner, &repo);
+    let pool = &state.analyzer.cache.db().pool;
+    let overview: Option<(i64, Option<i64>, bool, Option<String>)> = sqlx::query_as(
+        "SELECT total_commits, analysis_scope_commits, analysis_truncated, last_analyzed_sha \
+         FROM repo_history WHERE repo = $1 AND last_analyzed_at IS NOT NULL",
     )
+    .bind(&full)
+    .fetch_optional(pool)
+    .await?;
+    let Some((total_commits, scope_commits, truncated, revision)) = overview else {
+        return Ok((
+            StatusCode::ACCEPTED,
+            [(header::CACHE_CONTROL, "no-store")],
+            Json(serde_json::json!({"ready": false, "repo": full})),
+        )
+            .into_response());
+    };
+
+    let files = sqlx::query(
+        "SELECT path, commits, fix_commits FROM repo_file_stats \
+         WHERE repo = $1 AND path !~ $2 \
+         ORDER BY commits DESC, path ASC LIMIT 20",
+    )
+    .bind(&full)
+    .bind(DEPENDENCY_FILE_REGEX)
+    .fetch_all(pool)
+    .await?;
+    let file_rows: Vec<_> = files
+        .into_iter()
+        .map(|row| {
+            serde_json::json!({
+                "path": row.try_get::<String, _>("path").unwrap_or_default(),
+                "commits": row.try_get::<i64, _>("commits").unwrap_or(0),
+                "fix_commits": row.try_get::<i64, _>("fix_commits").unwrap_or(0),
+            })
+        })
+        .collect();
+
+    let author_sql = format!(
+        "SELECT COALESCE(NULLIF(github_login, ''), NULLIF(author_name, ''), author_email) AS label, \
+                github_login, avatar_url, commits, SUM(commits) OVER ()::BIGINT AS analyzed_total \
+         FROM repo_author_stats WHERE repo = $1 AND {NON_BOT_AUTHOR_FILTER} \
+         ORDER BY commits DESC, author_email ASC LIMIT 32"
+    );
+    let author_rows = sqlx::query(sqlx::AssertSqlSafe(author_sql))
+        .bind(&full)
+        .bind(BOT_LOGINS)
+        .fetch_all(pool)
+        .await?;
+    let analyzed_commits = author_rows
+        .first()
+        .and_then(|row| {
+            row.try_get::<Option<i64>, _>("analyzed_total")
+                .ok()
+                .flatten()
+        })
+        .unwrap_or(0);
+    let authors: Vec<_> = author_rows
+        .into_iter()
+        .map(|row| {
+            let avatar = row
+                .try_get::<Option<String>, _>("avatar_url")
+                .unwrap_or(None)
+                .filter(|url| trusted_avatar_url(url));
+            serde_json::json!({
+                "label": row.try_get::<String, _>("label").unwrap_or_default(),
+                "login": row.try_get::<Option<String>, _>("github_login").unwrap_or(None),
+                "avatar_url": avatar,
+                "commits": row.try_get::<i64, _>("commits").unwrap_or(0),
+            })
+        })
+        .collect();
+    let author_counts: Vec<i64> = authors
+        .iter()
+        .filter_map(|author| author.get("commits").and_then(serde_json::Value::as_i64))
+        .collect();
+    let bus_factor = repo_charts::compute_bus_factor(&author_counts, analyzed_commits);
+
+    let commit_days: Vec<(NaiveDate, i64)> =
+        sqlx::query_as("SELECT day, commits FROM repo_commit_days WHERE repo = $1 ORDER BY day")
+            .bind(&full)
+            .fetch_all(pool)
+            .await?;
+    let todo_days: Vec<(NaiveDate, i64)> = sqlx::query_as(
+        "SELECT day, SUM(todo_added - todo_removed) OVER (ORDER BY day)::BIGINT \
+         FROM repo_todo_deltas WHERE repo = $1 ORDER BY day",
+    )
+    .bind(&full)
+    .fetch_all(pool)
+    .await?;
+    let languages: Vec<(String, i64, i64, i64, i64)> = sqlx::query_as(
+        "SELECT language, files, lines_code, lines_blank, lines_comment \
+         FROM repo_lines WHERE repo = $1 \
+         AND (lines_code + lines_blank + lines_comment) > 0 \
+         ORDER BY (lines_code + lines_blank + lines_comment) DESC LIMIT 12",
+    )
+    .bind(&full)
+    .fetch_all(pool)
+    .await?;
+
+    let body = serde_json::json!({
+        "ready": true,
+        "repo": full,
+        "revision": revision,
+        "total_commits": total_commits.max(0),
+        "analyzed_commits": analyzed_commits.max(0),
+        "analysis_scope_commits": scope_commits.unwrap_or(0).max(0),
+        "analysis_truncated": truncated,
+        "bus_factor": bus_factor,
+        "files": file_rows,
+        "authors": authors,
+        "commit_days": commit_days.into_iter().map(|(date, value)| serde_json::json!({"date": date, "value": value})).collect::<Vec<_>>(),
+        "todo_days": todo_days.into_iter().map(|(date, value)| serde_json::json!({"date": date, "value": value.max(0)})).collect::<Vec<_>>(),
+        "languages": languages.into_iter().map(|(language, files, code, blank, comment)| serde_json::json!({
+            "language": language, "files": files, "code": code, "blank": blank, "comment": comment,
+        })).collect::<Vec<_>>(),
+    });
+    Ok((
+        [(header::CACHE_CONTROL, "public, s-maxage=300, max-age=60")],
+        Json(body),
+    )
+        .into_response())
 }
 
 /// Mutating endpoints. api.rs wraps this in a per-IP rate limiter.
@@ -449,11 +586,17 @@ struct StatQuery {
     since: Option<String>,
     /// `heatmap` only.
     year: Option<i32>,
+    /// In-app media omits embed-only attribution; README output keeps it.
+    context: Option<String>,
 }
 
 impl StatQuery {
     fn animate(&self) -> bool {
         matches!(self.animate.as_deref(), Some("1") | Some("true"))
+    }
+
+    fn in_app(&self) -> bool {
+        self.context.as_deref() == Some("app")
     }
 }
 
@@ -475,9 +618,12 @@ async fn stat_dispatcher(
     );
     let theme = theme_for(q.theme.as_deref());
     let Some(revision) = stat_revision(&state, &full, kind).await? else {
-        let svg = render_analysis_pending(&full, theme);
+        let mut svg = render_analysis_pending(&full, theme);
+        if q.in_app() {
+            svg = brand::without_embed_footer(svg);
+        }
         let Some(raster_format) = format.raster() else {
-            return Ok(svg_response_with_policy(svg, true).into_response());
+            return Ok(svg_response_with_policy(svg, true, !q.in_app()).into_response());
         };
         let bytes = crate::api::rasterize_limited(svg, raster_format, RASTER_SCALE).await?;
         return Ok(
@@ -503,15 +649,22 @@ async fn stat_dispatcher(
         StatKind::BusFactor => ensure_bus_factor_svg(&state, &full, theme, &theme_key).await?,
         StatKind::CommitTrend => ensure_commit_trend_svg(&state, &full, theme, &theme_key).await?,
     };
-    let svg = crate::texture::decorate(stat_svg_motion(animated_svg, q.animate()), theme);
+    let mut svg = crate::texture::decorate(stat_svg_motion(animated_svg, q.animate()), theme);
+    if q.in_app() {
+        svg = brand::without_embed_footer(svg);
+    }
 
     let Some(raster_format) = format.raster() else {
-        return Ok(svg_response(svg).into_response());
+        return Ok(svg_response_with_policy(svg, false, !q.in_app()).into_response());
     };
 
     // Raster path. Key off the SVG's cache key + format suffix so
     // both PNG and WebP variants memoize independently.
-    let raster_key = format!("{svg_key}|{}", format.cache_suffix());
+    let raster_key = format!(
+        "{svg_key}|{}|{}",
+        format.cache_suffix(),
+        if q.in_app() { "app" } else { "embed" }
+    );
     if let Some(cached) = state.raster_cache.get(&raster_key).await {
         return Ok(raster_response(raster_format, cached).into_response());
     }
@@ -537,34 +690,22 @@ fn stat_svg_motion(svg: String, animate: bool) -> String {
 async fn stat_revision(
     state: &ApiState,
     repo: &str,
-    kind: StatKind,
+    _kind: StatKind,
 ) -> Result<Option<String>, ApiError> {
-    let row: (Option<String>, Option<String>, Option<String>) = sqlx::query_as(
-        "SELECT \
-            (SELECT last_analyzed_sha FROM repo_history WHERE repo = $1), \
-            (SELECT status FROM repo_analysis_queue WHERE repo = $1), \
-            (SELECT phase FROM repo_analysis_queue WHERE repo = $1)",
+    let revision: Option<(String, i32, i64)> = sqlx::query_as(
+        "SELECT last_analyzed_sha, analysis_revision, \
+                COALESCE(analysis_scope_commits, 0) \
+         FROM repo_history \
+         WHERE repo = $1 AND last_analyzed_at IS NOT NULL",
     )
     .bind(repo)
-    .fetch_one(&state.analyzer.cache.db().pool)
+    .fetch_optional(&state.analyzer.cache.db().pool)
     .await?;
-    let active = matches!(row.1.as_deref(), Some("pending" | "in_progress"));
-    let core_saved = row.2.as_deref() == Some("finishing") && kind.ready_while_finishing();
-    Ok(if active && !core_saved { None } else { row.0 })
-}
-
-impl StatKind {
-    /// These charts read tables atomically replaced by `apply_commits_at_head`
-    /// before the worker enters its expensive language-count / contributor-
-    /// enrichment phase. Contributor and bus-factor cards wait because their
-    /// author identities are still being enriched; lines wait for the tree
-    /// count itself.
-    fn ready_while_finishing(self) -> bool {
-        matches!(
-            self,
-            Self::BugMagnets | Self::TopFiles | Self::Heatmap | Self::TodoTrend | Self::CommitTrend
-        )
-    }
+    // Writers replace the aggregate tables and cursor in one transaction.
+    // While a refresh is queued/running, the previous revision is therefore a
+    // complete cache and should stay visible instead of regressing to a
+    // misleading pending card.
+    Ok(revision.map(|(sha, schema, scope)| format!("{sha}:r{schema}:n{scope}")))
 }
 
 fn render_analysis_pending(repo: &str, theme: &crate::theme::Theme) -> String {
@@ -934,18 +1075,21 @@ fn parse_since(s: &str) -> Option<u32> {
     }
 }
 
-fn svg_response(svg: String) -> impl IntoResponse {
-    svg_response_with_policy(svg, false)
-}
-
-fn svg_response_with_policy(svg: String, pending: bool) -> impl IntoResponse {
+fn svg_response_with_policy(svg: String, pending: bool, branded: bool) -> impl IntoResponse {
     let mut headers = HeaderMap::new();
     headers.insert(
         header::CONTENT_TYPE,
         HeaderValue::from_static("image/svg+xml; charset=utf-8"),
     );
     headers.insert(header::CACHE_CONTROL, stat_cache_control(pending));
-    (headers, brand::with_site_link(svg))
+    (
+        headers,
+        if branded {
+            brand::with_site_link(svg)
+        } else {
+            svg
+        },
+    )
 }
 
 fn raster_response(format: RasterFormat, bytes: Arc<Vec<u8>>) -> impl IntoResponse {
@@ -1072,15 +1216,15 @@ mod tests {
     }
 
     #[test]
-    fn only_atomically_saved_core_charts_open_during_finishing() {
-        assert!(StatKind::BugMagnets.ready_while_finishing());
-        assert!(StatKind::TopFiles.ready_while_finishing());
-        assert!(StatKind::Heatmap.ready_while_finishing());
-        assert!(StatKind::TodoTrend.ready_while_finishing());
-        assert!(StatKind::CommitTrend.ready_while_finishing());
-        assert!(!StatKind::Contributors.ready_while_finishing());
-        assert!(!StatKind::BusFactor.ready_while_finishing());
-        assert!(!StatKind::Lines.ready_while_finishing());
+    fn in_app_media_context_is_explicit() {
+        assert!(!StatQuery::default().in_app());
+        assert!(
+            StatQuery {
+                context: Some("app".into()),
+                ..StatQuery::default()
+            }
+            .in_app()
+        );
     }
 
     #[test]

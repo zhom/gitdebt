@@ -66,6 +66,24 @@ pub fn with_site_link(mut svg: String) -> String {
     svg
 }
 
+/// Remove the embed-only footer from an SVG shown inside gitdebt itself.
+/// The app already supplies navigation and attribution; README/media responses
+/// keep the linked lockup and full-surface link unchanged.
+pub fn without_embed_footer(mut svg: String) -> String {
+    const OPEN: &str = "  <a href=\"https://gitdebt.com\" target=\"_blank\" rel=\"noopener\" aria-label=\"gitdebt\">";
+    while let Some(start) = svg.find(OPEN) {
+        let Some(relative_end) = svg[start..].find("  </a>") else {
+            break;
+        };
+        let mut end = start + relative_end + "  </a>".len();
+        if svg.as_bytes().get(end) == Some(&b'\n') {
+            end += 1;
+        }
+        svg.replace_range(start..end, "");
+    }
+    svg
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -103,5 +121,14 @@ mod tests {
             linked.find("data-gitdebt-surface-link").unwrap() < linked.find("<rect />").unwrap()
         );
         assert_eq!(with_site_link(linked.clone()), linked);
+    }
+
+    #[test]
+    fn app_surface_removes_embed_footer_only() {
+        let chart = format!("<svg><rect />{}</svg>", footer_lockup(100.0, 90.0, &LIGHT));
+        let app = without_embed_footer(chart);
+        assert!(app.contains("<rect />"));
+        assert!(!app.contains("data-gitdebt-logo"));
+        assert!(!app.contains("href=\"https://gitdebt.com\""));
     }
 }

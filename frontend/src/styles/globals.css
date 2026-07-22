@@ -247,8 +247,63 @@ details[open][data-state="open"] .mobile-nav-panel {
 }
 
 @utility card-panel {
-  @apply rounded-xl border border-border bg-card text-card-foreground;
+  @apply border-y border-border bg-card text-card-foreground sm:border-x;
   box-shadow: none;
+}
+
+.evidence-band {
+  position: relative;
+  isolation: isolate;
+  overflow: hidden;
+}
+
+.dither-depth {
+  background-image: radial-gradient(
+    color-mix(in oklab, var(--foreground) 7%, transparent) 0.65px,
+    transparent 0.8px
+  );
+  background-size: 5px 5px;
+}
+
+.evidence-band::before {
+  position: absolute;
+  z-index: -1;
+  inset: 0;
+  content: "";
+  color: var(--foreground);
+  opacity: 0.13;
+  background-image: radial-gradient(currentColor 0.75px, transparent 0.85px);
+  background-size: 4px 4px;
+  mask-image: linear-gradient(90deg, transparent, black 22%, black 78%, transparent);
+}
+
+.signal-dither-fill {
+  background-image: radial-gradient(var(--background) 0.7px, transparent 0.85px);
+  background-size: 3px 3px;
+}
+
+@keyframes growth-ticker-scroll {
+  to {
+    transform: translateX(-50%);
+  }
+}
+
+.growth-ticker-track {
+  animation: growth-ticker-scroll 48s linear infinite;
+  will-change: transform;
+}
+
+.group:hover > .growth-ticker-track,
+.group:focus-within > .growth-ticker-track {
+  animation-play-state: paused;
+}
+
+@media (prefers-reduced-motion: reduce) {
+  .growth-ticker-track {
+    animation: none;
+    transform: none;
+    will-change: auto;
+  }
 }
 
 @media (max-width: 39.999rem) {

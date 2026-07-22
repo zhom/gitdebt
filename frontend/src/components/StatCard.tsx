@@ -41,13 +41,17 @@ export function StatCard({
   liveRepo,
 }: Props) {
   const [attempt, setAttempt] = useState(0);
-  const [phase, setPhase] = useState<Phase>("gathering");
+  // The image is useful content even before this island hydrates. Starting in
+  // `ready` keeps the server-rendered media visible and avoids the cached-image
+  // race where `load` fires before React attaches its handler, leaving the
+  // gathering veil on screen forever.
+  const [phase, setPhase] = useState<Phase>("ready");
   const timerRef = useRef<ReturnType<typeof setTimeout> | null>(null);
   const reduceMotion = useReducedMotion();
   const theme = useRenderedTheme();
 
   const liveSrc = appendParam(
-    appendParam(src, "animate", "1"),
+    appendParam(appendParam(src, "context", "app"), "animate", "1"),
     "render",
     MEDIA_RENDER_REVISION,
   );

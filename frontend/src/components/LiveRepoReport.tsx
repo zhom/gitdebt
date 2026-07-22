@@ -2,8 +2,8 @@ import { useMemo } from "react";
 
 import { ChartViewer } from "@/components/ChartViewer";
 import { EarnedBadges } from "@/components/EarnedBadges";
+import { InteractiveRepoSignals } from "@/components/InteractiveRepoSignals";
 import { RepoHero } from "@/components/RepoHero";
-import { StatCard } from "@/components/StatCard";
 import { UsageSection } from "@/components/UsageSection";
 
 const SLUG_RE = /^([A-Za-z0-9._-]+)\/([A-Za-z0-9._-]+)$/;
@@ -24,19 +24,6 @@ const RESERVED_FIRST_SEGMENTS = new Set([
   "vs",
 ]);
 
-const PRIMARY_STATS = [
-  ["bug-magnets", "Where fixes cluster"],
-  ["top-files", "Files carrying the churn"],
-  ["bus-factor", "Knowledge concentration"],
-  ["commit-trend", "Maintenance pulse"],
-] as const;
-
-const SUPPORTING_STATS = [
-  ["heatmap", "Commit activity"],
-  ["lines", "Language activity"],
-  ["todo-trend", "TODO and FIXME trend"],
-] as const;
-
 function selectedRepo(): { owner: string; repo: string } | null {
   if (typeof window === "undefined") return null;
   const queryRepo = new URLSearchParams(window.location.search).get("repo");
@@ -46,35 +33,6 @@ function selectedRepo(): { owner: string; repo: string } | null {
   if (!match || RESERVED_FIRST_SEGMENTS.has(match[1].toLowerCase()))
     return null;
   return { owner: match[1].toLowerCase(), repo: match[2].toLowerCase() };
-}
-
-export function SecondarySignals({
-  apiBase,
-  repoBase,
-  slug,
-  embedLink,
-}: {
-  apiBase: string;
-  repoBase: string;
-  slug: string;
-  embedLink: string;
-}) {
-  return (
-    <div className="grid gap-5 lg:grid-cols-2">
-      {SUPPORTING_STATS.map(([name, label]) => (
-        <div key={name} className={name === "lines" ? "lg:col-span-2" : ""}>
-          <StatCard
-            src={`${repoBase}/stats/${name}.svg`}
-            alt={`${label} for ${slug}`}
-            caption={label}
-            apiBase={apiBase}
-            embedLink={embedLink}
-            liveRepo={slug}
-          />
-        </div>
-      ))}
-    </div>
-  );
 }
 
 export function LiveRepoReport({ apiBase }: { apiBase: string }) {
@@ -101,7 +59,6 @@ export function LiveRepoReport({ apiBase }: { apiBase: string }) {
 
   const { owner, repo } = selected;
   const slug = `${owner}/${repo}`;
-  const repoBase = `${apiBase}/api/repos/${owner}/${repo}`;
   const embedLink = `https://gitdebt.com/${slug}`;
 
   return (
@@ -138,27 +95,8 @@ export function LiveRepoReport({ apiBase }: { apiBase: string }) {
             codebase.
           </p>
         </header>
-        <div className="grid gap-5 lg:grid-cols-2">
-          {PRIMARY_STATS.map(([name, label]) => (
-            <div
-              key={name}
-              className={name === "commit-trend" ? "lg:col-span-2" : ""}
-            >
-              <StatCard
-                src={`${repoBase}/stats/${name}.svg`}
-                alt={`${label} for ${slug}`}
-                caption={label}
-                apiBase={apiBase}
-                embedLink={embedLink}
-                priority
-                liveRepo={slug}
-              />
-            </div>
-          ))}
-        </div>
-        <SecondarySignals
+        <InteractiveRepoSignals
           apiBase={apiBase}
-          repoBase={repoBase}
           slug={slug}
           embedLink={embedLink}
         />
@@ -202,28 +140,6 @@ export function LiveRepoReport({ apiBase }: { apiBase: string }) {
         />
       </section>
 
-      <section className="space-y-6">
-        <header className="max-w-2xl space-y-2">
-          <p className="font-mono text-xs tracking-wide text-muted-foreground uppercase">
-            Contributors
-          </p>
-          <h2 className="text-2xl font-semibold tracking-tight text-balance sm:text-3xl">
-            Who carries the repository
-          </h2>
-          <p className="text-base leading-relaxed text-pretty text-muted-foreground">
-            Ranked ownership shares from the analyzed commit history. Every
-            contributor links to GitHub, and the chart is README-ready.
-          </p>
-        </header>
-        <StatCard
-          src={`${repoBase}/stats/contributors.svg`}
-          alt={`Contributor ownership for ${slug}`}
-          caption="Contributor ownership"
-          apiBase={apiBase}
-          embedLink={embedLink}
-          liveRepo={slug}
-        />
-      </section>
     </div>
   );
 }

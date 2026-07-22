@@ -17,6 +17,8 @@
 //! Series colors come from a shared categorical palette, index 0 = brand
 //! ink. See `theme.rs` for the per-element fg/muted/grid colors.
 
+use std::borrow::Cow;
+
 use chrono::{DateTime, Datelike, Utc};
 use serde::Serialize;
 
@@ -31,6 +33,12 @@ pub struct Point {
     /// Cumulative total stars up to (and including) this timestamp.
     pub stars: u32,
 }
+
+/// More than one point per horizontal pixel cannot add visible fidelity to
+/// the 1200px chart, but it can turn popular repositories into multi-megabyte
+/// SVGs. A little oversampling preserves sharp bursts without shipping every
+/// archived event to the browser or rasterizer.
+const MAX_RENDER_POINTS: usize = 1_600;
 
 /// X-axis alignment for the chart.
 ///   * `Date` — absolute x-axis by timestamp (default). Repos appear at
@@ -145,6 +153,10 @@ pub fn cumulative_series(arrivals: &[DateTime<Utc>]) -> Vec<Point> {
 /// unchanged when it already fits. Used so the API's `history` array and
 /// the rendered paths stay bounded for huge repos.
 pub fn downsample(series: &[Point], max_points: usize) -> Vec<Point> {
+    downsample_by_index(series, max_points)
+}
+
+fn downsample_by_index<T: Clone>(series: &[T], max_points: usize) -> Vec<T> {
     if series.len() <= max_points || max_points < 2 {
         return series.to_vec();
     }
@@ -160,11 +172,20 @@ pub fn downsample(series: &[Point], max_points: usize) -> Vec<Point> {
     out
 }
 
+fn bounded_render_series<T: Clone>(series: &[T]) -> Cow<'_, [T]> {
+    if series.len() > MAX_RENDER_POINTS {
+        Cow::Owned(downsample_by_index(series, MAX_RENDER_POINTS))
+    } else {
+        Cow::Borrowed(series)
+    }
+}
+
 // Single-repo renderer (may animate)
 
 pub fn render_svg(series: &[Point], cfg: &ChartConfig, theme: &Theme, opts: &ChartOpts) -> String {
+    let series = bounded_render_series(series);
     crate::texture::decorate(
-        render_single_svg(series, cfg, theme, opts, 1.0, opts.animate),
+        render_single_svg(&series, cfg, theme, opts, 1.0, opts.animate),
         theme,
     )
 }
@@ -179,8 +200,9 @@ pub(crate) fn render_svg_frame(
     opts: &ChartOpts,
     progress: f32,
 ) -> String {
+    let series = bounded_render_series(series);
     crate::texture::decorate(
-        render_single_svg(series, cfg, theme, opts, progress.clamp(0.0, 1.0), false),
+        render_single_svg(&series, cfg, theme, opts, progress.clamp(0.0, 1.0), false),
         theme,
     )
 }
@@ -306,10 +328,11 @@ pub fn render_multi_svg(
     theme: &Theme,
     opts: &ChartOpts,
 ) -> String {
-    crate::texture::decorate(
-        render_multi_svg_inner(series_per_repo, cfg, theme, opts),
-        theme,
-    )
+    let bounded: Vec<(String, Vec<Point>)> = series_per_repo
+        .iter()
+        .map(|(repo, series)| (repo.clone(), bounded_render_series(series).into_owned()))
+        .collect();
+    crate::texture::decorate(render_multi_svg_inner(&bounded, cfg, theme, opts), theme)
 }
 
 fn render_multi_svg_inner(
@@ -466,8 +489,10 @@ pub fn render_overlay_svg(
     theme: &Theme,
     opts: &ChartOpts,
 ) -> String {
+    let stars = bounded_render_series(stars);
+    let downloads = bounded_render_series(downloads);
     crate::texture::decorate(
-        render_overlay_svg_inner(stars, downloads, cfg, overlay, theme, opts),
+        render_overlay_svg_inner(&stars, &downloads, cfg, overlay, theme, opts),
         theme,
     )
 }
@@ -1093,6 +1118,25 @@ mod tests {
     fn downsample_noop_when_small() {
         let s = cumulative_series(&[at(1), at(2), at(3)]);
         assert_eq!(downsample(&s, 400).len(), 3);
+    }
+
+    #[test]
+    fn renderer_bounds_large_paths_and_preserves_the_exact_total() {
+        let arrivals: Vec<_> = (0..100_000).map(at).collect();
+        let series = cumulative_series(&arrivals);
+        let bounded = bounded_render_series(&series);
+        assert_eq!(bounded.len(), MAX_RENDER_POINTS);
+        assert_eq!(bounded.first().unwrap().stars, 1);
+        assert_eq!(bounded.last().unwrap().stars, 100_000);
+
+        let svg = render_svg(
+            &series,
+            &ChartConfig::default(),
+            &LIGHT,
+            &ChartOpts::default(),
+        );
+        assert!(svg.contains("100.0k stars"));
+        assert!(svg.len() < 150_000, "bounded chart was {} bytes", svg.len());
     }
 
     #[test]

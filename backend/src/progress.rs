@@ -249,19 +249,37 @@ impl ProgressSnapshot {
         let next_page = star_phase
             .active()
             .then(|| raw.star_next_page.unwrap_or(1).clamp(1, u32::MAX as i64) as u32);
-        let (star_processed, star_total, star_percent) = archive_month_progress(raw.archive_cursor);
+        let (mut star_processed, star_total, mut star_percent) =
+            archive_month_progress(raw.archive_cursor);
+        // The final archive window ends at yesterday rather than at a month
+        // boundary, so its cursor remains inside the current month. Once the
+        // cache completeness flag is committed, the terminal snapshot must
+        // still say 100% instead of leaving the UI at 99% forever.
+        if star_phase == ProgressPhase::Complete && raw.stars_complete {
+            star_processed = star_total;
+            star_percent = Some(100);
+        }
         let provider_quota = raw.star_last_error.as_deref().is_some_and(|error| {
             error
                 .to_ascii_lowercase()
                 .contains("free query bytes scanned")
         });
-        let star_eta = if provider_quota {
+        let star_eta = if !star_phase.active() {
+            None
+        } else if provider_quota {
             raw.star_next_attempt_at
                 .map(|retry| (retry - Utc::now()).num_seconds().max(0) as u64)
         } else {
+            // Project-owned partitioned indexes complete a monthly window in
+            // roughly 1.5 seconds in production. Direct public-corpus scans
+            // remain deliberately conservative because their latency and
+            // bytes scanned are substantially less predictable.
+            let indexed_source = std::env::var("GH_ARCHIVE_SOURCE_TABLE")
+                .ok()
+                .is_some_and(|value| !value.trim().is_empty());
             star_total
                 .zip(star_processed)
-                .map(|(total, done)| total.saturating_sub(done).saturating_mul(45))
+                .map(|(total, done)| archive_eta_seconds(total, done, indexed_source))
                 .filter(|seconds| *seconds > 0)
         };
 
@@ -387,6 +405,15 @@ fn archive_month_progress(cursor: Option<NaiveDate>) -> (Option<u64>, Option<u64
         .unwrap_or(0);
     let percent = (total > 0).then_some(((done as f64 / total as f64) * 100.0).round() as u8);
     (Some(done), Some(total), percent)
+}
+
+fn archive_eta_seconds(total: u64, done: u64, indexed_source: bool) -> u64 {
+    let remaining = total.saturating_sub(done);
+    if indexed_source {
+        remaining.saturating_mul(3).div_ceil(2)
+    } else {
+        remaining.saturating_mul(45)
+    }
 }
 
 async fn load_snapshot(state: &ApiState, repo: &str) -> Result<ProgressSnapshot, ApiError> {
@@ -683,10 +710,14 @@ mod tests {
     fn either_independent_pipeline_can_complete_the_stream() {
         let stars = snapshot(RawProgress {
             stars_complete: true,
+            archive_cursor: Some(Utc::now().date_naive()),
             ..RawProgress::default()
         });
         assert_eq!(stars.phase, ProgressPhase::Complete);
         assert!(stars.terminal);
+        assert_eq!(stars.stars.processed_units, stars.stars.total_units);
+        assert_eq!(stars.stars.percent, Some(100));
+        assert_eq!(stars.stars.eta_seconds, None);
 
         let analysis = snapshot(RawProgress {
             analysis_complete: true,
@@ -694,6 +725,13 @@ mod tests {
         });
         assert_eq!(analysis.phase, ProgressPhase::Complete);
         assert!(analysis.terminal);
+    }
+
+    #[test]
+    fn indexed_archive_eta_uses_observed_partition_rate() {
+        assert_eq!(archive_eta_seconds(186, 58, true), 192);
+        assert_eq!(archive_eta_seconds(186, 58, false), 5_760);
+        assert_eq!(archive_eta_seconds(186, 186, true), 0);
     }
 
     #[test]

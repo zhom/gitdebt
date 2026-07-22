@@ -24,6 +24,7 @@ pub(crate) const TODO_PATCH_COMMIT_LIMIT: usize = 100;
 /// It cannot collide with a Git object id and lets the normal freshness/cache
 /// contract complete instead of retrying an empty repository forever.
 pub(crate) const EMPTY_REPOSITORY_HEAD: &str = "empty-repository";
+const CACHE_FORMAT_VERSION: &str = "2";
 
 pub(crate) fn analysis_commit_limit() -> usize {
     std::env::var("REPO_ANALYSIS_COMMIT_LIMIT")
@@ -99,7 +100,22 @@ pub async fn open_or_clone(
     let path = storage.path_for(repo);
     tokio::fs::create_dir_all(path.parent().unwrap_or_else(|| Path::new("."))).await?;
 
-    if path.exists() {
+    if path.exists() && !cache_format_is_current(&path).await {
+        // Older tree-filtered clones can contain the commit graph without the
+        // historical trees required by `--name-only`. Relaxing the filter on
+        // a later fetch does not reliably backfill those promisor objects, so
+        // metadata walks degrade into thousands of serial lazy fetches. A
+        // versioned one-time rebuild is faster and makes every later scan
+        // fully local.
+        tracing::info!(repo, "rebuilding legacy repository cache");
+        tokio::fs::remove_dir_all(&path)
+            .await
+            .context("remove legacy bare clone")?;
+        if let Err(clone_error) = clone_bare(repo, &path).await {
+            let _ = tokio::fs::remove_dir_all(&path).await;
+            return Err(clone_error);
+        }
+    } else if path.exists() {
         if let Err(error) = fetch_updates(&path).await {
             if !fetch_requires_reclone(&error) {
                 return Err(error);
@@ -153,7 +169,34 @@ async fn clone_bare(repo: &str, path: &Path) -> Result<()> {
             String::from_utf8_lossy(&output.stderr)
         );
     }
+    let config = Command::new("git")
+        .arg("-C")
+        .arg(path)
+        .args(["config", "gitdebt.cacheFormat", CACHE_FORMAT_VERSION])
+        .output()
+        .await
+        .context("mark repository cache format")?;
+    if !config.status.success() {
+        bail!(
+            "git cache format failed: {}",
+            String::from_utf8_lossy(&config.stderr)
+        );
+    }
     Ok(())
+}
+
+async fn cache_format_is_current(path: &Path) -> bool {
+    let Ok(output) = Command::new("git")
+        .arg("-C")
+        .arg(path)
+        .args(["config", "--get", "gitdebt.cacheFormat"])
+        .output()
+        .await
+    else {
+        return false;
+    };
+    output.status.success()
+        && String::from_utf8_lossy(&output.stdout).trim() == CACHE_FORMAT_VERSION
 }
 
 async fn fetch_updates(path: &Path) -> Result<()> {
@@ -1006,6 +1049,37 @@ mod tests {
         assert!(plan.shas.is_empty());
         assert!(!plan.truncated);
         assert_eq!(reachable_commit_count(&handle).await.unwrap(), 0);
+    }
+
+    #[tokio::test]
+    async fn repository_cache_requires_the_current_explicit_format() {
+        let tmp = tempfile::tempdir().unwrap();
+        let status = std::process::Command::new("git")
+            .arg("-C")
+            .arg(tmp.path())
+            .args(["init", "--bare", "-q"])
+            .status()
+            .unwrap();
+        assert!(status.success());
+        assert!(!cache_format_is_current(tmp.path()).await);
+
+        let stale = std::process::Command::new("git")
+            .arg("-C")
+            .arg(tmp.path())
+            .args(["config", "gitdebt.cacheFormat", "1"])
+            .status()
+            .unwrap();
+        assert!(stale.success());
+        assert!(!cache_format_is_current(tmp.path()).await);
+
+        let current = std::process::Command::new("git")
+            .arg("-C")
+            .arg(tmp.path())
+            .args(["config", "gitdebt.cacheFormat", CACHE_FORMAT_VERSION])
+            .status()
+            .unwrap();
+        assert!(current.success());
+        assert!(cache_format_is_current(tmp.path()).await);
     }
 
     // #3 streaming-parser equivalence tests.

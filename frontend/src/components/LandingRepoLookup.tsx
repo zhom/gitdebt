@@ -63,12 +63,12 @@ export function LandingRepoLookup() {
           />
           <button
             type="submit"
-            className="group inline-flex min-h-14 shrink-0 items-center justify-center gap-2 bg-primary px-4 text-sm font-medium text-primary-foreground outline-none hover:opacity-85 focus-visible:outline-2 focus-visible:outline-offset-2 focus-visible:outline-ring sm:min-h-16 sm:px-6"
+            className="dither-primary group inline-flex min-h-14 shrink-0 items-center justify-center gap-2 px-4 text-sm font-medium outline-none focus-visible:outline-2 focus-visible:outline-offset-2 focus-visible:outline-ring sm:min-h-16 sm:px-6"
           >
             <span className="hidden sm:inline">Analyze repository</span>
             <span className="sm:hidden">Analyze</span>
             <ArrowRight
-              className="size-4 transition-transform duration-150 group-hover:translate-x-0.5 motion-reduce:transition-none"
+              className="dither-arrow size-4 transition-transform duration-150 group-hover:translate-x-0.5 motion-reduce:transition-none"
               strokeWidth={1.75}
               aria-hidden="true"
             />
@@ -107,7 +107,7 @@ export function LandingRepoLookup() {
             key={example}
             type="button"
             onClick={() => chooseExample(example)}
-            className="min-h-11 border-b border-border font-mono text-sm text-muted-foreground outline-none hover:border-foreground hover:text-foreground focus-visible:outline-2 focus-visible:outline-offset-4 focus-visible:outline-ring sm:min-h-0"
+            className="dither-control min-h-11 px-2 font-mono text-sm text-muted-foreground outline-none hover:text-foreground focus-visible:outline-2 focus-visible:outline-offset-4 focus-visible:outline-ring sm:min-h-9"
           >
             {example}
           </button>

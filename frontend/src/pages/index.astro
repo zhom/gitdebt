@@ -19,6 +19,7 @@ import { ComparisonModeGraphic } from "@/components/ComparisonModeGraphic";
 import { LandingRepoLookup } from "@/components/LandingRepoLookup";
 import { GrowthTicker } from "@/components/GrowthTicker";
 import { PlatformPulse } from "@/components/PlatformPulse";
+import { ReportLayerGraphic } from "@/components/ReportLayerGraphic";
 import { SignalFlowGraphic } from "@/components/SignalFlowGraphic";
 import { ThemeEmbedPreview } from "@/components/ThemeEmbedPreview";
 import { WarmRepos } from "@/components/WarmRepos";
@@ -72,6 +73,7 @@ const jsonLd = [
 const reportLayers = [
   {
     number: "01",
+    graphic: "stars" as const,
     title: "Star history",
     desc: "See when attention arrived. Compare launches by calendar date or from day zero.",
     link: "/compare",
@@ -79,6 +81,7 @@ const reportLayers = [
   },
   {
     number: "02",
+    graphic: "health" as const,
     title: "Repository health",
     desc: "Find churn, bug magnets, bus factor, contributor concentration, and TODO drift.",
     link: "/facebook/react",
@@ -86,6 +89,7 @@ const reportLayers = [
   },
   {
     number: "03",
+    graphic: "readme" as const,
     title: "README stats",
     desc: "Embed theme-aware SVG, PNG, WebP, and GIF charts that link to the live report.",
     link: "/badges",
@@ -221,21 +225,22 @@ const landingWarmRepos = Array.from(
 
             <ol id="features" role="list" class="mt-14 scroll-mt-24 border-y border-foreground">
               {reportLayers.map((layer) => (
-                <li class="grid gap-5 border-b border-border py-8 last:border-b-0 md:grid-cols-[4rem_0.8fr_1.2fr_auto] md:items-start">
+                <li class="grid gap-5 border-b border-border py-8 last:border-b-0 md:grid-cols-[3rem_0.7fr_10rem_1.15fr_auto] md:items-center">
                   <p class="font-mono text-xs text-muted-foreground">{layer.number}</p>
                   <h3 class="max-w-[18ch] text-xl font-medium tracking-tight">
                     {layer.title}
                   </h3>
+                  <ReportLayerGraphic client:visible kind={layer.graphic} />
                   <p class="max-w-[62ch] text-base/7 text-pretty text-muted-foreground sm:text-sm/6">
                     {layer.desc}
                   </p>
                   <a
                     href={layer.link}
-                    class="group inline-flex min-h-11 items-center gap-2 self-start border-b border-border font-mono text-sm outline-none hover:border-foreground focus-visible:outline-2 focus-visible:outline-offset-4 focus-visible:outline-ring sm:min-h-0"
+                    class="dither-control group inline-flex min-h-11 items-center gap-2 self-start px-3 font-mono text-sm outline-none focus-visible:outline-2 focus-visible:outline-offset-4 focus-visible:outline-ring sm:min-h-9"
                   >
                     {layer.linkLabel}
                     <ArrowRight
-                      className="size-4 transition-transform duration-150 group-hover:translate-x-0.5 motion-reduce:transition-none"
+                      className="dither-arrow size-4 transition-transform duration-150 group-hover:translate-x-0.5 motion-reduce:transition-none"
                       strokeWidth={1.75}
                       aria-hidden="true"
                     />
@@ -263,11 +268,11 @@ const landingWarmRepos = Array.from(
                 </p>
                 <a
                   href="/compare"
-                  class="group mt-7 inline-flex min-h-12 items-center gap-2 bg-primary px-5 text-sm font-medium text-primary-foreground outline-none hover:opacity-85 focus-visible:outline-2 focus-visible:outline-offset-4 focus-visible:outline-ring"
+                  class="dither-primary group mt-7 inline-flex min-h-12 items-center gap-2 px-5 text-sm font-medium outline-none focus-visible:outline-2 focus-visible:outline-offset-4 focus-visible:outline-ring"
                 >
                   Build a comparison
                   <ArrowRight
-                    className="size-4 transition-transform duration-150 group-hover:translate-x-0.5 motion-reduce:transition-none"
+                    className="dither-arrow size-4 transition-transform duration-150 group-hover:translate-x-0.5 motion-reduce:transition-none"
                     strokeWidth={1.75}
                     aria-hidden="true"
                   />
@@ -347,7 +352,7 @@ const landingWarmRepos = Array.from(
                   Share the evidence
                 </p>
                 <h2 class="mt-4 max-w-[18ch] text-3xl font-semibold tracking-[-0.035em] text-balance sm:text-5xl">
-                  Stats that ship with your repo.
+                  README stats, ready to paste.
                 </h2>
                 <p class="mt-5 max-w-[50ch] text-base/7 text-pretty text-muted-foreground">
                   Add star history, health cards, and badges to any GitHub
@@ -357,11 +362,11 @@ const landingWarmRepos = Array.from(
                 </p>
                 <a
                   href="/badges"
-                  class="group mt-7 inline-flex min-h-11 items-center gap-2 border-b border-border font-mono text-sm outline-none hover:border-foreground focus-visible:outline-2 focus-visible:outline-offset-4 focus-visible:outline-ring sm:min-h-0"
+                  class="dither-control group mt-7 inline-flex min-h-11 items-center gap-2 px-3 font-mono text-sm outline-none focus-visible:outline-2 focus-visible:outline-offset-4 focus-visible:outline-ring sm:min-h-9"
                 >
                   Open the badge studio
                   <ArrowRight
-                    className="size-4 transition-transform duration-150 group-hover:translate-x-0.5 motion-reduce:transition-none"
+                    className="dither-arrow size-4 transition-transform duration-150 group-hover:translate-x-0.5 motion-reduce:transition-none"
                     strokeWidth={1.75}
                     aria-hidden="true"
                   />
@@ -416,11 +421,11 @@ const landingWarmRepos = Array.from(
             </div>
             <a
               href="#lookup"
-              class="group inline-flex min-h-12 items-center justify-center gap-2 border border-primary-foreground px-5 text-sm font-medium text-primary-foreground outline-none hover:bg-primary-foreground hover:text-primary focus-visible:outline-2 focus-visible:outline-offset-4 focus-visible:outline-primary-foreground dark:border-foreground dark:text-foreground dark:hover:bg-foreground dark:hover:text-background dark:focus-visible:outline-ring"
+              class="dither-control group inline-flex min-h-12 items-center justify-center gap-2 border-current px-5 text-sm font-medium outline-none focus-visible:outline-2 focus-visible:outline-offset-4 focus-visible:outline-primary-foreground dark:focus-visible:outline-ring"
             >
               Analyze a repository
               <ArrowRight
-                className="size-4 transition-transform duration-150 group-hover:translate-x-0.5 motion-reduce:transition-none"
+                className="dither-arrow size-4 transition-transform duration-150 group-hover:translate-x-0.5 motion-reduce:transition-none"
                 strokeWidth={1.75}
                 aria-hidden="true"
               />

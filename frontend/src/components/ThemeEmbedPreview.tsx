@@ -26,14 +26,14 @@ export function ThemeEmbedPreview() {
             The matching asset is selected by GitHub
           </p>
         </figcaption>
-        <div className="flex border-b border-border" aria-label="README theme preview">
+        <div className="flex gap-1" aria-label="README theme preview">
           {(["light", "dark"] as const).map((option) => (
             <button
               key={option}
               type="button"
               onClick={() => setTheme(option)}
               aria-pressed={theme === option}
-              className="relative min-h-11 px-3 font-mono text-xs text-muted-foreground outline-none hover:text-foreground focus-visible:outline-2 focus-visible:outline-offset-2 focus-visible:outline-ring aria-pressed:text-foreground sm:min-h-9"
+              className="dither-control relative min-h-11 px-3 font-mono text-xs text-muted-foreground outline-none hover:text-foreground focus-visible:outline-2 focus-visible:outline-offset-2 focus-visible:outline-ring aria-pressed:text-foreground sm:min-h-9"
             >
               {option === "light" ? "Light README" : "Dark README"}
               {theme === option && (
@@ -92,10 +92,27 @@ export function ThemeEmbedPreview() {
                 aria-label={`Illustrative ${theme} README chart`}
                 role="img"
               >
+                <defs>
+                  <linearGradient id={`readme-wave-${theme}`} x1="0" x2="1">
+                    <stop offset="0" stopColor="var(--dither-wave-1)" />
+                    <stop offset=".55" stopColor="var(--dither-wave-2)" />
+                    <stop offset="1" stopColor="var(--dither-wave-3)" />
+                  </linearGradient>
+                  <pattern id={`readme-dots-${theme}`} width="4" height="4" patternUnits="userSpaceOnUse">
+                    <rect width="1.4" height="1.4" fill={`url(#readme-wave-${theme})`} />
+                    <rect x="2" y="2" width=".8" height=".8" fill={`url(#readme-wave-${theme})`} opacity=".65" />
+                  </pattern>
+                </defs>
+                <motion.path
+                  d="M2 55 C48 54 74 43 104 41 C157 37 181 24 221 19 C248 15 265 10 278 4 V64 H2Z"
+                  fill={`url(#readme-dots-${theme})`}
+                  animate={reduceMotion ? undefined : { y: [0, -1.5, 0] }}
+                  transition={{ duration: 4.5, repeat: Infinity, ease: "easeInOut" }}
+                />
                 <path
                   d="M2 55 C48 54 74 43 104 41 C157 37 181 24 221 19 C248 15 265 10 278 4"
                   fill="none"
-                  stroke="currentColor"
+                  stroke={`url(#readme-wave-${theme})`}
                   strokeLinecap="round"
                   strokeWidth="2"
                 />

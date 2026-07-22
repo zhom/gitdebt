@@ -165,16 +165,37 @@
   body::before {
     position: fixed;
     z-index: -1;
-    inset: 0;
+    inset: 0 auto 0 0;
+    width: min(24rem, 28vw);
     pointer-events: none;
     content: "";
-    opacity: 0.2;
+    opacity: 0.16;
     background-image:
       radial-gradient(color-mix(in oklab, var(--dither-wave-1) 16%, transparent) 0.65px, transparent 0.85px),
       radial-gradient(color-mix(in oklab, var(--dither-wave-2) 11%, transparent) 0.55px, transparent 0.8px);
     background-position: 0 0, 3px 3px;
     background-size: 7px 7px;
-    mask-image: linear-gradient(to bottom, black, transparent 72%);
+    mask-image:
+      radial-gradient(ellipse 85% 16% at 0% 18%, black, transparent 72%),
+      radial-gradient(ellipse 95% 18% at 0% 54%, black, transparent 74%),
+      radial-gradient(ellipse 80% 15% at 0% 84%, black, transparent 72%);
+  }
+  body::after {
+    position: fixed;
+    z-index: -1;
+    inset: 0 0 0 auto;
+    width: min(22rem, 25vw);
+    pointer-events: none;
+    content: "";
+    opacity: 0.13;
+    background-image:
+      radial-gradient(color-mix(in oklab, var(--dither-wave-3) 18%, transparent) 0.65px, transparent 0.85px),
+      radial-gradient(color-mix(in oklab, var(--dither-wave-2) 12%, transparent) 0.55px, transparent 0.8px);
+    background-position: 0 0, 3px 3px;
+    background-size: 7px 7px;
+    mask-image:
+      radial-gradient(ellipse 90% 18% at 100% 30%, black, transparent 72%),
+      radial-gradient(ellipse 82% 16% at 100% 70%, black, transparent 74%);
   }
   :focus-visible {
     outline: 2px solid var(--ring);
@@ -333,11 +354,32 @@ details[open][data-state="open"] .mobile-nav-panel {
 }
 
 .dither-depth {
+  background: transparent;
+}
+
+.dither-badge-bed {
   background-image:
-    radial-gradient(color-mix(in oklab, var(--dither-wave-1) 34%, transparent) 0.75px, transparent 0.9px),
-    radial-gradient(color-mix(in oklab, var(--dither-wave-2) 22%, transparent) 0.65px, transparent 0.85px);
-  background-position: 0 0, 3px 3px;
-  background-size: 6px 6px;
+    radial-gradient(color-mix(in oklab, var(--dither-wave-1) 18%, transparent) 0.6px, transparent 0.8px),
+    linear-gradient(100deg, transparent, color-mix(in oklab, var(--dither-wave-2) 4%, transparent), transparent);
+  background-size: 5px 5px, 100% 100%;
+}
+
+.dither-arrow {
+  filter: drop-shadow(2px 1px 0 color-mix(in oklab, var(--dither-wave-1) 32%, transparent));
+}
+
+.dither-primary {
+  background-color: var(--primary);
+  color: var(--primary-foreground);
+  background-image:
+    radial-gradient(color-mix(in oklab, var(--dither-wave-1) 42%, transparent) 0.65px, transparent 0.85px),
+    linear-gradient(110deg, transparent 25%, color-mix(in oklab, var(--dither-wave-2) 22%, transparent), transparent 72%);
+  background-size: 4px 4px, 180% 100%;
+  transition: background-position 320ms var(--motion-ease-out), transform 120ms var(--motion-ease-out);
+}
+
+.dither-primary:hover {
+  background-position: 0 0, 100% 0;
 }
 
 .evidence-band::before {

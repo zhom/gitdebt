@@ -418,6 +418,39 @@ fn compact_error(error: &anyhow::Error) -> String {
 async fn process(job: &AnalysisJob, ctx: &AnalysisCtx) -> Result<usize> {
     let repo = job.repo.as_str();
     let started = Instant::now();
+    // A queue row is not proof that a repository is public: it may be stale,
+    // manually inserted, or have been requested with an OAuth token that can
+    // see private data. Require a recent metadata response through the
+    // public-only GitHub decoder before any clone is opened. Private, deleted,
+    // and renamed repositories all become the same non-readable tombstone.
+    let cache = crate::cache::Cache::new(ctx.db.clone());
+    if !cache
+        .repo_metadata_fresh_within(repo, chrono::Duration::hours(1))
+        .await?
+    {
+        let (owner, name) = repo
+            .split_once('/')
+            .context("analysis queue contained an invalid repository slug")?;
+        let github = user_scoped_github(job, ctx).await;
+        match github.repo_metadata(owner, name).await? {
+            Some(metadata) => {
+                cache
+                    .put_repo_metadata(
+                        repo,
+                        metadata.id,
+                        metadata.stargazers_count,
+                        metadata.forks_count,
+                        metadata.created_at,
+                    )
+                    .await?;
+            }
+            None => {
+                cache.mark_repo_missing(repo).await?;
+                tracing::info!(repo, "repository analysis skipped because it is not public");
+                return Ok(0);
+            }
+        }
+    }
     // Pull the cursor and algorithm revision together. Old bounded analyses
     // advanced their cursor to HEAD after sampling only a small recent window;
     // those rows must be atomically rebuilt rather than incremented.

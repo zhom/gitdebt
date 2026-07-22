@@ -175,6 +175,7 @@ const PLATFORM_ACTIVITY_SQL: &str = "SELECT r.repo, COALESCE(r.star_count, 0), r
          FROM active_repo_star_history stars WHERE stars.repo = r.repo \
      ) g ON TRUE \
      WHERE r.last_viewed_at IS NOT NULL AND NOT r.missing \
+       AND r.metadata_fetched_at IS NOT NULL \
      ORDER BY r.last_viewed_at DESC, r.repo ASC \
      LIMIT $1";
 
@@ -235,14 +236,18 @@ impl Cache {
 
     /// Cached stargazer timestamps for a repo, oldest-first. Returns
     /// `None` unless the fetch previously completed (`stargazers_complete`)
-    /// — the caller then triggers a re-fetch. Only non-identifying
+    /// and current metadata has proved that the repository is public. The
+    /// caller then triggers a verified re-fetch. Only non-identifying
     /// timestamps leave the cache layer.
     pub async fn get_repo_stargazers(&self, repo: &str) -> Result<Option<Vec<DateTime<Utc>>>> {
-        let complete: Option<bool> =
-            sqlx::query_scalar("SELECT history_complete FROM repos WHERE repo = $1")
-                .bind(repo)
-                .fetch_optional(&self.db.pool)
-                .await?;
+        let complete: Option<bool> = sqlx::query_scalar(
+            "SELECT history_complete FROM repos \
+             WHERE repo = $1 AND missing = FALSE \
+               AND metadata_fetched_at IS NOT NULL",
+        )
+        .bind(repo)
+        .fetch_optional(&self.db.pool)
+        .await?;
         if complete != Some(true) {
             return Ok(None);
         }
@@ -351,11 +356,14 @@ impl Cache {
     /// non-blocking analyze path to decide between "serve cached history"
     /// and "enqueue + return pending" without loading the rows.
     pub async fn repo_stargazers_complete(&self, repo: &str) -> Result<bool> {
-        let complete: Option<bool> =
-            sqlx::query_scalar("SELECT history_complete FROM repos WHERE repo = $1")
-                .bind(repo)
-                .fetch_optional(&self.db.pool)
-                .await?;
+        let complete: Option<bool> = sqlx::query_scalar(
+            "SELECT history_complete FROM repos \
+             WHERE repo = $1 AND missing = FALSE \
+               AND metadata_fetched_at IS NOT NULL",
+        )
+        .bind(repo)
+        .fetch_optional(&self.db.pool)
+        .await?;
         Ok(complete == Some(true))
     }
 
@@ -370,7 +378,8 @@ impl Cache {
     ) -> Result<bool> {
         let row: Option<(bool, Option<DateTime<Utc>>)> = sqlx::query_as(
             "SELECT history_complete, COALESCE(archive_fetched_at, stargazers_fetched_at) \
-             FROM repos WHERE repo = $1",
+             FROM repos WHERE repo = $1 AND missing = FALSE \
+               AND metadata_fetched_at IS NOT NULL",
         )
         .bind(repo)
         .fetch_optional(&self.db.pool)
@@ -387,11 +396,15 @@ impl Cache {
     /// best-effort total without loading every stargazer row. Returns
     /// `None` when nothing is cached yet.
     pub async fn get_repo_star_count(&self, repo: &str) -> Result<Option<i64>> {
-        let n: Option<i64> = sqlx::query_scalar("SELECT star_count FROM repos WHERE repo = $1")
-            .bind(repo)
-            .fetch_optional(&self.db.pool)
-            .await?
-            .flatten();
+        let n: Option<i64> = sqlx::query_scalar(
+            "SELECT star_count FROM repos \
+             WHERE repo = $1 AND missing = FALSE \
+               AND metadata_fetched_at IS NOT NULL",
+        )
+        .bind(repo)
+        .fetch_optional(&self.db.pool)
+        .await?
+        .flatten();
         Ok(n)
     }
 
@@ -957,7 +970,8 @@ impl Cache {
     pub async fn count_sitemap_repos(&self) -> Result<i64> {
         let n: i64 = sqlx::query_scalar(
             "SELECT COUNT(*) FROM repos \
-                 WHERE history_complete = TRUE AND missing = FALSE",
+                 WHERE history_complete = TRUE AND missing = FALSE \
+                   AND metadata_fetched_at IS NOT NULL",
         )
         .fetch_one(&self.db.pool)
         .await?;
@@ -981,6 +995,7 @@ impl Cache {
                              archive_fetched_at, stargazers_fetched_at, metadata_fetched_at, NOW()) AS updated_at \
              FROM repos \
              WHERE history_complete = TRUE AND missing = FALSE \
+               AND metadata_fetched_at IS NOT NULL \
              ORDER BY updated_at DESC, repo ASC \
              LIMIT $1 OFFSET $2",
         )
@@ -1150,12 +1165,14 @@ impl Cache {
         repo: &str,
         ttl: chrono::Duration,
     ) -> Result<bool> {
-        let row: Option<DateTime<Utc>> =
-            sqlx::query_scalar("SELECT metadata_fetched_at FROM repos WHERE repo = $1")
-                .bind(repo)
-                .fetch_optional(&self.db.pool)
-                .await?
-                .flatten();
+        let row: Option<DateTime<Utc>> = sqlx::query_scalar(
+            "SELECT metadata_fetched_at FROM repos \
+             WHERE repo = $1 AND missing = FALSE",
+        )
+        .bind(repo)
+        .fetch_optional(&self.db.pool)
+        .await?
+        .flatten();
         let Some(parsed) = row else { return Ok(false) };
         Ok(Utc::now() - parsed < ttl)
     }
@@ -1183,6 +1200,7 @@ mod tests {
     #[test]
     fn platform_activity_is_postgres_only_and_excludes_tombstones() {
         assert!(PLATFORM_ACTIVITY_SQL.contains("NOT r.missing"));
+        assert!(PLATFORM_ACTIVITY_SQL.contains("r.metadata_fetched_at IS NOT NULL"));
         assert!(PLATFORM_ACTIVITY_SQL.contains("r.history_complete"));
         assert!(PLATFORM_ACTIVITY_SQL.contains("h.last_analyzed_at IS NOT NULL"));
         assert!(PLATFORM_ACTIVITY_SQL.contains("ORDER BY r.last_viewed_at DESC"));

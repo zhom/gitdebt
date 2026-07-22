@@ -310,6 +310,29 @@ impl PageSource for GithubPages<'_> {
 
 async fn process(ctx: &WorkerCtx, job: &queue::Job) -> Result<Outcome> {
     let (owner, repo) = split_slug(&job.repo);
+    // Queue membership is never a visibility grant. Confirm through the
+    // public-only metadata decoder before touching the stargazer endpoint;
+    // OAuth-visible private repositories therefore cannot enter this worker.
+    if !ctx
+        .cache
+        .repo_metadata_fresh_within(&job.repo, chrono::Duration::hours(1))
+        .await?
+    {
+        match ctx.github.repo_metadata(&owner, &repo).await? {
+            Some(metadata) => {
+                ctx.cache
+                    .put_repo_metadata(
+                        &job.repo,
+                        metadata.id,
+                        metadata.stargazers_count,
+                        metadata.forks_count,
+                        metadata.created_at,
+                    )
+                    .await?;
+            }
+            None => return Err(GithubError::NotFound(job.repo.clone()).into()),
+        }
+    }
     let src = GithubPages {
         github: &ctx.github,
         owner: owner.clone(),

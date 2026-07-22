@@ -646,6 +646,10 @@ async fn analyze_fresh_complete_repo_returns_history_not_pending() {
     let items: Vec<(i64, _)> = (0..5)
         .map(|i| (i + 1, base + Duration::seconds(i)))
         .collect();
+    cache
+        .put_repo_metadata(&full, Some(101), 5, 0, None)
+        .await
+        .unwrap();
     cache.put_repo_stargazers(&full, &items).await.unwrap();
     assert!(cache.repo_stargazers_complete(&full).await.unwrap());
     assert!(
@@ -695,6 +699,10 @@ async fn incremental_append_through_cache() {
     let initial: Vec<(i64, _)> = (0..3)
         .map(|i| (i + 1, base + Duration::seconds(i)))
         .collect();
+    cache
+        .put_repo_metadata(&full, Some(102), 3, 0, None)
+        .await
+        .unwrap();
     cache.put_repo_stargazers(&full, &initial).await.unwrap();
 
     // Incremental append of two newer rows.
@@ -706,6 +714,41 @@ async fn incremental_append_through_cache() {
     let got = cache.get_repo_stargazers(&full).await.unwrap().unwrap();
     assert_eq!(got.len(), 5, "appended tail is present and complete");
     assert_eq!(cache.get_repo_star_count(&full).await.unwrap(), Some(5));
+
+    cleanup(&db, prefix).await;
+}
+
+#[tokio::test]
+async fn completed_history_is_hidden_until_public_metadata_is_recorded() {
+    let Some(db) = test_db().await else {
+        eprintln!("skipping: set GITDEBT_TEST_DATABASE_URL to run");
+        return;
+    };
+    let prefix = "gitdebt-test-public-proof/";
+    cleanup(&db, prefix).await;
+
+    let cache = Cache::new(db.clone());
+    let full = format!("{prefix}legacy");
+    let at = Utc.timestamp_opt(1_700_000_000, 0).unwrap();
+    cache.put_repo_stargazers(&full, &[(1, at)]).await.unwrap();
+
+    assert!(
+        cache.get_repo_stargazers(&full).await.unwrap().is_none(),
+        "legacy history without public metadata must never reach readers"
+    );
+    assert!(!cache.repo_stargazers_complete(&full).await.unwrap());
+    assert_eq!(cache.get_repo_star_count(&full).await.unwrap(), None);
+
+    cache
+        .put_repo_metadata(&full, Some(104), 1, 0, None)
+        .await
+        .unwrap();
+    assert_eq!(
+        cache.get_repo_stargazers(&full).await.unwrap().unwrap(),
+        vec![at]
+    );
+    assert!(cache.repo_stargazers_complete(&full).await.unwrap());
+    assert_eq!(cache.get_repo_star_count(&full).await.unwrap(), Some(1));
 
     cleanup(&db, prefix).await;
 }
@@ -724,6 +767,10 @@ async fn partial_fetch_leaves_incomplete() {
 
     let base = Utc.timestamp_opt(1_700_000_000, 0).unwrap();
     let stale = vec![(99, base - Duration::seconds(1))];
+    cache
+        .put_repo_metadata(&full, Some(103), 1, 0, None)
+        .await
+        .unwrap();
     cache.put_repo_stargazers(&full, &stale).await.unwrap();
 
     let items: Vec<(i64, _)> = (0..10)

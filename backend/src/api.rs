@@ -424,9 +424,11 @@ impl PipelineSignals {
 async fn load_pipeline_signals(db: &crate::db::Db) -> Result<PipelineSignals, sqlx::Error> {
     let row = sqlx::query(
         "SELECT \
-            (SELECT COUNT(*)::BIGINT FROM repos WHERE history_complete = TRUE AND missing = FALSE) \
+            (SELECT COUNT(*)::BIGINT FROM repos WHERE history_complete = TRUE \
+                AND missing = FALSE AND metadata_fetched_at IS NOT NULL) \
                 AS histories_complete, \
-            (SELECT COUNT(*)::BIGINT FROM repos WHERE history_complete = FALSE AND missing = FALSE) \
+            (SELECT COUNT(*)::BIGINT FROM repos WHERE history_complete = FALSE \
+                AND missing = FALSE AND metadata_fetched_at IS NOT NULL) \
                 AS histories_pending, \
             (SELECT COUNT(*)::BIGINT FROM star_fetch_queue \
                 WHERE status IN ('pending', 'in_progress')) AS star_jobs_active, \
@@ -775,12 +777,16 @@ async fn build_star_export(
     if summary.as_ref().is_some_and(|s| s.missing) {
         return Err(ApiError::not_found("repo not found"));
     }
-    let complete = summary.as_ref().is_some_and(|s| s.stargazers_complete);
+    let public = summary
+        .as_ref()
+        .is_some_and(|s| !s.missing && s.metadata_fetched_at.is_some());
+    let complete = public && summary.as_ref().is_some_and(|s| s.stargazers_complete);
     if !complete {
         // No trustworthy history yet: empty series, best-effort headline
         // total from the denormalized metadata count (0 when truly cold).
         let total_stars = summary
             .as_ref()
+            .filter(|_| public)
             .and_then(|s| s.star_count)
             .filter(|n| *n >= 0)
             .map(|n| n as u64)
@@ -2329,11 +2335,15 @@ async fn load_repo_badges(
     } else {
         (
             None,
-            summary
-                .as_ref()
-                .and_then(|value| value.star_count)
-                .unwrap_or(0)
-                .max(0) as u64,
+            if readiness.metadata {
+                summary
+                    .as_ref()
+                    .and_then(|value| value.star_count)
+                    .unwrap_or(0)
+                    .max(0) as u64
+            } else {
+                0
+            },
         )
     };
 
@@ -2450,13 +2460,15 @@ async fn repo_render_readiness(
     .bind(repo)
     .fetch_one(&state.analyzer.cache.db().pool)
     .await?;
-    let stars = summary
+    let public = summary
         .as_ref()
-        .is_some_and(|value| value.stargazers_complete);
-    let metadata = summary
-        .as_ref()
-        .is_some_and(|value| value.metadata_fetched_at.is_some());
-    let analysis = analysis_sha.is_some() && !analysis_active;
+        .is_some_and(|value| !value.missing && value.metadata_fetched_at.is_some());
+    let stars = public
+        && summary
+            .as_ref()
+            .is_some_and(|value| value.stargazers_complete);
+    let metadata = public;
+    let analysis = public && analysis_sha.is_some() && !analysis_active;
     let revision = format!(
         "s:{}|m:{}|a:{}",
         summary
@@ -3282,7 +3294,9 @@ async fn load_user_card_data(
          LEFT JOIN repo_analysis_queue active \
            ON active.repo = repos.repo \
           AND active.status IN ('pending', 'in_progress') \
-         WHERE repos.repo LIKE $1 || '/%' AND NOT repos.missing",
+         WHERE repos.repo LIKE $1 || '/%' \
+           AND NOT repos.missing \
+           AND repos.metadata_fetched_at IS NOT NULL",
     )
     .bind(login)
     .fetch_one(&db.pool)
@@ -3296,7 +3310,11 @@ async fn load_user_card_data(
         "SELECT COALESCE(SUM(commits), 0)::BIGINT AS commits, \
                 COUNT(DISTINCT repo) AS contribs, \
                 MIN(first_commit_at) AS first_at \
-         FROM repo_author_stats WHERE LOWER(github_login) = $1",
+         FROM repo_author_stats author \
+         JOIN repos public_repo ON public_repo.repo = author.repo \
+         WHERE LOWER(author.github_login) = $1 \
+           AND public_repo.missing = FALSE \
+           AND public_repo.metadata_fetched_at IS NOT NULL",
     )
     .bind(login)
     .fetch_one(&db.pool)
@@ -3335,9 +3353,13 @@ async fn load_top_langs(
     let rows = match scope {
         LangScope::Owner => {
             sqlx::query(
-                "SELECT language, SUM(lines_code)::BIGINT AS lines FROM repo_lines \
-                 WHERE repo LIKE $1 || '/%' \
-                 GROUP BY language ORDER BY lines DESC, language LIMIT 5",
+                "SELECT lines.language, SUM(lines.lines_code)::BIGINT AS lines \
+                 FROM repo_lines lines \
+                 JOIN repos public_repo ON public_repo.repo = lines.repo \
+                 WHERE lines.repo LIKE $1 || '/%' \
+                   AND public_repo.missing = FALSE \
+                   AND public_repo.metadata_fetched_at IS NOT NULL \
+                 GROUP BY lines.language ORDER BY lines DESC, lines.language LIMIT 5",
             )
             .bind(bind)
             .fetch_all(&db.pool)
@@ -3345,9 +3367,13 @@ async fn load_top_langs(
         }
         LangScope::Repo => {
             sqlx::query(
-                "SELECT language, SUM(lines_code)::BIGINT AS lines FROM repo_lines \
-                 WHERE repo = $1 \
-                 GROUP BY language ORDER BY lines DESC, language LIMIT 5",
+                "SELECT lines.language, SUM(lines.lines_code)::BIGINT AS lines \
+                 FROM repo_lines lines \
+                 JOIN repos public_repo ON public_repo.repo = lines.repo \
+                 WHERE lines.repo = $1 \
+                   AND public_repo.missing = FALSE \
+                   AND public_repo.metadata_fetched_at IS NOT NULL \
+                 GROUP BY lines.language ORDER BY lines DESC, lines.language LIMIT 5",
             )
             .bind(bind)
             .fetch_all(&db.pool)
@@ -3570,6 +3596,12 @@ async fn ensure_repo_card_svg(
             short_ttl: true,
         });
     };
+    if summary.metadata_fetched_at.is_none() {
+        return Ok(RenderedCard {
+            svg: cards::render_repo_pending_card(&repo_full, None, theme),
+            short_ttl: true,
+        });
+    }
     let data = load_repo_card_data(state, &repo_full, &summary).await?;
     let analyzed = data.commits.is_some() || data.lines_total.is_some();
     if !summary.stargazers_complete && !analyzed {
@@ -3887,6 +3919,7 @@ async fn load_leaderboard_rows(
                    AND s.starred_at >= NOW() - make_interval(days => $3) \
              ) v ON TRUE \
              WHERE r.history_complete = TRUE AND r.missing = FALSE \
+               AND r.metadata_fetched_at IS NOT NULL \
                AND r.star_count IS NOT NULL \
              ORDER BY r.star_count DESC, r.repo ASC \
              LIMIT $1 OFFSET $2"
@@ -3903,6 +3936,7 @@ async fn load_leaderboard_rows(
                  GROUP BY repo \
              ) v ON v.repo = r.repo \
              WHERE r.history_complete = TRUE AND r.missing = FALSE \
+               AND r.metadata_fetched_at IS NOT NULL \
              ORDER BY v.velocity DESC, r.repo ASC \
              LIMIT $1 OFFSET $2"
         }

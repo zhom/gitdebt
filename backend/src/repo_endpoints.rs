@@ -229,8 +229,13 @@ async fn repo_stats_json(
     let full = crate::analyzer::repo_key(&owner, &repo);
     let pool = &state.analyzer.cache.db().pool;
     let overview: Option<(i64, Option<i64>, bool, Option<String>)> = sqlx::query_as(
-        "SELECT total_commits, analysis_scope_commits, analysis_truncated, last_analyzed_sha \
-         FROM repo_history WHERE repo = $1 AND last_analyzed_at IS NOT NULL",
+        "SELECT history.total_commits, history.analysis_scope_commits, \
+                history.analysis_truncated, history.last_analyzed_sha \
+         FROM repo_history history \
+         JOIN repos public_repo ON public_repo.repo = history.repo \
+         WHERE history.repo = $1 AND history.last_analyzed_at IS NOT NULL \
+           AND public_repo.missing = FALSE \
+           AND public_repo.metadata_fetched_at IS NOT NULL",
     )
     .bind(&full)
     .fetch_optional(pool)
@@ -396,7 +401,7 @@ async fn enqueue_analysis(
     }
     let verified = summary
         .as_ref()
-        .is_some_and(|repo| repo.metadata_fetched_at.is_some() || repo.stargazers_complete);
+        .is_some_and(|repo| !repo.missing && repo.metadata_fetched_at.is_some());
     if !verified {
         let github = if let (Some(user_id), Some(config)) = (user_id, state.gh_app.as_ref()) {
             match crate::auth::user_access_token(state.analyzer.cache.db(), config, user_id).await {
@@ -694,10 +699,13 @@ async fn stat_revision(
     _kind: StatKind,
 ) -> Result<Option<String>, ApiError> {
     let revision: Option<(String, i32, i64)> = sqlx::query_as(
-        "SELECT last_analyzed_sha, analysis_revision, \
-                COALESCE(analysis_scope_commits, 0) \
-         FROM repo_history \
-         WHERE repo = $1 AND last_analyzed_at IS NOT NULL",
+        "SELECT history.last_analyzed_sha, history.analysis_revision, \
+                COALESCE(history.analysis_scope_commits, 0) \
+         FROM repo_history history \
+         JOIN repos public_repo ON public_repo.repo = history.repo \
+         WHERE history.repo = $1 AND history.last_analyzed_at IS NOT NULL \
+           AND public_repo.missing = FALSE \
+           AND public_repo.metadata_fetched_at IS NOT NULL",
     )
     .bind(repo)
     .fetch_optional(&state.analyzer.cache.db().pool)

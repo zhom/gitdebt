@@ -312,14 +312,18 @@ pub async fn load_day_deltas_by_repo(
 }
 
 /// Per-repo `(stargazers_complete, missing)` flags for a slug set, in one
-/// query. Slugs absent from `repos` (never seen) simply don't appear in
-/// the map — the caller treats them as cold.
+/// query. History is readable only after metadata has proved that the repo is
+/// public. Slugs absent from `repos` (never seen) simply don't appear in the
+/// map — the caller treats them as cold.
 pub async fn load_repo_states(db: &Db, repos: &[String]) -> Result<HashMap<String, (bool, bool)>> {
     if repos.is_empty() {
         return Ok(HashMap::new());
     }
     let rows = sqlx::query(
-        "SELECT repo, history_complete AS stargazers_complete, missing \
+        "SELECT repo, \
+                (history_complete AND metadata_fetched_at IS NOT NULL) \
+                    AS stargazers_complete, \
+                missing \
              FROM repos WHERE repo = ANY($1)",
     )
     .bind(repos)

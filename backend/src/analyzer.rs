@@ -179,6 +179,9 @@ async fn analyze_repo_with_enqueue(
             history: Vec::new(),
         });
     }
+    let public = summary
+        .as_ref()
+        .is_some_and(|s| !s.missing && s.metadata_fetched_at.is_some());
 
     // Fire-and-forget repo-metadata refresh on TTL miss. Surfaces the
     // authoritative star count + creation date without blocking; the
@@ -211,10 +214,11 @@ async fn analyze_repo_with_enqueue(
         }
         None => {
             // Nothing trustworthy cached yet. Surface a best-effort total
-            // from the denormalized count (0 if truly cold) so the shell
-            // can render a headline before the fetch lands.
+            // only after public metadata exists (0 if cold or unverified) so
+            // a legacy private row cannot leak through the analyze response.
             let total = summary
                 .as_ref()
+                .filter(|_| public)
                 .and_then(|s| s.star_count)
                 .filter(|n| *n >= 0)
                 .map(|n| n as u32)
@@ -247,7 +251,10 @@ async fn analyze_repo_with_enqueue(
             .await
             .unwrap_or(false);
 
-    let created_at = summary.as_ref().and_then(|s| s.created_at);
+    let created_at = summary
+        .as_ref()
+        .filter(|_| public)
+        .and_then(|s| s.created_at);
 
     Ok(AnalysisResult {
         repo: repo_full,
@@ -255,10 +262,11 @@ async fn analyze_repo_with_enqueue(
         created_at,
         queued: queued.clamp(0, u32::MAX as i64) as u32,
         history_complete,
-        history_kind: if summary
-            .as_ref()
-            .and_then(|value| value.history_source.as_deref())
-            == Some("gh_archive")
+        history_kind: if public
+            && summary
+                .as_ref()
+                .and_then(|value| value.history_source.as_deref())
+                == Some("gh_archive")
         {
             "public_star_actions"
         } else if history_complete {
@@ -272,14 +280,17 @@ async fn analyze_repo_with_enqueue(
             .unwrap_or(0),
         history_coverage_start: summary
             .as_ref()
+            .filter(|_| public)
             .and_then(|value| value.history_coverage_start),
         history_coverage_end: summary
             .as_ref()
+            .filter(|_| public)
             .and_then(|value| value.history_coverage_end),
-        history_approximate: summary
-            .as_ref()
-            .and_then(|value| value.history_source.as_deref())
-            == Some("gh_archive"),
+        history_approximate: public
+            && summary
+                .as_ref()
+                .and_then(|value| value.history_source.as_deref())
+                == Some("gh_archive"),
         pending,
         backfilling,
         history_status: if history_complete {

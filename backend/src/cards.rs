@@ -176,16 +176,14 @@ fn svg_open(w: f32, h: f32, label: &str) -> String {
 /// Card chrome: rounded rect, 1px border (opacity 0 when hidden — the
 /// geometry stays identical so `hide_border` never reflows anything).
 fn chrome(w: f32, h: f32, theme: &Theme, hide_border: bool) -> String {
-    let mut out = format!(
+    format!(
         "  <rect x=\"0.5\" y=\"0.5\" width=\"{:.1}\" height=\"{:.1}\" rx=\"4.5\" fill=\"{}\" stroke=\"{}\" stroke-width=\"1\" stroke-opacity=\"{}\" />\n",
         w - 1.0,
         h - 1.0,
         card_bg(theme),
         theme.border,
         if hide_border { "0" } else { "1" },
-    );
-    out.push_str(&brand::themed_logo_mark(12.0, h - 19.0, 10.0, theme));
-    out
+    )
 }
 
 fn anim_group(animate: bool, index: usize) -> (String, &'static str) {
@@ -469,7 +467,7 @@ fn user_rows(data: &UserCardData, opts: &UserCardOptions) -> Vec<UserRow> {
             }),
             UserMetric::Commits => rows.push(UserRow::Stat {
                 glyph: GlyphKind::Commit,
-                label: "Commits Analyzed",
+                label: "Commits Found",
                 value: lower_bound(data.commits),
             }),
             UserMetric::Contribs => rows.push(UserRow::Stat {
@@ -513,32 +511,50 @@ fn user_rows(data: &UserCardData, opts: &UserCardOptions) -> Vec<UserRow> {
 }
 
 /// Card height for the maintainer-footprint composition. Metrics form a
-/// two-column grid; the optional legacy `hide_rank` switch hides the analysis
-/// coverage rail rather than changing the card into a different layout.
+/// two-column grid. The legacy `hide_rank` parameter is layout-neutral now
+/// that the card no longer exposes an analysis-coverage rail.
 pub fn user_card_height(rows: usize, hide_title: bool, hide_rank: bool) -> u32 {
-    let header: u32 = if hide_title { 66 } else { 88 };
+    let _ = hide_rank;
+    let header: u32 = if hide_title { 58 } else { 74 };
     let metric_rows = (rows as u32).div_ceil(2);
-    let coverage: u32 = if hide_rank { 0 } else { 45 };
-    (header + metric_rows * 58 + coverage + 34).max(184)
+    (header + metric_rows * 58 + 38).max(184)
+}
+
+/// A deterministic, playful profile title derived only from the card's
+/// visible activity totals.
+pub fn user_persona(data: &UserCardData) -> &'static str {
+    if data.stars >= 100_000 {
+        "OSS WIZARD"
+    } else if data.commits >= 1_000 && data.stars < 500 {
+        "PRODUCTIVE PROCRASTINATOR"
+    } else if data.forks >= 10_000 {
+        "ECOSYSTEM ARCHITECT"
+    } else if data.repos_tracked >= 10 && data.commits >= 300 {
+        "REPO GARDENER"
+    } else if data.contribs >= 20 {
+        "CODE NOMAD"
+    } else {
+        "OPEN SOURCE BUILDER"
+    }
 }
 
 /// Render the user profile card. Pure + deterministic. `Err` when the
-/// selection leaves nothing to draw (all stats hidden AND the analysis
-/// coverage rail hidden).
+/// selection leaves nothing to draw.
 pub fn render_user_card(
     data: &UserCardData,
     opts: &UserCardOptions,
     theme: &Theme,
 ) -> Result<String, &'static str> {
     let rows = user_rows(data, opts);
-    if rows.is_empty() && opts.hide_rank {
-        return Err("either metrics or analysis coverage are required");
+    if rows.is_empty() {
+        return Err("at least one profile metric is required");
     }
     let w = opts.width as f32;
     let h = user_card_height(rows.len(), opts.hide_title, opts.hide_rank) as f32;
     let pal0 = brand(theme);
     let login = escape_xml(&data.login);
     let title = display_title(opts.custom_title.as_deref(), &format!("@{}", data.login));
+    let persona = user_persona(data);
 
     let mut body = String::new();
     body.push_str(&format!(
@@ -549,23 +565,22 @@ pub fn render_user_card(
         border = theme.border,
         stroke_opacity = if opts.hide_border { "0" } else { "1" },
     ));
-    body.push_str(&brand::themed_logo_mark(24.0, 20.0, 34.0, theme));
     body.push_str(&format!(
-        "  <text class=\"ey\" x=\"70\" y=\"32\" fill=\"{pal0}\">GITDEBT / MAINTAINER FOOTPRINT</text>\n",
+        "  <text class=\"ey\" x=\"24\" y=\"25\" fill=\"{pal0}\">{persona}</text>\n",
     ));
     if !opts.hide_title {
         body.push_str(&format!(
-            "  <text class=\"t\" x=\"70\" y=\"57\" fill=\"{}\">{title}</text>\n",
+            "  <text class=\"t\" x=\"24\" y=\"52\" fill=\"{}\">{title}</text>\n",
             theme.fg
         ));
     } else {
         body.push_str(&format!(
-            "  <text class=\"m\" x=\"70\" y=\"52\" fill=\"{}\">@{login}</text>\n",
+            "  <text class=\"m\" x=\"24\" y=\"43\" fill=\"{}\">@{login}</text>\n",
             theme.muted
         ));
     }
 
-    let grid_y = if opts.hide_title { 66.0 } else { 88.0 };
+    let grid_y = if opts.hide_title { 58.0 } else { 74.0 };
     let gap = 12.0;
     let cell_w = (w - 48.0 - gap) / 2.0;
     for (i, row) in rows.iter().enumerate() {
@@ -629,41 +644,14 @@ pub fn render_user_card(
         body.push_str(close);
     }
 
-    let metric_rows = rows.len().div_ceil(2) as f32;
-    let mut footer_y = grid_y + metric_rows * 58.0;
-    if !opts.hide_rank {
-        let completion = if data.repos_tracked == 0 {
-            0.0
-        } else {
-            (data.repos_analyzed as f64 / data.repos_tracked as f64).clamp(0.0, 1.0)
-        };
-        let rail_w = w - 48.0;
-        let fill_w = rail_w * completion as f32;
-        let status = if data.analysis_pending() {
-            "ANALYSIS COVERAGE"
-        } else {
-            "ANALYSIS COMPLETE"
-        };
-        body.push_str(&format!(
-            "  <g><text class=\"ml\" x=\"24\" y=\"{label_y:.1}\" fill=\"{muted}\">{status}</text><text class=\"ml\" x=\"{right:.1}\" y=\"{label_y:.1}\" text-anchor=\"end\" fill=\"{fg}\">{analyzed} / {tracked} REPOS</text><rect x=\"24\" y=\"{rail_y:.1}\" width=\"{rail_w:.1}\" height=\"5\" rx=\"2.5\" fill=\"{track}\" /><rect x=\"24\" y=\"{rail_y:.1}\" width=\"{fill_w:.1}\" height=\"5\" rx=\"2.5\" fill=\"{pal0}\" /></g>\n",
-            label_y = footer_y + 13.0,
-            rail_y = footer_y + 23.0,
-            right = w - 24.0,
-            muted = theme.muted,
-            fg = theme.fg,
-            analyzed = data.repos_analyzed,
-            tracked = data.repos_tracked,
-            track = theme.track,
-        ));
-        footer_y += 45.0;
-    }
+    let footer_y = grid_y + rows.len().div_ceil(2) as f32 * 58.0;
 
     body.push_str(&format!(
-        "  <a href=\"https://gitdebt.com/u/{login}\" target=\"_blank\" rel=\"noopener\"><text class=\"m\" x=\"{x:.1}\" y=\"{y:.1}\" text-anchor=\"end\" fill=\"{muted}\">gitdebt.com/u/{login} ↗</text></a>\n",
-        x = w - 25.0,
+        "  <a href=\"https://gitdebt.com/u/{login}\" target=\"_blank\" rel=\"noopener\"><text class=\"m\" x=\"24\" y=\"{y:.1}\" fill=\"{muted}\">gitdebt.com/u/{login} ↗</text></a>\n",
         y = footer_y + 20.0,
         muted = theme.muted,
     ));
+    body.push_str(&brand::footer_lockup(w - 24.0, footer_y + 20.0, theme));
 
     Ok(format!(
         "{open}{CARD_STYLE}{body}</svg>",
@@ -979,12 +967,7 @@ pub fn render_repo_card(
         body.push_str(&lang_strip(&shares, 25.0, bar_y, w - 50.0, theme));
     }
 
-    body.push_str(&format!(
-        "  <a href=\"https://gitdebt.com/{slug}\" target=\"_blank\" rel=\"noopener\"><text class=\"m\" x=\"{x:.1}\" y=\"{y:.1}\" text-anchor=\"end\" fill=\"{muted}\">via gitdebt</text></a>\n",
-        x = w - 25.0,
-        y = h - 10.0,
-        muted = theme.muted,
-    ));
+    body.push_str(&brand::footer_lockup(w - 25.0, h - 10.0, theme));
 
     Ok(format!(
         "{open}{CARD_STYLE}{body}</svg>",
@@ -1074,15 +1057,14 @@ pub fn render_repo_pending_card(slug: &str, stars: Option<u64>, theme: &Theme) -
 fn notice_card(title: &str, message: &str, theme: &Theme) -> String {
     let (w, h) = (400.0_f32, 100.0_f32);
     format!(
-        "{open}{CARD_STYLE}{chrome}  <text class=\"rt\" x=\"25\" y=\"42\" fill=\"{fg}\">{title}</text>\n  <text class=\"c\" x=\"25\" y=\"66\" fill=\"{muted}\">{message}</text>\n  <a href=\"https://gitdebt.com\" target=\"_blank\" rel=\"noopener\"><text class=\"m\" x=\"{fx:.1}\" y=\"{fy:.1}\" text-anchor=\"end\" fill=\"{muted}\">via gitdebt</text></a>\n</svg>",
+        "{open}{CARD_STYLE}{chrome}  <text class=\"rt\" x=\"25\" y=\"42\" fill=\"{fg}\">{title}</text>\n  <text class=\"c\" x=\"25\" y=\"66\" fill=\"{muted}\">{message}</text>\n{footer}</svg>",
         open = svg_open(w, h, "gitdebt"),
         chrome = chrome(w, h, theme, false),
         fg = theme.fg,
         muted = theme.muted,
         title = escape_xml(&truncate_chars(title, 48)),
         message = escape_xml(message),
-        fx = w - 25.0,
-        fy = h - 12.0,
+        footer = brand::footer_lockup(w - 25.0, h - 12.0, theme),
     )
 }
 
@@ -1299,9 +1281,9 @@ mod tests {
         data.contribs = 0;
         data.repos_analyzed = 0;
         let svg = render_user_card(&data, &UserCardOptions::default(), &LIGHT).unwrap();
-        assert!(svg.contains("Commits Analyzed"));
+        assert!(svg.contains("Commits Found"));
         assert!(svg.contains(">warming</text>"));
-        assert!(svg.contains("0 / 8 REPOS"));
+        assert!(!svg.contains("ANALYSIS COVERAGE"));
         assert!(!svg.contains(">0</text>"));
     }
 
@@ -1342,20 +1324,20 @@ mod tests {
     }
 
     #[test]
-    fn hiding_everything_plus_hide_rank_errors() {
+    fn hiding_everything_errors_regardless_of_legacy_rank_flag() {
         let opts = UserCardOptions {
             metrics: select_user_metrics(Some("stars,commits,contribs,repos,forks"), None),
             hide_rank: true,
             ..UserCardOptions::default()
         };
         assert!(render_user_card(&sample_user(), &opts, &LIGHT).is_err());
-        // Same selection with the rank visible still renders.
+        // The old rank flag no longer supplies a replacement coverage rail.
         let with_rank = UserCardOptions {
             metrics: select_user_metrics(Some("stars,commits,contribs,repos,forks"), None),
             hide_rank: false,
             ..UserCardOptions::default()
         };
-        assert!(render_user_card(&sample_user(), &with_rank, &LIGHT).is_ok());
+        assert!(render_user_card(&sample_user(), &with_rank, &LIGHT).is_err());
         // Empty repo-card selection errors too.
         let ropts = RepoCardOptions {
             metrics: Vec::new(),
@@ -1416,9 +1398,9 @@ mod tests {
             ..UserCardOptions::default()
         };
         let svg = render_user_card(&sample_user(), &opts, &LIGHT).unwrap();
-        assert!(svg.contains("MAINTAINER FOOTPRINT"));
+        assert!(svg.contains("OPEN SOURCE BUILDER"));
         assert!(svg.contains("data-gitdebt-logo=\"true\""));
-        assert!(svg.contains("ANALYSIS COMPLETE"));
+        assert!(!svg.contains("ANALYSIS COVERAGE"));
         assert!(!svg.contains("stroke-dashoffset"));
         assert!(svg.contains("dur=\"0.2s\""));
         assert!(svg.contains("begin=\"0.08s\""));
@@ -1432,9 +1414,19 @@ mod tests {
             ..UserCardOptions::default()
         };
         let svg = render_user_card(&sample_user(), &opts, &LIGHT).unwrap();
-        assert!(svg.contains("MAINTAINER FOOTPRINT"));
-        assert!(svg.contains("ANALYSIS COMPLETE"));
+        assert!(svg.contains("OPEN SOURCE BUILDER"));
+        assert!(!svg.contains("ANALYSIS"));
         assert!(!svg.contains("class=\"g\""));
+    }
+
+    #[test]
+    fn profile_personas_follow_visible_activity() {
+        let mut data = sample_user();
+        data.stars = 100_000;
+        assert_eq!(user_persona(&data), "OSS WIZARD");
+        data.stars = 10;
+        data.commits = 2_000;
+        assert_eq!(user_persona(&data), "PRODUCTIVE PROCRASTINATOR");
     }
 
     #[test]
@@ -1552,9 +1544,9 @@ mod tests {
     fn footer_links_to_matching_pages() {
         let user = render_user_card(&sample_user(), &UserCardOptions::default(), &LIGHT).unwrap();
         assert!(user.contains("https://gitdebt.com/u/octocat"));
-        assert!(user.contains("8 / 8 REPOS"));
+        assert!(user.contains("data-gitdebt-logo=\"true\""));
         let repo = render_repo_card(&sample_repo(), &full_repo_opts(false), &LIGHT).unwrap();
-        assert!(repo.contains("https://gitdebt.com/rust-lang/rust"));
+        assert!(repo.contains("https://gitdebt.com"));
         assert!(repo.contains("https://github.com/rust-lang/rust"));
     }
 

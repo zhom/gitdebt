@@ -11,6 +11,7 @@ use std::net::{IpAddr, Ipv4Addr, Ipv6Addr, SocketAddr};
 use std::sync::OnceLock;
 
 use axum::extract::ConnectInfo;
+use axum_extra::extract::cookie::CookieJar;
 
 use moka::future::Cache as MokaCache;
 use tower_governor::{
@@ -96,8 +97,8 @@ pub struct ApiState {
     pub metrics_token: Option<String>,
     /// Bare-clone storage. Shared with the repo-analysis pool; the usage
     /// endpoint reuses it to read package manifests out of existing clones
-    /// (never clones itself — falls back to the repo-name heuristic when a
-    /// clone is absent).
+    /// (never clones itself; a missing clone means no manifest-backed package
+    /// association is shown).
     pub storage: std::sync::Arc<crate::repo_history::RepoStorage>,
 }
 
@@ -215,6 +216,10 @@ pub fn router(state: ApiState) -> Router {
         .route("/api/repos/{owner}/{repo}/analyze", get(analyze))
         .route("/api/repos/{owner}/{repo}/stars.csv", get(stars_csv))
         .route("/api/repos/{owner}/{repo}/stars.json", get(stars_json))
+        .route(
+            "/api/repos/{owner}/{repo}/earned-badges.json",
+            get(earned_badges_json),
+        )
         .route("/api/users/{login}/analyze", get(user_analyze))
         .route("/api/leaderboard.json", get(leaderboard_json))
         .route("/api/activity.json", get(platform_activity))
@@ -329,6 +334,10 @@ pub fn router(state: ApiState) -> Router {
     );
     let rate_limited = Router::new()
         .merge(crate::repo_endpoints::mutating_router())
+        .route(
+            "/api/users/{login}/warm",
+            axum::routing::post(warm_user_profile),
+        )
         .layer(GovernorLayer::new(governor_conf))
         .layer(
             CorsLayer::new()
@@ -855,7 +864,8 @@ fn map_aggregate_err(e: aggregate::AggregateError) -> ApiError {
 }
 
 /// `GET /api/users/:login/analyze` —
-/// `{login,repos_included,repos_pending,total_stars,history:[{date,stars}]}`,
+/// `{login,repos_included,repos_pending,repos_analyzed,repos_analyzing,`
+/// `total_stars,history:[{date,stars}]}`,
 /// summing the cumulative star series across the login's top public repos.
 /// Non-blocking on star data: uncached repos are enqueued on the existing
 /// star-fetch queue and counted in `repos_pending`. Memoized like
@@ -876,11 +886,16 @@ async fn user_analyze(
         serde_json::to_string(&agg.to_json())?
     } else {
         let key = format!("user:{}", login.to_ascii_lowercase());
-        single_flight(&state.analyze_cache, key, async {
+        if let Some(json) = state.analyze_cache.get(&key).await {
+            json
+        } else {
             let agg = build_user_aggregate(&state, &login).await?;
-            Ok(serde_json::to_string(&agg.to_json())?)
-        })
-        .await?
+            let json = serde_json::to_string(&agg.to_json())?;
+            if agg.repos_pending == 0 && agg.repos_analyzing == 0 {
+                state.analyze_cache.insert(key, json.clone()).await;
+            }
+            json
+        }
     };
     let mut headers = HeaderMap::new();
     headers.insert(
@@ -905,21 +920,74 @@ async fn build_user_aggregate(
     login: &str,
 ) -> Result<std::sync::Arc<aggregate::UserAggregate>, ApiError> {
     let key = login.to_ascii_lowercase();
-    // Single-flight: a celebrity login (many concurrent chart render keys —
-    // theme × axis × from/to) coalesces onto ONE aggregate build + enqueue
-    // batch. `try_get_with` never memoizes the error arm, so `LoginNotFound`
-    // re-reads its cheap tombstone and `Busy` retries — the pre-existing
-    // "errors are never memoized" contract is preserved.
-    state
-        .user_agg_cache
-        .try_get_with(key.clone(), async {
-            aggregate::build(&state.analyzer, &key)
-                .await
+    if let Some(aggregate) = state.user_agg_cache.get(&key).await {
+        return Ok(aggregate);
+    }
+    let aggregate = std::sync::Arc::new(
+        aggregate::build(&state.analyzer, &key)
+            .await
+            .map_err(map_aggregate_err)?,
+    );
+    // A pending aggregate changes as workers land. Caching it for five
+    // minutes made a fast backend look frozen to the profile UI.
+    if aggregate.repos_pending == 0 && aggregate.repos_analyzing == 0 {
+        state.user_agg_cache.insert(key, aggregate.clone()).await;
+    }
+    Ok(aggregate)
+}
+
+/// Credentialed self-profile warm-up. The session login must match the path;
+/// an authenticated visitor cannot spend their token or interactive queue
+/// priority on somebody else's account.
+async fn warm_user_profile(
+    State(state): State<ApiState>,
+    Path(login): Path<String>,
+    jar: CookieJar,
+) -> Result<impl IntoResponse, ApiError> {
+    if !aggregate::is_valid_login(&login) {
+        return Err(ApiError::bad_request("invalid login"));
+    }
+    let config = state
+        .gh_app
+        .as_ref()
+        .ok_or_else(|| ApiError::unavailable("authentication unavailable"))?;
+    let user_id = crate::auth::current_user_id(config, &jar)
+        .ok_or_else(|| ApiError::unauthorized("sign in required"))?;
+    let stored_login: Option<String> =
+        sqlx::query_scalar("SELECT login FROM app_users WHERE id = $1")
+            .bind(user_id)
+            .fetch_optional(&state.analyzer.cache.db().pool)
+            .await?;
+    let login = login.to_ascii_lowercase();
+    if !stored_login.is_some_and(|value| value.eq_ignore_ascii_case(&login)) {
+        return Err(ApiError::unauthorized("profile does not match session"));
+    }
+
+    let github =
+        match crate::auth::user_access_token(state.analyzer.cache.db(), config, user_id).await? {
+            Some(token) => state
+                .analyzer
+                .github
+                .for_user_token(&token)
                 .map(std::sync::Arc::new)
-                .map_err(map_aggregate_err)
-        })
+                .unwrap_or_else(|_| state.analyzer.github.clone()),
+            None => state.analyzer.github.clone(),
+        };
+    let aggregate = aggregate::build_for_user(&state.analyzer, &login, user_id, github)
         .await
-        .map_err(|e| e.clone_shared())
+        .map_err(map_aggregate_err)?;
+
+    state.user_agg_cache.invalidate(&login).await;
+    state
+        .analyze_cache
+        .invalidate(&format!("user:{login}"))
+        .await;
+    let mut headers = HeaderMap::new();
+    headers.insert(
+        header::CACHE_CONTROL,
+        HeaderValue::from_static("private, no-store"),
+    );
+    Ok((headers, Json(aggregate.to_json())))
 }
 
 /// Render-or-fetch the aggregate star chart for a login: the summed series
@@ -1814,8 +1882,33 @@ async fn build_usage(
     let repo = repo.to_ascii_lowercase();
     let repo_full = format!("{owner}/{repo}");
 
-    let resolved = usage::resolve_packages(&owner, &repo, &q.overrides(), &state.storage).await;
-    let downloads = usage::fetch_all(&state.analyzer.cache, &resolved).await;
+    let declared = usage::resolve_packages(&owner, &repo, &q.overrides(), &state.storage).await;
+    let downloads = usage::fetch_all(&state.analyzer.cache, &declared).await;
+    // A manifest declaration proves repository intent; a successful registry
+    // response proves the package exists. Only expose identities satisfying
+    // both halves so a stale/typoed manifest can never become a public link.
+    let resolved = Resolved {
+        npm: downloads
+            .npm
+            .is_some()
+            .then(|| declared.npm.clone())
+            .flatten(),
+        crate_: downloads
+            .crates
+            .is_some()
+            .then(|| declared.crate_.clone())
+            .flatten(),
+        pypi: downloads
+            .pypi
+            .is_some()
+            .then(|| declared.pypi.clone())
+            .flatten(),
+        docker: downloads
+            .docker
+            .is_some()
+            .then(|| declared.docker.clone())
+            .flatten(),
+    };
 
     // Authoritative counts (best-effort from cache; the analyze path
     // refreshes them out-of-band).
@@ -2055,11 +2148,198 @@ async fn usage_webp(
 
 // Badges
 
+#[derive(Debug, Clone, PartialEq, Eq, Serialize)]
+struct EarnedRepoBadge {
+    id: &'static str,
+    label: &'static str,
+    detail: String,
+    earned: bool,
+    pending: bool,
+}
+
+#[derive(Debug, Default)]
+struct RepoBadgeEvidence {
+    latest_commit: Option<chrono::NaiveDate>,
+    commits_30d: u64,
+    contributor_commits: Vec<i64>,
+    stars_30d: Option<u64>,
+    total_stars: u64,
+    analysis_complete: bool,
+    stars_complete: bool,
+}
+
+fn evaluate_repo_badges(
+    evidence: &RepoBadgeEvidence,
+    today: chrono::NaiveDate,
+) -> Vec<EarnedRepoBadge> {
+    let active = evidence.analysis_complete
+        && evidence
+            .latest_commit
+            .is_some_and(|day| day >= today - chrono::Duration::days(29))
+        && evidence.commits_30d >= 5;
+    let contributors = evidence.contributor_commits.len() as u64;
+    let total_commits = evidence
+        .contributor_commits
+        .iter()
+        .copied()
+        .fold(0i64, i64::saturating_add);
+    let ownership =
+        crate::repo_charts::compute_bus_factor(&evidence.contributor_commits, total_commits) as u64;
+    let community = evidence.analysis_complete && contributors >= 5 && ownership >= 2;
+    let momentum = evidence.stars_complete
+        && evidence.stars_30d.is_some_and(|gain| {
+            gain >= 25 && (gain >= 100 || gain.saturating_mul(100) >= evidence.total_stars.max(1))
+        });
+
+    vec![
+        EarnedRepoBadge {
+            id: "active",
+            label: "actively maintained",
+            detail: if evidence.analysis_complete {
+                format!(
+                    "{} commits / 30d",
+                    crate::badge::humanize(evidence.commits_30d)
+                )
+            } else {
+                "analysis pending".to_string()
+            },
+            earned: active,
+            pending: !evidence.analysis_complete,
+        },
+        EarnedRepoBadge {
+            id: "community",
+            label: "community powered",
+            detail: if evidence.analysis_complete {
+                format!("bus factor {ownership} / {contributors} contributors")
+            } else {
+                "analysis pending".to_string()
+            },
+            earned: community,
+            pending: !evidence.analysis_complete,
+        },
+        EarnedRepoBadge {
+            id: "momentum",
+            label: "star momentum",
+            detail: evidence.stars_30d.map_or_else(
+                || "history pending".to_string(),
+                |gain| format!("+{} stars / 30d", crate::badge::humanize(gain)),
+            ),
+            earned: momentum,
+            pending: !evidence.stars_complete,
+        },
+    ]
+}
+
+async fn load_repo_badges(
+    state: &ApiState,
+    repo_full: &str,
+) -> Result<Vec<EarnedRepoBadge>, ApiError> {
+    let db = state.analyzer.cache.db();
+    let today = Utc::now().date_naive();
+    let readiness = repo_render_readiness(state, repo_full).await?;
+    let (latest_commit, commits_30d, contributor_commits) = if readiness.analysis {
+        let activity = sqlx::query(
+            "SELECT MAX(day) AS latest_commit, \
+                    COALESCE(SUM(commits) FILTER \
+                        (WHERE day >= $2), 0)::BIGINT AS commits_30d \
+             FROM repo_commit_days WHERE repo = $1",
+        )
+        .bind(repo_full)
+        .bind(today - chrono::Duration::days(29))
+        .fetch_one(&db.pool)
+        .await?;
+        let latest_commit: Option<chrono::NaiveDate> = activity.try_get("latest_commit")?;
+        let commits_30d: i64 = activity.try_get("commits_30d")?;
+
+        // Badge qualification follows the same broad bot exclusions as the
+        // contributor chart. The result contains only aggregate commit counts.
+        let contributor_commits = sqlx::query_scalar::<_, i64>(
+            "SELECT commits FROM repo_author_stats \
+             WHERE repo = $1 \
+               AND author_name NOT LIKE '%[bot]%' \
+               AND author_email NOT LIKE '%[bot]@%' \
+               AND (github_login IS NULL OR github_login NOT LIKE '%[bot]%') \
+             ORDER BY commits DESC",
+        )
+        .bind(repo_full)
+        .fetch_all(&db.pool)
+        .await?
+        .into_iter()
+        .map(|value| value.max(0))
+        .collect::<Vec<_>>();
+        (
+            latest_commit,
+            commits_30d.max(0) as u64,
+            contributor_commits,
+        )
+    } else {
+        (None, 0, Vec::new())
+    };
+
+    let summary = state.analyzer.cache.get_repo_summary(repo_full).await?;
+    let (stars_30d, total_stars) = if readiness.stars {
+        let rows = export::accumulate(&export::load_day_deltas(db, repo_full).await?);
+        let gain = rows
+            .iter()
+            .filter(|row| row.date >= today - chrono::Duration::days(29))
+            .map(|row| row.delta)
+            .sum();
+        let total = summary
+            .as_ref()
+            .and_then(|value| value.star_count)
+            .filter(|value| *value >= 0)
+            .map(|value| value as u64)
+            .or_else(|| rows.last().map(|row| row.total))
+            .unwrap_or(0);
+        (Some(gain), total)
+    } else {
+        (
+            None,
+            summary
+                .as_ref()
+                .and_then(|value| value.star_count)
+                .unwrap_or(0)
+                .max(0) as u64,
+        )
+    };
+
+    Ok(evaluate_repo_badges(
+        &RepoBadgeEvidence {
+            latest_commit,
+            commits_30d,
+            contributor_commits,
+            stars_30d,
+            total_stars,
+            analysis_complete: readiness.analysis,
+            stars_complete: readiness.stars,
+        },
+        today,
+    ))
+}
+
+async fn earned_badges_json(
+    State(state): State<ApiState>,
+    Path((owner, repo)): Path<(String, String)>,
+) -> Result<impl IntoResponse, ApiError> {
+    if !is_valid_slug(&owner) || !is_valid_slug(&repo) {
+        return Err(ApiError::bad_request("invalid owner/repo"));
+    }
+    let repo_full = crate::analyzer::repo_key(&owner, &repo);
+    let badges = load_repo_badges(&state, &repo_full).await?;
+    let mut headers = HeaderMap::new();
+    headers.insert(
+        header::CACHE_CONTROL,
+        HeaderValue::from_static("public, s-maxage=300, max-age=60"),
+    );
+    Ok((headers, Json(badges)))
+}
+
 /// Query params for the badge endpoints. See AGENTS / the badge-studio
 /// contract for the exact param vocabulary.
 #[derive(Debug, Default, Clone, Deserialize)]
 struct BadgeQuery {
     theme: Option<String>,
+    signal: Option<String>,
     metrics: Option<String>,
     style: Option<String>,
     animate: Option<String>,
@@ -2097,8 +2377,9 @@ impl BadgeQuery {
         let metrics = self.metrics.as_deref().unwrap_or("default");
         let style = self.style.as_deref().unwrap_or("flat");
         let source = self.source.as_deref().unwrap_or("auto");
+        let signal = self.signal.as_deref().unwrap_or("-");
         format!(
-            "{theme_key}|m:{metrics}|s:{style}|a:{}|src:{source}|{}|{}|{}|{}",
+            "{theme_key}|m:{metrics}|s:{style}|a:{}|signal:{signal}|src:{source}|{}|{}|{}|{}",
             self.animate(),
             self.npm.as_deref().unwrap_or("-"),
             self.crate_.as_deref().unwrap_or("-"),
@@ -2186,6 +2467,25 @@ async fn build_badge_svg(
         owner.to_ascii_lowercase(),
         repo.to_ascii_lowercase()
     );
+    if let Some(signal) = q.signal.as_deref().map(str::trim).filter(|v| !v.is_empty()) {
+        let badges = load_repo_badges(state, &repo_full).await?;
+        let earned = badges
+            .iter()
+            .find(|badge| badge.id == signal)
+            .ok_or_else(|| ApiError::bad_request("unknown badge signal"))?;
+        return Ok(RenderedCard {
+            svg: crate::badge::render_signal_badge(
+                earned.label,
+                &earned.detail,
+                earned.earned,
+                theme,
+                q.animate(),
+            ),
+            // Qualification depends on a moving 30-day window and should
+            // self-correct quickly in an existing README.
+            short_ttl: true,
+        });
+    }
     let readiness = repo_render_readiness(state, &repo_full).await?;
     let stable = metrics.iter().all(|metric| match metric {
         Metric::Stars => readiness.stars,
@@ -4455,6 +4755,35 @@ mod tests {
             q.key_fragment(&crate::theme::DARK)
         );
         assert_eq!(q.key_fragment(t), q.key_fragment(t));
+    }
+
+    #[test]
+    fn earned_badges_require_current_and_distributed_evidence() {
+        let today = chrono::NaiveDate::from_ymd_opt(2026, 7, 22).unwrap();
+        let badges = evaluate_repo_badges(
+            &RepoBadgeEvidence {
+                latest_commit: Some(today - chrono::Duration::days(2)),
+                commits_30d: 18,
+                contributor_commits: vec![40, 35, 25, 10, 5, 5],
+                stars_30d: Some(125),
+                total_stars: 4_000,
+                analysis_complete: true,
+                stars_complete: true,
+            },
+            today,
+        );
+        assert!(badges.iter().all(|badge| badge.earned));
+        assert_eq!(badges[1].detail, "bus factor 2 / 6 contributors");
+    }
+
+    #[test]
+    fn earned_badges_do_not_turn_unknown_data_into_an_award() {
+        let today = chrono::NaiveDate::from_ymd_opt(2026, 7, 22).unwrap();
+        let badges = evaluate_repo_badges(&RepoBadgeEvidence::default(), today);
+        assert!(badges.iter().all(|badge| !badge.earned));
+        assert!(badges.iter().all(|badge| badge.pending));
+        assert_eq!(badges[0].detail, "analysis pending");
+        assert_eq!(badges[2].detail, "history pending");
     }
 
     #[test]

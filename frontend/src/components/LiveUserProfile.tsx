@@ -2,19 +2,20 @@ import { useEffect, useMemo, useState } from "react";
 import { ExternalLink, Loader2 } from "lucide-react";
 
 import { ChartViewer } from "@/components/ChartViewer";
-import { MEDIA_RENDER_REVISION } from "@/lib/media";
-import { useRenderedTheme } from "@/lib/rendered-theme";
+import { ProfileCardPreview } from "@/components/ProfileCardPreview";
 
 type UserAnalyze = {
   login: string;
   repos_included: number;
   repos_pending: number;
+  repos_analyzed: number;
+  repos_analyzing: number;
   total_stars: number;
   history: { date: string; stars: number }[];
 };
 
 const LOGIN_RE = /^[A-Za-z0-9](?:[A-Za-z0-9-]{0,37}[A-Za-z0-9])?$/;
-const POLL_MS = 20_000;
+const POLL_MS = 8_000;
 
 function selectedLogin(): string | null {
   if (typeof window === "undefined") return null;
@@ -40,31 +41,51 @@ export function LiveUserProfile({
   const [data, setData] = useState<UserAnalyze | null>(null);
   const [loading, setLoading] = useState(Boolean(login));
   const [error, setError] = useState<string | null>(null);
-  const theme = useRenderedTheme();
 
   useEffect(() => {
-    if (!login) return;
+    const targetLogin = login ?? "";
+    if (!targetLogin) return;
     let cancelled = false;
     let timer: ReturnType<typeof setTimeout> | null = null;
+    let warmAttempted = false;
 
     async function load() {
       try {
         setLoading(true);
-        const response = await fetch(
-          `${apiBase}/api/users/${login}/analyze`,
-          {
+        let response: Response | null = null;
+        if (!warmAttempted) {
+          warmAttempted = true;
+          const warm = await fetch(`${apiBase}/api/users/${targetLogin}/warm`, {
+            method: "POST",
             cache: "no-store",
-            credentials: "omit",
+            credentials: "include",
             headers: { accept: "application/json" },
-          },
-        );
+          });
+          if (warm.ok) response = warm;
+        }
+        response ??= await fetch(`${apiBase}/api/users/${targetLogin}/analyze`, {
+          cache: "no-store",
+          credentials: "omit",
+          headers: { accept: "application/json" },
+        });
         if (response.status === 404) throw new Error("GitHub user not found.");
         if (!response.ok) throw new Error("Profile data is temporarily unavailable.");
-        const next = (await response.json()) as UserAnalyze;
+        const payload = (await response.json()) as Partial<UserAnalyze>;
+        const next: UserAnalyze = {
+          login: payload.login ?? targetLogin,
+          repos_included: payload.repos_included ?? 0,
+          repos_pending: payload.repos_pending ?? 0,
+          repos_analyzed: payload.repos_analyzed ?? 0,
+          repos_analyzing: payload.repos_analyzing ?? 0,
+          total_stars: payload.total_stars ?? 0,
+          history: payload.history ?? [],
+        };
         if (cancelled) return;
         setData(next);
         setError(null);
-        if (next.repos_pending > 0) timer = setTimeout(load, POLL_MS);
+        if (next.repos_pending > 0 || next.repos_analyzing > 0) {
+          timer = setTimeout(load, POLL_MS);
+        }
       } catch (reason) {
         if (!cancelled) {
           setError(
@@ -100,7 +121,7 @@ export function LiveUserProfile({
   }
 
   const revision = data
-    ? `${data.total_stars}-${data.repos_included}-${data.repos_pending}`
+    ? `${data.total_stars}-${data.repos_included}-${data.repos_pending}-${data.repos_analyzed}`
     : "pending";
   const hasHistory = (data?.history.length ?? 0) > 0;
 
@@ -141,8 +162,8 @@ export function LiveUserProfile({
             value: data ? data.repos_included.toLocaleString() : "—",
           },
           {
-            label: "Repos still warming",
-            value: data ? data.repos_pending.toLocaleString() : "—",
+            label: "Code-health reports",
+            value: data ? `${data.repos_analyzed.toLocaleString()} ready` : "—",
           },
         ].map((item) => (
           <div
@@ -159,7 +180,7 @@ export function LiveUserProfile({
         ))}
       </dl>
 
-      {(loading || (data?.repos_pending ?? 0) > 0) && (
+      {(loading || (data?.repos_pending ?? 0) > 0 || (data?.repos_analyzing ?? 0) > 0) && (
         <div
           className="flex items-start gap-3 border-y border-border py-4"
           role="status"
@@ -169,8 +190,10 @@ export function LiveUserProfile({
             aria-hidden="true"
           />
           <p className="text-sm leading-relaxed text-muted-foreground">
-            Discovering public repositories and warming their saved history.
-            This page updates automatically.
+            {data?.repos_analyzing
+              ? `Analyzing ${data.repos_analyzing} repositories with interactive priority. `
+              : "Discovering public repositories. "}
+            This page updates every few seconds.
           </p>
         </div>
       )}
@@ -188,6 +211,7 @@ export function LiveUserProfile({
           alt={`Aggregate star history across ${login}'s public repositories`}
           caption="Aggregate star history"
           priority
+          points={data?.history ?? []}
         />
       ) : (
         data &&
@@ -211,15 +235,15 @@ export function LiveUserProfile({
             Profile card
           </h2>
           <p className="text-base text-muted-foreground">
-            A compact lower-bound summary over repositories gitdebt has tracked.
+            A compact maintainer footprint with an activity-based profile title.
           </p>
         </header>
         <div className="flex justify-center border-y border-border py-5">
-          <img
-            src={`${apiBase}/api/users/${login}/card.svg?theme=${theme}&v=${revision}&render=${MEDIA_RENDER_REVISION}`}
-            alt={`gitdebt profile statistics for ${login}`}
-            loading="lazy"
-            decoding="async"
+          <ProfileCardPreview
+            apiBase={apiBase}
+            login={login}
+            initialRevision={revision}
+            warm={false}
           />
         </div>
       </section>

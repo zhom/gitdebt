@@ -45,11 +45,11 @@ type Props = {
   priority?: boolean;
 };
 
-function availableSources(resolved: UsageResponse["resolved"]): UsageSource[] {
+function availableSources(data: UsageResponse): UsageSource[] {
   const out: UsageSource[] = ["auto"];
-  if (resolved.npm) out.push("npm");
-  if (resolved.crate) out.push("crates");
-  if (resolved.pypi) out.push("pypi");
+  if (data.resolved.npm && data.downloads.npm) out.push("npm");
+  if (data.resolved.crate && data.downloads.crates) out.push("crates");
+  if (data.resolved.pypi && data.downloads.pypi) out.push("pypi");
   return out;
 }
 
@@ -65,6 +65,20 @@ function compact(n: number): string {
     notation: "compact",
     maximumFractionDigits: 1,
   }).format(n);
+}
+
+function registryUrl(source: string, name: string): string {
+  const encoded = encodeURIComponent(name);
+  switch (source) {
+    case "npm":
+      return `https://www.npmjs.com/package/${encoded}`;
+    case "crates":
+      return `https://crates.io/crates/${encoded}`;
+    case "PyPI":
+      return `https://pypi.org/project/${encoded}`;
+    default:
+      return `https://hub.docker.com/r/${name.split("/").map(encodeURIComponent).join("/")}`;
+  }
 }
 
 export function UsageSection({
@@ -106,7 +120,7 @@ export function UsageSection({
   }, [owner, repo, apiBase, initialData]);
 
   const sources = useMemo(
-    () => (data ? availableSources(data.resolved) : (["auto"] as UsageSource[])),
+    () => (data ? availableSources(data) : (["auto"] as UsageSource[])),
     [data],
   );
 
@@ -116,10 +130,10 @@ export function UsageSection({
 
   const hasPackage = Boolean(
     data &&
-      (data.resolved.npm ||
-        data.resolved.crate ||
-        data.resolved.pypi ||
-        data.resolved.docker),
+      ((data.resolved.npm && data.downloads.npm) ||
+        (data.resolved.crate && data.downloads.crates) ||
+        (data.resolved.pypi && data.downloads.pypi) ||
+        (data.resolved.docker && data.downloads.docker)),
   );
 
   const hasDownloadSeries = Boolean(
@@ -130,12 +144,12 @@ export function UsageSection({
   const chartPath = `/api/repos/${owner}/${repo}/usage.svg?type=${type}&source=${source}`;
 
   const resolvedRows = useMemo(() => {
-    if (!data) return [] as { label: string; value: string }[];
-    const rows: { label: string; value: string }[] = [];
-    if (data.resolved.npm) rows.push({ label: "npm", value: data.resolved.npm });
-    if (data.resolved.crate) rows.push({ label: "crates", value: data.resolved.crate });
-    if (data.resolved.pypi) rows.push({ label: "PyPI", value: data.resolved.pypi });
-    if (data.resolved.docker) rows.push({ label: "Docker", value: data.resolved.docker });
+    if (!data) return [] as { label: string; value: string; href: string }[];
+    const rows: { label: string; value: string; href: string }[] = [];
+    if (data.resolved.npm && data.downloads.npm) rows.push({ label: "npm", value: data.resolved.npm, href: registryUrl("npm", data.resolved.npm) });
+    if (data.resolved.crate && data.downloads.crates) rows.push({ label: "crates", value: data.resolved.crate, href: registryUrl("crates", data.resolved.crate) });
+    if (data.resolved.pypi && data.downloads.pypi) rows.push({ label: "PyPI", value: data.resolved.pypi, href: registryUrl("PyPI", data.resolved.pypi) });
+    if (data.resolved.docker && data.downloads.docker) rows.push({ label: "Docker", value: data.resolved.docker, href: registryUrl("Docker", data.resolved.docker) });
     return rows;
   }, [data]);
 
@@ -277,13 +291,18 @@ export function UsageSection({
               </dt>
               <dd className="mt-2 flex flex-col gap-1.5">
                 {resolvedRows.map((row) => (
-                  <span
+                  <a
                     key={row.label}
-                    className="flex items-baseline justify-between gap-4 font-mono text-base sm:text-sm"
+                    href={row.href}
+                    target="_blank"
+                    rel="noreferrer"
+                    className="group flex items-baseline justify-between gap-4 font-mono text-base sm:text-sm"
                   >
                     <span className="text-muted-foreground">{row.label}</span>
-                    <span className="truncate text-foreground">{row.value}</span>
-                  </span>
+                    <span className="truncate text-foreground underline decoration-border underline-offset-4 group-hover:decoration-foreground">
+                      {row.value} ↗
+                    </span>
+                  </a>
                 ))}
               </dd>
             </dl>

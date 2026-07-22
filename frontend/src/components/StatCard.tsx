@@ -105,7 +105,7 @@ export function StatCard({
   const chartPath = apiBase && src.startsWith(apiBase) ? src.slice(apiBase.length) : src;
 
   return (
-    <figure className="card-panel overflow-hidden">
+    <figure className="card-panel relative">
       {caption && (
         <figcaption className="flex items-center justify-between gap-3 border-b border-border bg-muted/40 px-5 py-3">
           <div className="inline-flex items-center gap-2 font-mono text-xs tracking-wide text-muted-foreground uppercase">
@@ -118,6 +118,7 @@ export function StatCard({
               chartPath={chartPath}
               linkHref={embedLink}
               label={caption}
+              altText={alt}
               variant="menu"
             />
           )}

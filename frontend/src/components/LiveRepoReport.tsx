@@ -2,6 +2,7 @@ import { useMemo, useState } from "react";
 import { AnimatePresence, motion, useReducedMotion } from "motion/react";
 
 import { ChartViewer } from "@/components/ChartViewer";
+import { EarnedBadges } from "@/components/EarnedBadges";
 import { RepoHero } from "@/components/RepoHero";
 import { StatCard } from "@/components/StatCard";
 import { UsageSection } from "@/components/UsageSection";
@@ -17,7 +18,6 @@ const PRIMARY_STATS = [
 ] as const;
 
 const SECONDARY_STATS = [
-  ["contributors", "Contributor distribution"],
   ["heatmap", "Commit activity"],
   ["lines", "Language footprint"],
   ["todo-trend", "TODO and FIXME trend"],
@@ -53,7 +53,7 @@ export function SecondarySignals({
         onClick={() => setOpen((value) => !value)}
         className="flex min-h-14 w-full items-center justify-between gap-4 px-5 py-3 text-left text-sm font-medium focus-visible:outline-2 focus-visible:-outline-offset-2 focus-visible:outline-ring"
       >
-        Four more repository signals
+        Three more repository signals
         <span
           className={`font-mono text-lg text-muted-foreground transition-transform duration-150 motion-reduce:transition-none ${open ? "rotate-45" : ""}`}
           aria-hidden="true"
@@ -190,6 +190,50 @@ export function LiveRepoReport({ apiBase }: { apiBase: string }) {
           repo={repo}
           apiBase={apiBase}
           showEmbed={false}
+        />
+      </section>
+
+      <section className="space-y-6">
+        <header className="max-w-2xl space-y-2">
+          <p className="font-mono text-xs tracking-wide text-muted-foreground uppercase">
+            Earned badges
+          </p>
+          <h2 className="text-2xl font-semibold tracking-tight text-balance sm:text-3xl">
+            Claims backed by repository data
+          </h2>
+          <p className="text-base leading-relaxed text-pretty text-muted-foreground">
+            Embeddable signals for current maintenance, shared ownership, and
+            recent star momentum. A badge appears only when the data qualifies.
+          </p>
+        </header>
+        <EarnedBadges
+          owner={owner}
+          repo={repo}
+          apiBase={apiBase}
+          embedLink={embedLink}
+        />
+      </section>
+
+      <section className="space-y-6">
+        <header className="max-w-2xl space-y-2">
+          <p className="font-mono text-xs tracking-wide text-muted-foreground uppercase">
+            Contributors
+          </p>
+          <h2 className="text-2xl font-semibold tracking-tight text-balance sm:text-3xl">
+            Who carries the repository
+          </h2>
+          <p className="text-base leading-relaxed text-pretty text-muted-foreground">
+            Ranked ownership shares from the analyzed commit history. Every
+            contributor links to GitHub, and the chart is README-ready.
+          </p>
+        </header>
+        <StatCard
+          src={`${repoBase}/stats/contributors.svg`}
+          alt={`Contributor ownership for ${slug}`}
+          caption="Contributor ownership"
+          apiBase={apiBase}
+          embedLink={embedLink}
+          liveRepo={slug}
         />
       </section>
     </div>

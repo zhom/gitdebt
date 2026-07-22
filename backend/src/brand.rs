@@ -11,9 +11,8 @@ const LOGO_SVG: &str = include_str!("../../assets/gitdebt-logo.svg");
 
 /// Render the canonical robot mark at an arbitrary SVG position.
 ///
-/// `ink` colors the rounded tile and `knockout` colors the robot cut-out.
-/// Callers pass concrete theme colors so light and dark README variants are
-/// both legible without CSS variables or `prefers-color-scheme`.
+/// `ink` colors the outline-free robot glyph. `knockout` is retained in the
+/// signature for stable call sites; the canonical mark no longer has a tile.
 pub fn logo_mark(x: f32, y: f32, size: f32, ink: &str, knockout: &str) -> String {
     let scale = size / 512.0;
     let body_start = LOGO_SVG.find('>').expect("logo opening tag") + 1;
@@ -35,15 +34,16 @@ pub fn themed_logo_mark(x: f32, y: f32, size: f32, theme: &Theme) -> String {
 /// Compact bottom-right logo + wordmark used by chart footers.
 ///
 /// The supplied coordinates are the right edge and text baseline, matching
-/// the existing right-anchored footer labels. The mark is deliberately only
-/// 10px tall so the attribution stays subordinate to the data.
+/// the existing right-anchored footer labels. The glyph is large enough to
+/// remain recognizable after GitHub's image proxy scales a README asset down.
 pub fn footer_lockup(right_x: f32, baseline_y: f32, theme: &Theme) -> String {
-    let mark_size = 10.0;
-    let mark_x = right_x - 49.0;
-    let mark_y = baseline_y - 9.0;
+    let mark_size = 14.0;
+    let mark_x = right_x - 57.0;
+    let mark_y = baseline_y - 12.0;
     format!(
-        "  <a href=\"https://gitdebt.com\" target=\"_blank\" rel=\"noopener\" aria-label=\"gitdebt\">\n{}    <text class=\"footer-link\" x=\"{right_x:.1}\" y=\"{baseline_y:.1}\" text-anchor=\"end\">gitdebt</text>\n  </a>\n",
+        "  <a href=\"https://gitdebt.com\" target=\"_blank\" rel=\"noopener\" aria-label=\"gitdebt\">\n{}    <text class=\"footer-link\" x=\"{right_x:.1}\" y=\"{baseline_y:.1}\" text-anchor=\"end\" fill=\"{muted}\">gitdebt</text>\n  </a>\n",
         themed_logo_mark(mark_x, mark_y, mark_size, theme),
+        muted = theme.muted,
     )
 }
 
@@ -79,9 +79,9 @@ mod tests {
         assert_eq!(light, themed_logo_mark(10.0, 20.0, 16.0, &LIGHT));
         assert!(light.contains("data-gitdebt-logo=\"true\""));
         assert!(light.contains("fill=\"#0a0a0a\""));
-        assert!(light.contains("fill=\"#ffffff\""));
+        assert!(!light.contains("<rect"));
         assert!(dark.contains("fill=\"#fafafa\""));
-        assert!(dark.contains("fill=\"#0a0a0a\""));
+        assert!(!dark.contains("<rect"));
         assert!(!light.contains("<image"));
         assert!(!dark.contains("<image"));
     }

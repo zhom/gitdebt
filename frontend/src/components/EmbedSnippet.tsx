@@ -22,6 +22,7 @@ type Props = {
   chartPath: string;
   linkHref: string;
   label: string;
+  altText?: string;
   state?: EmbedState;
   variant?: "panel" | "menu";
 };
@@ -77,6 +78,7 @@ export function EmbedSnippet({
   chartPath,
   linkHref,
   label,
+  altText,
   state,
   variant = "panel",
 }: Props) {
@@ -125,7 +127,7 @@ export function EmbedSnippet({
   );
   const lightUrl = appendParams(base, ["theme=light"]);
   const darkUrl = appendParams(base, ["theme=dark"]);
-  const alt = `Star history of ${label}`;
+  const alt = altText ?? `Star history of ${label}`;
   const page = withRef(linkHref, "readme");
 
   const flatUrl = theme === "dark" ? darkUrl : lightUrl;
@@ -231,7 +233,10 @@ export function EmbedSnippet({
 
   if (variant === "menu") {
     return (
-      <div ref={rootRef} className="relative ml-auto">
+      <div
+        ref={rootRef}
+        className={`relative ml-auto ${open ? "z-50" : ""}`}
+      >
         <button
           ref={triggerRef}
           type="button"

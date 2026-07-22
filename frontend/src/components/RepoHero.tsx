@@ -145,6 +145,9 @@ export function RepoHero({ owner, repo, apiBase, initialData }: Props) {
         const next = (await res.json()) as AnalyzeResponse;
         if (!cancelled) {
           setData(next);
+          window.dispatchEvent(
+            new CustomEvent("gitdebt:repo-data", { detail: next }),
+          );
           if (schedule && needsPolling(next)) {
             timer = setTimeout(tick, POLL_MS);
           }

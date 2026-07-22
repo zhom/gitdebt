@@ -397,30 +397,34 @@ fn first_monday_on_or_before(d: NaiveDate) -> NaiveDate {
 // Contributors
 
 pub fn render_contributors(repo: &str, contributors: &[ContributorRow], theme: &Theme) -> String {
-    let cell = 56u32;
-    let gap = 8u32;
-    let columns = 12u32;
-    let total = contributors.len() as u32;
-    let rows = total.div_ceil(columns).max(1);
-    let pad_left = 24u32;
-    let pad_top = 80u32;
-    let pad_bottom = 40u32;
-    let width = pad_left * 2 + columns * (cell + gap) - gap;
-    let height = pad_top + rows * (cell + gap) - gap + pad_bottom;
+    let width = 1000u32;
+    let pad = 40u32;
+    let header = 88u32;
+    let row_h = 48u32;
+    let footer = 38u32;
+    let shown: Vec<&ContributorRow> = contributors.iter().take(12).collect();
+    let total = contributors.len();
+    let height = header + shown.len().max(1) as u32 * row_h + footer;
+    let total_commits: i64 = contributors.iter().map(|row| row.commits.max(0)).sum();
+    let max_commits = shown
+        .iter()
+        .map(|row| row.commits)
+        .max()
+        .unwrap_or(1)
+        .max(1);
+    let bar_x = 390.0f32;
+    let bar_max = 430.0f32;
 
-    let mut avatars = String::new();
-    for (i, c) in contributors.iter().enumerate() {
-        let i_u = i as u32;
-        let col = i_u % columns;
-        let row = i_u / columns;
-        let x = pad_left + col * (cell + gap);
-        let y = pad_top + row * (cell + gap);
+    let mut rows = String::new();
+    for (i, c) in shown.iter().enumerate() {
+        let y = header as f32 + i as f32 * row_h as f32;
         let label = c.login.clone().unwrap_or_else(|| c.name.clone());
         let title = format!("{} · {} commits", label, c.commits);
         let href = match &c.login {
             Some(l) => format!("https://github.com/{l}"),
             None => "#".to_string(),
         };
+        let avatar_size = 30u32;
         let avatar = c.avatar_url.as_ref().map_or_else(
             || {
                 let initial = label
@@ -431,45 +435,59 @@ pub fn render_contributors(repo: &str, contributors: &[ContributorRow], theme: &
                     .to_string();
                 format!(
                     r#"<text class="avatar-fallback" x="{r}" y="{y}" text-anchor="middle">{initial}</text>"#,
-                    r = cell / 2,
-                    y = cell / 2 + 6,
+                    r = avatar_size / 2,
+                    y = avatar_size / 2 + 5,
                     initial = escape_xml(&initial),
                 )
             },
             |url| {
                 format!(
-                    r#"<image href="{url}" x="0" y="0" width="{cell}" height="{cell}" clip-path="url(#clip{i})" preserveAspectRatio="xMidYMid slice" />"#,
+                    r#"<image href="{url}" x="0" y="0" width="{avatar_size}" height="{avatar_size}" clip-path="url(#clip{i})" preserveAspectRatio="xMidYMid slice" />"#,
                     url = escape_xml(url),
                 )
             },
         );
-        // Outer <g> holds the SVG `transform` attribute (positioning).
-        // Inner <g class="avatar-scaler"> is what CSS hover scales — we
-        // can't re-use the same element because the existing transform
-        // attr would override CSS scale().
-        avatars.push_str(&format!(
-            r##"<a href="{href}" target="_blank" rel="noopener">
-  <g class="avatar-pos" transform="translate({x},{y})" opacity="1">
+        let bar_w = c.commits.max(0) as f32 / max_commits as f32 * bar_max;
+        let share = if total_commits > 0 {
+            c.commits.max(0) as f64 / total_commits as f64 * 100.0
+        } else {
+            0.0
+        };
+        rows.push_str(&format!(
+            r##"<g transform="translate({pad}, {y:.1})" opacity="1">
     <animate class="motion" attributeName="opacity" from="0" to="1" dur="0.2s" begin="{begin:.2}s" fill="freeze" />
-    <g class="avatar-scaler">
+    <a class="contributor-link" href="{href}" target="_blank" rel="noopener">
       <title>{title}</title>
       <clipPath id="clip{i}">
         <circle cx="{r}" cy="{r}" r="{r}" />
       </clipPath>
-      <circle class="avatar-ring" cx="{r}" cy="{r}" r="{r}" />
-      {avatar}
-    </g>
-  </g>
-</a>
+      <g class="avatar-pos">
+        <circle class="avatar-ring" cx="{r}" cy="{r}" r="{r}" />
+        {avatar}
+      </g>
+      <text class="contributor" x="46" y="13">{label}</text>
+    </a>
+    <text class="share" x="46" y="29">{share:.1}% of analyzed commits</text>
+    <rect class="bar-track" x="{bar_x:.1}" y="7" width="{bar_max:.1}" height="16" rx="8" />
+    <rect class="bar-fill" x="{bar_x:.1}" y="7" width="{bar_w:.1}" height="16" rx="8" />
+    <text class="commits" x="{right:.1}" y="20" text-anchor="end">{commits} commits</text>
+</g>
 "##,
+            pad = pad,
             href = escape_xml(&href),
-            x = x,
             y = y,
             begin = reveal_begin(i),
             title = escape_xml(&title),
             i = i,
-            r = cell / 2,
+            r = avatar_size / 2,
             avatar = avatar,
+            label = escape_xml(&label),
+            share = share,
+            bar_x = bar_x,
+            bar_max = bar_max,
+            bar_w = bar_w,
+            right = width - pad,
+            commits = humanize(c.commits.max(0)),
         ));
     }
 
@@ -480,25 +498,30 @@ pub fn render_contributors(repo: &str, contributors: &[ContributorRow], theme: &
     .title {{ fill: {fg}; font: 600 18px ui-sans-serif, system-ui, sans-serif; }}
     .subtitle {{ fill: {muted}; font: 13px ui-sans-serif, system-ui, sans-serif; }}
     .avatar-ring {{ fill: {track}; stroke: {border}; stroke-width: 1; }}
-    .avatar-fallback {{ fill: {muted}; font: 600 17px ui-sans-serif, system-ui, sans-serif; }}
-    .avatar-scaler {{
-      transform-box: fill-box;
-      transform-origin: center center;
-      transition: transform 160ms cubic-bezier(0.23, 1, 0.32, 1);
-    }}
+    .avatar-fallback {{ fill: {muted}; font: 600 13px ui-sans-serif, system-ui, sans-serif; }}
+    .contributor {{ fill: {fg}; font: 600 13px ui-sans-serif, system-ui, sans-serif; }}
+    .share {{ fill: {muted}; font: 11px ui-sans-serif, system-ui, sans-serif; }}
+    .commits {{ fill: {fg}; font: 600 12px ui-monospace, SFMono-Regular, monospace; }}
+    .bar-track {{ fill: {track}; }}
+    .bar-fill {{ fill: {fg}; transform-box: fill-box; transform-origin: left center; transition: opacity 160ms cubic-bezier(0.23, 1, 0.32, 1); }}
+    .avatar-pos {{ transform-box: fill-box; transform-origin: center; transition: transform 180ms cubic-bezier(0.23, 1, 0.32, 1); }}
+    .contributor-link {{ cursor: pointer; }}
     @media (hover: hover) and (pointer: fine) {{
-      a:hover .avatar-scaler {{ transform: scale(1.05); }}
+      g:hover .bar-fill {{ opacity: 0.72; }}
+      .contributor-link:hover .avatar-pos {{ transform: scale(1.05); }}
+      .contributor-link:hover .contributor {{ text-decoration: underline; }}
     }}
     .footer-link {{ fill: {muted}; font: 600 11px ui-sans-serif, system-ui, sans-serif; text-decoration: none; letter-spacing: 0.02em; }}
     .footer-link:hover {{ fill: {fg}; }}
     @media (prefers-reduced-motion: reduce) {{
       .motion {{ display: none; }}
-      .avatar-scaler {{ transition: none; }}
+      .bar-fill {{ transition: none; }}
+      .avatar-pos {{ transition: none; }}
     }}
   ]]></style>
-  <text class="title" x="{pad_left}" y="36">{repo}</text>
-  <text class="subtitle" x="{pad_left}" y="58">{total} contributor{plural}</text>
-{avatars}
+  <text class="title" x="{pad}" y="36">Contributor ownership</text>
+  <text class="subtitle" x="{pad}" y="58">Top {shown_count} of {total} contributors · {repo}</text>
+{rows}
 {footer}
 </svg>"##,
         width = width,
@@ -508,11 +531,11 @@ pub fn render_contributors(repo: &str, contributors: &[ContributorRow], theme: &
         muted = theme.muted,
         border = theme.border,
         track = theme.track,
-        pad_left = pad_left,
+        pad = pad,
+        shown_count = shown.len(),
         total = total,
-        plural = if total == 1 { "" } else { "s" },
-        avatars = avatars,
-        footer = brand::footer_lockup((width as f32) - pad_left as f32, footer_y, theme,),
+        rows = rows,
+        footer = brand::footer_lockup((width as f32) - pad as f32, footer_y, theme,),
     )
 }
 

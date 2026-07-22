@@ -1,0 +1,140 @@
+import { useCallback, useEffect, useState } from "react";
+
+import { EmbedSnippet } from "@/components/EmbedSnippet";
+import { MEDIA_RENDER_REVISION } from "@/lib/media";
+import { useRenderedTheme } from "@/lib/rendered-theme";
+
+type EarnedBadge = {
+  id: "active" | "community" | "momentum";
+  label: string;
+  detail: string;
+  earned: boolean;
+  pending: boolean;
+};
+
+export function EarnedBadges({
+  owner,
+  repo,
+  apiBase,
+  embedLink,
+}: {
+  owner: string;
+  repo: string;
+  apiBase: string;
+  embedLink: string;
+}) {
+  const slug = `${owner}/${repo}`;
+  const [badges, setBadges] = useState<EarnedBadge[] | null>(null);
+  const [failed, setFailed] = useState(false);
+  const theme = useRenderedTheme();
+
+  const load = useCallback(async () => {
+    try {
+      const response = await fetch(
+        `${apiBase}/api/repos/${owner}/${repo}/earned-badges.json`,
+        { cache: "no-store", credentials: "omit" },
+      );
+      if (!response.ok) throw new Error("badge evidence unavailable");
+      setBadges((await response.json()) as EarnedBadge[]);
+      setFailed(false);
+    } catch {
+      setFailed(true);
+    }
+  }, [apiBase, owner, repo]);
+
+  useEffect(() => {
+    void load();
+  }, [load]);
+
+  useEffect(() => {
+    function refresh(event: Event) {
+      const detail = (event as CustomEvent<{
+        repo?: string;
+        stars?: { phase?: string };
+        analysis?: { phase?: string };
+      }>).detail;
+      if (detail?.repo?.toLowerCase() !== slug.toLowerCase()) return;
+      if (
+        detail.stars?.phase === "complete" ||
+        detail.analysis?.phase === "complete"
+      ) {
+        void load();
+      }
+    }
+    window.addEventListener("gitdebt:repo-progress", refresh);
+    return () => window.removeEventListener("gitdebt:repo-progress", refresh);
+  }, [load, slug]);
+
+  const earned = badges?.filter((badge) => badge.earned) ?? [];
+
+  if (!badges && !failed) {
+    return (
+      <div className="grid gap-4 sm:grid-cols-3" aria-label="Checking earned badges">
+        {[0, 1, 2].map((key) => (
+          <div
+            key={key}
+            className="h-24 rounded-xl border border-border bg-muted/30 motion-safe:animate-pulse"
+            aria-hidden="true"
+          />
+        ))}
+      </div>
+    );
+  }
+
+  if (failed) {
+    return (
+      <p className="border-y border-border py-4 text-sm text-muted-foreground">
+        Badge evidence is temporarily unavailable.
+      </p>
+    );
+  }
+
+  if (earned.length === 0) {
+    const pending = badges?.some((badge) => badge.pending);
+    return (
+      <p className="border-y border-border py-4 text-sm leading-relaxed text-muted-foreground">
+        {pending
+          ? "Badge evidence is still being calculated. This section updates when the report finishes."
+          : "No badge is awarded yet. Badges require measured maintenance, distributed ownership, or recent star momentum—never a paid placement."}
+      </p>
+    );
+  }
+
+  return (
+    <div className="grid gap-4 lg:grid-cols-2">
+      {earned.map((badge) => {
+        const chartPath = `/api/repos/${owner}/${repo}/badge.svg?signal=${badge.id}`;
+        const alt = `${slug}: ${badge.label}, ${badge.detail}`;
+        return (
+          <figure key={badge.id} className="card-panel relative">
+            <figcaption className="flex flex-wrap items-center justify-between gap-3 border-b border-border bg-muted/40 px-4 py-3">
+              <div>
+                <p className="font-mono text-xs tracking-wide text-foreground uppercase">
+                  {badge.label}
+                </p>
+                <p className="mt-0.5 text-sm text-muted-foreground">{badge.detail}</p>
+              </div>
+              <EmbedSnippet
+                apiBase={apiBase}
+                chartPath={chartPath}
+                linkHref={embedLink}
+                label={slug}
+                altText={alt}
+                variant="menu"
+              />
+            </figcaption>
+            <div className="flex min-h-24 items-center justify-center p-5">
+              <img
+                src={`${apiBase}${chartPath}&theme=${theme}&animate=1&render=${MEDIA_RENDER_REVISION}`}
+                alt={alt}
+                loading="lazy"
+                decoding="async"
+                className="block h-auto max-w-full"
+              />
+            </div>
+          </figure>
+        );
+      })}
+    </div>
+  );
+}

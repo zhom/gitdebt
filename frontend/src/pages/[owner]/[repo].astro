@@ -11,6 +11,7 @@ import SiteHeader from "@/components/SiteHeader.astro";
 import SiteFooter from "@/components/SiteFooter.astro";
 import { RepoHero } from "@/components/RepoHero";
 import { ChartViewer } from "@/components/ChartViewer";
+import { EarnedBadges } from "@/components/EarnedBadges";
 import { SecondarySignals } from "@/components/LiveRepoReport";
 import { StatCard } from "@/components/StatCard";
 import { UsageSection, type UsageResponse } from "@/components/UsageSection";
@@ -418,6 +419,7 @@ const vsLinks = (categoryRelated.length > 0 ? categoryRelated : FALLBACK_SUGGEST
           liveRepo={repoSlug}
           embedLink={canonical}
           label={repoSlug}
+          points={history}
         />
 
         {faqs.length > 0 && (
@@ -512,6 +514,52 @@ const vsLinks = (categoryRelated.length > 0 ? categoryRelated : FALLBACK_SUGGEST
             apiBase={apiBase}
             initialData={usage}
             showEmbed={false}
+          />
+        </section>
+
+        <section class="space-y-6">
+          <header class="max-w-2xl space-y-2">
+            <p class="font-mono text-xs tracking-wide text-muted-foreground uppercase">
+              Earned badges
+            </p>
+            <h2 class="text-2xl font-semibold tracking-tight text-balance sm:text-3xl">
+              Claims backed by repository data
+            </h2>
+            <p class="text-base leading-relaxed text-pretty text-muted-foreground">
+              Embeddable signals for current maintenance, shared ownership, and
+              recent star momentum. A badge appears only when the data qualifies.
+            </p>
+          </header>
+          <EarnedBadges
+            client:visible
+            owner={owner}
+            repo={repo}
+            apiBase={apiBase}
+            embedLink={canonical}
+          />
+        </section>
+
+        <section class="space-y-6">
+          <header class="max-w-2xl space-y-2">
+            <p class="font-mono text-xs tracking-wide text-muted-foreground uppercase">
+              Contributors
+            </p>
+            <h2 class="text-2xl font-semibold tracking-tight text-balance sm:text-3xl">
+              Who carries the repository
+            </h2>
+            <p class="text-base leading-relaxed text-pretty text-muted-foreground">
+              Ranked ownership shares from the analyzed commit history. Every
+              contributor links to GitHub, and the chart is README-ready.
+            </p>
+          </header>
+          <StatCard
+            client:visible
+            src={`${apiBase}/api/repos/${owner}/${repo}/stats/contributors.svg`}
+            alt={`Contributor ownership for ${repoSlug}`}
+            caption="Contributor ownership"
+            apiBase={apiBase}
+            embedLink={canonical}
+            liveRepo={repoSlug}
           />
         </section>
 

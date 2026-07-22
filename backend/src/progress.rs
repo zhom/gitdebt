@@ -388,8 +388,8 @@ fn configured_analysis_workers() -> usize {
     std::env::var("REPO_ANALYSIS_WORKERS")
         .ok()
         .and_then(|value| value.parse().ok())
-        .unwrap_or(1)
-        .clamp(1, 2)
+        .unwrap_or(2)
+        .clamp(1, 4)
 }
 
 fn archive_month_progress(cursor: Option<NaiveDate>) -> (Option<u64>, Option<u64>, Option<u8>) {

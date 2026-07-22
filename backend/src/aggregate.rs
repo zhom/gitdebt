@@ -32,6 +32,7 @@
 //! deterministic).
 
 use std::collections::{BTreeMap, HashMap, HashSet};
+use std::sync::Arc;
 
 use anyhow::Result;
 use chrono::{NaiveDate, TimeZone, Utc};
@@ -41,6 +42,7 @@ use sqlx::Row;
 use crate::analyzer::{self, AnalyzerCtx};
 use crate::chart::{self, Point};
 use crate::db::Db;
+use crate::github::GithubClient;
 use crate::github::RepoListItem;
 use crate::repo_analysis;
 use crate::repo_endpoints::is_valid_slug;
@@ -172,6 +174,11 @@ pub struct UserAggregate {
     /// Repos in the top-50 list without complete history yet — enqueued on
     /// the star-fetch queue; the aggregate grows as they land.
     pub repos_pending: u32,
+    /// Owned repositories whose code-health analysis is complete and not
+    /// currently being refreshed.
+    pub repos_analyzed: u32,
+    /// Owned repositories still waiting on or running code-health analysis.
+    pub repos_analyzing: u32,
     /// Full summed total (not window-filtered), like `/analyze`.
     pub total_stars: u64,
     pub series: Vec<Point>,
@@ -179,7 +186,8 @@ pub struct UserAggregate {
 
 impl UserAggregate {
     /// The `/api/users/:login/analyze` JSON body. Locked contract:
-    /// `{login,repos_included,repos_pending,total_stars,history:[{date,stars}]}`.
+    /// `{login,repos_included,repos_pending,repos_analyzed,repos_analyzing,`
+    /// `total_stars,history:[{date,stars}]}`.
     /// `history` is downsampled to ≤ [`MAX_HISTORY_POINTS`], same policy as
     /// the repo `/analyze` payload.
     pub fn to_json(&self) -> serde_json::Value {
@@ -187,6 +195,8 @@ impl UserAggregate {
             "login": self.login,
             "repos_included": self.repos_included,
             "repos_pending": self.repos_pending,
+            "repos_analyzed": self.repos_analyzed,
+            "repos_analyzing": self.repos_analyzing,
             "total_stars": self.total_stars,
             "history": chart::downsample(&self.series, MAX_HISTORY_POINTS),
         })
@@ -331,8 +341,23 @@ pub async fn load_repo_states(db: &Db, repos: &[String]) -> Result<HashMap<Strin
 /// validates the login ([`is_valid_login`]); this normalizes to lowercase.
 pub async fn build(ctx: &AnalyzerCtx, login: &str) -> Result<UserAggregate, AggregateError> {
     let login = login.to_ascii_lowercase();
-    let repos = resolve_login_repos(ctx, &login).await?;
-    build_from_repos(ctx, login, repos, true).await
+    let repos = resolve_login_repos(ctx, &login, None).await?;
+    build_from_repos(ctx, login, repos, true, None).await
+}
+
+/// Authenticated self-profile build. The caller has already proved that
+/// `user_id` owns `login`. The OAuth-scoped client is used only for that
+/// account's repository discovery, while durable work stores the user id—not
+/// the token—and receives interactive priority.
+pub async fn build_for_user(
+    ctx: &AnalyzerCtx,
+    login: &str,
+    user_id: i64,
+    github: Arc<GithubClient>,
+) -> Result<UserAggregate, AggregateError> {
+    let login = login.to_ascii_lowercase();
+    let repos = resolve_login_repos(ctx, &login, Some(github.as_ref())).await?;
+    build_from_repos(ctx, login, repos, true, Some(user_id)).await
 }
 
 /// Build an aggregate exclusively from cached Postgres state. Static-site
@@ -352,7 +377,7 @@ pub async fn build_readonly(
         .get_login_repos(&login)
         .await?
         .ok_or(AggregateError::Busy)?;
-    build_from_repos(ctx, login, repos, false).await
+    build_from_repos(ctx, login, repos, false, None).await
 }
 
 async fn build_from_repos(
@@ -360,6 +385,7 @@ async fn build_from_repos(
     login: String,
     repos: Vec<(String, i64)>,
     enqueue: bool,
+    user_id: Option<i64>,
 ) -> Result<UserAggregate, AggregateError> {
     let slugs: Vec<String> = repos.into_iter().map(|(slug, _)| slug).collect();
 
@@ -370,6 +396,11 @@ async fn build_from_repos(
     let mut analysis_candidates: Vec<String> = Vec::new();
     let mut pending: u32 = 0;
     let mut enqueued: usize = 0;
+    let star_enqueue_limit = if user_id.is_some() {
+        MAX_AGGREGATE_REPOS
+    } else {
+        MAX_ENQUEUES_PER_BUILD
+    };
     for slug in &slugs {
         match states.get(slug.as_str()) {
             // Complete cached history → contributes to the sum. (A
@@ -385,8 +416,17 @@ async fn build_from_repos(
             // still count as pending — "no complete history yet" — and get
             // enqueued by later builds as earlier batches drain.
             _ => {
-                if enqueue && enqueued < MAX_ENQUEUES_PER_BUILD {
-                    analyzer::enqueue_fetch(ctx, slug).await;
+                if enqueue && enqueued < star_enqueue_limit {
+                    if user_id.is_some() {
+                        if let Err(error) =
+                            crate::queue::enqueue(db, slug, repo_analysis::INTERACTIVE_PRIORITY)
+                                .await
+                        {
+                            tracing::warn!(repo = %slug, %error, "interactive star enqueue failed");
+                        }
+                    } else {
+                        analyzer::enqueue_fetch(ctx, slug).await;
+                    }
                     enqueued += 1;
                 }
                 pending += 1;
@@ -405,22 +445,68 @@ async fn build_from_repos(
     // fields cannot remain at an unexplained zero forever. This is
     // Postgres-only on the request path; cloning and author enrichment happen
     // asynchronously in the existing worker pool.
-    if enqueue
-        && let Err(error) =
+    if enqueue {
+        if let Some(user_id) = user_id {
+            for repo in &analysis_candidates {
+                if let Err(error) = repo_analysis::enqueue_prioritized(
+                    db,
+                    repo,
+                    repo_analysis::INTERACTIVE_PRIORITY,
+                    Some(user_id),
+                )
+                .await
+                {
+                    tracing::warn!(login, %repo, %error, "interactive profile analysis enqueue failed");
+                }
+            }
+        } else if let Err(error) =
             repo_analysis::enqueue_many(db, &analysis_candidates, MAX_ANALYSIS_ENQUEUES_PER_BUILD)
                 .await
-    {
-        tracing::warn!(login, %error, "profile repo-analysis enqueue failed");
+        {
+            tracing::warn!(login, %error, "profile repo-analysis enqueue failed");
+        }
     }
 
     let per_repo = load_day_deltas_by_repo(db, &included).await?;
     let merged = merge_day_deltas(&per_repo);
     let (series, total_stars) = deltas_to_series(&merged);
+    let repos_analyzed = if analysis_candidates.is_empty() {
+        0
+    } else {
+        sqlx::query_scalar::<_, i64>(
+            "SELECT COUNT(*)::BIGINT FROM repo_history history \
+             WHERE history.repo = ANY($1) \
+               AND history.last_analyzed_at IS NOT NULL \
+               AND NOT EXISTS (SELECT 1 FROM repo_analysis_queue active \
+                               WHERE active.repo = history.repo \
+                                 AND active.status IN ('pending', 'in_progress'))",
+        )
+        .bind(&analysis_candidates)
+        .fetch_one(&db.pool)
+        .await
+        .map_err(anyhow::Error::from)?
+        .max(0) as u32
+    };
+    let repos_analyzing = if analysis_candidates.is_empty() {
+        0
+    } else {
+        sqlx::query_scalar::<_, i64>(
+            "SELECT COUNT(*)::BIGINT FROM repo_analysis_queue \
+             WHERE repo = ANY($1) AND status IN ('pending', 'in_progress')",
+        )
+        .bind(&analysis_candidates)
+        .fetch_one(&db.pool)
+        .await
+        .map_err(anyhow::Error::from)?
+        .max(0) as u32
+    };
 
     Ok(UserAggregate {
         login,
         repos_included: included.len() as u32,
         repos_pending: pending,
+        repos_analyzed,
+        repos_analyzing,
         total_stars,
         series,
     })
@@ -433,6 +519,7 @@ async fn build_from_repos(
 async fn resolve_login_repos(
     ctx: &AnalyzerCtx,
     login: &str,
+    user_github: Option<&GithubClient>,
 ) -> Result<Vec<(String, i64)>, AggregateError> {
     let cache = &ctx.cache;
     let meta = cache.get_login_repos_meta(login).await?;
@@ -456,13 +543,14 @@ async fn resolve_login_repos(
     // window has budget (the login namespace is infinite, so this is the
     // only bound on attacker-paced synchronous GitHub spend). Either gate
     // failing → fall through to the stale cached list.
-    let live_allowed = if !ctx.github.has_budget().await {
+    let github = user_github.unwrap_or(ctx.github.as_ref());
+    let live_allowed = if !github.has_budget().await {
         tracing::warn!(
             login,
             "no GitHub budget headroom for repos-list; falling back to cached list"
         );
         false
-    } else if !try_spend_live_list_fetch() {
+    } else if user_github.is_none() && !try_spend_live_list_fetch() {
         tracing::warn!(
             login,
             "live repos-list window budget exhausted; falling back to cached list"
@@ -472,7 +560,7 @@ async fn resolve_login_repos(
         true
     };
     if live_allowed {
-        match ctx.github.user_repos(login).await {
+        match github.user_repos(login).await {
             Ok(Some(items)) => {
                 let top = top_repos_by_stars(&items, MAX_AGGREGATE_REPOS);
                 // Best-effort cache write: we already hold the data, a
@@ -758,6 +846,8 @@ mod tests {
             login: "octocat".into(),
             repos_included: 2,
             repos_pending: 1,
+            repos_analyzed: 1,
+            repos_analyzing: 1,
             total_stars: total,
             series,
         };
@@ -765,6 +855,8 @@ mod tests {
         assert_eq!(v["login"], "octocat");
         assert_eq!(v["repos_included"], 2);
         assert_eq!(v["repos_pending"], 1);
+        assert_eq!(v["repos_analyzed"], 1);
+        assert_eq!(v["repos_analyzing"], 1);
         assert_eq!(v["total_stars"], 4);
         // history entries are {date, stars} — Point's serde rename.
         assert_eq!(v["history"][0]["date"], "2020-01-01T00:00:00Z");
@@ -773,7 +865,7 @@ mod tests {
         assert!(v["history"][0].get("at").is_none());
         // Exactly the contract keys, nothing extra.
         let keys: Vec<&String> = v.as_object().unwrap().keys().collect();
-        assert_eq!(keys.len(), 5);
+        assert_eq!(keys.len(), 7);
     }
 
     #[test]
@@ -788,6 +880,8 @@ mod tests {
             login: "big".into(),
             repos_included: 1,
             repos_pending: 0,
+            repos_analyzed: 2,
+            repos_analyzing: 0,
             total_stars: total,
             series,
         };

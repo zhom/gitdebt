@@ -285,6 +285,64 @@ pub fn render_badge(input: &BadgeInput, theme: &Theme) -> String {
     }
 }
 
+/// Render an evidence-backed repository signal as a compact README badge.
+///
+/// The API owns the qualification rules; this function only renders the
+/// already-evaluated result. Keeping evaluation out of the renderer preserves
+/// deterministic bytes and makes the SVG independently testable.
+pub fn render_signal_badge(
+    label: &str,
+    detail: &str,
+    earned: bool,
+    theme: &Theme,
+    animate: bool,
+) -> String {
+    const H: f32 = 30.0;
+    const SIGNAL_CHAR_W: f32 = 6.7;
+    let label = escape_xml(label);
+    let detail = escape_xml(detail);
+    let label_width = label.chars().count() as f32 * SIGNAL_CHAR_W;
+    let detail_width = detail.chars().count() as f32 * SIGNAL_CHAR_W;
+    let width = (44.0 + label_width + detail_width + 30.0).clamp(180.0, 420.0);
+    let detail_x = 31.0 + label_width + 13.0;
+    let status = if earned { "earned" } else { "not earned" };
+    let signal = if earned { theme.accent } else { theme.muted };
+    let panel = if theme.dark { "#171717" } else { "#f5f5f5" };
+    let motion = if animate {
+        r#"<animateTransform class="motion" attributeName="transform" type="scale" from="0.75" to="1" dur="0.22s" fill="freeze" calcMode="spline" keySplines="0.23 1 0.32 1" />"#
+    } else {
+        ""
+    };
+    let check = if earned {
+        format!(
+            "  <g transform=\"translate(8 7)\" stroke=\"{signal}\" stroke-width=\"2\" fill=\"none\" stroke-linecap=\"round\" stroke-linejoin=\"round\"><circle cx=\"8\" cy=\"8\" r=\"7\" /><path d=\"M4.8 8.1 7 10.3 11.5 5.8\" />{motion}</g>\n"
+        )
+    } else {
+        format!(
+            "  <circle cx=\"16\" cy=\"15\" r=\"6\" fill=\"none\" stroke=\"{signal}\" stroke-width=\"1.5\" />\n"
+        )
+    };
+    let logo = brand::themed_logo_mark(width - 20.0, 8.0, 14.0, theme);
+
+    format!(
+        r##"<svg xmlns="http://www.w3.org/2000/svg" width="{width:.0}" height="{H:.0}" viewBox="0 0 {width:.0} {H:.0}" role="img" aria-label="{label}: {detail}, {status}">
+  <style><![CDATA[
+    text {{ font: 600 11px ui-sans-serif, system-ui, sans-serif; }}
+    .detail {{ font-weight: 500; }}
+    {MOTION_CSS}
+  ]]></style>
+  <rect x="0.5" y="0.5" width="{panel_width:.1}" height="29" rx="7" fill="{panel}" stroke="{border}" />
+  <rect x="0" y="6" width="3" height="18" rx="1.5" fill="{signal}" />
+{check}  <text x="31" y="19" fill="{fg}">{label}</text>
+  <text class="detail" x="{detail_x:.1}" y="19" fill="{muted}">· {detail}</text>
+{logo}</svg>"##,
+        panel_width = width - 1.0,
+        border = theme.border,
+        fg = theme.fg,
+        muted = theme.muted,
+    )
+}
+
 /// Shared SVG header. `extra_defs` lets a style inject filters or other defs.
 fn svg_header(width: f32, label: &str, defs: &str) -> String {
     format!(
@@ -668,6 +726,36 @@ mod tests {
         assert_eq!(humanize(12_345), "12.3k");
         assert_eq!(humanize(1_500_000), "1.5M");
         assert_eq!(humanize(2_000_000_000), "2.0B");
+    }
+
+    #[test]
+    fn earned_signal_badge_is_deterministic_and_theme_baked() {
+        let first = render_signal_badge(
+            "actively maintained",
+            "18 commits · 30d",
+            true,
+            &LIGHT,
+            true,
+        );
+        let second = render_signal_badge(
+            "actively maintained",
+            "18 commits · 30d",
+            true,
+            &LIGHT,
+            true,
+        );
+        assert_eq!(first, second);
+        assert!(first.contains("actively maintained"));
+        assert!(first.contains("18 commits · 30d"));
+        assert!(first.contains("aria-label=\"actively maintained: 18 commits · 30d, earned\""));
+        assert!(first.contains("data-gitdebt-logo=\"true\""));
+        assert!(first.contains("<animateTransform"));
+        assert!(!first.contains("var("));
+
+        let dark = render_signal_badge("community powered", "8 contributors", false, &DARK, false);
+        assert!(dark.contains("not earned"));
+        assert!(!dark.contains("<animate"));
+        assert!(dark.contains(DARK.fg));
     }
 
     #[test]

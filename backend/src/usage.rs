@@ -100,15 +100,15 @@ pub struct UsageOverrides {
 
 /// Resolve package identifiers for `owner/repo`, best-effort.
 ///
-/// Priority: explicit override → manifest in a local clone (if reachable) →
-/// bare repo-name heuristic. A *present* override pins its registry: if the
+/// Priority: explicit override → a publishable root manifest in the local
+/// clone. There is deliberately no repo-name heuristic: a registry package
+/// that happens to share a repository name is not proof of ownership. A
+/// *present* override pins its registry: if the
 /// value fails validation the registry resolves to `None` (source omitted)
 /// rather than falling back — see [`assemble_resolved`]. The repo-name
-/// fallback is intentionally permissive (we don't verify the package exists
-/// at resolve time — the download fetch does that, omitting the source on a
-/// 404). npm + PyPI + crates fall back to the bare repo name; Docker Hub
-/// falls back to `owner/repo` (its namespace/repo shape) since a bare name
-/// has no namespace.
+/// download fetch still confirms that the declared package exists, omitting
+/// the source on a 404. Docker images have no trustworthy root-manifest
+/// declaration here, so they appear only through an explicit override.
 pub async fn resolve_packages(
     owner: &str,
     repo: &str,
@@ -125,14 +125,13 @@ pub async fn resolve_packages(
     assemble_resolved(owner, repo, overrides, manifest)
 }
 
-/// Pure assembly of the final [`Resolved`] set from the three candidate
-/// tiers. Precedence per registry: explicit override > manifest name >
-/// bare repo-name heuristic.
+/// Pure assembly of the final [`Resolved`] set from verified declarations.
+/// Precedence per registry: explicit override > root manifest name.
 ///
 /// Every candidate is filtered through [`valid_pkg`] / [`clean_docker`]
 /// before it can reach a registry URL: overrides (attacker-controlled query
-/// params), the manifest-derived names (parsers already filter, but
-/// belt-and-braces), and the bare-name fallback. A crafted value like
+/// params) and the manifest-derived names (parsers already filter, but
+/// belt-and-braces). A crafted value like
 /// `react/../../admin` would otherwise traverse the registry URL path
 /// (SSRF / path-traversal).
 ///
@@ -143,26 +142,23 @@ pub async fn resolve_packages(
 /// package would misattribute data (and the invalid value itself must never
 /// reach a registry URL).
 fn assemble_resolved(
-    owner: &str,
-    repo: &str,
+    _owner: &str,
+    _repo: &str,
     overrides: &UsageOverrides,
     manifest: ManifestNames,
 ) -> Resolved {
-    let bare = valid_pkg(repo).then(|| repo.to_string());
     let pick = |ov: &Option<String>, manifest_name: Option<String>| match ov {
         Some(v) => clean_pkg(Some(v)),
-        None => manifest_name.or_else(|| bare.clone()),
+        None => manifest_name.and_then(|name| clean_pkg(Some(&name))),
     };
     Resolved {
         npm: pick(&overrides.npm, manifest.npm),
         crate_: pick(&overrides.crate_, manifest.crate_),
         pypi: pick(&overrides.pypi, manifest.pypi),
-        // Docker has no manifest probe; the heuristic is the repo's own
-        // `namespace/repo`, the common Docker Hub shape. Both override and
-        // fallback are validated as Docker references (one optional `/`).
+        // Docker has no trustworthy manifest probe in this pipeline.
         docker: match &overrides.docker {
             Some(v) => clean_docker(Some(v)),
-            None => clean_docker(Some(&format!("{owner}/{repo}"))),
+            None => None,
         },
     }
 }
@@ -177,7 +173,7 @@ fn clean_pkg(name: Option<&str>) -> Option<String> {
 /// Validate a Docker Hub reference: `namespace/repo` or a bare `repo`
 /// (mapped to `library/repo` at fetch time). Each side must be a clean
 /// single segment — this blocks `react/../../admin`-style traversal in the
-/// `?docker=` override and the `owner/repo` fallback alike.
+/// `?docker=` override.
 fn clean_docker(name: Option<&str>) -> Option<String> {
     let name = name?.trim();
     if name.is_empty() || name.len() > 128 {
@@ -204,7 +200,7 @@ struct ManifestNames {
 
 /// Best-effort manifest read from the bare clone the debt pipeline already
 /// keeps. We never clone here — if the clone is absent (never analyzed, or
-/// evicted) we just return empties and fall back to the repo-name heuristic.
+/// evicted) we return empties and omit unverifiable package associations.
 /// Bare clones have no working tree, so we read blobs via `git show
 /// HEAD:<path>`.
 async fn read_manifest_names(owner: &str, repo: &str, storage: &RepoStorage) -> ManifestNames {
@@ -261,6 +257,9 @@ async fn git_show(repo_path: &Path, file: &str) -> Option<String> {
 /// decode the whole thing as a JSON value and read `.name`.
 fn parse_package_json_name(content: &str) -> Option<String> {
     let v: serde_json::Value = serde_json::from_str(content).ok()?;
+    if v.get("private").and_then(serde_json::Value::as_bool) == Some(true) {
+        return None;
+    }
     let name = v.get("name")?.as_str()?.trim();
     valid_pkg(name).then(|| name.to_string())
 }
@@ -384,7 +383,7 @@ fn strip_toml_comment(line: &str) -> &str {
 /// junk. The fetch's 404 handling is the *final* validator (it confirms the
 /// package exists), but this is the SECURITY boundary: every value that
 /// reaches a `format!("https://.../{pkg}/...")` URL — query overrides,
-/// manifest-derived names, and the repo-name fallback — passes through here
+/// and manifest-derived names — passes through here
 /// first. A crafted value like `react/../../admin` would otherwise traverse
 /// the registry URL path (SSRF / path-traversal).
 ///
@@ -930,6 +929,12 @@ mod tests {
     }
 
     #[test]
+    fn private_package_json_is_not_a_published_package() {
+        let c = r#"{ "name": "workspace-root", "private": true }"#;
+        assert_eq!(parse_package_json_name(c), None);
+    }
+
+    #[test]
     fn package_json_malicious_name_rejected() {
         // A hostile manifest cannot smuggle a traversal into the URL path.
         let c = r#"{ "name": "../../../internal/admin" }"#;
@@ -1011,7 +1016,7 @@ mod tests {
 
     #[test]
     fn setup_py_dynamic_name_is_none() {
-        // Computed names bail to the repo-name heuristic.
+        // Computed names are not treated as verifiable declarations.
         let c = "setup(name=get_name(), version='1.0')\n";
         assert_eq!(parse_setup_py_name(c), None);
     }
@@ -1179,7 +1184,7 @@ mod tests {
     }
 
     #[test]
-    fn precedence_manifest_beats_bare() {
+    fn manifest_names_are_used_without_guessing_other_registries() {
         let r = assemble_resolved(
             "octo",
             "widget",
@@ -1187,25 +1192,20 @@ mod tests {
             manifest(Some("npm-mf"), None, Some("pypi-mf")),
         );
         assert_eq!(r.npm.as_deref(), Some("npm-mf"));
-        // No manifest crate → bare repo name.
-        assert_eq!(r.crate_.as_deref(), Some("widget"));
+        assert_eq!(r.crate_, None);
         assert_eq!(r.pypi.as_deref(), Some("pypi-mf"));
-        // Docker heuristic is owner/repo.
-        assert_eq!(r.docker.as_deref(), Some("octo/widget"));
+        assert_eq!(r.docker, None);
     }
 
     #[test]
-    fn precedence_bare_fallback_when_nothing_else() {
+    fn no_manifest_means_no_guessed_package() {
         let r = assemble_resolved(
             "octo",
             "widget",
             &UsageOverrides::default(),
             ManifestNames::default(),
         );
-        assert_eq!(r.npm.as_deref(), Some("widget"));
-        assert_eq!(r.crate_.as_deref(), Some("widget"));
-        assert_eq!(r.pypi.as_deref(), Some("widget"));
-        assert_eq!(r.docker.as_deref(), Some("octo/widget"));
+        assert!(r.is_empty());
     }
 
     #[test]
@@ -1233,9 +1233,8 @@ mod tests {
     }
 
     #[test]
-    fn precedence_invalid_bare_name_omits_registry() {
-        // A repo whose own name fails validation (defensive; slugs are
-        // validated upstream) yields no fallback candidate.
+    fn no_manifest_never_uses_the_repo_name() {
+        // Repository identity alone is not evidence of a registry package.
         let r = assemble_resolved(
             "octo",
             "weird~name",
@@ -1345,12 +1344,12 @@ mod tests {
             run(&clone, &["add", "-A"]);
             run(&clone, &["commit", "-q", "-m", "manifests"]);
 
-            // Manifest beats the bare repo-name heuristic.
+            // Root manifests are the only automatic source of identity.
             let r = resolve_packages("octo", "widget", &UsageOverrides::default(), &storage).await;
             assert_eq!(r.npm.as_deref(), Some("widget-js"));
             assert_eq!(r.crate_.as_deref(), Some("widget-rs"));
             assert_eq!(r.pypi.as_deref(), Some("widget-py"));
-            assert_eq!(r.docker.as_deref(), Some("octo/widget"));
+            assert_eq!(r.docker, None);
 
             // Override beats manifest; untouched registries keep manifest.
             let r = resolve_packages(
@@ -1380,10 +1379,9 @@ mod tests {
             assert_eq!(r.npm, None);
             assert_eq!(r.crate_.as_deref(), Some("widget-rs"));
 
-            // Absent clone → bare repo-name heuristic.
+            // Absent clone → no guessed registry identity.
             let r = resolve_packages("octo", "noclone", &UsageOverrides::default(), &storage).await;
-            assert_eq!(r.npm.as_deref(), Some("noclone"));
-            assert_eq!(r.docker.as_deref(), Some("octo/noclone"));
+            assert!(r.is_empty());
         }
     }
 

@@ -54,14 +54,15 @@ async fn main() -> Result<()> {
 
     // Repo-history analysis pool. Separate queue, separate workload
     // shape: clones are disk-heavy + CPU-heavy, not GitHub-API-bound.
-    // One worker is the right default — parallel disk thrashes the cache
-    // and git CLI subprocesses already use multiple cores internally.
+    // Interactive profile/report requests enqueue durable priority work. Two
+    // workers keep one large clone from serializing every other visible
+    // report; operators with fast local storage can raise this to four.
     let storage = std::sync::Arc::new(gitdebt::repo_history::RepoStorage::from_env());
     let requested_analysis_workers: usize = std::env::var("REPO_ANALYSIS_WORKERS")
         .ok()
         .and_then(|s| s.parse().ok())
-        .unwrap_or(1);
-    let analysis_workers = requested_analysis_workers.clamp(1, 2);
+        .unwrap_or(2);
+    let analysis_workers = requested_analysis_workers.clamp(1, 4);
     if requested_analysis_workers != analysis_workers {
         tracing::warn!(
             requested = requested_analysis_workers,

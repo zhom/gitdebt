@@ -8,8 +8,8 @@ import SiteHeader from "@/components/SiteHeader.astro";
 import SiteFooter from "@/components/SiteFooter.astro";
 import { ChartViewer } from "@/components/ChartViewer";
 import { EmbedSnippet } from "@/components/EmbedSnippet";
+import { ProfileCardPreview } from "@/components/ProfileCardPreview";
 import { LiveUserProfile } from "@/components/LiveUserProfile";
-import { MEDIA_RENDER_REVISION } from "@/lib/media";
 import { firstStarYear, gainedInTrailingDays } from "@/lib/star-insights";
 
 export async function getStaticPaths() {
@@ -211,6 +211,7 @@ const jsonLd: Record<string, unknown>[] = [
             caption="Aggregate star history"
             embedLink={canonical}
             label={login}
+            points={data.history}
           />
         )}
 
@@ -224,7 +225,7 @@ const jsonLd: Record<string, unknown>[] = [
                 </h2>
                 <p class="max-w-[60ch] text-base text-pretty text-muted-foreground sm:text-sm">
                   A gitdebt-native maintainer footprint with stars, commits,
-                  tracked repositories, and analysis coverage.
+                  tracked repositories, and an activity-based profile title.
                 </p>
               </div>
               <EmbedSnippet
@@ -237,17 +238,11 @@ const jsonLd: Record<string, unknown>[] = [
               />
             </header>
             <div class="flex justify-center border-y border-border py-6">
-              <img
-                class="theme-image-light"
-                src={`${apiBase}/api/users/${login}/card.svg?theme=light&render=${MEDIA_RENDER_REVISION}`}
-                alt={`gitdebt profile stats card for ${login}`}
-                loading="lazy"
-              />
-              <img
-                class="theme-image-dark"
-                src={`${apiBase}/api/users/${login}/card.svg?theme=dark&render=${MEDIA_RENDER_REVISION}`}
-                alt={`gitdebt profile stats card for ${login}`}
-                loading="lazy"
+              <ProfileCardPreview
+                client:visible
+                apiBase={apiBase}
+                login={login}
+                initialRevision={`${data.total_stars}-${data.repos_included}-${data.repos_pending}`}
               />
             </div>
           </section>

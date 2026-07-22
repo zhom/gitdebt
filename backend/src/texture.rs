@@ -41,9 +41,12 @@ pub fn decorate(mut svg: String, theme: &Theme) -> String {
     if svg.contains("data-gitdebt-texture=\"true\"") {
         return svg;
     }
-    let field = "\n  <rect data-gitdebt-texture=\"true\" width=\"100%\" height=\"100%\" fill=\"url(#gd-pixel-field)\" mask=\"url(#gd-pixel-field-mask)\" opacity=\"0.28\" pointer-events=\"none\" />\n";
+    let field = format!(
+        "\n  <rect data-gitdebt-canvas=\"true\" width=\"100%\" height=\"100%\" fill=\"{}\" pointer-events=\"none\" />\n  <rect data-gitdebt-texture=\"true\" width=\"100%\" height=\"100%\" fill=\"url(#gd-pixel-field)\" mask=\"url(#gd-pixel-field-mask)\" opacity=\"0.28\" pointer-events=\"none\" />\n",
+        theme.bg,
+    );
     if let Some(index) = svg.find('>') {
-        svg.insert_str(index + 1, field);
+        svg.insert_str(index + 1, &field);
     }
     if let Some(index) = svg.rfind("</svg>") {
         svg.insert_str(index, &format!("\n{}\n", defs(theme)));
@@ -80,6 +83,8 @@ mod tests {
         let second = decorate(first.clone(), &theme::LIGHT);
         assert_eq!(first, second);
         assert!(first.contains("data-gitdebt-texture=\"true\""));
+        assert!(first.contains("data-gitdebt-canvas=\"true\""));
+        assert!(first.contains(crate::theme::LIGHT.bg));
         assert!(first.contains("shape-rendering=\"crispEdges\""));
         assert!(!first.contains("var(--"));
         assert!(

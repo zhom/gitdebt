@@ -3,11 +3,7 @@ import { AnimatePresence, motion, useReducedMotion } from "motion/react";
 import { ArrowRight } from "lucide-react";
 
 import { Button } from "@/components/ui/button";
-import {
-  DURATION,
-  EASE_OUT,
-  REDUCED_MOTION_DURATION,
-} from "@/lib/motion";
+import { DURATION, EASE_OUT, REDUCED_MOTION_DURATION } from "@/lib/motion";
 
 const EXAMPLES = ["facebook/react", "vercel/next.js", "zhom/donutbrowser"];
 
@@ -24,8 +20,9 @@ export function RepoLookup() {
       return;
     }
     const [, owner, repo] = match;
-    const query = new URLSearchParams({ repo: `${owner}/${repo}` });
-    window.location.assign(`/report?${query.toString()}`);
+    window.location.assign(
+      `/${encodeURIComponent(owner.toLowerCase())}/${encodeURIComponent(repo.toLowerCase())}`,
+    );
   }
 
   function onSubmit(e: React.SubmitEvent<HTMLFormElement>) {
@@ -47,7 +44,10 @@ export function RepoLookup() {
           className="flex flex-1 items-center rounded-md border border-input bg-card font-mono text-base focus-within:outline-2 focus-within:outline-offset-2 focus-within:outline-ring sm:text-sm"
           data-invalid={error ? "" : undefined}
         >
-          <label htmlFor="repo-lookup" className="pl-3.5 text-muted-foreground select-none">
+          <label
+            htmlFor="repo-lookup"
+            className="pl-3.5 text-muted-foreground select-none"
+          >
             github.com/
           </label>
           <input
@@ -82,9 +82,7 @@ export function RepoLookup() {
             animate={{ opacity: 1, y: 0 }}
             exit={{ opacity: 0, transition: { duration: 0.12 } }}
             transition={{
-              duration: reduceMotion
-                ? REDUCED_MOTION_DURATION
-                : DURATION.enter,
+              duration: reduceMotion ? REDUCED_MOTION_DURATION : DURATION.enter,
               ease: EASE_OUT,
             }}
             className="mt-2 text-base text-destructive sm:text-sm"

@@ -61,29 +61,35 @@ fn reveal_begin(index: usize) -> f32 {
 // Bug-magnet files
 
 pub fn render_bug_magnets(repo: &str, rows: &[FileRow], theme: &Theme) -> String {
-    horizontal_bar_chart(BarChartConfig {
-        repo,
-        title: "Bug-magnet files",
-        subtitle: "Files with the most fix commits",
-        rows,
-        accent: theme.bug,
-        accent_dim: theme.bug_dim,
+    crate::texture::decorate(
+        horizontal_bar_chart(BarChartConfig {
+            repo,
+            title: "Bug-magnet files",
+            subtitle: "Files with the most fix commits",
+            rows,
+            accent: theme.bug,
+            accent_dim: theme.bug_dim,
+            theme,
+        }),
         theme,
-    })
+    )
 }
 
 // Top changed files
 
 pub fn render_top_changed(repo: &str, rows: &[FileRow], theme: &Theme) -> String {
-    horizontal_bar_chart(BarChartConfig {
-        repo,
-        title: "Most-changed files",
-        subtitle: "Files with the most commits",
-        rows,
-        accent: theme.accent,
-        accent_dim: theme.accent_dim,
+    crate::texture::decorate(
+        horizontal_bar_chart(BarChartConfig {
+            repo,
+            title: "Most-changed files",
+            subtitle: "Files with the most commits",
+            rows,
+            accent: theme.accent,
+            accent_dim: theme.accent_dim,
+            theme,
+        }),
         theme,
-    })
+    )
 }
 
 struct BarChartConfig<'a> {
@@ -165,13 +171,13 @@ fn horizontal_bar_chart(cfg: BarChartConfig<'_>) -> String {
     .bar-link:hover .bar-label {{ fill: {accent}; text-decoration: underline; }}
     .bar-count {{ font: 600 12px ui-sans-serif, system-ui, sans-serif; }}
     .bar-track {{ fill: {track}; }}
-    .bar-fill {{ fill: {accent}; }}
+    .bar-fill {{ fill: url(#gd-pixel-fill); stroke: {accent}; stroke-width: 1; shape-rendering: crispEdges; }}
     .footer-link {{ fill: {muted}; font: 600 11px ui-sans-serif, system-ui, sans-serif; text-decoration: none; letter-spacing: 0.02em; }}
     .footer-link:hover {{ fill: {fg}; }}
     @media (prefers-reduced-motion: reduce) {{
       .motion {{ display: none; }}
     }}
-    g:hover .bar-fill {{ fill: {accent_dim}; }}
+    g:hover .bar-fill {{ stroke: {accent_dim}; opacity: 0.72; }}
   ]]></style>
   <text class="title" x="{padding}" y="36">{title}</text>
   <text class="subtitle" x="{padding}" y="58">{subtitle} · {repo}</text>
@@ -220,6 +226,20 @@ fn count_placement<'a>(
 // Commit heatmap
 
 pub fn render_heatmap(
+    repo: &str,
+    subtitle_label: &str,
+    start: NaiveDate,
+    end: NaiveDate,
+    days: &[DayCount],
+    theme: &Theme,
+) -> String {
+    crate::texture::decorate(
+        render_heatmap_inner(repo, subtitle_label, start, end, days, theme),
+        theme,
+    )
+}
+
+fn render_heatmap_inner(
     repo: &str,
     subtitle_label: &str,
     start: NaiveDate,
@@ -397,34 +417,41 @@ fn first_monday_on_or_before(d: NaiveDate) -> NaiveDate {
 // Contributors
 
 pub fn render_contributors(repo: &str, contributors: &[ContributorRow], theme: &Theme) -> String {
-    let width = 1000u32;
-    let pad = 40u32;
-    let header = 88u32;
-    let row_h = 48u32;
-    let footer = 38u32;
-    let shown: Vec<&ContributorRow> = contributors.iter().take(12).collect();
-    let total = contributors.len();
-    let height = header + shown.len().max(1) as u32 * row_h + footer;
-    let total_commits: i64 = contributors.iter().map(|row| row.commits.max(0)).sum();
-    let max_commits = shown
+    crate::texture::decorate(render_contributors_inner(repo, contributors, theme), theme)
+}
+
+fn render_contributors_inner(repo: &str, contributors: &[ContributorRow], theme: &Theme) -> String {
+    let width = 1100u32;
+    let pad = 44u32;
+    let header = 94u32;
+    let tile_w = 120u32;
+    let tile_h = 146u32;
+    let gap = 8u32;
+    let columns = 8usize;
+    let footer = 42u32;
+    let shown: Vec<&ContributorRow> = contributors
         .iter()
-        .map(|row| row.commits)
-        .max()
-        .unwrap_or(1)
-        .max(1);
-    let bar_x = 390.0f32;
-    let bar_max = 430.0f32;
+        .filter(|row| row.commits > 0)
+        .take(16)
+        .collect();
+    let total = contributors.len();
+    let tile_rows = shown.len().max(1).div_ceil(columns) as u32;
+    let height = header + tile_rows * tile_h + footer;
+    let total_commits: i64 = contributors.iter().map(|row| row.commits.max(0)).sum();
 
     let mut rows = String::new();
     for (i, c) in shown.iter().enumerate() {
-        let y = header as f32 + i as f32 * row_h as f32;
+        let column = i % columns;
+        let row = i / columns;
+        let x = pad + column as u32 * (tile_w + gap);
+        let y = header + row as u32 * tile_h;
         let label = c.login.clone().unwrap_or_else(|| c.name.clone());
         let title = format!("{} · {} commits", label, c.commits);
-        let href = match &c.login {
-            Some(l) => format!("https://github.com/{l}"),
-            None => "#".to_string(),
-        };
-        let avatar_size = 30u32;
+        let profile = c
+            .login
+            .as_ref()
+            .map(|login| format!("https://github.com/{login}"));
+        let avatar_size = 76u32;
         let avatar = c.avatar_url.as_ref().map_or_else(
             || {
                 let initial = label
@@ -434,60 +461,53 @@ pub fn render_contributors(repo: &str, contributors: &[ContributorRow], theme: &
                     .to_uppercase()
                     .to_string();
                 format!(
-                    r#"<text class="avatar-fallback" x="{r}" y="{y}" text-anchor="middle">{initial}</text>"#,
+                    r#"<rect class="avatar-fallback-bg" width="{avatar_size}" height="{avatar_size}" rx="8" /><text class="avatar-fallback" x="{r}" y="{y}" text-anchor="middle">{initial}</text>"#,
                     r = avatar_size / 2,
-                    y = avatar_size / 2 + 5,
+                    y = avatar_size / 2 + 8,
                     initial = escape_xml(&initial),
                 )
             },
             |url| {
                 format!(
-                    r#"<image href="{url}" x="0" y="0" width="{avatar_size}" height="{avatar_size}" clip-path="url(#clip{i})" preserveAspectRatio="xMidYMid slice" />"#,
+                    r#"<image href="{url}" x="0" y="0" width="{avatar_size}" height="{avatar_size}" clip-path="url(#contributor-clip-{i})" preserveAspectRatio="xMidYMid slice" />"#,
                     url = escape_xml(url),
                 )
             },
         );
-        let bar_w = c.commits.max(0) as f32 / max_commits as f32 * bar_max;
         let share = if total_commits > 0 {
             c.commits.max(0) as f64 / total_commits as f64 * 100.0
         } else {
             0.0
         };
+        let label = truncate_tail(&label, 15);
+        let content = format!(
+            r##"<title>{title}</title>
+      <rect class="avatar-pixels" x="-6" y="-6" width="88" height="88" rx="10" />
+      <clipPath id="contributor-clip-{i}"><rect width="{avatar_size}" height="{avatar_size}" rx="8" /></clipPath>
+      <g class="avatar-pos">{avatar}</g>
+      <text class="contributor" x="0" y="98">{label}</text>
+      <text class="commits" x="0" y="116">{commits} commits</text>
+      <text class="share" x="0" y="133">{share:.1}%</text>"##,
+            title = escape_xml(&title),
+            commits = c.commits.max(0),
+            label = escape_xml(&label),
+        );
+        let linked = profile.map_or(content.clone(), |href| {
+            format!(
+                r##"<a class="contributor-link" href="{href}" target="_blank" rel="noopener">{content}</a>"##,
+                href = escape_xml(&href),
+            )
+        });
         rows.push_str(&format!(
-            r##"<g transform="translate({pad}, {y:.1})" opacity="1">
+            r##"<g transform="translate({x}, {y})" opacity="1">
     <animate class="motion" attributeName="opacity" from="0" to="1" dur="0.2s" begin="{begin:.2}s" fill="freeze" />
-    <a class="contributor-link" href="{href}" target="_blank" rel="noopener">
-      <title>{title}</title>
-      <clipPath id="clip{i}">
-        <circle cx="{r}" cy="{r}" r="{r}" />
-      </clipPath>
-      <g class="avatar-pos">
-        <circle class="avatar-ring" cx="{r}" cy="{r}" r="{r}" />
-        {avatar}
-      </g>
-      <text class="contributor" x="46" y="13">{label}</text>
-    </a>
-    <text class="share" x="46" y="29">{share:.1}% of analyzed commits</text>
-    <rect class="bar-track" x="{bar_x:.1}" y="7" width="{bar_max:.1}" height="16" rx="8" />
-    <rect class="bar-fill" x="{bar_x:.1}" y="7" width="{bar_w:.1}" height="16" rx="8" />
-    <text class="commits" x="{right:.1}" y="20" text-anchor="end">{commits} commits</text>
+    {linked}
 </g>
 "##,
-            pad = pad,
-            href = escape_xml(&href),
             y = y,
+            x = x,
             begin = reveal_begin(i),
-            title = escape_xml(&title),
-            i = i,
-            r = avatar_size / 2,
-            avatar = avatar,
-            label = escape_xml(&label),
-            share = share,
-            bar_x = bar_x,
-            bar_max = bar_max,
-            bar_w = bar_w,
-            right = width - pad,
-            commits = humanize(c.commits.max(0)),
+            linked = linked,
         ));
     }
 
@@ -497,17 +517,15 @@ pub fn render_contributors(repo: &str, contributors: &[ContributorRow], theme: &
   <style><![CDATA[
     .title {{ fill: {fg}; font: 600 18px ui-sans-serif, system-ui, sans-serif; }}
     .subtitle {{ fill: {muted}; font: 13px ui-sans-serif, system-ui, sans-serif; }}
-    .avatar-ring {{ fill: {track}; stroke: {border}; stroke-width: 1; }}
-    .avatar-fallback {{ fill: {muted}; font: 600 13px ui-sans-serif, system-ui, sans-serif; }}
+    .avatar-pixels {{ fill: url(#gd-pixel-fill); stroke: {border}; stroke-width: 1; shape-rendering: crispEdges; }}
+    .avatar-fallback-bg {{ fill: {track}; }}
+    .avatar-fallback {{ fill: {fg}; font: 700 22px ui-monospace, SFMono-Regular, monospace; }}
     .contributor {{ fill: {fg}; font: 600 13px ui-sans-serif, system-ui, sans-serif; }}
-    .share {{ fill: {muted}; font: 11px ui-sans-serif, system-ui, sans-serif; }}
-    .commits {{ fill: {fg}; font: 600 12px ui-monospace, SFMono-Regular, monospace; }}
-    .bar-track {{ fill: {track}; }}
-    .bar-fill {{ fill: {fg}; transform-box: fill-box; transform-origin: left center; transition: opacity 160ms cubic-bezier(0.23, 1, 0.32, 1); }}
+    .share {{ fill: {muted}; font: 11px ui-monospace, SFMono-Regular, monospace; }}
+    .commits {{ fill: {fg}; font: 600 11px ui-monospace, SFMono-Regular, monospace; }}
     .avatar-pos {{ transform-box: fill-box; transform-origin: center; transition: transform 180ms cubic-bezier(0.23, 1, 0.32, 1); }}
     .contributor-link {{ cursor: pointer; }}
     @media (hover: hover) and (pointer: fine) {{
-      g:hover .bar-fill {{ opacity: 0.72; }}
       .contributor-link:hover .avatar-pos {{ transform: scale(1.05); }}
       .contributor-link:hover .contributor {{ text-decoration: underline; }}
     }}
@@ -515,12 +533,11 @@ pub fn render_contributors(repo: &str, contributors: &[ContributorRow], theme: &
     .footer-link:hover {{ fill: {fg}; }}
     @media (prefers-reduced-motion: reduce) {{
       .motion {{ display: none; }}
-      .bar-fill {{ transition: none; }}
       .avatar-pos {{ transition: none; }}
     }}
   ]]></style>
-  <text class="title" x="{pad}" y="36">Contributor ownership</text>
-  <text class="subtitle" x="{pad}" y="58">Top {shown_count} of {total} contributors · {repo}</text>
+  <text class="title" x="{pad}" y="36">Contributors</text>
+  <text class="subtitle" x="{pad}" y="58">Top {shown_count} of {total} people shown separately · {total_commits} analyzed commits · {repo}</text>
 {rows}
 {footer}
 </svg>"##,
@@ -534,6 +551,7 @@ pub fn render_contributors(repo: &str, contributors: &[ContributorRow], theme: &
         pad = pad,
         shown_count = shown.len(),
         total = total,
+        total_commits = humanize(total_commits),
         rows = rows,
         footer = brand::footer_lockup((width as f32) - pad as f32, footer_y, theme,),
     )
@@ -542,6 +560,10 @@ pub fn render_contributors(repo: &str, contributors: &[ContributorRow], theme: &
 // Lines of code by language
 
 pub fn render_languages(repo: &str, rows: &[LanguageBar], theme: &Theme) -> String {
+    crate::texture::decorate(render_languages_inner(repo, rows, theme), theme)
+}
+
+fn render_languages_inner(repo: &str, rows: &[LanguageBar], theme: &Theme) -> String {
     let width = 1100u32;
     let row_h = 32u32;
     let header_h = 96u32;
@@ -585,7 +607,8 @@ pub fn render_languages(repo: &str, rows: &[LanguageBar], theme: &Theme) -> Stri
   <circle cx="6" cy="{dot_y:.1}" r="6" fill="{color}" />
   <text class="bar-label" x="20" y="{label_y:.1}">{language}</text>
   <rect class="bar-track" x="{label_w}" y="0" width="{bar_max_w:.1}" height="{bar_h}" rx="3" />
-  <rect x="{label_w}" y="0" width="{bar_w:.1}" height="{bar_h}" rx="3" fill="{color}" />
+  <rect x="{label_w}" y="0" width="{bar_w:.1}" height="{bar_h}" rx="3" fill="{color}" opacity="0.28" />
+  <rect x="{label_w}" y="0" width="{bar_w:.1}" height="{bar_h}" rx="3" fill="url(#gd-pixel-fill)" stroke="{color}" stroke-width="1" />
   <text class="bar-count" x="{count_x:.1}" y="{label_y:.1}" text-anchor="{count_anchor}" fill="{count_color}">
     <title>{lines} total · {code} code · {comments} comments · {blanks} blank</title>
     {count_text}
@@ -636,7 +659,7 @@ pub fn render_languages(repo: &str, rows: &[LanguageBar], theme: &Theme) -> Stri
       .motion {{ display: none; }}
     }}
   ]]></style>
-  <text class="title" x="{padding}" y="36">Lines of code</text>
+  <text class="title" x="{padding}" y="36">Language activity</text>
   <text class="subtitle" x="{padding}" y="58">{repo} · {total} lines · {code} code · {files} files in {n} languages</text>
 {bars}
 {footer}
@@ -732,6 +755,10 @@ fn linguist_color(name: &str) -> &'static str {
 // TODO/FIXME trend
 
 pub fn render_todo_trend(repo: &str, points: &[TodoPoint], theme: &Theme) -> String {
+    crate::texture::decorate(render_todo_trend_inner(repo, points, theme), theme)
+}
+
+fn render_todo_trend_inner(repo: &str, points: &[TodoPoint], theme: &Theme) -> String {
     let width = 1200u32;
     let height = 360u32;
     let pad_l = 56.0_f32;
@@ -825,7 +852,7 @@ pub fn render_todo_trend(repo: &str, points: &[TodoPoint], theme: &Theme) -> Str
   {y_ticks}
   <g opacity="1">
     <animate class="motion" attributeName="opacity" from="0" to="1" dur="0.2s" begin="0s" fill="freeze" />
-    <path d="{area}" fill="{bug}" opacity="0.18" />
+    <path d="{area}" fill="url(#gd-pixel-fill)" opacity="0.72" />
     <path d="{path}" fill="none" stroke="{bug}" stroke-width="2.5" stroke-linecap="round" stroke-linejoin="round" />
     <circle cx="{peak_x:.1}" cy="{peak_y:.1}" r="5" fill="{bug}" />
   </g>
@@ -856,6 +883,8 @@ pub fn render_todo_trend(repo: &str, points: &[TodoPoint], theme: &Theme) -> Str
 pub struct AuthorShare {
     /// Display label — GitHub login when known, otherwise author name.
     pub label: String,
+    pub login: Option<String>,
+    pub avatar_url: Option<String>,
     pub commits: i64,
 }
 
@@ -888,27 +917,32 @@ pub fn compute_bus_factor(commits: &[i64], total_commits: i64) -> usize {
     sorted.len()
 }
 
-/// Contributor-concentration chart: horizontal ownership bars for the
-/// top authors (bar width = share of ALL commits, so the track reads as
-/// "100% of the project") plus the computed bus-factor number. Authors
-/// inside the bus-factor set render in the accent color; everyone else
-/// in muted. `total_commits` must cover the whole (bot-filtered) author
-/// population, not just the rows passed in.
+/// Contributor-concentration chart focused on the people carrying at least
+/// one percent of the analyzed commits. The bus factor still considers the
+/// full bot-filtered author population; the visual deliberately omits tiny
+/// shares so the ownership risk remains legible.
 pub fn render_bus_factor(
     repo: &str,
     authors: &[AuthorShare],
     total_commits: i64,
     theme: &Theme,
 ) -> String {
-    let width = 900u32;
-    let row_h = 32u32;
-    let header_h = 110u32;
-    let footer_h = 32u32;
-    let padding = 56u32;
-    let bar_h = 18u32;
+    crate::texture::decorate(
+        render_bus_factor_inner(repo, authors, total_commits, theme),
+        theme,
+    )
+}
 
-    // Deterministic ordering regardless of caller: commits desc, then
-    // label asc as the tie-break.
+fn render_bus_factor_inner(
+    repo: &str,
+    authors: &[AuthorShare],
+    total_commits: i64,
+    theme: &Theme,
+) -> String {
+    let width = 900u32;
+    let height = 360u32;
+    let padding = 56u32;
+
     let mut sorted: Vec<&AuthorShare> = authors.iter().filter(|a| a.commits > 0).collect();
     sorted.sort_by(|a, b| {
         b.commits
@@ -922,89 +956,94 @@ pub fn render_bus_factor(
 
     let commit_counts: Vec<i64> = sorted.iter().map(|a| a.commits).collect();
     let bus_factor = compute_bus_factor(&commit_counts, total_commits);
-    let shown = &sorted[..sorted.len().min(10)];
-    let n = shown.len() as u32;
-    let height = header_h + n * row_h + footer_h;
-    let label_w = 260.0_f32;
-    let bar_max_w = (width as f32) - padding as f32 - label_w - padding as f32;
+    let risk = match bus_factor {
+        0 => "Unavailable",
+        1 => "Solo",
+        2 => "High",
+        3 => "Medium",
+        _ => "Low",
+    };
+    let shown: Vec<&AuthorShare> = sorted
+        .into_iter()
+        .filter(|author| author.commits.saturating_mul(100) >= total_commits)
+        .take(8)
+        .collect();
 
-    let mut bars = String::new();
+    let mut people = String::new();
     for (i, a) in shown.iter().enumerate() {
-        let y = header_h as f32 + (i as f32) * row_h as f32 + (row_h - bar_h) as f32 / 2.0;
+        let column = i % 4;
+        let row = i / 4;
+        let x = padding + column as u32 * 198;
+        let y = 110 + row as u32 * 102;
         let share = a.commits as f64 / total_commits as f64;
-        let bar_w = (share as f32) * bar_max_w;
-        let fill = if i < bus_factor {
-            theme.accent
-        } else {
-            theme.muted
-        };
-        let label = truncate_tail(&a.label, 32);
+        let label = truncate_tail(&a.label, 18);
         let pct_text = format!("{:.1}%", share * 100.0);
-        let (pct_x, pct_anchor, pct_color) =
-            count_placement(label_w, bar_w, &pct_text, fill, theme.muted);
         let tooltip = format!("{} · {} commits · {}", a.label, a.commits, pct_text);
-        bars.push_str(&format!(
-            r##"<g transform="translate({padding}, {y:.1})" opacity="1">
-  <animate class="motion" attributeName="opacity" from="0" to="1" dur="0.2s" begin="{begin:.2}s" fill="freeze" />
-  <title>{tooltip}</title>
-  <text class="bar-label" x="0" y="{label_y:.1}">{label}</text>
-  <rect class="bar-track" x="{label_w}" y="0" width="{bar_max_w:.1}" height="{bar_h}" rx="3" />
-  <rect x="{label_w}" y="0" width="{bar_w:.1}" height="{bar_h}" rx="3" fill="{fill}" />
-  <text class="bar-count" x="{pct_x:.1}" y="{label_y:.1}" text-anchor="{pct_anchor}" fill="{pct_color}">
-    {pct_text}
-  </text>
-</g>
-"##,
-            padding = padding,
-            y = y,
-            begin = reveal_begin(i),
+        let avatar = a.avatar_url.as_ref().map_or_else(
+            || {
+                let initial = label.chars().next().unwrap_or('?').to_uppercase().to_string();
+                format!(r#"<rect width="58" height="58" rx="7" class="avatar-fallback-bg" /><text class="avatar-fallback" x="29" y="37" text-anchor="middle">{}</text>"#, escape_xml(&initial))
+            },
+            |url| format!(r#"<image href="{}" width="58" height="58" clip-path="url(#owner-clip-{i})" preserveAspectRatio="xMidYMid slice" />"#, escape_xml(url)),
+        );
+        let content = format!(
+            r##"<title>{tooltip}</title>
+    <rect class="avatar-pixels" x="-5" y="-5" width="68" height="68" rx="9" />
+    <clipPath id="owner-clip-{i}"><rect width="58" height="58" rx="7" /></clipPath>
+    <g class="avatar-pos">{avatar}</g>
+    <text class="person" x="70" y="23">{label}</text>
+    <text class="person-meta" x="70" y="43">{commits} commits</text>
+    <text class="person-share" x="70" y="61">{pct_text}</text>"##,
             tooltip = escape_xml(&tooltip),
             label = escape_xml(&label),
-            label_w = label_w,
-            label_y = bar_h as f32 / 2.0 + 5.0,
-            bar_max_w = bar_max_w,
-            bar_h = bar_h,
-            fill = fill,
-            bar_w = bar_w,
-            pct_text = pct_text,
-            pct_x = pct_x,
-            pct_anchor = pct_anchor,
-            pct_color = pct_color,
+            commits = a.commits,
+        );
+        let linked = a.login.as_ref().map_or(content.clone(), |login| {
+            format!(r##"<a class="person-link" href="https://github.com/{login}" target="_blank" rel="noopener">{content}</a>"##, login = escape_xml(login))
+        });
+        people.push_str(&format!(
+            r##"<g transform="translate({x}, {y})" opacity="1">
+  <animate class="motion" attributeName="opacity" from="0" to="1" dur="0.2s" begin="{begin:.2}s" fill="freeze" />
+  {linked}
+</g>
+"##,
+            x = x,
+            y = y,
+            begin = reveal_begin(i),
+            linked = linked,
         ));
     }
 
     let footer_y = (height - 12) as f32;
     let right_x = (width - padding) as f32;
-    let legend1_dot = padding as f32 + 6.0;
-    let legend1_text = legend1_dot + 12.0;
-    let legend2_dot = legend1_text + 120.0;
-    let legend2_text = legend2_dot + 12.0;
     format!(
         r##"<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 {width} {height}" role="img" aria-label="Bus factor for {repo}">
   <style><![CDATA[
     .title {{ fill: {fg}; font: 600 18px ui-sans-serif, system-ui, sans-serif; }}
     .subtitle {{ fill: {muted}; font: 13px ui-sans-serif, system-ui, sans-serif; }}
-    .legend {{ fill: {muted}; font: 11px ui-sans-serif, system-ui, sans-serif; }}
-    .bar-label {{ fill: {fg}; font: 12px ui-sans-serif, system-ui, sans-serif; font-weight: 500; }}
-    .bar-count {{ font: 600 12px ui-sans-serif, system-ui, sans-serif; }}
-    .bar-track {{ fill: {track}; }}
     .bf-caption {{ fill: {muted}; font: 600 11px ui-sans-serif, system-ui, sans-serif; letter-spacing: 0.08em; }}
-    .bf-number {{ fill: {accent}; font: 700 48px ui-sans-serif, system-ui, sans-serif; }}
+    .bf-number {{ fill: {accent}; font: 700 30px ui-sans-serif, system-ui, sans-serif; }}
+    .avatar-pixels {{ fill: url(#gd-pixel-fill); stroke: {border}; stroke-width: 1; shape-rendering: crispEdges; }}
+    .avatar-fallback-bg {{ fill: {track}; }}
+    .avatar-fallback {{ fill: {fg}; font: 700 18px ui-monospace, SFMono-Regular, monospace; }}
+    .person {{ fill: {fg}; font: 600 12px ui-sans-serif, system-ui, sans-serif; }}
+    .person-meta {{ fill: {fg}; font: 600 10px ui-monospace, SFMono-Regular, monospace; }}
+    .person-share {{ fill: {muted}; font: 10px ui-monospace, SFMono-Regular, monospace; }}
+    .avatar-pos {{ transform-box: fill-box; transform-origin: center; transition: transform 180ms cubic-bezier(0.23, 1, 0.32, 1); }}
+    .person-link:hover .avatar-pos {{ transform: scale(1.05); }}
+    .person-link:hover .person {{ text-decoration: underline; }}
     .footer-link {{ fill: {muted}; font: 600 11px ui-sans-serif, system-ui, sans-serif; text-decoration: none; letter-spacing: 0.02em; }}
     .footer-link:hover {{ fill: {fg}; }}
     @media (prefers-reduced-motion: reduce) {{
       .motion {{ display: none; }}
+      .avatar-pos {{ transition: none; }}
     }}
   ]]></style>
   <text class="title" x="{padding}" y="36">Bus factor</text>
-  <text class="subtitle" x="{padding}" y="58">Fewest contributors covering over half of {total} commits · {repo}</text>
-  <circle cx="{legend1_dot:.0}" cy="78" r="5" fill="{accent}" />
-  <text class="legend" x="{legend1_text:.0}" y="82">core group ({bus_factor})</text>
-  <circle cx="{legend2_dot:.0}" cy="78" r="5" fill="{muted}" />
-  <text class="legend" x="{legend2_text:.0}" y="82">everyone else</text>
-  <text class="bf-caption" x="{right_x:.0}" y="36" text-anchor="end">BUS FACTOR</text>
-  <text class="bf-number" x="{right_x:.0}" y="90" text-anchor="end">{bus_factor}</text>
-{bars}
+  <text class="subtitle" x="{padding}" y="58">People with at least 1% of {total} commits · {repo}</text>
+  <text class="bf-caption" x="{right_x:.0}" y="34" text-anchor="end">OWNERSHIP RISK · FACTOR {bus_factor}</text>
+  <text class="bf-number" x="{right_x:.0}" y="70" text-anchor="end">{risk}</text>
+{people}
 {footer}
 </svg>"##,
         width = width,
@@ -1012,17 +1051,15 @@ pub fn render_bus_factor(
         repo = escape_xml(repo),
         fg = theme.fg,
         muted = theme.muted,
+        border = theme.border,
         track = theme.track,
         accent = theme.accent,
         padding = padding,
         total = humanize(total_commits),
         bus_factor = bus_factor,
-        legend1_dot = legend1_dot,
-        legend1_text = legend1_text,
-        legend2_dot = legend2_dot,
-        legend2_text = legend2_text,
+        risk = risk,
         right_x = right_x,
-        bars = bars,
+        people = people,
         footer = brand::footer_lockup(right_x, footer_y, theme),
     )
 }
@@ -1087,6 +1124,10 @@ fn next_month(d: NaiveDate) -> NaiveDate {
 /// with the peak month annotated. Styling mirrors the TODO/FIXME trend
 /// chart, but in the accent color — commit volume is activity, not debt.
 pub fn render_commit_trend(repo: &str, days: &[DayCount], theme: &Theme) -> String {
+    crate::texture::decorate(render_commit_trend_inner(repo, days, theme), theme)
+}
+
+fn render_commit_trend_inner(repo: &str, days: &[DayCount], theme: &Theme) -> String {
     let months = bucket_months(days);
     let width = 1200u32;
     let height = 360u32;
@@ -1179,7 +1220,7 @@ pub fn render_commit_trend(repo: &str, days: &[DayCount], theme: &Theme) -> Stri
   {y_ticks}
   <g opacity="1">
     <animate class="motion" attributeName="opacity" from="0" to="1" dur="0.2s" begin="0s" fill="freeze" />
-    <path d="{area}" fill="{accent}" opacity="0.18" />
+    <path d="{area}" fill="url(#gd-pixel-fill)" opacity="0.72" />
     <path d="{path}" fill="none" stroke="{accent}" stroke-width="2.5" stroke-linecap="round" stroke-linejoin="round" />
     <circle cx="{peak_x:.1}" cy="{peak_y:.1}" r="5" fill="{accent}" />
     <text class="peak-label" x="{peak_label_x:.1}" y="{peak_label_y:.1}" text-anchor="{peak_anchor}">{peak_commits}</text>
@@ -1400,7 +1441,7 @@ mod tests {
     }
 
     #[test]
-    fn contributors_uses_scale_hover_not_glow() {
+    fn contributors_are_avatar_led_linked_and_separately_counted() {
         let rows = vec![ContributorRow {
             login: Some("zhom".into()),
             name: "zhom".into(),
@@ -1410,11 +1451,11 @@ mod tests {
         let svg = render_contributors("foo/bar", &rows, &theme::LIGHT);
         assert!(svg.contains("href=\"https://github.com/zhom"));
         assert!(svg.contains("<image"));
+        assert!(svg.contains("100 commits"));
+        assert!(svg.contains("avatar-pixels"));
         assert!(!svg.contains("animateTransform"));
-        // The new behavior: scale on hover, not drop-shadow.
         assert!(svg.contains("scale(1.05)"));
         assert!(svg.contains("(hover: hover) and (pointer: fine)"));
-        assert!(svg.contains("160ms"));
         assert!(!svg.contains("drop-shadow"));
     }
 
@@ -1529,31 +1570,63 @@ mod tests {
     }
 
     #[test]
-    fn bus_factor_chart_renders_number_bars_and_baked_colors() {
+    fn bus_factor_chart_renders_avatar_ownership_risk() {
         let authors = vec![
             AuthorShare {
                 label: "alice".into(),
+                login: Some("alice".into()),
+                avatar_url: Some("https://avatars.githubusercontent.com/u/1".into()),
                 commits: 60,
             },
             AuthorShare {
                 label: "bob".into(),
+                login: None,
+                avatar_url: None,
                 commits: 30,
             },
             AuthorShare {
                 label: "carol".into(),
+                login: None,
+                avatar_url: None,
                 commits: 10,
             },
         ];
         let svg = render_bus_factor("foo/bar", &authors, 100, &theme::LIGHT);
         assert!(svg.contains("Bus factor"));
-        assert!(svg.contains("BUS FACTOR"));
-        // Bus factor of 1 (alice alone exceeds half) surfaces in the legend.
-        assert!(svg.contains("core group (1)"));
+        assert!(svg.contains("OWNERSHIP RISK · FACTOR 1"));
+        assert!(svg.contains(">Solo</text>"));
         assert!(svg.contains("alice"));
         assert!(svg.contains("60.0%"));
+        assert!(svg.contains("https://github.com/alice"));
+        assert!(svg.contains("<image"));
         assert!(svg.contains(theme::LIGHT.accent));
         assert!(svg.contains("gitdebt.com"));
         assert!(!svg.contains("var(--"));
+    }
+
+    #[test]
+    fn bus_factor_hides_people_below_one_percent() {
+        let svg = render_bus_factor(
+            "foo/bar",
+            &[
+                AuthorShare {
+                    label: "visible".into(),
+                    login: None,
+                    avatar_url: None,
+                    commits: 999,
+                },
+                AuthorShare {
+                    label: "tiny".into(),
+                    login: None,
+                    avatar_url: None,
+                    commits: 1,
+                },
+            ],
+            1_000,
+            &theme::LIGHT,
+        );
+        assert!(svg.contains("visible"));
+        assert!(!svg.contains(">tiny</text>"));
     }
 
     #[test]
@@ -1565,6 +1638,8 @@ mod tests {
             "foo/bar",
             &[AuthorShare {
                 label: "x".into(),
+                login: None,
+                avatar_url: None,
                 commits: 0,
             }],
             0,
@@ -1662,6 +1737,8 @@ mod tests {
     fn new_charts_are_bytes_deterministic() {
         let authors = vec![AuthorShare {
             label: "a".into(),
+            login: None,
+            avatar_url: None,
             commits: 5,
         }];
         assert_eq!(
@@ -1704,7 +1781,8 @@ mod tests {
         assert!(svg.contains("88 files · "));
         // Language marks use GitHub Linguist colors while labels stay themed.
         assert!(svg.contains(r##"<circle cx="6" cy="9.0" r="6" fill="#dea584" />"##));
-        assert!(svg.contains(r##"height="18" rx="3" fill="#3178c6" />"##));
+        assert!(svg.contains(r##"height="18" rx="3" fill="#3178c6" opacity="0.28""##));
+        assert!(svg.contains(r##"fill="url(#gd-pixel-fill)" stroke="#3178c6""##));
         assert!(svg.contains(".bar-label { fill: #0a0a0a;"));
     }
 
@@ -1736,7 +1814,7 @@ mod tests {
         }];
         let bars = without_smil(&render_bug_magnets("foo/bar", &files, &theme::LIGHT));
         assert!(!bars.contains("width=\"0\""));
-        assert!(!bars.contains("opacity=\"0\""));
+        assert!(!bars.contains("<g opacity=\"0\""));
 
         let days = vec![DayCount {
             day: NaiveDate::from_ymd_opt(2026, 3, 3).unwrap(),
@@ -1751,7 +1829,7 @@ mod tests {
             &theme::LIGHT,
         ));
         assert!(!heatmap.contains("class=\"cell\"") || heatmap.contains("opacity=\"1\""));
-        assert!(!heatmap.contains("opacity=\"0\""));
+        assert!(!heatmap.contains("<g opacity=\"0\""));
 
         let contributors = without_smil(&render_contributors(
             "foo/bar",
@@ -1778,19 +1856,21 @@ mod tests {
             &theme::LIGHT,
         ));
         assert!(!languages.contains("width=\"0\""));
-        assert!(!languages.contains("opacity=\"0\""));
+        assert!(!languages.contains("<g opacity=\"0\""));
 
         let authors = without_smil(&render_bus_factor(
             "foo/bar",
             &[AuthorShare {
                 label: "alice".into(),
+                login: None,
+                avatar_url: None,
                 commits: 4,
             }],
             4,
             &theme::LIGHT,
         ));
         assert!(!authors.contains("width=\"0\""));
-        assert!(!authors.contains("opacity=\"0\""));
+        assert!(!authors.contains("<g opacity=\"0\""));
 
         let todos = without_smil(&render_todo_trend(
             "foo/bar",
@@ -1807,7 +1887,7 @@ mod tests {
             &theme::LIGHT,
         ));
         assert!(!todos.contains("stroke-dashoffset"));
-        assert!(todos.contains("opacity=\"0.18\""));
+        assert!(todos.contains("fill=\"url(#gd-pixel-fill)\" opacity=\"0.72\""));
         assert!(todos.contains(" r=\"5\""));
 
         let commits = without_smil(&render_commit_trend(
@@ -1825,7 +1905,7 @@ mod tests {
             &theme::LIGHT,
         ));
         assert!(!commits.contains("stroke-dashoffset"));
-        assert!(commits.contains("opacity=\"0.18\""));
+        assert!(commits.contains("fill=\"url(#gd-pixel-fill)\" opacity=\"0.72\""));
         assert!(commits.contains(" r=\"5\""));
     }
 }

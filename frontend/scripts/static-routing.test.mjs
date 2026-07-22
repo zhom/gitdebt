@@ -108,11 +108,11 @@ function validOutput(directory, redirects = null) {
 test("missing two-segment repo paths fall back to the noindex live report", () => {
   assert.equal(
     missingRepoReportTarget("/Some-Owner/Repo.js"),
-    "/report?repo=some-owner%2Frepo.js",
+    "/some-owner/repo.js",
   );
   assert.equal(
     missingRepoReportTarget("/new-owner/new-repo/"),
-    "/report?repo=new-owner%2Fnew-repo",
+    "/new-owner/new-repo",
   );
 });
 

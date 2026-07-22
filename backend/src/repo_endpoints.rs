@@ -411,7 +411,7 @@ async fn stat_dispatcher(
         StatKind::BusFactor => ensure_bus_factor_svg(&state, &full, theme, &theme_key).await?,
         StatKind::CommitTrend => ensure_commit_trend_svg(&state, &full, theme, &theme_key).await?,
     };
-    let svg = stat_svg_motion(animated_svg, q.animate());
+    let svg = crate::texture::decorate(stat_svg_motion(animated_svg, q.animate()), theme);
 
     let Some(raster_format) = format.raster() else {
         return Ok(svg_response(svg).into_response());
@@ -752,6 +752,7 @@ async fn ensure_bus_factor_svg(
         // keeps the row order (and therefore the SVG bytes) deterministic.
         let sql = format!(
             "SELECT COALESCE(NULLIF(github_login, ''), NULLIF(author_name, ''), author_email) AS label, \
+                    github_login, avatar_url, \
                     commits, \
                     SUM(commits) OVER ()::BIGINT AS total \
              FROM repo_author_stats \
@@ -771,6 +772,8 @@ async fn ensure_bus_factor_svg(
             .into_iter()
             .map(|r| AuthorShare {
                 label: r.try_get("label").unwrap_or_default(),
+                login: r.try_get::<Option<String>, _>("github_login").unwrap_or(None),
+                avatar_url: r.try_get::<Option<String>, _>("avatar_url").unwrap_or(None),
                 commits: r.try_get("commits").unwrap_or(0),
             })
             .collect();

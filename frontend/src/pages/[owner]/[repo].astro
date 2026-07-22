@@ -348,8 +348,8 @@ const stats = [
   },
   {
     name: "lines",
-    label: "Lines of code",
-    desc: "Per-language breakdown via tokei",
+    label: "Language activity",
+    desc: "Per-language code, comments, and files",
   },
   {
     name: "heatmap",
@@ -496,16 +496,18 @@ const vsLinks = (categoryRelated.length > 0 ? categoryRelated : FALLBACK_SUGGEST
           </header>
           <div class="grid gap-6 sm:grid-cols-2">
             {primaryStats.map((s) => (
-              <StatCard
-                client:load
-                src={`${apiBase}/api/repos/${owner}/${repo}/stats/${s.name}.svg`}
-                alt={`${s.label} for ${repoSlug}`}
-                caption={s.label}
-                apiBase={apiBase}
-                embedLink={canonical}
-                priority={true}
-                liveRepo={repoSlug}
-              />
+              <div class={s.name === "commit-trend" ? "sm:col-span-2" : ""}>
+                <StatCard
+                  client:load
+                  src={`${apiBase}/api/repos/${owner}/${repo}/stats/${s.name}.svg`}
+                  alt={`${s.label} for ${repoSlug}`}
+                  caption={s.label}
+                  apiBase={apiBase}
+                  embedLink={canonical}
+                  priority={true}
+                  liveRepo={repoSlug}
+                />
+              </div>
             ))}
           </div>
           <SecondarySignals

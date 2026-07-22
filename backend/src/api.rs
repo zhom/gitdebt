@@ -235,6 +235,10 @@ pub fn router(state: ApiState) -> Router {
             "/api/repos/{owner}/{repo}/progress",
             get(crate::progress::repo_progress),
         )
+        .route(
+            "/api/repos/{owner}/{repo}/progress.json",
+            get(crate::progress::repo_progress_snapshot),
+        )
         .layer(GovernorLayer::new(analyze_governor))
         .layer(public_cors.clone());
 
@@ -1021,14 +1025,17 @@ async fn ensure_user_chart_svg(
     let agg = build_user_aggregate(state, &login).await?;
     let series = export::filter_points(&agg.series, &spec);
     let pending = agg.repos_included == 0 || series.is_empty();
-    let svg = render_svg(
-        &series,
-        &ChartConfig {
-            repo: login,
-            ..ChartConfig::default()
-        },
+    let svg = crate::texture::decorate(
+        render_svg(
+            &series,
+            &ChartConfig {
+                repo: login,
+                ..ChartConfig::default()
+            },
+            theme,
+            &q.opts(),
+        ),
         theme,
-        &q.opts(),
     );
     if pending {
         // Aggregate still filling (or the window is empty): short TTL,
@@ -1562,20 +1569,23 @@ async fn ensure_chart_svg(
         // but serve it short-TTL and never pin it in the 24h svg cache, so a
         // first view can't lock "no data" at origin + CDN for a day.
         let empty = series.is_empty();
-        let svg = render_svg(
-            &series,
-            &ChartConfig {
-                repo: repo_full,
-                metric_label: if archive_activity {
-                    "public star actions"
-                } else {
-                    "stars"
-                }
-                .to_string(),
-                ..ChartConfig::default()
-            },
+        let svg = crate::texture::decorate(
+            render_svg(
+                &series,
+                &ChartConfig {
+                    repo: repo_full,
+                    metric_label: if archive_activity {
+                        "public star actions"
+                    } else {
+                        "stars"
+                    }
+                    .to_string(),
+                    ..ChartConfig::default()
+                },
+                theme,
+                &q.opts(),
+            ),
             theme,
-            &q.opts(),
         );
         if empty {
             return Err(RenderMiss::Pending(svg));
@@ -1748,7 +1758,10 @@ async fn ensure_multi_svg(
         // All repos cold (no cached history yet): short-TTL placeholder,
         // never pinned in the 24h cache.
         let empty = series_per_repo.iter().all(|(_, s)| s.is_empty());
-        let svg = render_multi_svg(&series_per_repo, &ChartConfig::default(), theme, &q.opts());
+        let svg = crate::texture::decorate(
+            render_multi_svg(&series_per_repo, &ChartConfig::default(), theme, &q.opts()),
+            theme,
+        );
         if empty {
             return Err(RenderMiss::Pending(svg));
         }
@@ -2040,16 +2053,19 @@ async fn ensure_usage_svg(
         // Cold repo (no cached star series yet): render the placeholder but
         // serve it short-TTL — never pin an empty overlay for 24h.
         let empty = stars.is_empty();
-        let svg = render_overlay_svg(
-            &stars,
-            &cum,
-            &ChartConfig::default(),
-            &OverlayConfig {
-                repo: bundle.repo_full,
-                downloads_label: label,
-            },
+        let svg = crate::texture::decorate(
+            render_overlay_svg(
+                &stars,
+                &cum,
+                &ChartConfig::default(),
+                &OverlayConfig {
+                    repo: bundle.repo_full,
+                    downloads_label: label,
+                },
+                theme,
+                &q.opts(),
+            ),
             theme,
-            &q.opts(),
         );
         if empty {
             return Err(RenderMiss::Pending(svg));

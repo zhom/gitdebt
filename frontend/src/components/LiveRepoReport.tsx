@@ -1,14 +1,28 @@
-import { useMemo, useState } from "react";
-import { AnimatePresence, motion, useReducedMotion } from "motion/react";
+import { useMemo } from "react";
 
 import { ChartViewer } from "@/components/ChartViewer";
 import { EarnedBadges } from "@/components/EarnedBadges";
 import { RepoHero } from "@/components/RepoHero";
 import { StatCard } from "@/components/StatCard";
 import { UsageSection } from "@/components/UsageSection";
-import { DURATION, EASE_OUT, REDUCED_MOTION_DURATION } from "@/lib/motion";
 
 const SLUG_RE = /^([A-Za-z0-9._-]+)\/([A-Za-z0-9._-]+)$/;
+const RESERVED_FIRST_SEGMENTS = new Set([
+  "_astro",
+  "404",
+  "about",
+  "api",
+  "badges",
+  "compare",
+  "leaderboard",
+  "privacy",
+  "profile",
+  "report",
+  "sitemaps",
+  "terms",
+  "u",
+  "vs",
+]);
 
 const PRIMARY_STATS = [
   ["bug-magnets", "Where fixes cluster"],
@@ -17,17 +31,20 @@ const PRIMARY_STATS = [
   ["commit-trend", "Maintenance pulse"],
 ] as const;
 
-const SECONDARY_STATS = [
+const SUPPORTING_STATS = [
   ["heatmap", "Commit activity"],
-  ["lines", "Language footprint"],
+  ["lines", "Language activity"],
   ["todo-trend", "TODO and FIXME trend"],
 ] as const;
 
 function selectedRepo(): { owner: string; repo: string } | null {
   if (typeof window === "undefined") return null;
-  const raw = new URLSearchParams(window.location.search).get("repo") ?? "";
+  const queryRepo = new URLSearchParams(window.location.search).get("repo");
+  const pathRepo = window.location.pathname.replace(/^\/+|\/+$/g, "");
+  const raw = queryRepo ?? pathRepo;
   const match = raw.trim().match(SLUG_RE);
-  if (!match) return null;
+  if (!match || RESERVED_FIRST_SEGMENTS.has(match[1].toLowerCase()))
+    return null;
   return { owner: match[1].toLowerCase(), repo: match[2].toLowerCase() };
 }
 
@@ -42,53 +59,20 @@ export function SecondarySignals({
   slug: string;
   embedLink: string;
 }) {
-  const [open, setOpen] = useState(false);
-  const reduceMotion = useReducedMotion();
-
   return (
-    <div className="border-y border-border">
-      <button
-        type="button"
-        aria-expanded={open}
-        onClick={() => setOpen((value) => !value)}
-        className="flex min-h-14 w-full items-center justify-between gap-4 px-5 py-3 text-left text-sm font-medium focus-visible:outline-2 focus-visible:-outline-offset-2 focus-visible:outline-ring"
-      >
-        Three more repository signals
-        <span
-          className={`font-mono text-lg text-muted-foreground transition-transform duration-150 motion-reduce:transition-none ${open ? "rotate-45" : ""}`}
-          aria-hidden="true"
-        >
-          +
-        </span>
-      </button>
-      <AnimatePresence initial={false}>
-        {open && (
-          <motion.div
-            initial={{ height: 0, opacity: 0 }}
-            animate={{ height: "auto", opacity: 1 }}
-            exit={{ height: 0, opacity: 0 }}
-            transition={{
-              duration: reduceMotion ? REDUCED_MOTION_DURATION : DURATION.enter,
-              ease: EASE_OUT,
-            }}
-            className="overflow-hidden border-t border-border"
-          >
-            <div className="grid gap-5 py-5 lg:grid-cols-2">
-              {SECONDARY_STATS.map(([name, label]) => (
-                <StatCard
-                  key={name}
-                  src={`${repoBase}/stats/${name}.svg`}
-                  alt={`${label} for ${slug}`}
-                  caption={label}
-                  apiBase={apiBase}
-                  embedLink={embedLink}
-                  liveRepo={slug}
-                />
-              ))}
-            </div>
-          </motion.div>
-        )}
-      </AnimatePresence>
+    <div className="grid gap-5 lg:grid-cols-2">
+      {SUPPORTING_STATS.map(([name, label]) => (
+        <div key={name} className={name === "lines" ? "lg:col-span-2" : ""}>
+          <StatCard
+            src={`${repoBase}/stats/${name}.svg`}
+            alt={`${label} for ${slug}`}
+            caption={label}
+            apiBase={apiBase}
+            embedLink={embedLink}
+            liveRepo={slug}
+          />
+        </div>
+      ))}
     </div>
   );
 }
@@ -156,16 +140,20 @@ export function LiveRepoReport({ apiBase }: { apiBase: string }) {
         </header>
         <div className="grid gap-5 lg:grid-cols-2">
           {PRIMARY_STATS.map(([name, label]) => (
-            <StatCard
+            <div
               key={name}
-              src={`${repoBase}/stats/${name}.svg`}
-              alt={`${label} for ${slug}`}
-              caption={label}
-              apiBase={apiBase}
-              embedLink={embedLink}
-              priority
-              liveRepo={slug}
-            />
+              className={name === "commit-trend" ? "lg:col-span-2" : ""}
+            >
+              <StatCard
+                src={`${repoBase}/stats/${name}.svg`}
+                alt={`${label} for ${slug}`}
+                caption={label}
+                apiBase={apiBase}
+                embedLink={embedLink}
+                priority
+                liveRepo={slug}
+              />
+            </div>
           ))}
         </div>
         <SecondarySignals

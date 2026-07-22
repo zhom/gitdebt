@@ -13,9 +13,7 @@ import { formatCountdown, useLiveCountdown } from "@/lib/live-eta";
 
 export type StarPoint = { date: string; stars: number };
 export type HistoryKind =
-  | "current_stargazers"
-  | "public_star_actions"
-  | "unavailable";
+  "current_stargazers" | "public_star_actions" | "unavailable";
 export type HistoryStatus = "ready" | "queued" | "retrying" | "not_public";
 
 export type AnalyzeResponse = {
@@ -81,6 +79,7 @@ type Props = {
 };
 
 const POLL_MS = 20_000;
+const PROGRESS_POLL_MS = 4_000;
 
 function needsPolling(data: AnalyzeResponse): boolean {
   if (data.not_found || data.history_status === "not_public") return false;
@@ -129,6 +128,7 @@ export function RepoHero({ owner, repo, apiBase, initialData }: Props) {
   useEffect(() => {
     let cancelled = false;
     let timer: ReturnType<typeof setTimeout> | null = null;
+    let progressTimer: ReturnType<typeof setTimeout> | null = null;
     let fetching = false;
 
     async function tick(schedule = true) {
@@ -136,11 +136,14 @@ export function RepoHero({ owner, repo, apiBase, initialData }: Props) {
       fetching = true;
       try {
         setLoading(true);
-        const res = await fetch(`${apiBase}/api/repos/${owner}/${repo}/analyze`, {
-          cache: "no-store",
-          credentials: "omit",
-          headers: { accept: "application/json" },
-        });
+        const res = await fetch(
+          `${apiBase}/api/repos/${owner}/${repo}/analyze`,
+          {
+            cache: "no-store",
+            credentials: "omit",
+            headers: { accept: "application/json" },
+          },
+        );
         if (!res.ok) throw new Error(`API ${res.status}`);
         const next = (await res.json()) as AnalyzeResponse;
         if (!cancelled) {
@@ -177,16 +180,46 @@ export function RepoHero({ owner, repo, apiBase, initialData }: Props) {
     }
 
     let events: EventSource | null = null;
+    function applyProgress(next: RepoProgress, isLive: boolean) {
+      if (cancelled) return;
+      setProgress(next);
+      setLiveProgress(isLive);
+      window.dispatchEvent(
+        new CustomEvent("gitdebt:repo-progress", { detail: next }),
+      );
+      void tick(false);
+    }
+
+    async function pollProgress() {
+      if (cancelled) return;
+      try {
+        const response = await fetch(
+          `${apiBase}/api/repos/${owner}/${repo}/progress.json`,
+          {
+            cache: "no-store",
+            credentials: "omit",
+            headers: { accept: "application/json" },
+          },
+        );
+        if (!response.ok) throw new Error(`progress ${response.status}`);
+        const next = (await response.json()) as RepoProgress;
+        applyProgress(next, false);
+        if (next.terminal) return;
+      } catch {
+        setLiveProgress(false);
+      }
+      progressTimer = setTimeout(pollProgress, PROGRESS_POLL_MS);
+    }
+
+    function startProgressPolling() {
+      if (progressTimer || cancelled) return;
+      void pollProgress();
+    }
+
     const handleProgress = (event: MessageEvent<string>) => {
       try {
         const next = JSON.parse(event.data) as RepoProgress;
-        if (cancelled) return;
-        setProgress(next);
-        setLiveProgress(true);
-        window.dispatchEvent(
-          new CustomEvent("gitdebt:repo-progress", { detail: next }),
-        );
-        void tick(false);
+        applyProgress(next, true);
         if (next.terminal) events?.close();
       } catch {
         // A malformed progress frame should not interrupt the polling fallback.
@@ -197,7 +230,6 @@ export function RepoHero({ owner, repo, apiBase, initialData }: Props) {
       if (cancelled) return;
       events = new EventSource(
         `${apiBase}/api/repos/${owner}/${repo}/progress`,
-        { withCredentials: true },
       );
       events.addEventListener("progress", handleProgress as EventListener);
       events.addEventListener("open", () => setLiveProgress(true));
@@ -205,11 +237,13 @@ export function RepoHero({ owner, repo, apiBase, initialData }: Props) {
         events.addEventListener(eventName, () => {
           setLiveProgress(false);
           events?.close();
+          startProgressPolling();
         });
       }
       events.addEventListener("error", () => {
         setLiveProgress(false);
         events?.close();
+        startProgressPolling();
       });
     }
 
@@ -217,13 +251,20 @@ export function RepoHero({ owner, repo, apiBase, initialData }: Props) {
       // Both analyzer reads are enqueue triggers. Wait for them before opening
       // the read-only stream so a cold repo cannot report idle and close before
       // its durable work rows exist.
-      void Promise.allSettled([tick(), enqueueAnalysis()]).then(connectProgress);
+      void Promise.allSettled([tick(), enqueueAnalysis()]).then(() => {
+        void pollProgress();
+        connectProgress();
+      });
     } else {
-      void enqueueAnalysis().finally(connectProgress);
+      void enqueueAnalysis().finally(() => {
+        void pollProgress();
+        connectProgress();
+      });
     }
     return () => {
       cancelled = true;
       if (timer) clearTimeout(timer);
+      if (progressTimer) clearTimeout(progressTimer);
       events?.close();
     };
   }, [owner, repo, apiBase, initialData]);
@@ -244,8 +285,8 @@ export function RepoHero({ owner, repo, apiBase, initialData }: Props) {
             Repository not public or not found
           </h1>
           <p className="max-w-[62ch] text-base text-pretty text-muted-foreground">
-            GitHub did not expose {slug} as a public repository. Check the
-            owner and repository name, or open it on GitHub if you have private
+            GitHub did not expose {slug} as a public repository. Check the owner
+            and repository name, or open it on GitHub if you have private
             access. gitdebt does not ingest private repository data.
           </p>
         </div>
@@ -256,7 +297,11 @@ export function RepoHero({ owner, repo, apiBase, initialData }: Props) {
           className="inline-flex min-h-11 items-center gap-2 rounded-md border border-border px-3 py-2 text-sm text-muted-foreground hover:bg-accent hover:text-foreground focus-visible:outline-2 focus-visible:outline-offset-2 focus-visible:outline-ring"
         >
           Check on GitHub
-          <ExternalLink className="size-3.5" strokeWidth={1.8} aria-hidden="true" />
+          <ExternalLink
+            className="size-3.5"
+            strokeWidth={1.8}
+            aria-hidden="true"
+          />
         </a>
       </section>
     );
@@ -277,7 +322,7 @@ export function RepoHero({ owner, repo, apiBase, initialData }: Props) {
     },
     {
       label: "Code analysis",
-      value: analysisLabel(progress?.analysis.phase),
+      value: analysisLabel(progress?.analysis),
     },
   ];
   const showProgress =
@@ -308,7 +353,11 @@ export function RepoHero({ owner, repo, apiBase, initialData }: Props) {
           className="inline-flex min-h-11 shrink-0 items-center gap-2 self-start rounded-md border border-border px-3 py-2 text-sm text-muted-foreground hover:bg-accent hover:text-foreground focus-visible:outline-2 focus-visible:outline-offset-2 focus-visible:outline-ring sm:self-auto"
         >
           Open on GitHub
-          <ExternalLink className="size-3.5" strokeWidth={1.8} aria-hidden="true" />
+          <ExternalLink
+            className="size-3.5"
+            strokeWidth={1.8}
+            aria-hidden="true"
+          />
         </a>
       </header>
 
@@ -337,9 +386,7 @@ export function RepoHero({ owner, repo, apiBase, initialData }: Props) {
         ))}
       </dl>
 
-      {data && archiveHistory && (
-        <HistoryProvenance data={data} slug={slug} />
-      )}
+      {data && archiveHistory && <HistoryProvenance data={data} slug={slug} />}
 
       {showProgress && (
         <div
@@ -464,8 +511,9 @@ function starPhaseFromAnalyze(data: AnalyzeResponse | null): ProgressPhase {
   return data.pending ? "fetching" : "pending";
 }
 
-function analysisLabel(phase: ProgressPhase | undefined): string {
-  switch (phase) {
+function analysisLabel(work: ProgressWork | undefined): string {
+  if (work?.complete) return "Ready";
+  switch (work?.phase) {
     case "complete":
       return "Ready";
     case "analyzing":
@@ -480,19 +528,13 @@ function analysisLabel(phase: ProgressPhase | undefined): string {
     case "restricted":
       return "Retrying";
     default:
-      return "Starting";
+      return "Checking";
   }
 }
 
-function ProgressStep({
-  label,
-  work,
-}: {
-  label: string;
-  work: ProgressWork;
-}) {
+function ProgressStep({ label, work }: { label: string; work: ProgressWork }) {
   const phase = work.phase;
-  const complete = phase === "complete";
+  const complete = work.complete || phase === "complete";
   const stopped = phase === "not_found";
   const reduceMotion = useReducedMotion();
   const remaining = useLiveCountdown(
@@ -505,31 +547,31 @@ function ProgressStep({
   return (
     <div className="min-w-0 rounded-lg border border-border p-3">
       <div className="flex items-center gap-3">
-      <span
-        className={`grid size-6 shrink-0 place-items-center rounded-full border text-xs ${
-          complete
-            ? "border-signal bg-signal text-signal-foreground"
-            : stopped
-              ? "border-border text-muted-foreground"
-              : "border-signal/40 bg-signal/10 text-signal"
-        }`}
-        aria-hidden="true"
-      >
-        {complete ? "✓" : "·"}
-      </span>
-      <div>
-        <p className="flex flex-wrap items-center gap-2 text-sm font-medium">
-          {label}
-          {work.priority === "interactive" && (
-            <span className="rounded-full bg-primary px-2 py-0.5 font-mono text-[10px] tracking-wide text-primary-foreground uppercase">
-              priority
-            </span>
-          )}
-        </p>
-        <p className="mt-0.5 text-xs leading-relaxed text-muted-foreground">
-          {detail}
-        </p>
-      </div>
+        <span
+          className={`grid size-6 shrink-0 place-items-center rounded-full border text-xs ${
+            complete
+              ? "border-signal bg-signal text-signal-foreground"
+              : stopped
+                ? "border-border text-muted-foreground"
+                : "border-signal/40 bg-signal/10 text-signal"
+          }`}
+          aria-hidden="true"
+        >
+          {complete ? "✓" : "·"}
+        </span>
+        <div>
+          <p className="flex flex-wrap items-center gap-2 text-sm font-medium">
+            {label}
+            {work.priority === "interactive" && (
+              <span className="rounded-full bg-primary px-2 py-0.5 font-mono text-[10px] tracking-wide text-primary-foreground uppercase">
+                priority
+              </span>
+            )}
+          </p>
+          <p className="mt-0.5 text-xs leading-relaxed text-muted-foreground">
+            {detail}
+          </p>
+        </div>
       </div>
       {percent !== undefined && !complete && !stopped && (
         <div
@@ -577,7 +619,10 @@ function progressDetail(
         : "";
     return `Waiting for BigQuery billing or quota.${retryLabel}`;
   }
-  const eta = remaining !== undefined ? ` · about ${formatCountdown(remaining)} left` : "";
+  const eta =
+    remaining !== undefined
+      ? ` · about ${formatCountdown(remaining)} left`
+      : "";
   if (work.detail === "cloning") return `Cloning the default branch${eta}`;
   if (work.detail === "scanning_history") {
     const units =
@@ -586,9 +631,15 @@ function progressDetail(
         : "Walking recent commit history";
     return `${units}${eta}`;
   }
-  if (work.detail === "saving_history") return `Saving repository signals${eta}`;
-  if (work.detail === "finishing") return `Counting languages and resolving top contributors${eta}`;
-  if (work.phase === "retrying" || work.phase === "failed" || work.phase === "restricted") {
+  if (work.detail === "saving_history")
+    return `Saving repository signals${eta}`;
+  if (work.detail === "finishing")
+    return `Counting languages and resolving top contributors${eta}`;
+  if (
+    work.phase === "retrying" ||
+    work.phase === "failed" ||
+    work.phase === "restricted"
+  ) {
     return `Retry scheduled${eta}`;
   }
   if (work.queue_position) {
@@ -596,12 +647,17 @@ function progressDetail(
       ? `About ${formatCountdown(remaining)} left · ${work.queue_position.toLocaleString()} ahead`
       : `${work.queue_position.toLocaleString()} reports ahead · measuring wait`;
   }
-  if (work.phase === "backfilling" && work.processed_units !== undefined && work.total_units) {
+  if (
+    work.phase === "backfilling" &&
+    work.processed_units !== undefined &&
+    work.total_units
+  ) {
     return `${work.processed_units} / ${work.total_units} archive months${eta}`;
   }
   if (work.phase === "analyzing") return `Walking recent commit history${eta}`;
-  if (remaining !== undefined) return `About ${formatCountdown(remaining)} left`;
-  return "Starting · measuring wait";
+  if (remaining !== undefined)
+    return `About ${formatCountdown(remaining)} left`;
+  return "Measuring work and wait";
 }
 
 function AnimatedNumber({

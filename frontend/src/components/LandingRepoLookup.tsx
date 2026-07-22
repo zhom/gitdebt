@@ -2,11 +2,7 @@ import { useRef, useState } from "react";
 import { AnimatePresence, motion, useReducedMotion } from "motion/react";
 import { ArrowRight } from "lucide-react";
 
-import {
-  DURATION,
-  EASE_OUT,
-  REDUCED_MOTION_DURATION,
-} from "@/lib/motion";
+import { DURATION, EASE_OUT, REDUCED_MOTION_DURATION } from "@/lib/motion";
 
 const EXAMPLES = ["facebook/react", "vercel/next.js", "zhom/donutbrowser"];
 const REPO_RE = /^([A-Za-z0-9._-]+)\/([A-Za-z0-9._-]+)$/;
@@ -23,8 +19,9 @@ export function LandingRepoLookup() {
       setError("Enter a repository as owner/repo.");
       return;
     }
-    const query = new URLSearchParams({ repo: `${match[1]}/${match[2]}` });
-    window.location.assign(`/report?${query.toString()}`);
+    window.location.assign(
+      `/${encodeURIComponent(match[1].toLowerCase())}/${encodeURIComponent(match[2].toLowerCase())}`,
+    );
   }
 
   function submit(event: React.SubmitEvent<HTMLFormElement>) {

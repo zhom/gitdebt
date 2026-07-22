@@ -163,7 +163,10 @@ pub fn downsample(series: &[Point], max_points: usize) -> Vec<Point> {
 // Single-repo renderer (may animate)
 
 pub fn render_svg(series: &[Point], cfg: &ChartConfig, theme: &Theme, opts: &ChartOpts) -> String {
-    render_single_svg(series, cfg, theme, opts, 1.0, opts.animate)
+    crate::texture::decorate(
+        render_single_svg(series, cfg, theme, opts, 1.0, opts.animate),
+        theme,
+    )
 }
 
 /// Render one static frame of the single-repo chart. Used by the GIF
@@ -176,7 +179,10 @@ pub(crate) fn render_svg_frame(
     opts: &ChartOpts,
     progress: f32,
 ) -> String {
-    render_single_svg(series, cfg, theme, opts, progress.clamp(0.0, 1.0), false)
+    crate::texture::decorate(
+        render_single_svg(series, cfg, theme, opts, progress.clamp(0.0, 1.0), false),
+        theme,
+    )
 }
 
 fn render_single_svg(
@@ -203,6 +209,10 @@ fn render_single_svg(
 
     let color = palette(theme)[0];
     let path = build_path(&xs, series, &x_at, &y_at);
+    let baseline = y_at(0.0);
+    let first_x = x_at(xs[0]);
+    let last_x = x_at(*xs.last().unwrap_or(&xs[0]));
+    let area = format!("{path} L {last_x:.1} {baseline:.1} L {first_x:.1} {baseline:.1} Z");
     let dash = approximate_path_length(&xs, series, &x_at, &y_at);
     let dash_offset = ((dash as f32) * (1.0 - progress)).round() as u32;
 
@@ -251,6 +261,7 @@ fn render_single_svg(
   <text class="title" x="{title_x}" y="{title_y}">{repo}</text>
   <text class="subtitle" x="{title_x}" y="{subtitle_y}">{subtitle}</text>
 {axis_lines}
+  <path d="{area}" fill="{pixel_fill}" opacity="0.62" />
   <path d="{path}" fill="none" stroke="{color}" stroke-width="2.5" stroke-linecap="round" stroke-linejoin="round" stroke-dasharray="{dash}" stroke-dashoffset="{dash_offset}">
 {motion}
   </path>
@@ -266,6 +277,8 @@ fn render_single_svg(
         title_y = geom.pad - 22.0,
         subtitle_y = geom.pad - 6.0,
         path = path,
+        area = area,
+        pixel_fill = crate::texture::FILL,
         dash = dash,
         color = color,
         dash_offset = dash_offset,
@@ -288,6 +301,18 @@ fn render_single_svg(
 /// would render blank in a README. Determinism holds: same input → same
 /// bytes.
 pub fn render_multi_svg(
+    series_per_repo: &[(String, Vec<Point>)],
+    cfg: &ChartConfig,
+    theme: &Theme,
+    opts: &ChartOpts,
+) -> String {
+    crate::texture::decorate(
+        render_multi_svg_inner(series_per_repo, cfg, theme, opts),
+        theme,
+    )
+}
+
+fn render_multi_svg_inner(
     series_per_repo: &[(String, Vec<Point>)],
     cfg: &ChartConfig,
     theme: &Theme,
@@ -346,7 +371,8 @@ pub fn render_multi_svg(
         let color = pal[i % pal.len()];
         let d = build_path(xs, series, &x_at, &y_at);
         paths.push_str(&format!(
-            "  <path d=\"{d}\" fill=\"none\" stroke=\"{color}\" stroke-width=\"2.5\" stroke-linecap=\"round\" stroke-linejoin=\"round\" />\n",
+            "  <path d=\"{d}\" fill=\"none\" stroke=\"{pixel_fill}\" stroke-width=\"8\" opacity=\"0.38\" stroke-linecap=\"square\" stroke-linejoin=\"miter\" />\n  <path d=\"{d}\" fill=\"none\" stroke=\"{color}\" stroke-width=\"2.5\" stroke-linecap=\"round\" stroke-linejoin=\"round\" />\n",
+            pixel_fill = crate::texture::FILL,
         ));
         // Legend swatch + label. Advance `lx` by an estimate of the label
         // width so entries don't overlap (deterministic: 6.5px/char).
@@ -433,6 +459,20 @@ pub struct OverlayConfig {
 /// stars-only chart plus a small "no package downloads found" note, so the
 /// endpoint always returns a usable image.
 pub fn render_overlay_svg(
+    stars: &[Point],
+    downloads: &[DownloadCumPoint],
+    cfg: &ChartConfig,
+    overlay: &OverlayConfig,
+    theme: &Theme,
+    opts: &ChartOpts,
+) -> String {
+    crate::texture::decorate(
+        render_overlay_svg_inner(stars, downloads, cfg, overlay, theme, opts),
+        theme,
+    )
+}
+
+fn render_overlay_svg_inner(
     stars: &[Point],
     downloads: &[DownloadCumPoint],
     cfg: &ChartConfig,
@@ -559,12 +599,14 @@ pub fn render_overlay_svg(
     // Lines.
     let star_path = build_path(&star_xs, stars, &x_at, &star_y_at);
     let mut paths = format!(
-        "  <path d=\"{star_path}\" fill=\"none\" stroke=\"{star_color}\" stroke-width=\"2.5\" stroke-linecap=\"round\" stroke-linejoin=\"round\" />\n",
+        "  <path d=\"{star_path}\" fill=\"none\" stroke=\"{pixel_fill}\" stroke-width=\"8\" opacity=\"0.38\" stroke-linecap=\"square\" />\n  <path d=\"{star_path}\" fill=\"none\" stroke=\"{star_color}\" stroke-width=\"2.5\" stroke-linecap=\"round\" stroke-linejoin=\"round\" />\n",
+        pixel_fill = crate::texture::FILL,
     );
     if has_downloads {
         let dl_path = build_download_path(&dl_xs, downloads, &x_at, &dl_y_at);
         paths.push_str(&format!(
-            "  <path d=\"{dl_path}\" fill=\"none\" stroke=\"{dl_color}\" stroke-width=\"2.5\" stroke-linecap=\"round\" stroke-linejoin=\"round\" stroke-dasharray=\"6 4\" />\n",
+            "  <path d=\"{dl_path}\" fill=\"none\" stroke=\"{pixel_fill}\" stroke-width=\"7\" opacity=\"0.3\" stroke-linecap=\"square\" />\n  <path d=\"{dl_path}\" fill=\"none\" stroke=\"{dl_color}\" stroke-width=\"2.5\" stroke-linecap=\"round\" stroke-linejoin=\"round\" stroke-dasharray=\"6 4\" />\n",
+            pixel_fill = crate::texture::FILL,
         ));
     }
 

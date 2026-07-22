@@ -21,7 +21,7 @@ const RESERVED_FIRST_SEGMENTS = new Set([
 const REPO_SEGMENT_RE = /^[A-Za-z0-9._-]+$/;
 
 /**
- * Return the live-report URL for a missing two-segment repository snapshot.
+ * Return the canonical repository URL for a valid two-segment slug.
  * Existing static files are served by Cloudflare Pages before its 404 page
  * runs this helper, so this is intentionally a client-side fallback.
  *
@@ -58,5 +58,5 @@ export function missingRepoReportTarget(pathname) {
   }
 
   const slug = `${owner.toLowerCase()}/${repo.toLowerCase()}`;
-  return `/report?repo=${encodeURIComponent(slug)}`;
+  return `/${slug}`;
 }

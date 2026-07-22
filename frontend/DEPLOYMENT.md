@@ -24,9 +24,9 @@ fallback instead lives in `404.html`:
 
 1. Pages serves a generated `owner/repo.html` when it exists.
 2. A missing path receives the custom, `noindex` 404 page.
-3. Its small route helper recognizes a valid, non-reserved two-segment GitHub
-   slug and uses `location.replace()` to open
-   `/report?repo=owner%2Frepo`.
+3. Its client shell recognizes a valid, non-reserved two-segment GitHub slug
+   and renders the uncatalogued repository report in place without changing
+   the address bar.
 4. Legal, product, sitemap, comparison, and malformed routes remain genuine
    404s and cannot enter a redirect loop.
 
@@ -46,7 +46,7 @@ The build asks the Rust API for its analyzed-repository catalog, then generates:
 - curated category and head-to-head comparison pages;
 - a same-origin sitemap containing only repo pages emitted by that build.
 
-`/report?repo=owner/repo` is the live, client-rendered entry point. It works as
+`/owner/repo` is the live, client-rendered entry point. It works as
 soon as someone searches for a repo, follows a missing snapshot URL, or opens a
 repo from the browser extension. After the backend finishes ingesting that
 repo, the next static refresh adds its crawlable snapshot.

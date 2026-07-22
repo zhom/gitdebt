@@ -12,6 +12,7 @@ use std::sync::{Mutex, OnceLock};
 use std::time::Duration;
 
 use axum::{
+    Json,
     extract::{ConnectInfo, Path, State},
     http::{HeaderMap, HeaderName, HeaderValue, header},
     response::{
@@ -629,6 +630,25 @@ pub async fn repo_progress(
         )
         .into_response();
     set_stream_headers(response.headers_mut());
+    Ok(response)
+}
+
+/// One bounded progress snapshot for clients that cannot keep an SSE
+/// connection open. This is read-only and shares the exact durable queue
+/// projection used by the stream.
+pub async fn repo_progress_snapshot(
+    State(state): State<ApiState>,
+    Path((owner, repo)): Path<(String, String)>,
+) -> Result<Response, ApiError> {
+    if !is_valid_slug(&owner) || !is_valid_slug(&repo) {
+        return Err(ApiError::bad_request("invalid owner/repo"));
+    }
+    let repo = crate::analyzer::repo_key(&owner, &repo);
+    let snapshot = load_snapshot_bounded(&state, &repo).await?;
+    let mut response = Json(snapshot).into_response();
+    response
+        .headers_mut()
+        .insert(header::CACHE_CONTROL, HeaderValue::from_static("no-store"));
     Ok(response)
 }
 

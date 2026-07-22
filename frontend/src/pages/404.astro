@@ -6,8 +6,7 @@ import BaseHead from "@/components/BaseHead.astro";
 import Seo from "@/components/Seo.astro";
 import SiteHeader from "@/components/SiteHeader.astro";
 import SiteFooter from "@/components/SiteFooter.astro";
-import { RepoLookup } from "@/components/RepoLookup";
-import { buttonVariants } from "@/components/ui/button";
+import { LiveRepoReport } from "@/components/LiveRepoReport";
 import { staticApiBase } from "@/lib/static-api-base";
 
 const apiBase = staticApiBase();
@@ -30,39 +29,18 @@ const ogImage = `${apiBase}/api/og.png`;
       noindex={true}
     />
     <meta name="gitdebt-route-fallback" content="missing-repo" />
-    <script>
-      import { missingRepoReportTarget } from "@/lib/static-routing.mjs";
-
-      const target = missingRepoReportTarget(window.location.pathname);
-      if (target) window.location.replace(target);
-    </script>
   </head>
   <body>
     <div class="isolate flex min-h-dvh flex-col">
       <SiteHeader />
 
-      <main id="main-content" class="mx-auto flex w-full max-w-3xl flex-1 flex-col items-center justify-center gap-8 px-6 py-24 text-center">
-        <p class="font-mono text-xs tracking-wide text-signal uppercase tabular-nums">
-          Error 404
-        </p>
-
-        <div class="space-y-4">
-          <h1 class="text-4xl font-semibold tracking-tight text-balance sm:text-5xl">
-            Repo or page not found
-          </h1>
-          <p class="mx-auto max-w-[48ch] text-lg text-pretty text-muted-foreground">
-            That URL didn't lead anywhere. Check the spelling, or look up
-            another repo's star history below.
-          </p>
-        </div>
-
-        <div class="w-full">
-          <RepoLookup client:load />
-        </div>
-
-        <a href="/" class={buttonVariants({ variant: "outline", size: "lg" })}>
-          Back to home
-        </a>
+      <main id="main-content" class="mx-auto w-full max-w-7xl flex-1 px-6 py-12 sm:py-16 lg:px-10">
+        <LiveRepoReport client:only="react" apiBase={apiBase} />
+        <noscript>
+          <div class="border-y border-border py-12 text-center">
+            JavaScript is required to open a repository that has not been included in the static catalog yet.
+          </div>
+        </noscript>
       </main>
 
       <SiteFooter />

@@ -610,6 +610,7 @@ mod tests {
             full_name: full_name.to_string(),
             stargazers_count: stars,
             fork: false,
+            private: false,
         }
     }
 

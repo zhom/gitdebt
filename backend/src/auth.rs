@@ -25,6 +25,7 @@ use url::Url;
 use crate::api::ApiState;
 use crate::crypto::Crypto;
 use crate::db::Db;
+use crate::repo_analysis;
 
 const GITHUB_AUTHORIZE_URL: &str = "https://github.com/login/oauth/authorize";
 const GITHUB_TOKEN_URL: &str = "https://github.com/login/oauth/access_token";
@@ -33,6 +34,7 @@ const SESSION_COOKIE: &str = "session";
 const CSRF_COOKIE: &str = "oauth_csrf";
 const RETURN_TO_COOKIE: &str = "oauth_return_to";
 const SESSION_TTL_DAYS: i64 = 30;
+const AUTHENTICATED_WARM_REPO_LIMIT: usize = 500;
 
 /// Configuration loaded from env. Optional — without these, the auth
 /// routes return 503 instead of crashing the server, so the app still
@@ -331,9 +333,9 @@ async fn login_callback(
         .refresh_token_expires_in
         .map(|s| now + Duration::seconds(s));
 
-    // Tokens go in encrypted. The DB sees only ciphertext. They are retained
-    // for explicitly user-scoped GitHub App features; shared star-history and
-    // repository-analysis workers deliberately never borrow user credentials.
+    // Tokens go in encrypted. The DB sees only ciphertext. Durable jobs retain
+    // only the user id and decrypt the credential just-in-time for that user's
+    // public-repository discovery and prioritized analysis.
     let access_enc = cfg
         .crypto
         .encrypt(&token.access_token)
@@ -376,6 +378,21 @@ async fn login_callback(
     .execute(&state.analyzer.cache.db().pool)
     .await?;
 
+    // Redirect immediately; authenticated discovery and durable queue writes
+    // continue in the background. The token is used only for this user's
+    // public owned/starred repo lists and their prioritized analysis jobs.
+    let warm_state = state.clone();
+    let warm_token = token.access_token.clone();
+    let warm_login = user.login.clone();
+    let warm_user_id = user.id;
+    tokio::spawn(async move {
+        if let Err(error) =
+            warm_authenticated_account(warm_state, warm_user_id, &warm_login, &warm_token).await
+        {
+            tracing::warn!(user_id = warm_user_id, %error, "authenticated account warm-up failed");
+        }
+    });
+
     let session_value = sign_session(
         &cfg.session_secret,
         user.id,
@@ -394,6 +411,88 @@ async fn login_callback(
         .remove(removal_cookie(RETURN_TO_COOKIE, cfg.cookie_secure))
         .add(session_cookie);
     Ok((jar, Redirect::to(&destination)))
+}
+
+async fn warm_authenticated_account(
+    state: ApiState,
+    user_id: i64,
+    login: &str,
+    token: &str,
+) -> Result<()> {
+    let github = state.analyzer.github.for_user_token(token)?;
+    let (owned, starred) = tokio::join!(
+        github.authenticated_public_repos(),
+        github.authenticated_starred_repos(),
+    );
+    let owned = owned.unwrap_or_else(|error| {
+        tracing::warn!(user_id, %error, "authenticated owned-repo discovery failed");
+        Vec::new()
+    });
+    let starred = starred.unwrap_or_else(|error| {
+        tracing::warn!(user_id, %error, "authenticated starred-repo discovery failed");
+        Vec::new()
+    });
+
+    let repos = authenticated_warm_slugs(owned.into_iter().chain(starred));
+    for repo in &repos {
+        if let Err(error) = crate::queue::enqueue(
+            state.analyzer.cache.db(),
+            repo,
+            repo_analysis::INTERACTIVE_PRIORITY,
+        )
+        .await
+        {
+            tracing::warn!(user_id, %repo, %error, "authenticated star warm-up enqueue failed");
+        }
+        if let Err(error) = repo_analysis::enqueue_prioritized(
+            state.analyzer.cache.db(),
+            repo,
+            repo_analysis::INTERACTIVE_PRIORITY,
+            Some(user_id),
+        )
+        .await
+        {
+            tracing::warn!(user_id, %repo, %error, "authenticated code warm-up enqueue failed");
+        }
+    }
+
+    // Refresh the owned-repository profile aggregate immediately using the
+    // same token-derived budget. The cached mapping remains repository-only;
+    // starred relationships are deliberately not stored.
+    let github = std::sync::Arc::new(github);
+    if let Err(error) =
+        crate::aggregate::build_for_user(&state.analyzer, login, user_id, github).await
+    {
+        tracing::warn!(user_id, %error, "authenticated profile warm-up failed");
+    }
+    Ok(())
+}
+
+fn authenticated_warm_slugs(
+    repos: impl IntoIterator<Item = crate::github::RepoListItem>,
+) -> Vec<String> {
+    let mut seen = std::collections::HashSet::new();
+    repos
+        .into_iter()
+        .filter_map(|repo| {
+            if repo.private {
+                return None;
+            }
+            let (owner, name) = repo.full_name.split_once('/')?;
+            if !crate::repo_endpoints::is_valid_slug(owner)
+                || !crate::repo_endpoints::is_valid_slug(name)
+            {
+                return None;
+            }
+            let slug = format!(
+                "{}/{}",
+                owner.to_ascii_lowercase(),
+                name.to_ascii_lowercase()
+            );
+            seen.insert(slug.clone()).then_some(slug)
+        })
+        .take(AUTHENTICATED_WARM_REPO_LIMIT)
+        .collect()
 }
 
 async fn logout(State(state): State<ApiState>, jar: CookieJar) -> (CookieJar, Redirect) {
@@ -592,6 +691,37 @@ mod tests {
         assert_eq!(safe_return_to(Some("https://evil.example")), "/");
         assert_eq!(safe_return_to(Some("//evil.example/path")), "/");
         assert_eq!(safe_return_to(Some("/safe#https://evil.example")), "/");
+    }
+
+    #[test]
+    fn authenticated_warm_list_is_public_slug_only_and_deduplicated() {
+        let repos = [
+            crate::github::RepoListItem {
+                full_name: "Owner/Repo".into(),
+                stargazers_count: 1,
+                fork: false,
+                private: false,
+            },
+            crate::github::RepoListItem {
+                full_name: "owner/repo".into(),
+                stargazers_count: 1,
+                fork: false,
+                private: false,
+            },
+            crate::github::RepoListItem {
+                full_name: "../not-a-slug".into(),
+                stargazers_count: 1,
+                fork: false,
+                private: false,
+            },
+            crate::github::RepoListItem {
+                full_name: "owner/private-repo".into(),
+                stargazers_count: 1,
+                fork: false,
+                private: true,
+            },
+        ];
+        assert_eq!(authenticated_warm_slugs(repos), vec!["owner/repo"]);
     }
 
     #[tokio::test]

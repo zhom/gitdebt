@@ -367,6 +367,54 @@ impl GithubClient {
         }
         Ok(Some(out))
     }
+
+    /// Public repositories owned by the authenticated user. The explicit
+    /// visibility filter prevents a broader OAuth grant from ever feeding a
+    /// private slug into gitdebt's public analysis queues.
+    pub async fn authenticated_public_repos(&self) -> Result<Vec<RepoListItem>, GithubError> {
+        self.authenticated_repo_list(&format!(
+            "{API_BASE}/user/repos?per_page=100&visibility=public&affiliation=owner&sort=pushed"
+        ))
+        .await
+    }
+
+    /// Public repositories starred by the authenticated user. This list is
+    /// used only as an ephemeral warm-up hint; the user↔repo relationship is
+    /// never persisted.
+    pub async fn authenticated_starred_repos(&self) -> Result<Vec<RepoListItem>, GithubError> {
+        self.authenticated_repo_list(&format!("{API_BASE}/user/starred?per_page=100"))
+            .await
+    }
+
+    async fn authenticated_repo_list(
+        &self,
+        initial_url: &str,
+    ) -> Result<Vec<RepoListItem>, GithubError> {
+        let mut url = initial_url.to_string();
+        let mut out = Vec::new();
+        let mut pages = 0usize;
+        loop {
+            let resp = self.send(&url, None).await?;
+            match resp.status().as_u16() {
+                200 => {}
+                403 | 429 => return Err(GithubError::RateLimited(None)),
+                status => {
+                    return Err(GithubError::Api {
+                        status,
+                        body: resp.text().await.unwrap_or_default(),
+                    });
+                }
+            }
+            let next = next_link(&resp);
+            out.extend(resp.json::<Vec<RepoListItem>>().await?);
+            pages += 1;
+            match next {
+                Some(next) if pages < REPO_LIST_MAX_PAGES => url = next,
+                _ => break,
+            }
+        }
+        Ok(out)
+    }
 }
 
 /// Page cap for [`GithubClient::user_repos`] — see its docs. 10 pages ×
@@ -505,6 +553,8 @@ pub struct RepoListItem {
     pub stargazers_count: i64,
     #[serde(default)]
     pub fork: bool,
+    #[serde(default)]
+    pub private: bool,
 }
 
 #[derive(Debug, Clone, Deserialize)]

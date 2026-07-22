@@ -12,7 +12,7 @@ use chrono::{DateTime, NaiveDate, Utc};
 use serde::Serialize;
 use tokio::process::Command;
 
-const DEFAULT_ANALYSIS_COMMIT_LIMIT: usize = 20_000;
+const DEFAULT_ANALYSIS_COMMIT_LIMIT: usize = 10_000;
 const MIN_ANALYSIS_COMMIT_LIMIT: usize = 5_000;
 const HARD_ANALYSIS_COMMIT_LIMIT: usize = 50_000;
 /// Patch bodies are substantially more expensive than commit metadata because

@@ -573,10 +573,16 @@ fn render_languages_inner(repo: &str, rows: &[LanguageBar], theme: &Theme) -> St
     let n = rows.len() as u32;
     let height = header_h + n * row_h + footer_h;
 
-    let totals: Vec<i64> = rows
+    let line_totals: Vec<i64> = rows
         .iter()
         .map(|r| r.lines_code + r.lines_blank + r.lines_comment)
         .collect();
+    let file_census = line_totals.iter().all(|total| *total == 0);
+    let totals: Vec<i64> = if file_census {
+        rows.iter().map(|row| row.files).collect()
+    } else {
+        line_totals.clone()
+    };
     let max_total = totals.iter().copied().max().unwrap_or(1).max(1);
     let label_w = 220.0_f32;
     let meta_col_w = 200.0_f32;
@@ -595,12 +601,28 @@ fn render_languages_inner(repo: &str, rows: &[LanguageBar], theme: &Theme) -> St
         let count_text = humanize(total);
         let (count_x, count_anchor, count_color) =
             count_placement(label_w, bar_w, &count_text, color, theme.muted);
-        let meta_text = format!(
-            "{} file{} · {} code",
-            row.files,
-            if row.files == 1 { "" } else { "s" },
-            humanize(row.lines_code),
-        );
+        let meta_text = if file_census {
+            format!(
+                "{} file{}",
+                row.files,
+                if row.files == 1 { "" } else { "s" }
+            )
+        } else {
+            format!(
+                "{} file{} · {} code",
+                row.files,
+                if row.files == 1 { "" } else { "s" },
+                humanize(row.lines_code),
+            )
+        };
+        let title = if file_census {
+            format!("{} files in current HEAD", row.files)
+        } else {
+            format!(
+                "{total} total · {} code · {} comments · {} blank",
+                row.lines_code, row.lines_comment, row.lines_blank
+            )
+        };
         bars.push_str(&format!(
             r##"<g transform="translate({padding}, {y:.1})" opacity="1">
   <animate class="motion" attributeName="opacity" from="0" to="1" dur="0.2s" begin="{begin:.2}s" fill="freeze" />
@@ -610,7 +632,7 @@ fn render_languages_inner(repo: &str, rows: &[LanguageBar], theme: &Theme) -> St
   <rect x="{label_w}" y="0" width="{bar_w:.1}" height="{bar_h}" rx="3" fill="{color}" opacity="0.28" />
   <rect x="{label_w}" y="0" width="{bar_w:.1}" height="{bar_h}" rx="3" fill="url(#gd-pixel-fill)" stroke="{color}" stroke-width="1" />
   <text class="bar-count" x="{count_x:.1}" y="{label_y:.1}" text-anchor="{count_anchor}" fill="{count_color}">
-    <title>{lines} total · {code} code · {comments} comments · {blanks} blank</title>
+    <title>{title}</title>
     {count_text}
   </text>
   <text class="bar-meta" x="{meta_x:.1}" y="{label_y:.1}">
@@ -629,10 +651,7 @@ fn render_languages_inner(repo: &str, rows: &[LanguageBar], theme: &Theme) -> St
             bar_max_w = bar_max_w,
             bar_h = bar_h,
             bar_w = bar_w,
-            lines = total,
-            code = row.lines_code,
-            comments = row.lines_comment,
-            blanks = row.lines_blank,
+            title = escape_xml(&title),
             count_x = count_x,
             count_anchor = count_anchor,
             count_color = count_color,
@@ -644,8 +663,30 @@ fn render_languages_inner(repo: &str, rows: &[LanguageBar], theme: &Theme) -> St
 
     let footer_y = (height - 12) as f32;
     let right_edge_x = (label_w + bar_max_w + meta_col_w) + padding as f32 - 4.0;
+    let subtitle = if file_census {
+        format!(
+            "{} · {} files in {} languages · current HEAD tree",
+            repo,
+            humanize(total_files),
+            rows.len()
+        )
+    } else {
+        format!(
+            "{} · {} lines · {} code · {} files in {} languages",
+            repo,
+            humanize(total_total),
+            humanize(total_code),
+            total_files,
+            rows.len()
+        )
+    };
+    let aria = if file_census {
+        format!("Language file activity in {repo}")
+    } else {
+        format!("Lines of code in {repo}")
+    };
     format!(
-        r##"<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 {width} {height}" role="img" aria-label="Lines of code in {repo}">
+        r##"<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 {width} {height}" role="img" aria-label="{aria}">
   <style><![CDATA[
     .title {{ fill: {fg}; font: 600 18px ui-sans-serif, system-ui, sans-serif; }}
     .subtitle {{ fill: {muted}; font: 13px ui-sans-serif, system-ui, sans-serif; }}
@@ -660,22 +701,19 @@ fn render_languages_inner(repo: &str, rows: &[LanguageBar], theme: &Theme) -> St
     }}
   ]]></style>
   <text class="title" x="{padding}" y="36">Language activity</text>
-  <text class="subtitle" x="{padding}" y="58">{repo} · {total} lines · {code} code · {files} files in {n} languages</text>
+  <text class="subtitle" x="{padding}" y="58">{subtitle}</text>
 {bars}
 {footer}
 </svg>"##,
         width = width,
         height = height,
-        repo = escape_xml(repo),
+        aria = escape_xml(&aria),
         fg = theme.fg,
         muted = theme.muted,
         track = theme.track,
         padding = padding,
         bars = bars,
-        total = humanize(total_total),
-        code = humanize(total_code),
-        files = total_files,
-        n = rows.len(),
+        subtitle = escape_xml(&subtitle),
         footer = brand::footer_lockup(right_edge_x, footer_y, theme),
     )
 }
@@ -1804,6 +1842,21 @@ mod tests {
         let svg = render_languages("foo/bar", &rows, &theme::DARK);
         assert!(svg.contains(r##"fill="#8b8b8b""##));
         assert!(svg.contains(".bar-label { fill: #fafafa;"));
+    }
+
+    #[test]
+    fn languages_labels_tree_census_as_files_not_lines() {
+        let rows = vec![LanguageBar {
+            language: "C".into(),
+            files: 42_000,
+            lines_code: 0,
+            lines_blank: 0,
+            lines_comment: 0,
+        }];
+        let svg = render_languages("torvalds/linux", &rows, &theme::LIGHT);
+        assert!(svg.contains("42.0k files in 1 languages · current HEAD tree"));
+        assert!(svg.contains("42000 files in current HEAD"));
+        assert!(!svg.contains("42.0k lines"));
     }
 
     #[test]

@@ -634,9 +634,41 @@ async fn update_work_progress(
 }
 
 async fn run_line_counts(db: &Db, handle: &RepoHandle, repo: &str) -> Result<()> {
-    let counts = code_count::count_lines(&handle.path).await?;
-    code_count::save(db, repo, &counts).await?;
-    tracing::info!(repo, languages = counts.len(), "line counts updated");
+    let (file_census, tree_files) = code_count::language_file_census(&handle.path).await?;
+    if tree_files > code_count::exact_line_count_max_files() {
+        code_count::save(db, repo, &file_census).await?;
+        tracing::info!(
+            repo,
+            tree_files,
+            languages = file_census.len(),
+            "large repository language file census updated"
+        );
+        return Ok(());
+    }
+
+    match tokio::time::timeout(
+        code_count::exact_line_count_timeout(),
+        code_count::count_lines(&handle.path),
+    )
+    .await
+    {
+        Ok(Ok(counts)) => {
+            code_count::save(db, repo, &counts).await?;
+            tracing::info!(repo, languages = counts.len(), "line counts updated");
+        }
+        Ok(Err(error)) => {
+            tracing::warn!(repo, %error, "exact line count failed; using file census");
+            code_count::save(db, repo, &file_census).await?;
+        }
+        Err(_) => {
+            tracing::warn!(
+                repo,
+                tree_files,
+                "exact line count timed out; using file census"
+            );
+            code_count::save(db, repo, &file_census).await?;
+        }
+    }
     Ok(())
 }
 

@@ -129,6 +129,35 @@ test("rejects noindex URLs listed in the sitemap", () => {
   );
 });
 
+test("rejects indexable pages omitted from the sitemap", () => {
+  const directory = fixture();
+  write(
+    directory,
+    "index.html",
+    page({
+      route: "/",
+      title: "Home",
+      description: "GitHub repository analytics",
+    }),
+  );
+  write(
+    directory,
+    "repo/index.html",
+    page({
+      route: "/repo",
+      title: "Repository",
+      description: "Repository analytics and star history",
+    }),
+  );
+  sitemaps(directory, ["/"]);
+
+  const result = auditSeo({ distDir: directory, site: SITE });
+  assert.ok(
+    result.errors.includes("Indexable pages outside the sitemap: /repo"),
+    result.errors.join("\n"),
+  );
+});
+
 test("prunes noindex URLs before running the strict audit", () => {
   const directory = fixture();
   write(

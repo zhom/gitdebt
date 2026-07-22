@@ -197,11 +197,16 @@ export function InteractiveRepoSignals(props: Props) {
           <SignalHeader apiBase={apiBase} slug={slug} embedLink={embedLink} name="lines" label="Language activity" />
           <div className="space-y-4 px-5 py-5">
             {stats.languages.map((language) => {
-              const total = language.code + language.blank + language.comment;
-              const max = Math.max(1, ...stats.languages.map((row) => row.code + row.blank + row.comment));
+              const lines = language.code + language.blank + language.comment;
+              const total = lines > 0 ? lines : language.files;
+              const max = Math.max(1, ...stats.languages.map((row) => {
+                const rowLines = row.code + row.blank + row.comment;
+                return rowLines > 0 ? rowLines : row.files;
+              }));
+              const unit = lines > 0 ? "lines" : language.files === 1 ? "file" : "files";
               return (
-                <div key={language.language} title={`${language.files} files · ${total.toLocaleString()} lines`}>
-                  <div className="flex items-center justify-between gap-4 font-mono text-xs"><span>{language.language}</span><span className="text-muted-foreground">{compact(total)} lines</span></div>
+                <div key={language.language} title={`${language.files.toLocaleString()} files${lines > 0 ? ` · ${lines.toLocaleString()} lines` : ""}`}>
+                  <div className="flex items-center justify-between gap-4 font-mono text-xs"><span>{language.language}</span><span className="text-muted-foreground">{compact(total)} {unit}</span></div>
                   <div className="mt-1.5 h-2 bg-muted"><motion.div initial={false} animate={{ scaleX: total / max }} transition={reducedMotion ? { duration: 0 } : SPRING.snappy} className="signal-dither-fill h-full origin-left bg-foreground" /></div>
                 </div>
               );

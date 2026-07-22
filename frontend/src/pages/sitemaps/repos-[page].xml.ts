@@ -1,13 +1,17 @@
 import type { APIRoute } from "astro";
 import {
-  loadTrackedCatalog,
+  loadBuildCatalog,
   type CatalogRepo,
 } from "@/lib/build-catalog";
 
 const PER = 5_000;
 
 export async function getStaticPaths() {
-  const repos = await loadTrackedCatalog();
+  // Start from the exact same catalog that emits repository pages. The
+  // post-build SEO pass removes rendered noindex entries, leaving a sitemap
+  // that exactly matches the indexable files instead of omitting curated
+  // repositories that became complete during the build.
+  const repos = await loadBuildCatalog();
   const paths = [];
   for (let page = 0; page * PER < repos.length; page += 1) {
     paths.push({

@@ -494,8 +494,10 @@ export function auditSeo({
     (page) => !sitemapRoutes.has(normalizePathname(page.route)),
   );
   if (indexableOutsideSitemap.length > 0) {
-    warnings.push(
-      `${indexableOutsideSitemap.length} indexable pages are outside the sitemap`,
+    errors.push(
+      `Indexable pages outside the sitemap: ${indexableOutsideSitemap
+        .map((page) => page.route)
+        .join(", ")}`,
     );
   }
 

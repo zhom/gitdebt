@@ -174,6 +174,9 @@ GH_ARCHIVE_CONCURRENCY=1
 GH_ARCHIVE_HOURLY_LAG_MINUTES=15
 GH_ARCHIVE_HOURLY_MAX_HOURS=24
 REPO_ANALYSIS_WORKERS=1
+REPO_ANALYSIS_COMMIT_LIMIT=10000
+REPO_LINE_COUNT_MAX_FILES=20000
+REPO_LINE_COUNT_TIMEOUT_SECONDS=20
 METRICS_TOKEN=<random high-entropy bearer token>
 ```
 
@@ -245,9 +248,10 @@ to continue immediately after that free quota is exhausted.
 
 `WORKER_COUNT=8` is safe in archive mode: it controls concurrent GitHub
 metadata resolution, not BigQuery scans. `GH_ARCHIVE_CONCURRENCY` should stay
-at `1` initially. Repository analysis is intentionally capped at two workers
+at `1` initially. Repository analysis is intentionally capped at four workers
 per process even if `REPO_ANALYSIS_WORKERS` is set higher: clone and git-log
-subprocesses are disk-, process-, and thread-heavy. Start at `1`.
+subprocesses are disk-, process-, and thread-heavy. Start at `1`; use `4` only
+when the service has at least four CPUs and a persistent clone volume.
 `GITHUB_MAX_IN_FLIGHT_REQUESTS` defaults to `64` and is hard-capped below
 GitHub's 100-concurrent-request guidance.
 

@@ -526,8 +526,11 @@ pub async fn record_analysis_details(
 /// Run after every analysis (cheap when nothing's near full).
 pub async fn evict_to_quota(db: &Db, storage: &RepoStorage) -> Result<u64> {
     let target = storage.quota_bytes * (storage.high_watermark_pct as u64) / 100;
+    // PostgreSQL promotes SUM(bigint) to NUMERIC. Cast the bounded aggregate
+    // back to BIGINT so sqlx does not try to decode NUMERIC into i64 during
+    // the periodic production eviction pass.
     let used: i64 =
-        sqlx::query_scalar("SELECT COALESCE(SUM(clone_size_bytes), 0) FROM repo_history")
+        sqlx::query_scalar("SELECT COALESCE(SUM(clone_size_bytes), 0)::BIGINT FROM repo_history")
             .fetch_one(&db.pool)
             .await?;
     let mut used = used as u64;

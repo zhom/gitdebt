@@ -1,5 +1,5 @@
 import type { APIRoute } from "astro";
-import { loadTrackedCatalog } from "@/lib/build-catalog";
+import { loadBuildCatalog } from "@/lib/build-catalog";
 
 const PER = 5_000;
 
@@ -11,7 +11,7 @@ function resolveSite(astroSite: URL | undefined): string {
 
 export const GET: APIRoute = async ({ site }) => {
   const SITE = resolveSite(site);
-  const total = (await loadTrackedCatalog()).length;
+  const total = (await loadBuildCatalog()).length;
 
   const chunkCount = Math.ceil(total / PER);
   const entries: string[] = [];

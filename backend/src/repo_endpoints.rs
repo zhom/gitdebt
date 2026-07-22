@@ -319,8 +319,9 @@ async fn repo_stats_json(
     let languages: Vec<(String, i64, i64, i64, i64)> = sqlx::query_as(
         "SELECT language, files, lines_code, lines_blank, lines_comment \
          FROM repo_lines WHERE repo = $1 \
-         AND (lines_code + lines_blank + lines_comment) > 0 \
-         ORDER BY (lines_code + lines_blank + lines_comment) DESC LIMIT 12",
+         AND ((lines_code + lines_blank + lines_comment) > 0 OR files > 0) \
+         ORDER BY CASE WHEN (lines_code + lines_blank + lines_comment) > 0 \
+                  THEN (lines_code + lines_blank + lines_comment) ELSE files END DESC LIMIT 12",
     )
     .bind(&full)
     .fetch_all(pool)
@@ -957,8 +958,9 @@ async fn ensure_lines_svg(
         let rows = sqlx::query(
             "SELECT language, files, lines_code, lines_blank, lines_comment \
              FROM repo_lines \
-             WHERE repo = $1 AND (lines_code + lines_blank + lines_comment) > 0 \
-             ORDER BY (lines_code + lines_blank + lines_comment) DESC LIMIT 12",
+             WHERE repo = $1 AND ((lines_code + lines_blank + lines_comment) > 0 OR files > 0) \
+             ORDER BY CASE WHEN (lines_code + lines_blank + lines_comment) > 0 \
+                      THEN (lines_code + lines_blank + lines_comment) ELSE files END DESC LIMIT 12",
         )
         .bind(full)
         .fetch_all(&state.analyzer.cache.db().pool)

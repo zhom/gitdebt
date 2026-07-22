@@ -23,7 +23,7 @@ use gitdebt::{
     cache::{ArchiveStarEvent, Cache},
     db::Db,
     queue, repo_analysis,
-    repo_history::CommitInfo,
+    repo_history::{CommitInfo, RepoStorage},
     repo_stats,
 };
 use sqlx::postgres::PgPoolOptions;
@@ -880,6 +880,35 @@ async fn record_view_bumps_count_and_priority() {
     cache.record_repo_view(&full).await.unwrap();
     cache.record_repo_view(&full).await.unwrap();
     assert_eq!(cache.get_repo_view_count(&full).await.unwrap(), 2);
+
+    cleanup(&db, prefix).await;
+}
+
+#[tokio::test]
+async fn clone_quota_sum_decodes_as_bigint() {
+    let Some(db) = test_db().await else {
+        eprintln!("skipping: set GITDEBT_TEST_DATABASE_URL to run");
+        return;
+    };
+    let prefix = "gitdebt-test-quota/";
+    cleanup(&db, prefix).await;
+
+    let clone_root = tempfile::tempdir().expect("temp clone root");
+    let repo = format!("{prefix}repo");
+    repo_stats::record_clone(&db, &repo, clone_root.path(), 4096)
+        .await
+        .expect("record clone bytes");
+    let storage = RepoStorage {
+        root: clone_root.path().to_path_buf(),
+        quota_bytes: 1024 * 1024 * 1024 * 1024,
+        high_watermark_pct: 80,
+    };
+    assert_eq!(
+        repo_stats::evict_to_quota(&db, &storage)
+            .await
+            .expect("SUM(bigint) must decode after its explicit cast"),
+        0
+    );
 
     cleanup(&db, prefix).await;
 }

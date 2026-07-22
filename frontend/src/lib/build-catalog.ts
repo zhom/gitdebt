@@ -92,10 +92,6 @@ export function loadBuildCatalog(): Promise<CatalogRepo[]> {
   return catalogPromise;
 }
 
-export async function loadTrackedCatalog(): Promise<CatalogRepo[]> {
-  return (await loadBuildCatalog()).filter((repo) => repo.updatedAt !== null);
-}
-
 export async function staticRepoPaths() {
   const repos = await loadBuildCatalog();
   return repos.map(({ slug, updatedAt }) => {

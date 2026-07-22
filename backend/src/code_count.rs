@@ -22,6 +22,7 @@
 
 use std::path::Path;
 use std::process::Stdio;
+use std::{collections::HashMap, time::Duration};
 
 use anyhow::{Context, Result, bail};
 use chrono::Utc;
@@ -41,6 +42,13 @@ const MAX_FILE_BYTES: u64 = 2 * 1024 * 1024;
 /// byte and skip the file if found — text files in any encoding we
 /// support don't contain NULs.
 const BINARY_SNIFF_BYTES: usize = 8 * 1024;
+
+/// Avoid hydrating the complete HEAD of very large blobless clones. The tree
+/// still gives us an exact, current language/file census without downloading
+/// gigabytes of blobs; the UI and embed renderer explicitly label that
+/// fallback in files rather than pretending it is a line count.
+const DEFAULT_EXACT_LINE_COUNT_MAX_FILES: usize = 20_000;
+const DEFAULT_EXACT_LINE_COUNT_TIMEOUT_SECS: u64 = 20;
 
 #[derive(Debug, Clone)]
 pub struct LanguageCount {
@@ -65,6 +73,81 @@ pub async fn count_lines(repo_path: &Path) -> Result<Vec<LanguageCount>> {
     Ok(counts)
 }
 
+/// Return exact language file counts from the committed HEAD tree without
+/// materializing blobs. The second value is the total number of files in the
+/// tree, including file types that gitdebt does not classify.
+pub async fn language_file_census(repo_path: &Path) -> Result<(Vec<LanguageCount>, usize)> {
+    let output = Command::new("git")
+        .arg("-C")
+        .arg(repo_path)
+        .args(["ls-tree", "-rz", "--name-only", "HEAD"])
+        .kill_on_drop(true)
+        .output()
+        .await
+        .context("git ls-tree")?;
+    if !output.status.success() {
+        bail!("git ls-tree exited {}", output.status);
+    }
+
+    Ok(language_file_census_from_paths(&output.stdout))
+}
+
+fn language_file_census_from_paths(paths: &[u8]) -> (Vec<LanguageCount>, usize) {
+    let mut total_files = 0usize;
+    let mut files_by_language: HashMap<&'static str, i64> = HashMap::new();
+    for raw_path in paths.split(|byte| *byte == 0) {
+        if raw_path.is_empty() {
+            continue;
+        }
+        total_files = total_files.saturating_add(1);
+        let Ok(path) = std::str::from_utf8(raw_path) else {
+            continue;
+        };
+        let path = Path::new(path);
+        if path
+            .components()
+            .any(|component| component.as_os_str().to_str().is_some_and(is_ignored_dir))
+        {
+            continue;
+        }
+        let Some(hit) = detect_language(path) else {
+            continue;
+        };
+        *files_by_language.entry(hit.name).or_default() += 1;
+    }
+
+    let mut counts: Vec<LanguageCount> = files_by_language
+        .into_iter()
+        .map(|(language, files)| LanguageCount {
+            language: language.to_string(),
+            files,
+            lines_code: 0,
+            lines_blank: 0,
+            lines_comment: 0,
+        })
+        .collect();
+    counts.sort_by_key(|row| std::cmp::Reverse(row.files));
+    (counts, total_files)
+}
+
+pub fn exact_line_count_max_files() -> usize {
+    std::env::var("REPO_LINE_COUNT_MAX_FILES")
+        .ok()
+        .and_then(|value| value.parse().ok())
+        .filter(|value| *value > 0)
+        .unwrap_or(DEFAULT_EXACT_LINE_COUNT_MAX_FILES)
+}
+
+pub fn exact_line_count_timeout() -> Duration {
+    Duration::from_secs(
+        std::env::var("REPO_LINE_COUNT_TIMEOUT_SECONDS")
+            .ok()
+            .and_then(|value| value.parse().ok())
+            .filter(|value| *value > 0)
+            .unwrap_or(DEFAULT_EXACT_LINE_COUNT_TIMEOUT_SECS),
+    )
+}
+
 /// Materialize HEAD into a tempdir as `git archive HEAD > tar; tar -xf tar`.
 /// Two-step (write tar, extract tar) instead of a piped one-shot — keeps
 /// us off tokio's pipe-stdio dance and the intermediate `.tar` is
@@ -83,6 +166,7 @@ async fn extract_head(repo_path: &Path) -> Result<TempDir> {
         .args(["archive", "--format=tar", "HEAD"])
         .stdout(archive_out)
         .stderr(Stdio::piped())
+        .kill_on_drop(true)
         .status()
         .await
         .context("git archive")?;
@@ -97,6 +181,7 @@ async fn extract_head(repo_path: &Path) -> Result<TempDir> {
         .arg(tmp.path())
         .stdout(Stdio::null())
         .stderr(Stdio::piped())
+        .kill_on_drop(true)
         .status()
         .await
         .context("tar -xf")?;
@@ -662,5 +747,21 @@ mod tests {
         let src = "\r\n\r\nfoo\n";
         let (b, c, code) = count_lines_in_text(rust(), src);
         assert_eq!((b, c, code), (2, 0, 1));
+    }
+
+    #[test]
+    fn language_file_census_is_exact_and_ignores_unknown_types() {
+        let (rows, total_files) = language_file_census_from_paths(
+            b"src/main.rs\0src/lib.rs\0web/app.ts\0assets/logo.bin\0Makefile\0node_modules/vendor.js\0",
+        );
+        assert_eq!(total_files, 6);
+        assert_eq!(rows.iter().map(|row| row.files).sum::<i64>(), 4);
+        assert_eq!(rows[0].language, "Rust");
+        assert_eq!(rows[0].files, 2);
+        assert!(
+            rows.iter().all(|row| {
+                row.lines_code == 0 && row.lines_blank == 0 && row.lines_comment == 0
+            })
+        );
     }
 }

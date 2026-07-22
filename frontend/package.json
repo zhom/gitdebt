@@ -16,6 +16,7 @@
     "test": "node --test scripts/*.test.mjs",
     "test:routing": "node --test scripts/static-routing.test.mjs",
     "seo:audit": "node scripts/audit-seo.mjs",
+    "prewarm": "node scripts/prewarm-deployment.mjs",
     "test:seo": "node --test scripts/audit-seo.test.mjs",
     "preview": "astro preview",
     "astro": "astro",

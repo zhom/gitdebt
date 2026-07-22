@@ -74,3 +74,6 @@ jobs:
           --project-name=gitdebt
           --branch=main
           --commit-hash="${GITHUB_SHA}"
+
+      - name: Pre-collect and pre-render catalog repositories
+        run: pnpm --filter gitdebt-frontend prewarm

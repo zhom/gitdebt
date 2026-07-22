@@ -317,7 +317,7 @@ fn render_heatmap_inner(
             day = day_iter,
         );
         cells.push_str(&format!(
-            r##"<a class="cell-link" href="{href}" target="_blank" rel="noopener" aria-label="Open commits from {day}">
+            r##"<a class="day-link" href="{href}" target="_blank" rel="noopener" aria-label="Open commits from {day}">
   <rect class="cell" x="{x}" y="{y}" width="{cell}" height="{cell}" rx="2" fill="{fill}">
     <title>{day} · {count} commit{plural} · open on GitHub</title>
   </rect>
@@ -377,7 +377,7 @@ fn render_heatmap_inner(
     .subtitle {{ fill: {muted}; font: 13px ui-sans-serif, system-ui, sans-serif; }}
     .dow, .legend {{ fill: {muted}; font: 10px ui-sans-serif, system-ui, sans-serif; }}
     .cell {{ stroke: {border}; stroke-width: 0.5; stroke-opacity: 0.4; }}
-    .cell-link {{ cursor: pointer; }}
+    .day-link {{ cursor: pointer; }}
     .footer-link {{ fill: {muted}; font: 600 11px ui-sans-serif, system-ui, sans-serif; text-decoration: none; letter-spacing: 0.02em; }}
     .footer-link:hover {{ fill: {fg}; }}
     .cell:hover {{ stroke: {fg}; stroke-width: 1.5; stroke-opacity: 1; }}

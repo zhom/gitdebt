@@ -20,15 +20,9 @@ pub fn defs(theme: &Theme) -> String {
     format!(
         r##"<defs data-gitdebt-texture-defs="true">
   <linearGradient id="gd-dither-wave" gradientUnits="userSpaceOnUse" x1="0" y1="0" x2="1200" y2="280">
-    <stop offset="0" stop-color="{wave_1}">
-      <animate class="motion" attributeName="stop-color" values="{wave_1};{wave_2};{wave_1}" dur="7s" repeatCount="indefinite" />
-    </stop>
-    <stop offset="0.52" stop-color="{wave_2}">
-      <animate class="motion" attributeName="stop-color" values="{wave_2};{wave_3};{wave_2}" dur="8.5s" repeatCount="indefinite" />
-    </stop>
-    <stop offset="1" stop-color="{wave_3}">
-      <animate class="motion" attributeName="stop-color" values="{wave_3};{wave_1};{wave_3}" dur="10s" repeatCount="indefinite" />
-    </stop>
+    <stop offset="0" stop-color="{wave_1}" />
+    <stop offset="0.52" stop-color="{wave_2}" />
+    <stop offset="1" stop-color="{wave_3}" />
   </linearGradient>
   <pattern id="gd-pixel-field" width="8" height="8" patternUnits="userSpaceOnUse" patternTransform="translate(.5 .5)">
     <g shape-rendering="crispEdges" opacity="0.22" transform="scale(2)">{sparse}</g>
@@ -101,6 +95,7 @@ mod tests {
         assert!(first.contains(crate::theme::LIGHT.bg));
         assert!(first.contains("shape-rendering=\"crispEdges\""));
         assert!(first.contains("id=\"gd-dither-wave\""));
+        assert!(!first.contains("<animate"));
         assert!(!first.contains(&format!(
             "<rect width=\"8\" height=\"8\" fill=\"{}\"",
             crate::theme::LIGHT.track

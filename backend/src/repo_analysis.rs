@@ -26,6 +26,7 @@ const DEFAULT_MAX_PENDING_ANALYSES: i64 = 500;
 const DEFAULT_ANALYSIS_FRESH_HOURS: i64 = 24;
 const ENQUEUE_LOCK_ID: i64 = 6_794_738_132_977;
 pub const INTERACTIVE_PRIORITY: i64 = 1_000_000_000_000;
+pub(crate) const CURRENT_ANALYSIS_REVISION: i32 = 2;
 
 #[derive(Clone)]
 pub struct AnalysisCtx {
@@ -116,6 +117,7 @@ pub async fn enqueue_prioritized(
             SELECT 1 FROM repo_history history \
             WHERE history.repo = $1 \
               AND history.last_analyzed_at >= $2 \
+              AND history.analysis_revision >= $3 \
               AND NOT EXISTS ( \
                   SELECT 1 FROM repo_author_stats author \
                   WHERE author.repo = history.repo \
@@ -127,6 +129,7 @@ pub async fn enqueue_prioritized(
     )
     .bind(repo)
     .bind(now - analysis_freshness())
+    .bind(CURRENT_ANALYSIS_REVISION)
     .fetch_one(&mut *tx)
     .await?;
     if fresh {
@@ -414,13 +417,17 @@ fn compact_error(error: &anyhow::Error) -> String {
 async fn process(job: &AnalysisJob, ctx: &AnalysisCtx) -> Result<usize> {
     let repo = job.repo.as_str();
     let started = Instant::now();
-    // Pull last_analyzed_sha to drive incremental walking.
-    let last_sha: Option<String> =
-        sqlx::query_scalar("SELECT last_analyzed_sha FROM repo_history WHERE repo = $1")
-            .bind(repo)
-            .fetch_optional(&ctx.db.pool)
-            .await?
-            .flatten();
+    // Pull the cursor and algorithm revision together. Old bounded analyses
+    // advanced their cursor to HEAD after sampling only a small recent window;
+    // those rows must be atomically rebuilt rather than incremented.
+    let (last_sha, was_truncated, analysis_revision): (Option<String>, bool, i32) = sqlx::query_as(
+        "SELECT last_analyzed_sha, analysis_truncated, analysis_revision \
+             FROM repo_history WHERE repo = $1",
+    )
+    .bind(repo)
+    .fetch_optional(&ctx.db.pool)
+    .await?
+    .unwrap_or((None, false, 0));
 
     let handle = repo_history::open_or_clone(&ctx.storage, repo, last_sha.as_deref())
         .await
@@ -429,7 +436,9 @@ async fn process(job: &AnalysisJob, ctx: &AnalysisCtx) -> Result<usize> {
     let size = repo_history::clone_size_bytes(&handle.path);
     repo_stats::record_clone(&ctx.db, repo, &handle.path, size).await?;
 
-    if Some(handle.head_sha.as_str()) == last_sha.as_deref() {
+    if Some(handle.head_sha.as_str()) == last_sha.as_deref()
+        && analysis_revision >= CURRENT_ANALYSIS_REVISION
+    {
         // Commit aggregates and line counts are unchanged, but author
         // enrichment is deliberately retried. It is TTL/negative-cache
         // guarded, and a transient GitHub failure (or a deployment that
@@ -443,7 +452,20 @@ async fn process(job: &AnalysisJob, ctx: &AnalysisCtx) -> Result<usize> {
     }
 
     let limit = repo_history::analysis_commit_limit();
-    let plan = repo_history::plan_recent_commits(&handle, last_sha.as_deref(), limit).await?;
+    let mut replace = analysis_revision < CURRENT_ANALYSIS_REVISION || was_truncated;
+    let mut plan = repo_history::plan_recent_commits(
+        &handle,
+        if replace { None } else { last_sha.as_deref() },
+        limit,
+    )
+    .await?;
+    // More than one window landed since our cursor. Rebuild from HEAD so the
+    // stored window is coherent instead of appending an arbitrary slice.
+    if plan.truncated && !replace {
+        replace = true;
+        plan = repo_history::plan_recent_commits(&handle, None, limit).await?;
+    }
+    let reachable_commits = repo_history::reachable_commit_count(&handle).await?;
     update_work_progress(&ctx.db, repo, "scanning_history", Some(plan.shas.len()), 0).await?;
     let mut commits = Vec::with_capacity(plan.shas.len());
     for batch in plan.shas.chunks(repo_history::LOG_BATCH_COMMITS) {
@@ -459,7 +481,25 @@ async fn process(job: &AnalysisJob, ctx: &AnalysisCtx) -> Result<usize> {
     }
     let n = commits.len();
     update_work_progress(&ctx.db, repo, "saving_history", Some(n), n).await?;
-    repo_stats::apply_commits_at_head(&ctx.db, repo, &commits, &handle.head_sha).await?;
+    if replace {
+        repo_stats::replace_commits_at_head(
+            &ctx.db,
+            repo,
+            &commits,
+            &handle.head_sha,
+            reachable_commits,
+        )
+        .await?;
+    } else {
+        repo_stats::apply_commits_at_head_with_total(
+            &ctx.db,
+            repo,
+            &commits,
+            &handle.head_sha,
+            reachable_commits,
+        )
+        .await?;
+    }
 
     // Two independent post-passes, overlapped with `tokio::join!`:
     //   * author enrichment is GitHub-API-bound (network RTT, rate-limit

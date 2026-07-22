@@ -219,10 +219,79 @@ pub async fn apply_commits_at_head(
     commits: &[CommitInfo],
     analyzed_head_sha: &str,
 ) -> Result<()> {
+    write_commits_at_head(db, repo, commits, analyzed_head_sha, false, None).await
+}
+
+/// Increment commit-derived aggregates while pinning `total_commits` to the
+/// exact reachable graph count (including merges).
+pub async fn apply_commits_at_head_with_total(
+    db: &Db,
+    repo: &str,
+    commits: &[CommitInfo],
+    analyzed_head_sha: &str,
+    reachable_commits: usize,
+) -> Result<()> {
+    write_commits_at_head(
+        db,
+        repo,
+        commits,
+        analyzed_head_sha,
+        false,
+        Some(i64::try_from(reachable_commits).unwrap_or(i64::MAX)),
+    )
+    .await
+}
+
+/// Atomically replace all commit-derived aggregates for `repo` with a fresh
+/// bounded analysis window while storing the exact reachable commit count.
+/// This repairs earlier truncated cursors without exposing an empty or partial
+/// set to readers between DELETE and INSERT.
+pub async fn replace_commits_at_head(
+    db: &Db,
+    repo: &str,
+    commits: &[CommitInfo],
+    analyzed_head_sha: &str,
+    reachable_commits: usize,
+) -> Result<()> {
+    write_commits_at_head(
+        db,
+        repo,
+        commits,
+        analyzed_head_sha,
+        true,
+        Some(i64::try_from(reachable_commits).unwrap_or(i64::MAX)),
+    )
+    .await
+}
+
+async fn write_commits_at_head(
+    db: &Db,
+    repo: &str,
+    commits: &[CommitInfo],
+    analyzed_head_sha: &str,
+    replace: bool,
+    exact_total: Option<i64>,
+) -> Result<()> {
     let agg = aggregate_commits(commits);
 
     let mut tx = db.pool.begin().await.context("begin tx")?;
     let now = Utc::now();
+
+    if replace {
+        for table in [
+            "repo_author_stats",
+            "repo_commit_days",
+            "repo_todo_deltas",
+            "repo_file_stats",
+        ] {
+            let sql = format!("DELETE FROM {table} WHERE repo = $1");
+            sqlx::query(sqlx::AssertSqlSafe(sql))
+                .bind(repo)
+                .execute(&mut *tx)
+                .await
+                .with_context(|| format!("replace {table}"))?;
+        }
+    }
 
     // Authors
     let author_rows: Vec<(&String, &AuthorAgg)> = agg.authors.iter().collect();
@@ -355,23 +424,42 @@ pub async fn apply_commits_at_head(
     }
 
     // Bump cumulative commit count + last_analyzed metadata on repo_history.
-    let added = commits.len() as i64;
-    sqlx::query(
-        "INSERT INTO repo_history (repo, last_analyzed_sha, last_analyzed_at, head_sha, total_commits) \
-         VALUES ($1, $2, $3, $2, $4) \
-         ON CONFLICT (repo) DO UPDATE SET \
-            last_analyzed_sha = EXCLUDED.last_analyzed_sha, \
-            last_analyzed_at = EXCLUDED.last_analyzed_at, \
-            head_sha = EXCLUDED.head_sha, \
-            total_commits = repo_history.total_commits + $4",
-    )
-    .bind(repo)
-    .bind(analyzed_head_sha)
-    .bind(now)
-    .bind(added)
-    .execute(&mut *tx)
-    .await
-    .context("update repo_history")?;
+    if let Some(total) = exact_total {
+        sqlx::query(
+            "INSERT INTO repo_history (repo, last_analyzed_sha, last_analyzed_at, head_sha, total_commits) \
+             VALUES ($1, $2, $3, $2, $4) \
+             ON CONFLICT (repo) DO UPDATE SET \
+                last_analyzed_sha = EXCLUDED.last_analyzed_sha, \
+                last_analyzed_at = EXCLUDED.last_analyzed_at, \
+                head_sha = EXCLUDED.head_sha, \
+                total_commits = EXCLUDED.total_commits",
+        )
+        .bind(repo)
+        .bind(analyzed_head_sha)
+        .bind(now)
+        .bind(total.max(0))
+        .execute(&mut *tx)
+        .await
+        .context("replace repo_history")?;
+    } else {
+        let added = commits.len() as i64;
+        sqlx::query(
+            "INSERT INTO repo_history (repo, last_analyzed_sha, last_analyzed_at, head_sha, total_commits) \
+             VALUES ($1, $2, $3, $2, $4) \
+             ON CONFLICT (repo) DO UPDATE SET \
+                last_analyzed_sha = EXCLUDED.last_analyzed_sha, \
+                last_analyzed_at = EXCLUDED.last_analyzed_at, \
+                head_sha = EXCLUDED.head_sha, \
+                total_commits = repo_history.total_commits + $4",
+        )
+        .bind(repo)
+        .bind(analyzed_head_sha)
+        .bind(now)
+        .bind(added)
+        .execute(&mut *tx)
+        .await
+        .context("update repo_history")?;
+    }
 
     tx.commit().await.context("commit tx")?;
     Ok(())
@@ -421,11 +509,12 @@ pub async fn record_analysis_details(
 ) -> Result<()> {
     sqlx::query(
         "UPDATE repo_history SET analysis_duration_ms = $1, analysis_scope_commits = $2, \
-         analysis_truncated = $3 WHERE repo = $4",
+         analysis_truncated = $3, analysis_revision = $4 WHERE repo = $5",
     )
     .bind(duration_ms.max(0))
     .bind(i64::try_from(scope_commits).unwrap_or(i64::MAX))
     .bind(truncated)
+    .bind(crate::repo_analysis::CURRENT_ANALYSIS_REVISION)
     .bind(repo)
     .execute(&db.pool)
     .await?;

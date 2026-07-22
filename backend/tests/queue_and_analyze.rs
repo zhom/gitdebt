@@ -32,6 +32,7 @@ use tokio::sync::Mutex;
 static SCHEMA_READY: OnceLock<()> = OnceLock::new();
 static SCHEMA_LOCK: Mutex<()> = Mutex::const_new(());
 static STAR_CLAIM_LOCK: Mutex<()> = Mutex::const_new(());
+const CURRENT_ANALYSIS_REVISION: i32 = 2;
 
 /// Returns a connected `Db` if a test database is configured, else `None`
 /// (the test then no-ops). Keeps the suite green where no DB exists.
@@ -389,10 +390,12 @@ async fn repo_analysis_enqueue_is_freshness_bounded_and_old_dead_jobs_revive() {
 
     let fresh = format!("{prefix}fresh");
     sqlx::query(
-        "INSERT INTO repo_history (repo, last_analyzed_sha, last_analyzed_at) \
-         VALUES ($1, 'abc', NOW())",
+        "INSERT INTO repo_history \
+            (repo, last_analyzed_sha, last_analyzed_at, analysis_revision) \
+         VALUES ($1, 'abc', NOW(), $2)",
     )
     .bind(&fresh)
+    .bind(CURRENT_ANALYSIS_REVISION)
     .execute(&db.pool)
     .await
     .unwrap();
@@ -403,10 +406,12 @@ async fn repo_analysis_enqueue_is_freshness_bounded_and_old_dead_jobs_revive() {
 
     let unresolved = format!("{prefix}unresolved");
     sqlx::query(
-        "INSERT INTO repo_history (repo, last_analyzed_sha, last_analyzed_at) \
-         VALUES ($1, 'def', NOW())",
+        "INSERT INTO repo_history \
+            (repo, last_analyzed_sha, last_analyzed_at, analysis_revision) \
+         VALUES ($1, 'def', NOW(), $2)",
     )
     .bind(&unresolved)
+    .bind(CURRENT_ANALYSIS_REVISION)
     .execute(&db.pool)
     .await
     .unwrap();
@@ -440,10 +445,12 @@ async fn repo_analysis_enqueue_many_skips_settled_jobs_and_bounds_new_work() {
 
     let fresh = format!("{prefix}fresh");
     sqlx::query(
-        "INSERT INTO repo_history (repo, last_analyzed_sha, last_analyzed_at) \
-         VALUES ($1, 'abc', NOW())",
+        "INSERT INTO repo_history \
+            (repo, last_analyzed_sha, last_analyzed_at, analysis_revision) \
+         VALUES ($1, 'abc', NOW(), $2)",
     )
     .bind(&fresh)
+    .bind(CURRENT_ANALYSIS_REVISION)
     .execute(&db.pool)
     .await
     .unwrap();
@@ -574,6 +581,38 @@ async fn repo_analysis_commit_and_merge_head_advance_atomically() {
             .unwrap();
     assert_eq!(merge_only_state.0.as_deref(), Some(merge_only_head));
     assert_eq!(merge_only_state.1, 1);
+
+    let replacement_head = "4444444444444444444444444444444444444444";
+    let replacement = CommitInfo {
+        sha: replacement_head.to_string(),
+        author_email: "replacement@example.com".to_string(),
+        author_name: "Replacement".to_string(),
+        committed_at,
+        committed_day: committed_at.date_naive(),
+        message_first_line: "replacement window".to_string(),
+        is_fix: true,
+        paths_changed: vec!["src/new.rs".to_string()],
+        todo_added: 1,
+        todo_removed: 0,
+    };
+    repo_stats::replace_commits_at_head(&db, &repo, &[replacement], replacement_head, 1_567)
+        .await
+        .unwrap();
+    let replaced: (Option<String>, i64) =
+        sqlx::query_as("SELECT last_analyzed_sha, total_commits FROM repo_history WHERE repo = $1")
+            .bind(&repo)
+            .fetch_one(&db.pool)
+            .await
+            .unwrap();
+    assert_eq!(replaced.0.as_deref(), Some(replacement_head));
+    assert_eq!(replaced.1, 1_567, "reachable count includes merge commits");
+    let paths: Vec<String> =
+        sqlx::query_scalar("SELECT path FROM repo_file_stats WHERE repo = $1 ORDER BY path")
+            .bind(&repo)
+            .fetch_all(&db.pool)
+            .await
+            .unwrap();
+    assert_eq!(paths, vec!["src/new.rs"]);
 
     cleanup(&db, prefix).await;
 }

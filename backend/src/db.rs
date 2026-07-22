@@ -264,11 +264,13 @@ CREATE TABLE IF NOT EXISTS repo_history (
     total_commits        BIGINT NOT NULL DEFAULT 0,
     analysis_duration_ms BIGINT,
     analysis_scope_commits BIGINT,
-    analysis_truncated   BOOLEAN NOT NULL DEFAULT FALSE
+    analysis_truncated   BOOLEAN NOT NULL DEFAULT FALSE,
+    analysis_revision    INTEGER NOT NULL DEFAULT 0
 );
 ALTER TABLE repo_history ADD COLUMN IF NOT EXISTS analysis_duration_ms BIGINT;
 ALTER TABLE repo_history ADD COLUMN IF NOT EXISTS analysis_scope_commits BIGINT;
 ALTER TABLE repo_history ADD COLUMN IF NOT EXISTS analysis_truncated BOOLEAN NOT NULL DEFAULT FALSE;
+ALTER TABLE repo_history ADD COLUMN IF NOT EXISTS analysis_revision INTEGER NOT NULL DEFAULT 0;
 
 -- Per-file aggregates. fix_commits = commit count where the message
 -- matches /\b(fix|bug|hotfix|patch)\b/i; commits = total commits touching
@@ -716,6 +718,7 @@ mod tests {
             )
         );
         assert!(SCHEMA.contains("stargazers_complete   BOOLEAN NOT NULL DEFAULT FALSE"));
+        assert!(SCHEMA.contains("analysis_revision    INTEGER NOT NULL DEFAULT 0"));
         assert!(
             SCHEMA.contains("IF NOT EXISTS"),
             "schema must stay idempotent"

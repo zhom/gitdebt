@@ -6,16 +6,15 @@
 //! `repo_history.clone_size_bytes` and trimmed via `evict_to_quota`.
 
 use std::path::{Path, PathBuf};
-use std::process::Stdio;
 
 use anyhow::{Context, Result, bail};
 use chrono::{DateTime, NaiveDate, Utc};
 use serde::Serialize;
 use tokio::process::Command;
 
-const DEFAULT_ANALYSIS_COMMIT_LIMIT: usize = 5_000;
-const MIN_ANALYSIS_COMMIT_LIMIT: usize = 100;
-const HARD_ANALYSIS_COMMIT_LIMIT: usize = 20_000;
+const DEFAULT_ANALYSIS_COMMIT_LIMIT: usize = 20_000;
+const MIN_ANALYSIS_COMMIT_LIMIT: usize = 5_000;
+const HARD_ANALYSIS_COMMIT_LIMIT: usize = 50_000;
 
 pub(crate) fn analysis_commit_limit() -> usize {
     std::env::var("REPO_ANALYSIS_COMMIT_LIMIT")
@@ -75,14 +74,12 @@ pub struct RepoHandle {
 
 /// Open the bare clone if present, otherwise clone fresh from GitHub.
 /// Idempotent — repeated calls fast-fetch updates rather than re-cloning.
-/// `last_analyzed_sha` enables a shallow re-clone after eviction: only
-/// commits not in the previous history get fetched. If the shallow path
-/// fails (force-push, dropped objects, network glitch), falls back to a
-/// fresh full clone.
+/// The complete commit graph is retained even after aggregate analysis is
+/// bounded, so exact repository totals never depend on the sampling window.
 pub async fn open_or_clone(
     storage: &RepoStorage,
     repo: &str,
-    last_analyzed_sha: Option<&str>,
+    _last_analyzed_sha: Option<&str>,
 ) -> Result<RepoHandle> {
     let path = storage.path_for(repo);
     tokio::fs::create_dir_all(path.parent().unwrap_or_else(|| Path::new("."))).await?;
@@ -90,53 +87,24 @@ pub async fn open_or_clone(
     if path.exists() {
         fetch_updates(&path).await?;
     } else {
-        clone_bare(repo, &path, last_analyzed_sha).await?;
+        clone_bare(repo, &path).await?;
     }
     let head_sha = rev_parse_head(&path).await?;
     Ok(RepoHandle { path, head_sha })
 }
 
-async fn clone_bare(repo: &str, path: &Path, last_analyzed_sha: Option<&str>) -> Result<()> {
+async fn clone_bare(repo: &str, path: &Path) -> Result<()> {
     let url = format!("https://github.com/{repo}.git");
-    if let Some(sha) = last_analyzed_sha {
-        // Fetch only history after the last analyzed commit.
-        let status = Command::new("git")
-            .args([
-                "clone",
-                "--bare",
-                "--no-tags",
-                "--filter=blob:none",
-                "--shallow-exclude",
-                sha,
-                // `--` terminates option parsing: defense-in-depth so a
-                // future unvalidated `url`/`path` starting with `-` can't be
-                // smuggled in as a git flag.
-                "--",
-                &url,
-            ])
-            .arg(path)
-            .stdout(Stdio::null())
-            .stderr(Stdio::piped())
-            .status()
-            .await
-            .context("spawn shallow git clone")?;
-        if status.success() {
-            return Ok(());
-        }
-        tracing::warn!(repo, "shallow re-clone failed, falling back to full clone");
-        let _ = tokio::fs::remove_dir_all(path).await;
-    }
-    // Analysis only needs the default branch's commits and trees; blobs are
-    // fetched on demand by git show/archive.
-    let depth = format!("--depth={}", analysis_commit_limit());
+    // Fetch the complete commit graph so repository totals and contributor
+    // coverage are honest. Trees and blobs remain promisor objects and are
+    // fetched only for the bounded health-analysis window.
     let output = Command::new("git")
         .args([
             "clone",
             "--bare",
             "--no-tags",
             "--single-branch",
-            "--filter=blob:none",
-            &depth,
+            "--filter=tree:0",
             "--",
         ])
         .arg(&url)
@@ -163,19 +131,19 @@ async fn fetch_updates(path: &Path) -> Result<()> {
     // local branch (and therefore HEAD) actually moves forward.
     let branch = default_branch(path).await?;
     let refspec = format!("+refs/heads/{branch}:refs/heads/{branch}");
-    let output = Command::new("git")
+    let shallow = is_shallow_repository(path).await?;
+    let mut command = Command::new("git");
+    command
         .arg("-C")
         .arg(path)
+        .args(["fetch", "--no-tags", "--filter=tree:0"]);
+    if shallow {
+        command.arg("--unshallow");
+    }
+    let output = command
         // `--` before the positional remote name: defense-in-depth so a
         // future unvalidated positional arg can't be parsed as a flag.
-        .args([
-            "fetch",
-            "--no-tags",
-            "--filter=blob:none",
-            "--",
-            "origin",
-            &refspec,
-        ])
+        .args(["--", "origin", &refspec])
         .output()
         .await
         .context("spawn git fetch")?;
@@ -313,7 +281,7 @@ pub(crate) async fn plan_recent_commits(
         .map(str::to_string)
         .collect();
     validate_shas(&shas)?;
-    let truncated = shas.len() > bounded || is_shallow_repository(&handle.path).await?;
+    let truncated = shas.len() > bounded;
     shas.truncate(bounded);
     shas.reverse();
     Ok(CommitWalkPlan { shas, truncated })
@@ -334,6 +302,29 @@ async fn is_shallow_repository(path: &Path) -> Result<bool> {
         );
     }
     Ok(String::from_utf8_lossy(&output.stdout).trim() == "true")
+}
+
+/// Exact number of commits reachable from the default branch, including
+/// merges. The clone always carries the complete commit graph, so this is a
+/// cheap local graph walk even when patch-level health analysis is bounded.
+pub(crate) async fn reachable_commit_count(handle: &RepoHandle) -> Result<usize> {
+    let output = Command::new("git")
+        .arg("-C")
+        .arg(&handle.path)
+        .args(["rev-list", "--count", "HEAD"])
+        .output()
+        .await
+        .context("git reachable commit count")?;
+    if !output.status.success() {
+        bail!(
+            "git rev-list --count failed: {}",
+            String::from_utf8_lossy(&output.stderr)
+        );
+    }
+    String::from_utf8_lossy(&output.stdout)
+        .trim()
+        .parse::<usize>()
+        .context("parse reachable commit count")
 }
 
 /// Iterate every commit reachable from HEAD that isn't an ancestor of

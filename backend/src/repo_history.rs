@@ -90,12 +90,32 @@ pub async fn open_or_clone(
     tokio::fs::create_dir_all(path.parent().unwrap_or_else(|| Path::new("."))).await?;
 
     if path.exists() {
-        fetch_updates(&path).await?;
+        if let Err(error) = fetch_updates(&path).await {
+            if !fetch_requires_reclone(&error) {
+                return Err(error);
+            }
+            tracing::warn!(repo, %error, "cached default branch disappeared; recloning");
+            tokio::fs::remove_dir_all(&path)
+                .await
+                .context("remove stale bare clone")?;
+            if let Err(clone_error) = clone_bare(repo, &path).await {
+                // A failed clone can leave a non-repository directory that
+                // would otherwise turn every later retry into a fetch error.
+                let _ = tokio::fs::remove_dir_all(&path).await;
+                return Err(clone_error);
+            }
+        }
     } else {
         clone_bare(repo, &path).await?;
     }
     let head_sha = rev_parse_head(&path).await?;
     Ok(RepoHandle { path, head_sha })
+}
+
+fn fetch_requires_reclone(error: &anyhow::Error) -> bool {
+    let detail = error.to_string().to_ascii_lowercase();
+    detail.contains("couldn't find remote ref refs/heads/")
+        || detail.contains("could not find remote ref refs/heads/")
 }
 
 async fn clone_bare(repo: &str, path: &Path) -> Result<()> {
@@ -871,6 +891,15 @@ mod tests {
         assert_eq!(count_todo_words("// FIXME later TODO maybe"), 2);
         assert_eq!(count_todo_words("prefix should not match"), 0);
         assert_eq!(count_todo_words(""), 0);
+    }
+
+    #[test]
+    fn only_a_disappeared_remote_branch_discards_the_cached_clone() {
+        let missing =
+            anyhow::anyhow!("git fetch failed: fatal: couldn't find remote ref refs/heads/main");
+        let transient = anyhow::anyhow!("git fetch failed: connection reset by peer");
+        assert!(fetch_requires_reclone(&missing));
+        assert!(!fetch_requires_reclone(&transient));
     }
 
     // #3 streaming-parser equivalence tests.

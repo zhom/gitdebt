@@ -120,15 +120,16 @@ fn fetch_requires_reclone(error: &anyhow::Error) -> bool {
 
 async fn clone_bare(repo: &str, path: &Path) -> Result<()> {
     let url = format!("https://github.com/{repo}.git");
-    // Fetch the complete commit graph so exact totals stay cheap while trees
-    // and file bodies are hydrated only for the bounded analysis window.
+    // Fetch the complete commit graph and trees so exact totals and path-only
+    // history scans stay local. Historical file bodies remain promisor objects
+    // and are hydrated only for the small TODO patch window.
     let output = Command::new("git")
         .args([
             "clone",
             "--bare",
             "--no-tags",
             "--single-branch",
-            "--filter=tree:0",
+            "--filter=blob:none",
             "--",
         ])
         .arg(&url)
@@ -156,13 +157,21 @@ async fn fetch_updates(path: &Path) -> Result<()> {
     let branch = default_branch(path).await?;
     let refspec = format!("+refs/heads/{branch}:refs/heads/{branch}");
     let shallow = is_shallow_repository(path).await?;
+    let tree_less = partial_clone_filter(path)
+        .await?
+        .is_some_and(|filter| filter == "tree:0");
     let mut command = Command::new("git");
     command
         .arg("-C")
         .arg(path)
-        .args(["fetch", "--no-tags", "--filter=tree:0"]);
+        .args(["fetch", "--no-tags", "--filter=blob:none"]);
     if shallow {
         command.arg("--unshallow");
+    } else if tree_less {
+        // Existing tree:0 caches have the full graph but omit historical
+        // trees. Reapply the less restrictive filter once so later metadata
+        // walks do not degrade into hundreds of lazy network fetches.
+        command.arg("--refetch");
     }
     let output = command
         // `--` before the positional remote name: defense-in-depth so a
@@ -330,6 +339,27 @@ async fn is_shallow_repository(path: &Path) -> Result<bool> {
         );
     }
     Ok(String::from_utf8_lossy(&output.stdout).trim() == "true")
+}
+
+async fn partial_clone_filter(path: &Path) -> Result<Option<String>> {
+    let output = Command::new("git")
+        .arg("-C")
+        .arg(path)
+        .args(["config", "--get", "remote.origin.partialclonefilter"])
+        .output()
+        .await
+        .context("git partial clone filter")?;
+    if output.status.success() {
+        let filter = String::from_utf8_lossy(&output.stdout).trim().to_string();
+        return Ok((!filter.is_empty()).then_some(filter));
+    }
+    if output.status.code() == Some(1) {
+        return Ok(None);
+    }
+    bail!(
+        "git partial clone filter failed: {}",
+        String::from_utf8_lossy(&output.stderr)
+    )
 }
 
 /// Exact number of commits reachable from the default branch, including

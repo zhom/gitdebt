@@ -20,6 +20,10 @@ const HARD_ANALYSIS_COMMIT_LIMIT: usize = 50_000;
 /// and fix signals use the full bounded window; TODO/FIXME churn uses only the
 /// newest commits so it cannot hold the primary analysis hostage.
 pub(crate) const TODO_PATCH_COMMIT_LIMIT: usize = 100;
+/// Stable cursor for a valid repository whose default branch has no commits.
+/// It cannot collide with a Git object id and lets the normal freshness/cache
+/// contract complete instead of retrying an empty repository forever.
+pub(crate) const EMPTY_REPOSITORY_HEAD: &str = "empty-repository";
 
 pub(crate) fn analysis_commit_limit() -> usize {
     std::env::var("REPO_ANALYSIS_COMMIT_LIMIT")
@@ -75,6 +79,12 @@ impl RepoStorage {
 pub struct RepoHandle {
     pub path: PathBuf,
     pub head_sha: String,
+}
+
+impl RepoHandle {
+    pub fn is_empty(&self) -> bool {
+        self.head_sha == EMPTY_REPOSITORY_HEAD
+    }
 }
 
 /// Open the bare clone if present, otherwise clone fresh from GitHub.
@@ -217,17 +227,43 @@ async fn rev_parse_head(path: &Path) -> Result<String> {
     let output = Command::new("git")
         .arg("-C")
         .arg(path)
-        .args(["rev-parse", "HEAD"])
+        // Plain `rev-parse HEAD` prints the literal string `HEAD` with a zero
+        // exit status in an unborn repository. Verification is required to
+        // prove that the name resolves to a commit object.
+        .args(["rev-parse", "--verify", "HEAD^{commit}"])
         .output()
         .await
         .context("spawn rev-parse")?;
-    if !output.status.success() {
+    if !output.status.success() && repository_has_any_commit(path).await? {
         bail!(
             "git rev-parse failed: {}",
             String::from_utf8_lossy(&output.stderr)
         );
     }
+    if !output.status.success() {
+        return Ok(EMPTY_REPOSITORY_HEAD.to_string());
+    }
     Ok(String::from_utf8_lossy(&output.stdout).trim().to_string())
+}
+
+/// Distinguish a genuinely empty repository from a corrupt clone when HEAD
+/// cannot be resolved. `rev-list --all` succeeds with no output for an empty
+/// repo, while malformed object databases still surface as an error.
+async fn repository_has_any_commit(path: &Path) -> Result<bool> {
+    let output = Command::new("git")
+        .arg("-C")
+        .arg(path)
+        .args(["rev-list", "--all", "--max-count=1"])
+        .output()
+        .await
+        .context("probe repository commits")?;
+    if !output.status.success() {
+        bail!(
+            "git commit probe failed: {}",
+            String::from_utf8_lossy(&output.stderr)
+        );
+    }
+    Ok(!output.stdout.is_empty())
 }
 
 /// Per-commit aggregated facts. Built from a single streaming `git log`.
@@ -290,6 +326,12 @@ pub(crate) async fn plan_recent_commits(
     since_sha: Option<&str>,
     limit: usize,
 ) -> Result<CommitWalkPlan> {
+    if handle.is_empty() {
+        return Ok(CommitWalkPlan {
+            shas: Vec::new(),
+            truncated: false,
+        });
+    }
     let range = match since_sha {
         Some(sha) => format!("{sha}..HEAD"),
         None => "HEAD".to_string(),
@@ -366,6 +408,9 @@ async fn partial_clone_filter(path: &Path) -> Result<Option<String>> {
 /// merges. The clone always carries the complete commit graph, so this is a
 /// cheap local graph walk even when patch-level health analysis is bounded.
 pub(crate) async fn reachable_commit_count(handle: &RepoHandle) -> Result<usize> {
+    if handle.is_empty() {
+        return Ok(0);
+    }
     let output = Command::new("git")
         .arg("-C")
         .arg(&handle.path)
@@ -930,6 +975,37 @@ mod tests {
         let transient = anyhow::anyhow!("git fetch failed: connection reset by peer");
         assert!(fetch_requires_reclone(&missing));
         assert!(!fetch_requires_reclone(&transient));
+    }
+
+    #[tokio::test]
+    async fn empty_repository_completes_with_zero_history() {
+        if std::process::Command::new("git")
+            .arg("--version")
+            .status()
+            .is_err()
+        {
+            eprintln!("skipping: git not available");
+            return;
+        }
+        let tmp = tempfile::tempdir().unwrap();
+        let status = std::process::Command::new("git")
+            .arg("-C")
+            .arg(tmp.path())
+            .args(["init", "--bare", "-q"])
+            .status()
+            .unwrap();
+        assert!(status.success());
+
+        let head_sha = rev_parse_head(tmp.path()).await.unwrap();
+        assert_eq!(head_sha, EMPTY_REPOSITORY_HEAD);
+        let handle = RepoHandle {
+            path: tmp.path().to_path_buf(),
+            head_sha,
+        };
+        let plan = plan_recent_commits(&handle, None, 5_000).await.unwrap();
+        assert!(plan.shas.is_empty());
+        assert!(!plan.truncated);
+        assert_eq!(reachable_commit_count(&handle).await.unwrap(), 0);
     }
 
     // #3 streaming-parser equivalence tests.

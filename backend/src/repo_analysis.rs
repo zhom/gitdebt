@@ -437,6 +437,24 @@ async fn process(job: &AnalysisJob, ctx: &AnalysisCtx) -> Result<usize> {
     let size = repo_history::clone_size_bytes(&handle.path);
     repo_stats::record_clone(&ctx.db, repo, &handle.path, size).await?;
 
+    // An empty GitHub repository is a successful zero-result analysis, not a
+    // transient git failure. Persist the empty aggregate so request paths can
+    // render immediately and the durable queue does not retry forever.
+    if handle.is_empty() {
+        update_work_progress(&ctx.db, repo, "saving_history", Some(0), 0).await?;
+        repo_stats::replace_commits_at_head(&ctx.db, repo, &[], &handle.head_sha, 0).await?;
+        code_count::save(&ctx.db, repo, &[]).await?;
+        repo_stats::record_analysis_details(
+            &ctx.db,
+            repo,
+            i64::try_from(started.elapsed().as_millis()).unwrap_or(i64::MAX),
+            0,
+            false,
+        )
+        .await?;
+        return Ok(0);
+    }
+
     if Some(handle.head_sha.as_str()) == last_sha.as_deref()
         && analysis_revision >= CURRENT_ANALYSIS_REVISION
     {
@@ -453,7 +471,9 @@ async fn process(job: &AnalysisJob, ctx: &AnalysisCtx) -> Result<usize> {
     }
 
     let limit = repo_history::analysis_commit_limit();
-    let mut replace = analysis_revision < CURRENT_ANALYSIS_REVISION || was_truncated;
+    let mut replace = analysis_revision < CURRENT_ANALYSIS_REVISION
+        || was_truncated
+        || last_sha.as_deref() == Some(repo_history::EMPTY_REPOSITORY_HEAD);
     let mut plan = repo_history::plan_recent_commits(
         &handle,
         if replace { None } else { last_sha.as_deref() },

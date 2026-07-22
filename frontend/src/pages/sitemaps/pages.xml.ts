@@ -1,6 +1,9 @@
 import type { APIRoute } from "astro";
 import { CATEGORIES } from "@/data/categories";
-import { loadBuildCatalog } from "@/lib/build-catalog";
+import {
+  loadBuildCatalog,
+  staticComparisonPaths,
+} from "@/lib/build-catalog";
 
 // All emitted profile routes enter this build-time sitemap. The strict
 // post-build SEO pass removes any profile whose rendered page is `noindex`, so
@@ -25,6 +28,11 @@ const PAGES: { path: string; changefreq: string; priority: string }[] = [
     path: `/compare/${c.slug}`,
     changefreq: "weekly",
     priority: "0.7",
+  })),
+  ...staticComparisonPaths().map(({ params }) => ({
+    path: `/vs/${params.owner1}/${params.repo1}/${params.owner2}/${params.repo2}`,
+    changefreq: "weekly",
+    priority: "0.6",
   })),
 ];
 

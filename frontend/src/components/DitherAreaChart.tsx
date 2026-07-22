@@ -25,7 +25,7 @@ const BAYER = [
   [15, 7, 13, 5],
 ].map((row) => row.map((value) => (value + 0.5) / 16));
 
-const CELL = 2;
+const CELL = 3;
 const PLOT = { left: 54, right: 16, top: 18, bottom: 32 };
 
 function compact(value: number): string {
@@ -138,15 +138,37 @@ export function DitherAreaChart({
     const plotWidth = Math.max(1, right - left);
     const plotHeight = Math.max(1, bottom - top);
     let intensity = reducedMotion ? (hoverRef.current ? 1 : 0) : 0;
+    let reveal = reducedMotion ? 1 : 0;
+    let phase = 0;
+    let previous = performance.now();
     let raf = 0;
 
-    const draw = () => {
+    const draw = (now = performance.now()) => {
+      const elapsed = Math.min(48, Math.max(0, now - previous));
+      previous = now;
       const target = hoverRef.current ? 1 : 0;
       intensity += (target - intensity) * (reducedMotion ? 1 : 0.17);
+      reveal += (1 - reveal) * (reducedMotion ? 1 : Math.min(0.24, elapsed / 360));
+      if (hoverRef.current && !reducedMotion) phase += elapsed * 0.0045;
       ctx.clearRect(0, 0, cols, rows);
-      const color = getComputedStyle(root).color;
+      const styles = getComputedStyle(root);
+      const wave = ctx.createLinearGradient(left, top, right, bottom);
+      wave.addColorStop(
+        0,
+        styles.getPropertyValue("--dither-wave-1").trim() || styles.color,
+      );
+      wave.addColorStop(
+        0.52,
+        styles.getPropertyValue("--dither-wave-2").trim() || styles.color,
+      );
+      wave.addColorStop(
+        1,
+        styles.getPropertyValue("--dither-wave-3").trim() || styles.color,
+      );
+      const revealEdge = left + plotWidth * reveal;
 
       for (let x = left; x <= right; x += 1) {
+        if (x > revealEdge) break;
         const fraction = (x - left) / plotWidth;
         const sample = sampleAt(parsed, fraction, axis);
         const lineY = Math.max(
@@ -158,24 +180,31 @@ export function DitherAreaChart({
         );
         const depth = Math.max(1, bottom - lineY);
         for (let y = lineY; y <= bottom; y += 1) {
-          const density = (y - lineY) / depth;
+          const depthFraction = (y - lineY) / depth;
+          const ripple = Math.sin(x * 0.16 + y * 0.09 + phase) * 0.045 * intensity;
+          const density = Math.min(
+            0.985,
+            0.34 + depthFraction * 0.6 + intensity * 0.14 + ripple,
+          );
           const threshold = BAYER[y & 3][x & 3];
-          const filledFloor = density > 0.74;
-          const lit = filledFloor || density + intensity * 0.22 > threshold;
-          if (!lit) continue;
-          const alpha = filledFloor
-            ? 0.22 + density * 0.18 + intensity * 0.12
-            : 0.12 + density * 0.56 + intensity * 0.18;
-          ctx.globalAlpha = Math.min(0.9, alpha);
-          ctx.fillStyle = color;
+          if (density <= threshold) continue;
+          const edgeFade = Math.min(1, Math.max(0, revealEdge - x));
+          ctx.globalAlpha = (0.62 + density * 0.34) * edgeFade;
+          ctx.fillStyle = wave;
           ctx.fillRect(x, y, 1, 1);
         }
-        ctx.globalAlpha = 0.9;
-        ctx.fillStyle = color;
+        ctx.globalAlpha = 0.96;
+        ctx.fillStyle = wave;
         ctx.fillRect(x, lineY, 1, 1);
       }
       ctx.globalAlpha = 1;
-      if (Math.abs(intensity - target) > 0.002) raf = requestAnimationFrame(draw);
+      if (
+        reveal < 0.998 ||
+        Math.abs(intensity - target) > 0.002 ||
+        (hoverRef.current && !reducedMotion)
+      ) {
+        raf = requestAnimationFrame(draw);
+      }
     };
 
     draw();
@@ -223,7 +252,7 @@ export function DitherAreaChart({
   return (
     <div
       ref={rootRef}
-      className={`relative w-full overflow-hidden bg-card text-foreground ${className}`}
+      className={`relative w-full overflow-hidden bg-transparent text-foreground ${className}`}
       style={{ height }}
       onPointerEnter={() => setHovered(true)}
       onPointerMove={interactive ? (event) => setPointer(event.clientX) : undefined}

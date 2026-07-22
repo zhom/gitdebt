@@ -145,7 +145,7 @@ const jsonLd: Record<string, unknown>[] = [
     <div class="isolate flex min-h-dvh flex-col">
       <SiteHeader />
 
-      <main id="main-content" class="mx-auto flex w-full max-w-5xl flex-1 flex-col gap-10 px-6 py-12">
+      <main id="main-content" class="mx-auto flex w-full max-w-6xl flex-1 flex-col gap-12 px-6 py-12">
         <nav aria-label="Breadcrumb" class="font-mono text-xs text-muted-foreground">
           <a href="/" class="hover:text-foreground">gitdebt</a>
           <span class="px-1.5 text-border" aria-hidden="true">/</span>
@@ -237,7 +237,7 @@ const jsonLd: Record<string, unknown>[] = [
                 variant="menu"
               />
             </header>
-            <div class="flex justify-center border-y border-border py-6">
+            <div class="dither-depth flex justify-center border-t border-border py-8">
               <ProfileCardPreview
                 client:visible
                 apiBase={apiBase}
@@ -258,7 +258,7 @@ const jsonLd: Record<string, unknown>[] = [
               {ownedRepos.map((slug) => (
                 <a
                   href={`/${slug}`}
-                  class="inline-flex items-center rounded-md border border-border bg-background px-3 py-1.5 font-mono text-sm text-muted-foreground hover:bg-accent hover:text-accent-foreground"
+                  class="dither-control inline-flex items-center rounded-md border border-border bg-background px-3 py-1.5 font-mono text-sm text-muted-foreground hover:bg-accent hover:text-accent-foreground"
                 >
                   {slug}
                 </a>
@@ -271,7 +271,7 @@ const jsonLd: Record<string, unknown>[] = [
           </section>
         )}
 
-        <section class="card-panel space-y-3 p-6">
+        <section class="space-y-3 border-t border-border pt-6">
           <h2 class="text-base font-medium">How this page works</h2>
           <p class="max-w-[70ch] text-base text-pretty text-muted-foreground sm:text-sm">
             gitdebt sums the cumulative star history of {login}'s top public repos

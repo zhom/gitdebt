@@ -106,7 +106,7 @@ export function EarnedBadges({
         const chartPath = `/api/repos/${owner}/${repo}/badge.svg?signal=${badge.id}`;
         const alt = `${slug}: ${badge.label}, ${badge.detail}`;
         return (
-          <figure key={badge.id} className="card-panel relative">
+          <figure key={badge.id} className="signal-panel relative">
             <figcaption className="flex flex-wrap items-center justify-between gap-3 border-b border-border bg-muted/40 px-4 py-3">
               <div>
                 <p className="font-mono text-xs tracking-wide text-foreground uppercase">

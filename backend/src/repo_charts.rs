@@ -312,11 +312,18 @@ fn render_heatmap_inner(
         };
         let x = pad_left + col * (cell + gap);
         let y = pad_top + weekday * (cell + gap);
+        let href = format!(
+            "https://github.com/{repo}/commits?since={day}T00%3A00%3A00Z&amp;until={day}T23%3A59%3A59Z",
+            day = day_iter,
+        );
         cells.push_str(&format!(
-            r##"<rect class="cell" x="{x}" y="{y}" width="{cell}" height="{cell}" rx="2" fill="{fill}">
-  <title>{day} · {count} commit{plural}</title>
-</rect>
+            r##"<a class="cell-link" href="{href}" target="_blank" rel="noopener" aria-label="Open commits from {day}">
+  <rect class="cell" x="{x}" y="{y}" width="{cell}" height="{cell}" rx="2" fill="{fill}">
+    <title>{day} · {count} commit{plural} · open on GitHub</title>
+  </rect>
+</a>
 "##,
+            href = href,
             x = x,
             y = y,
             cell = cell,
@@ -370,6 +377,7 @@ fn render_heatmap_inner(
     .subtitle {{ fill: {muted}; font: 13px ui-sans-serif, system-ui, sans-serif; }}
     .dow, .legend {{ fill: {muted}; font: 10px ui-sans-serif, system-ui, sans-serif; }}
     .cell {{ stroke: {border}; stroke-width: 0.5; stroke-opacity: 0.4; }}
+    .cell-link {{ cursor: pointer; }}
     .footer-link {{ fill: {muted}; font: 600 11px ui-sans-serif, system-ui, sans-serif; text-decoration: none; letter-spacing: 0.02em; }}
     .footer-link:hover {{ fill: {fg}; }}
     .cell:hover {{ stroke: {fg}; stroke-width: 1.5; stroke-opacity: 1; }}
@@ -423,35 +431,25 @@ pub fn render_contributors(repo: &str, contributors: &[ContributorRow], theme: &
 fn render_contributors_inner(repo: &str, contributors: &[ContributorRow], theme: &Theme) -> String {
     let width = 1100u32;
     let pad = 44u32;
-    let header = 94u32;
-    let tile_w = 120u32;
-    let tile_h = 146u32;
-    let gap = 8u32;
-    let columns = 8usize;
-    let footer = 42u32;
+    let height = 208u32;
+    let avatar_y = 86u32;
+    let avatar_size = 78u32;
+    let step = 61u32;
     let shown: Vec<&ContributorRow> = contributors
         .iter()
         .filter(|row| row.commits > 0)
         .take(16)
         .collect();
-    let total = contributors.len();
-    let tile_rows = shown.len().max(1).div_ceil(columns) as u32;
-    let height = header + tile_rows * tile_h + footer;
-    let total_commits: i64 = contributors.iter().map(|row| row.commits.max(0)).sum();
 
     let mut rows = String::new();
     for (i, c) in shown.iter().enumerate() {
-        let column = i % columns;
-        let row = i / columns;
-        let x = pad + column as u32 * (tile_w + gap);
-        let y = header + row as u32 * tile_h;
+        let x = pad + i as u32 * step;
+        let y = avatar_y;
         let label = c.login.clone().unwrap_or_else(|| c.name.clone());
-        let title = format!("{} · {} commits", label, c.commits);
         let profile = c
             .login
             .as_ref()
             .map(|login| format!("https://github.com/{login}"));
-        let avatar_size = 76u32;
         let avatar = c.avatar_url.as_ref().map_or_else(
             || {
                 let initial = label
@@ -461,7 +459,7 @@ fn render_contributors_inner(repo: &str, contributors: &[ContributorRow], theme:
                     .to_uppercase()
                     .to_string();
                 format!(
-                    r#"<rect class="avatar-fallback-bg" width="{avatar_size}" height="{avatar_size}" rx="8" /><text class="avatar-fallback" x="{r}" y="{y}" text-anchor="middle">{initial}</text>"#,
+                    r#"<circle class="avatar-fallback-bg" cx="{r}" cy="{r}" r="{r}" /><text class="avatar-fallback" x="{r}" y="{y}" text-anchor="middle">{initial}</text>"#,
                     r = avatar_size / 2,
                     y = avatar_size / 2 + 8,
                     initial = escape_xml(&initial),
@@ -474,23 +472,17 @@ fn render_contributors_inner(repo: &str, contributors: &[ContributorRow], theme:
                 )
             },
         );
-        let share = if total_commits > 0 {
-            c.commits.max(0) as f64 / total_commits as f64 * 100.0
-        } else {
-            0.0
-        };
-        let label = truncate_tail(&label, 15);
         let content = format!(
-            r##"<title>{title}</title>
-      <rect class="avatar-pixels" x="-6" y="-6" width="88" height="88" rx="10" />
-      <clipPath id="contributor-clip-{i}"><rect width="{avatar_size}" height="{avatar_size}" rx="8" /></clipPath>
-      <g class="avatar-pos">{avatar}</g>
-      <text class="contributor" x="0" y="98">{label}</text>
-      <text class="commits" x="0" y="116">{commits} commits</text>
-      <text class="share" x="0" y="133">{share:.1}%</text>"##,
-            title = escape_xml(&title),
-            commits = c.commits.max(0),
+            r##"<title>{label}</title>
+      <g class="avatar-pos">
+        <circle class="avatar-pixels" cx="{r}" cy="{r}" r="{ring_r}" />
+        <clipPath id="contributor-clip-{i}"><circle cx="{r}" cy="{r}" r="{r}" /></clipPath>
+        {avatar}
+        <circle class="avatar-outline" cx="{r}" cy="{r}" r="{r}" />
+      </g>"##,
             label = escape_xml(&label),
+            r = avatar_size / 2,
+            ring_r = avatar_size / 2 + 5,
         );
         let linked = profile.map_or(content.clone(), |href| {
             format!(
@@ -499,7 +491,7 @@ fn render_contributors_inner(repo: &str, contributors: &[ContributorRow], theme:
             )
         });
         rows.push_str(&format!(
-            r##"<g transform="translate({x}, {y})" opacity="1">
+            r##"<g class="contributor-node" transform="translate({x}, {y})" opacity="1">
     <animate class="motion" attributeName="opacity" from="0" to="1" dur="0.2s" begin="{begin:.2}s" fill="freeze" />
     {linked}
 </g>
@@ -517,17 +509,15 @@ fn render_contributors_inner(repo: &str, contributors: &[ContributorRow], theme:
   <style><![CDATA[
     .title {{ fill: {fg}; font: 600 18px ui-sans-serif, system-ui, sans-serif; }}
     .subtitle {{ fill: {muted}; font: 13px ui-sans-serif, system-ui, sans-serif; }}
-    .avatar-pixels {{ fill: url(#gd-pixel-fill); stroke: {border}; stroke-width: 1; shape-rendering: crispEdges; }}
+    .avatar-pixels {{ fill: url(#gd-pixel-fill); stroke: {bg}; stroke-width: 3; shape-rendering: crispEdges; }}
+    .avatar-outline {{ fill: none; stroke: {border}; stroke-width: 1.5; }}
     .avatar-fallback-bg {{ fill: {track}; }}
     .avatar-fallback {{ fill: {fg}; font: 700 22px ui-monospace, SFMono-Regular, monospace; }}
-    .contributor {{ fill: {fg}; font: 600 13px ui-sans-serif, system-ui, sans-serif; }}
-    .share {{ fill: {muted}; font: 11px ui-monospace, SFMono-Regular, monospace; }}
-    .commits {{ fill: {fg}; font: 600 11px ui-monospace, SFMono-Regular, monospace; }}
-    .avatar-pos {{ transform-box: fill-box; transform-origin: center; transition: transform 180ms cubic-bezier(0.23, 1, 0.32, 1); }}
+    .avatar-pos {{ transform-box: fill-box; transform-origin: center; transition: transform 320ms cubic-bezier(0.2, 0.8, 0.2, 1); }}
     .contributor-link {{ cursor: pointer; }}
     @media (hover: hover) and (pointer: fine) {{
-      .contributor-link:hover .avatar-pos {{ transform: scale(1.05); }}
-      .contributor-link:hover .contributor {{ text-decoration: underline; }}
+      .contributor-link:hover .avatar-pos {{ transform: translateY(-10px) scale(1.08); }}
+      .contributor-link:hover .avatar-outline {{ stroke: {fg}; stroke-width: 2; }}
     }}
     .footer-link {{ fill: {muted}; font: 600 11px ui-sans-serif, system-ui, sans-serif; text-decoration: none; letter-spacing: 0.02em; }}
     .footer-link:hover {{ fill: {fg}; }}
@@ -537,7 +527,7 @@ fn render_contributors_inner(repo: &str, contributors: &[ContributorRow], theme:
     }}
   ]]></style>
   <text class="title" x="{pad}" y="36">Contributors</text>
-  <text class="subtitle" x="{pad}" y="58">Top {shown_count} of {total} people shown separately · {total_commits} analyzed commits · {repo}</text>
+  <text class="subtitle" x="{pad}" y="58">Public commit authors · {repo}</text>
 {rows}
 {footer}
 </svg>"##,
@@ -545,13 +535,11 @@ fn render_contributors_inner(repo: &str, contributors: &[ContributorRow], theme:
         height = height,
         repo = escape_xml(repo),
         fg = theme.fg,
+        bg = theme.bg,
         muted = theme.muted,
         border = theme.border,
         track = theme.track,
         pad = pad,
-        shown_count = shown.len(),
-        total = total,
-        total_commits = humanize(total_commits),
         rows = rows,
         footer = brand::footer_lockup((width as f32) - pad as f32, footer_y, theme,),
     )
@@ -890,7 +878,7 @@ fn render_todo_trend_inner(repo: &str, points: &[TodoPoint], theme: &Theme) -> S
   {y_ticks}
   <g opacity="1">
     <animate class="motion" attributeName="opacity" from="0" to="1" dur="0.2s" begin="0s" fill="freeze" />
-    <path d="{area}" fill="url(#gd-pixel-fill)" opacity="0.72" />
+    <path d="{area}" fill="url(#gd-pixel-fill)" opacity="0.94" />
     <path d="{path}" fill="none" stroke="{bug}" stroke-width="2.5" stroke-linecap="round" stroke-linejoin="round" />
     <circle cx="{peak_x:.1}" cy="{peak_y:.1}" r="5" fill="{bug}" />
   </g>
@@ -1258,7 +1246,7 @@ fn render_commit_trend_inner(repo: &str, days: &[DayCount], theme: &Theme) -> St
   {y_ticks}
   <g opacity="1">
     <animate class="motion" attributeName="opacity" from="0" to="1" dur="0.2s" begin="0s" fill="freeze" />
-    <path d="{area}" fill="url(#gd-pixel-fill)" opacity="0.72" />
+    <path d="{area}" fill="url(#gd-pixel-fill)" opacity="0.94" />
     <path d="{path}" fill="none" stroke="{accent}" stroke-width="2.5" stroke-linecap="round" stroke-linejoin="round" />
     <circle cx="{peak_x:.1}" cy="{peak_y:.1}" r="5" fill="{accent}" />
     <text class="peak-label" x="{peak_label_x:.1}" y="{peak_label_y:.1}" text-anchor="{peak_anchor}">{peak_commits}</text>
@@ -1479,7 +1467,7 @@ mod tests {
     }
 
     #[test]
-    fn contributors_are_avatar_led_linked_and_separately_counted() {
+    fn contributors_are_minimal_overlapping_linked_avatars() {
         let rows = vec![ContributorRow {
             login: Some("zhom".into()),
             name: "zhom".into(),
@@ -1489,10 +1477,12 @@ mod tests {
         let svg = render_contributors("foo/bar", &rows, &theme::LIGHT);
         assert!(svg.contains("href=\"https://github.com/zhom"));
         assert!(svg.contains("<image"));
-        assert!(svg.contains("100 commits"));
         assert!(svg.contains("avatar-pixels"));
+        assert!(!svg.contains("100 commits"));
+        assert!(!svg.contains("class=\"commits\""));
+        assert!(!svg.contains("class=\"share\""));
         assert!(!svg.contains("animateTransform"));
-        assert!(svg.contains("scale(1.05)"));
+        assert!(svg.contains("translateY(-10px) scale(1.08)"));
         assert!(svg.contains("(hover: hover) and (pointer: fine)"));
         assert!(!svg.contains("drop-shadow"));
     }
@@ -1940,7 +1930,7 @@ mod tests {
             &theme::LIGHT,
         ));
         assert!(!todos.contains("stroke-dashoffset"));
-        assert!(todos.contains("fill=\"url(#gd-pixel-fill)\" opacity=\"0.72\""));
+        assert!(todos.contains("fill=\"url(#gd-pixel-fill)\" opacity=\"0.94\""));
         assert!(todos.contains(" r=\"5\""));
 
         let commits = without_smil(&render_commit_trend(
@@ -1958,7 +1948,7 @@ mod tests {
             &theme::LIGHT,
         ));
         assert!(!commits.contains("stroke-dashoffset"));
-        assert!(commits.contains("fill=\"url(#gd-pixel-fill)\" opacity=\"0.72\""));
+        assert!(commits.contains("fill=\"url(#gd-pixel-fill)\" opacity=\"0.94\""));
         assert!(commits.contains(" r=\"5\""));
     }
 }

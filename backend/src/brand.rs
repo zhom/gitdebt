@@ -37,9 +37,9 @@ pub fn themed_logo_mark(x: f32, y: f32, size: f32, theme: &Theme) -> String {
 /// the existing right-anchored footer labels. The glyph is large enough to
 /// remain recognizable after GitHub's image proxy scales a README asset down.
 pub fn footer_lockup(right_x: f32, baseline_y: f32, theme: &Theme) -> String {
-    let mark_size = 14.0;
-    let mark_x = right_x - 57.0;
-    let mark_y = baseline_y - 12.0;
+    let mark_size = 18.0;
+    let mark_x = right_x - 63.0;
+    let mark_y = baseline_y - 15.0;
     format!(
         "  <a href=\"https://gitdebt.com\" target=\"_blank\" rel=\"noopener\" aria-label=\"gitdebt\">\n{}    <text class=\"footer-link\" x=\"{right_x:.1}\" y=\"{baseline_y:.1}\" text-anchor=\"end\" fill=\"{muted}\">gitdebt</text>\n  </a>\n",
         themed_logo_mark(mark_x, mark_y, mark_size, theme),

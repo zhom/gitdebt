@@ -10,6 +10,8 @@ use std::path::{Path, PathBuf};
 use gitdebt::raster::{RasterFormat, rasterize};
 
 const SOURCE_SIZE: f32 = 512.0;
+const MARK_PATTERN: &str = "M0 0h3v3H0zM4 0h3v3H4zM8 0h3v3H8zM12 0h3v3h-3zM4 4h3v3H4zM12 4h3v3h-3zM0 8h3v3H0zM4 8h3v3H4zM8 8h3v3H8zM12 8h3v3h-3zM4 12h3v3H4zM12 12h3v3h-3z";
+const ICON_PATTERN: &str = "M0 0h24v24H0zM25 25h7v7h-7zM0 27h5v5H0zM27 0h5v5h-5z";
 
 fn main() {
     let root = Path::new(env!("CARGO_MANIFEST_DIR"))
@@ -21,7 +23,7 @@ fn main() {
     let icon = app_icon_svg(&mark);
     let maskable = maskable_svg(&icon);
 
-    write(&root.join("assets/gitdebt-logo.svg"), icon.as_bytes());
+    write(&root.join("assets/gitdebt-logo.svg"), mark.as_bytes());
     write(&root.join("frontend/public/logo.svg"), mark.as_bytes());
 
     for destination in [
@@ -70,12 +72,19 @@ fn validate_mark(mark: &str) {
         !mark.contains("filter"),
         "mark must not contain raster effects"
     );
+    assert!(
+        mark.contains(MARK_PATTERN),
+        "canonical dither pattern changed"
+    );
 }
 
 fn app_icon_svg(mark: &str) -> String {
+    let light_mark = svg_body(mark)
+        .replace("width=\"16\" height=\"16\"", "width=\"32\" height=\"32\"")
+        .replace(MARK_PATTERN, ICON_PATTERN)
+        .replace("fill=\"#000\"", "fill=\"#fff\"");
     format!(
-        "<svg xmlns=\"http://www.w3.org/2000/svg\" width=\"512\" height=\"512\" viewBox=\"0 0 512 512\" role=\"img\" aria-label=\"gitdebt robot\"><rect width=\"512\" height=\"512\" rx=\"112\" fill=\"#000\"/><g fill=\"#fff\">{}</g></svg>",
-        svg_body(mark)
+        "<svg xmlns=\"http://www.w3.org/2000/svg\" width=\"512\" height=\"512\" viewBox=\"0 0 512 512\" role=\"img\" aria-label=\"gitdebt robot\"><rect width=\"512\" height=\"512\" rx=\"112\" fill=\"#000\"/>{light_mark}</svg>"
     )
 }
 

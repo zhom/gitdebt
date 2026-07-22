@@ -11,15 +11,30 @@ const BAYER_4: [[u8; 4]; 4] = [[0, 8, 2, 10], [12, 4, 14, 6], [3, 11, 1, 9], [15
 /// SVG definitions for a compact ordered-dot field and a denser signal fill.
 pub fn defs(theme: &Theme) -> String {
     let sparse = pattern_cells(theme.fg, 4);
-    let dense = pattern_cells(theme.accent, 10);
+    let dense = pattern_cells("url(#gd-dither-wave)", 13);
+    let (wave_1, wave_2, wave_3) = if theme.dark {
+        ("#9b7bff", "#46b3ff", "#ef72ff")
+    } else {
+        ("#5b2cff", "#087fea", "#bf24d6")
+    };
     format!(
         r##"<defs data-gitdebt-texture-defs="true">
+  <linearGradient id="gd-dither-wave" gradientUnits="userSpaceOnUse" x1="0" y1="0" x2="1200" y2="280">
+    <stop offset="0" stop-color="{wave_1}">
+      <animate class="motion" attributeName="stop-color" values="{wave_1};{wave_2};{wave_1}" dur="7s" repeatCount="indefinite" />
+    </stop>
+    <stop offset="0.52" stop-color="{wave_2}">
+      <animate class="motion" attributeName="stop-color" values="{wave_2};{wave_3};{wave_2}" dur="8.5s" repeatCount="indefinite" />
+    </stop>
+    <stop offset="1" stop-color="{wave_3}">
+      <animate class="motion" attributeName="stop-color" values="{wave_3};{wave_1};{wave_3}" dur="10s" repeatCount="indefinite" />
+    </stop>
+  </linearGradient>
   <pattern id="gd-pixel-field" width="8" height="8" patternUnits="userSpaceOnUse" patternTransform="translate(.5 .5)">
     <g shape-rendering="crispEdges" opacity="0.22" transform="scale(2)">{sparse}</g>
   </pattern>
   <pattern id="gd-pixel-fill" width="8" height="8" patternUnits="userSpaceOnUse" patternTransform="translate(.5 .5)">
-    <rect width="8" height="8" fill="{track}" />
-    <g shape-rendering="crispEdges" opacity="0.82" transform="scale(2)">{dense}</g>
+    <g shape-rendering="crispEdges" opacity="0.96" transform="scale(2)">{dense}</g>
   </pattern>
   <linearGradient id="gd-pixel-fade" x1="0" y1="0" x2="0" y2="1">
     <stop offset="0" stop-color="white" stop-opacity="0" />
@@ -30,7 +45,6 @@ pub fn defs(theme: &Theme) -> String {
     <rect width="100%" height="100%" fill="url(#gd-pixel-fade)" />
   </mask>
 </defs>"##,
-        track = theme.track,
     )
 }
 
@@ -86,6 +100,11 @@ mod tests {
         assert!(first.contains("data-gitdebt-canvas=\"true\""));
         assert!(first.contains(crate::theme::LIGHT.bg));
         assert!(first.contains("shape-rendering=\"crispEdges\""));
+        assert!(first.contains("id=\"gd-dither-wave\""));
+        assert!(!first.contains(&format!(
+            "<rect width=\"8\" height=\"8\" fill=\"{}\"",
+            crate::theme::LIGHT.track
+        )));
         assert!(!first.contains("var(--"));
         assert!(
             first.find("data-gitdebt-texture").expect("texture field")

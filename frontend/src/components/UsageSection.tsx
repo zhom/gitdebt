@@ -166,7 +166,7 @@ export function UsageSection({
   }, [data]);
 
   const tabClass = (active: boolean) =>
-    `min-h-11 rounded-md px-3 py-2 font-mono text-base tracking-wide uppercase sm:min-h-0 sm:px-2.5 sm:py-1 sm:text-xs ${
+    `dither-control min-h-11 rounded-md px-3 py-2 font-mono text-base tracking-wide uppercase sm:min-h-0 sm:px-2.5 sm:py-1 sm:text-xs ${
       active
         ? "bg-accent text-accent-foreground"
         : "text-muted-foreground hover:bg-accent/60 hover:text-accent-foreground"
@@ -175,7 +175,7 @@ export function UsageSection({
   if (loading) {
     return (
       <AsyncSwap state="loading">
-        <div className="card-panel p-6">
+        <div className="signal-panel p-6">
           <p className="inline-flex items-center gap-2 font-mono text-xs tracking-wide text-muted-foreground uppercase">
             <Loader2
               className="size-3.5 shrink-0 motion-safe:animate-spin text-signal"
@@ -223,7 +223,7 @@ export function UsageSection({
   return (
     <AsyncSwap state="ready">
       <section className="space-y-6">
-        <figure className="card-panel overflow-hidden">
+        <figure className="signal-panel overflow-visible">
           <figcaption className="flex flex-wrap items-center justify-between gap-3 border-b border-border bg-muted/40 px-5 py-3">
             <div className="inline-flex items-center gap-2 font-mono text-xs tracking-wide text-muted-foreground uppercase">
               <span
@@ -247,7 +247,7 @@ export function UsageSection({
                       name="source"
                       value={source}
                       onChange={(e) => setSource(e.target.value as UsageSource)}
-                      className="col-start-1 row-start-1 min-h-11 appearance-none rounded-md border border-input bg-background py-2 pr-8 pl-3 font-mono text-base text-foreground outline-none focus-visible:outline-2 focus-visible:-outline-offset-1 focus-visible:outline-ring sm:min-h-0 sm:py-1 sm:pr-7 sm:pl-2 sm:text-xs"
+                      className="dither-control col-start-1 row-start-1 min-h-11 appearance-none rounded-md border border-input bg-background py-2 pr-8 pl-3 font-mono text-base text-foreground outline-none focus-visible:outline-2 focus-visible:-outline-offset-1 focus-visible:outline-ring sm:min-h-0 sm:py-1 sm:pr-7 sm:pl-2 sm:text-xs"
                     >
                       {sources.map((s) => (
                         <option key={s} value={s}>

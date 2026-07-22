@@ -360,7 +360,7 @@ const vsLinks = (categoryRelated.length > 0 ? categoryRelated : FALLBACK_SUGGEST
     <div class="isolate flex min-h-dvh flex-col">
       <SiteHeader />
 
-      <main id="main-content" class="mx-auto flex w-full max-w-5xl flex-1 flex-col gap-10 px-6 py-12">
+      <main id="main-content" class="mx-auto flex w-full max-w-7xl flex-1 flex-col gap-12 px-6 py-12">
         <nav aria-label="Breadcrumb" class="font-mono text-xs text-muted-foreground">
           <a href="/" class="hover:text-foreground">gitdebt</a>
           <span class="px-1.5 text-border" aria-hidden="true">/</span>
@@ -506,7 +506,7 @@ const vsLinks = (categoryRelated.length > 0 ? categoryRelated : FALLBACK_SUGGEST
               <a
                 href={`/vs/${repoSlug}/${other}`}
                 data-warm-repos={`${repoSlug},${other}`}
-                class="inline-flex min-h-11 items-center gap-1.5 rounded-md border border-border bg-background px-3 py-2 font-mono text-base text-muted-foreground hover:bg-accent hover:text-accent-foreground sm:min-h-0 sm:py-1.5 sm:text-sm"
+                class="dither-control inline-flex min-h-11 items-center gap-1.5 rounded-md border border-border bg-background px-3 py-2 font-mono text-base text-muted-foreground hover:bg-accent hover:text-accent-foreground sm:min-h-0 sm:py-1.5 sm:text-sm"
               >
                 vs {other}
               </a>

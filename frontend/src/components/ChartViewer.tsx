@@ -111,17 +111,17 @@ export function ChartViewer({
     `${src}${sep}${params.join("&")}&theme=${theme}`;
 
   const tabClass = (active: boolean) =>
-    `min-h-11 rounded-md px-3 py-2 font-mono text-base tracking-wide uppercase sm:min-h-0 sm:px-2.5 sm:py-1 sm:text-xs ${
+    `dither-control min-h-11 rounded-md px-3 py-2 font-mono text-base tracking-wide uppercase sm:min-h-0 sm:px-2.5 sm:py-1 sm:text-xs ${
       active
         ? "bg-accent text-accent-foreground"
         : "text-muted-foreground hover:bg-accent/60 hover:text-accent-foreground"
     }`;
 
   const dateInputClass =
-    "min-h-11 w-full rounded-md border border-input bg-background px-2 py-2 font-mono text-base text-foreground outline-none scheme-light dark:scheme-dark focus-visible:outline-2 focus-visible:-outline-offset-1 focus-visible:outline-ring sm:min-h-0 sm:w-[8.5rem] sm:py-1 sm:text-xs";
+    "dither-control min-h-11 w-full rounded-md border border-input bg-background px-2 py-2 font-mono text-base text-foreground outline-none scheme-light dark:scheme-dark focus-visible:outline-2 focus-visible:-outline-offset-1 focus-visible:outline-ring sm:min-h-0 sm:w-[8.5rem] sm:py-1 sm:text-xs";
 
   const figure = (
-    <figure className="card-panel relative">
+    <figure className="signal-panel relative">
       <figcaption className="flex flex-wrap items-center justify-between gap-3 border-b border-border bg-muted/40 px-5 py-3">
         {caption && (
           <div className="inline-flex items-center gap-2 font-mono text-xs tracking-wide text-muted-foreground uppercase">

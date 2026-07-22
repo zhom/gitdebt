@@ -85,6 +85,7 @@ export function EmbedSnippet({
   const [mode, setMode] = useState<Mode>("markdown");
   const [format, setFormat] = useState<Format>("svg");
   const [theme, setTheme] = useState<ThemeChoice>("auto");
+  const [animatedSvg, setAnimatedSvg] = useState(false);
   const [open, setOpen] = useState(false);
   const rootRef = useRef<HTMLDivElement>(null);
   const triggerRef = useRef<HTMLButtonElement>(null);
@@ -117,7 +118,7 @@ export function EmbedSnippet({
 
   const formatParams =
     selectedFormat === "svg"
-      ? ["animate=0"]
+      ? [`animate=${animatedSvg ? "1" : "0"}`]
       : selectedFormat === "gif"
         ? ["motion=draw"]
         : [];
@@ -148,7 +149,7 @@ export function EmbedSnippet({
   const snippet = mode === "markdown" ? markdown : html;
 
   const tabClass = (active: boolean) =>
-    `min-h-11 rounded-md px-3 py-2 font-mono text-base tracking-wide uppercase sm:min-h-0 sm:px-2.5 sm:py-1 sm:text-xs ${
+    `dither-control min-h-11 rounded-md px-3 py-2 font-mono text-base tracking-wide uppercase sm:min-h-0 sm:px-2.5 sm:py-1 sm:text-xs ${
       active
         ? "bg-accent text-accent-foreground"
         : "text-muted-foreground hover:bg-accent/60 hover:text-accent-foreground"
@@ -162,7 +163,7 @@ export function EmbedSnippet({
           value={theme}
           onChange={(e) => setTheme(e.target.value as ThemeChoice)}
           aria-label="Embed theme"
-          className="col-start-1 row-start-1 min-h-11 appearance-none rounded-md border border-input bg-background py-2 pr-8 pl-3 font-mono text-base text-foreground outline-none focus-visible:outline-2 focus-visible:-outline-offset-1 focus-visible:outline-ring sm:min-h-0 sm:py-1 sm:pr-7 sm:pl-2 sm:text-xs"
+          className="dither-control col-start-1 row-start-1 min-h-11 appearance-none rounded-md border border-input bg-background py-2 pr-8 pl-3 font-mono text-base text-foreground outline-none focus-visible:outline-2 focus-visible:-outline-offset-1 focus-visible:outline-ring sm:min-h-0 sm:py-1 sm:pr-7 sm:pl-2 sm:text-xs"
         >
           {THEMES.map((t) => (
             <option key={t.id} value={t.id}>
@@ -189,6 +190,16 @@ export function EmbedSnippet({
           </button>
         ))}
       </div>
+      {selectedFormat === "svg" && (
+        <button
+          type="button"
+          aria-pressed={animatedSvg}
+          onClick={() => setAnimatedSvg((value) => !value)}
+          className={tabClass(animatedSvg)}
+        >
+          {animatedSvg ? "Animated SVG" : "Static SVG"}
+        </button>
+      )}
       <div className="flex items-center gap-1" role="group" aria-label="Embed format">
         <button
           type="button"
@@ -219,7 +230,7 @@ export function EmbedSnippet({
         <CopyButton
           value={snippet}
           ariaLabel="Copy embed snippet"
-          className="absolute top-3 right-3 inline-flex min-h-11 items-center gap-1.5 rounded-md border border-border bg-background/95 px-3 py-2 font-mono text-base text-muted-foreground backdrop-blur hover:bg-accent hover:text-accent-foreground sm:min-h-0 sm:px-2.5 sm:py-1 sm:text-xs"
+          className="dither-control absolute top-3 right-3 inline-flex min-h-11 items-center gap-1.5 rounded-md border border-border bg-background/95 px-3 py-2 font-mono text-base text-muted-foreground backdrop-blur hover:bg-accent hover:text-accent-foreground sm:min-h-0 sm:px-2.5 sm:py-1 sm:text-xs"
           idleLabel="Copy"
         />
       </div>
@@ -242,7 +253,7 @@ export function EmbedSnippet({
           type="button"
           aria-expanded={open}
           onClick={() => setOpen((value) => !value)}
-          className="inline-flex min-h-11 items-center gap-2 rounded-md border border-border bg-background px-3 py-2 font-mono text-sm text-foreground shadow-sm transition-colors duration-150 hover:bg-accent focus-visible:outline-2 focus-visible:outline-offset-2 focus-visible:outline-ring sm:min-h-0 sm:text-xs"
+          className="dither-control inline-flex min-h-11 items-center gap-2 rounded-md border border-border bg-background px-3 py-2 font-mono text-sm text-foreground transition-colors duration-150 hover:bg-accent focus-visible:outline-2 focus-visible:outline-offset-2 focus-visible:outline-ring sm:min-h-0 sm:text-xs"
         >
           <Code2 className="size-4" strokeWidth={1.75} aria-hidden="true" />
           Add to README
@@ -261,7 +272,7 @@ export function EmbedSnippet({
                 duration: reduceMotion ? REDUCED_MOTION_DURATION : DURATION.enter,
                 ease: EASE_OUT,
               }}
-              className="absolute top-[calc(100%+0.65rem)] right-0 z-40 w-[min(42rem,calc(100vw-3rem))] origin-top-right overflow-hidden rounded-xl border border-border bg-card text-left shadow-xl"
+              className="dither-menu absolute top-[calc(100%+0.65rem)] right-0 z-40 w-[min(38rem,calc(100vw-2rem))] origin-top-right overflow-hidden rounded-xl text-left"
             >
               <div className="space-y-3 px-5 py-4">
                 <div>

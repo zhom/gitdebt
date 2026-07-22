@@ -287,6 +287,7 @@ impl ProgressSnapshot {
         let analysis_detail = match raw.analysis_phase.as_deref() {
             Some("cloning") => Some("cloning"),
             Some("scanning_history") => Some("scanning_history"),
+            Some("scanning_todos") => Some("scanning_todos"),
             Some("saving_history") => Some("saving_history"),
             Some("finishing") => Some("finishing"),
             Some("retrying") => Some("retrying"),
@@ -316,6 +317,9 @@ impl ProgressSnapshot {
             Some("cloning") => Some(5),
             Some("scanning_history") => {
                 Some((10.0 + scan_ratio.unwrap_or(0.0).clamp(0.0, 1.0) * 70.0).round() as u8)
+            }
+            Some("scanning_todos") => {
+                Some((80.0 + scan_ratio.unwrap_or(0.0).clamp(0.0, 1.0) * 3.0).round() as u8)
             }
             Some("saving_history") => Some(84),
             Some("finishing") => Some(92),

@@ -15,6 +15,11 @@ use tokio::process::Command;
 const DEFAULT_ANALYSIS_COMMIT_LIMIT: usize = 20_000;
 const MIN_ANALYSIS_COMMIT_LIMIT: usize = 5_000;
 const HARD_ANALYSIS_COMMIT_LIMIT: usize = 50_000;
+/// Patch bodies are substantially more expensive than commit metadata because
+/// partial clones must hydrate historical blobs. Contributor, cadence, churn,
+/// and fix signals use the full bounded window; TODO/FIXME churn uses only the
+/// newest commits so it cannot hold the primary analysis hostage.
+pub(crate) const TODO_PATCH_COMMIT_LIMIT: usize = 100;
 
 pub(crate) fn analysis_commit_limit() -> usize {
     std::env::var("REPO_ANALYSIS_COMMIT_LIMIT")
@@ -95,9 +100,8 @@ pub async fn open_or_clone(
 
 async fn clone_bare(repo: &str, path: &Path) -> Result<()> {
     let url = format!("https://github.com/{repo}.git");
-    // Fetch the complete commit graph so repository totals and contributor
-    // coverage are honest. Trees and blobs remain promisor objects and are
-    // fetched only for the bounded health-analysis window.
+    // Fetch the complete commit graph so exact totals stay cheap while trees
+    // and file bodies are hydrated only for the bounded analysis window.
     let output = Command::new("git")
         .args([
             "clone",
@@ -234,6 +238,10 @@ const MAX_PATCH_BYTES: usize = 4 * 1024 * 1024;
 // progress update; 100 still amortizes process startup while giving the UI
 // five measured checkpoints across the production first-pass window.
 pub(crate) const LOG_BATCH_COMMITS: usize = 100;
+/// Metadata-only walks retain far less output and do not hydrate file bodies,
+/// so larger batches reduce git/network startup cost without hiding progress
+/// for minutes at a time.
+pub(crate) const METADATA_BATCH_COMMITS: usize = 500;
 
 /// Bounded newest-history plan used by the production worker. Large projects
 /// such as Linux have more than a million reachable commits; repository-health
@@ -420,6 +428,88 @@ pub(crate) async fn walk_commit_batch(
         );
     }
     Ok(parse_log_records(&output.stdout))
+}
+
+/// Read author, date, message, and changed-path metadata without materializing
+/// historical file bodies. `--name-only --no-renames` needs commit trees but
+/// not blobs, and preserves the old path-set contract for renames (delete +
+/// add) while keeping the primary repository signals fast.
+pub(crate) async fn walk_commit_metadata_batch(
+    handle: &RepoHandle,
+    shas: &[String],
+) -> Result<Vec<CommitInfo>> {
+    if shas.is_empty() {
+        return Ok(Vec::new());
+    }
+    validate_shas(shas)?;
+    let log_format = "%x00%x00GDCOMMIT%x00%H%x00%P%x00%ae%x00%an%x00%aI%x00%s%x00";
+    let mut command = Command::new("git");
+    command.arg("-C").arg(&handle.path).args([
+        "log",
+        "--no-walk=unsorted",
+        "--name-only",
+        "-z",
+        "--no-renames",
+        &format!("--format={log_format}"),
+    ]);
+    command.args(shas).arg("--");
+    let output = command.output().await.context("batched metadata git log")?;
+    if !output.status.success() {
+        bail!(
+            "batched metadata git log failed: {}",
+            String::from_utf8_lossy(&output.stderr)
+        );
+    }
+    Ok(parse_metadata_records(&output.stdout))
+}
+
+fn parse_metadata_records(stdout: &[u8]) -> Vec<CommitInfo> {
+    split_on(stdout, COMMIT_SENTINEL)
+        .into_iter()
+        .filter(|record| !record.is_empty())
+        .filter_map(parse_metadata_record)
+        .collect()
+}
+
+fn parse_metadata_record(record: &[u8]) -> Option<CommitInfo> {
+    let mut segments = record.split(|&byte| byte == 0);
+    let sha = String::from_utf8_lossy(segments.next()?).trim().to_string();
+    if sha.is_empty() {
+        return None;
+    }
+    let is_root = String::from_utf8_lossy(segments.next()?).trim().is_empty();
+    let author_email = String::from_utf8_lossy(segments.next()?).to_lowercase();
+    let author_name = String::from_utf8_lossy(segments.next()?).to_string();
+    let iso = String::from_utf8_lossy(segments.next()?).to_string();
+    let message_first_line = String::from_utf8_lossy(segments.next()?).to_string();
+    let committed_at = DateTime::parse_from_rfc3339(iso.trim())
+        .map(|date| date.with_timezone(&Utc))
+        .unwrap_or_else(|_| Utc::now());
+    let paths_changed = if is_root {
+        Vec::new()
+    } else {
+        segments
+            .map(|path| {
+                String::from_utf8_lossy(path)
+                    .trim_matches(|character| character == '\n' || character == '\r')
+                    .to_string()
+            })
+            .filter(|path| !path.is_empty())
+            .collect()
+    };
+
+    Some(CommitInfo {
+        sha,
+        author_email,
+        author_name,
+        committed_day: committed_at.date_naive(),
+        committed_at,
+        is_fix: is_fix_message(&message_first_line),
+        message_first_line,
+        paths_changed,
+        todo_added: 0,
+        todo_removed: 0,
+    })
 }
 
 fn validate_shas(shas: &[String]) -> Result<()> {
@@ -1252,6 +1342,23 @@ mod tests {
                 .lines()
                 .map(|s| s.to_string())
                 .collect();
+
+            let metadata = walk_commit_metadata_batch(&handle, &shas).await.unwrap();
+            assert_eq!(metadata.len(), new_commits.len());
+            for (fast, complete) in metadata.iter().zip(new_commits.iter()) {
+                assert_eq!(fast.sha, complete.sha);
+                assert_eq!(fast.author_email, complete.author_email);
+                assert_eq!(fast.author_name, complete.author_name);
+                assert_eq!(fast.committed_at, complete.committed_at);
+                assert_eq!(fast.message_first_line, complete.message_first_line);
+                assert_eq!(fast.is_fix, complete.is_fix);
+                let mut fast_paths = fast.paths_changed.clone();
+                let mut complete_paths = complete.paths_changed.clone();
+                fast_paths.sort();
+                complete_paths.sort();
+                assert_eq!(fast_paths, complete_paths);
+                assert_eq!((fast.todo_added, fast.todo_removed), (0, 0));
+            }
 
             assert_eq!(
                 new_commits.len(),

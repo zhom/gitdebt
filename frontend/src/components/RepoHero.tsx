@@ -631,6 +631,13 @@ function progressDetail(
         : "Walking recent commit history";
     return `${units}${eta}`;
   }
+  if (work.detail === "scanning_todos") {
+    const units =
+      work.processed_units !== undefined && work.total_units !== undefined
+        ? `${work.processed_units.toLocaleString()} / ${work.total_units.toLocaleString()} recent patches`
+        : "Checking recent TODO/FIXME changes";
+    return `${units}${eta}`;
+  }
   if (work.detail === "saving_history")
     return `Saving repository signals${eta}`;
   if (work.detail === "finishing")

@@ -32,7 +32,7 @@ use tokio::sync::Mutex;
 static SCHEMA_READY: OnceLock<()> = OnceLock::new();
 static SCHEMA_LOCK: Mutex<()> = Mutex::const_new(());
 static STAR_CLAIM_LOCK: Mutex<()> = Mutex::const_new(());
-const CURRENT_ANALYSIS_REVISION: i32 = 2;
+const CURRENT_ANALYSIS_REVISION: i32 = 3;
 
 /// Returns a connected `Db` if a test database is configured, else `None`
 /// (the test then no-ops). Keeps the suite green where no DB exists.

@@ -7,6 +7,7 @@
 //! analysis throughput is bounded by git CLI subprocesses, not by what
 //! tokio can multiplex.
 
+use std::collections::HashMap;
 use std::sync::Arc;
 use std::time::{Duration, Instant};
 
@@ -26,7 +27,7 @@ const DEFAULT_MAX_PENDING_ANALYSES: i64 = 500;
 const DEFAULT_ANALYSIS_FRESH_HOURS: i64 = 24;
 const ENQUEUE_LOCK_ID: i64 = 6_794_738_132_977;
 pub const INTERACTIVE_PRIORITY: i64 = 1_000_000_000_000;
-pub(crate) const CURRENT_ANALYSIS_REVISION: i32 = 2;
+pub(crate) const CURRENT_ANALYSIS_REVISION: i32 = 3;
 
 #[derive(Clone)]
 pub struct AnalysisCtx {
@@ -468,8 +469,8 @@ async fn process(job: &AnalysisJob, ctx: &AnalysisCtx) -> Result<usize> {
     let reachable_commits = repo_history::reachable_commit_count(&handle).await?;
     update_work_progress(&ctx.db, repo, "scanning_history", Some(plan.shas.len()), 0).await?;
     let mut commits = Vec::with_capacity(plan.shas.len());
-    for batch in plan.shas.chunks(repo_history::LOG_BATCH_COMMITS) {
-        commits.extend(repo_history::walk_commit_batch(&handle, batch).await?);
+    for batch in plan.shas.chunks(repo_history::METADATA_BATCH_COMMITS) {
+        commits.extend(repo_history::walk_commit_metadata_batch(&handle, batch).await?);
         update_work_progress(
             &ctx.db,
             repo,
@@ -478,6 +479,39 @@ async fn process(job: &AnalysisJob, ctx: &AnalysisCtx) -> Result<usize> {
             commits.len(),
         )
         .await?;
+    }
+    let todo_start = plan
+        .shas
+        .len()
+        .saturating_sub(repo_history::TODO_PATCH_COMMIT_LIMIT);
+    let todo_shas = &plan.shas[todo_start..];
+    let mut todo_by_sha = HashMap::with_capacity(todo_shas.len());
+    if !todo_shas.is_empty() {
+        update_work_progress(&ctx.db, repo, "scanning_todos", Some(todo_shas.len()), 0).await?;
+        let mut todo_done = 0;
+        for batch in todo_shas.chunks(repo_history::LOG_BATCH_COMMITS) {
+            let patch_commits = repo_history::walk_commit_batch(&handle, batch).await?;
+            todo_done += patch_commits.len();
+            todo_by_sha.extend(
+                patch_commits
+                    .into_iter()
+                    .map(|commit| (commit.sha, (commit.todo_added, commit.todo_removed))),
+            );
+            update_work_progress(
+                &ctx.db,
+                repo,
+                "scanning_todos",
+                Some(todo_shas.len()),
+                todo_done,
+            )
+            .await?;
+        }
+    }
+    for commit in &mut commits {
+        if let Some((added, removed)) = todo_by_sha.get(&commit.sha) {
+            commit.todo_added = *added;
+            commit.todo_removed = *removed;
+        }
     }
     let n = commits.len();
     update_work_progress(&ctx.db, repo, "saving_history", Some(n), n).await?;

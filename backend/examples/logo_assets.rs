@@ -10,8 +10,7 @@ use std::path::{Path, PathBuf};
 use gitdebt::raster::{RasterFormat, rasterize};
 
 const SOURCE_SIZE: f32 = 512.0;
-const MARK_PATTERN: &str = "M0 0h3v3H0zM4 0h3v3H4zM8 0h3v3H8zM12 0h3v3h-3zM4 4h3v3H4zM12 4h3v3h-3zM0 8h3v3H0zM4 8h3v3H4zM8 8h3v3H8zM12 8h3v3h-3zM4 12h3v3H4zM12 12h3v3h-3z";
-const ICON_PATTERN: &str = "M0 0h24v24H0zM25 25h7v7h-7zM0 27h5v5H0zM27 0h5v5h-5z";
+const MARK_PATTERN: &str = "M0 0h24v24H0zM25 25h7v7h-7zM0 27h5v5H0zM27 0h5v5h-5z";
 
 fn main() {
     let root = Path::new(env!("CARGO_MANIFEST_DIR"))
@@ -36,6 +35,8 @@ fn main() {
     for (destination, size) in [
         (root.join("frontend/public/icon-192.png"), 192),
         (root.join("frontend/public/icon-512.png"), 512),
+        (root.join("frontend/public/favicon-16.png"), 16),
+        (root.join("frontend/public/favicon-32.png"), 32),
         (root.join("extension/icons/icon-16.png"), 16),
         (root.join("extension/icons/icon-32.png"), 32),
         (root.join("extension/icons/icon-48.png"), 48),
@@ -79,10 +80,7 @@ fn validate_mark(mark: &str) {
 }
 
 fn app_icon_svg(mark: &str) -> String {
-    let light_mark = svg_body(mark)
-        .replace("width=\"16\" height=\"16\"", "width=\"32\" height=\"32\"")
-        .replace(MARK_PATTERN, ICON_PATTERN)
-        .replace("fill=\"#000\"", "fill=\"#fff\"");
+    let light_mark = svg_body(mark).replace("fill=\"#000\"", "fill=\"#fff\"");
     format!(
         "<svg xmlns=\"http://www.w3.org/2000/svg\" width=\"512\" height=\"512\" viewBox=\"0 0 512 512\" role=\"img\" aria-label=\"gitdebt robot\"><rect width=\"512\" height=\"512\" rx=\"112\" fill=\"#000\"/>{light_mark}</svg>"
     )

@@ -115,6 +115,11 @@ export function SignalFlowGraphic({ apiBase }: { apiBase: string }) {
   }, [apiBase, selected?.history_ready, selected?.repo]);
 
   return (
+    <a
+      href={selected ? `/${selected.repo}` : undefined}
+      aria-label={selected ? `Open the ${selected.repo} repository report` : "Live repository activity"}
+      className="block outline-none focus-visible:outline-2 focus-visible:outline-offset-2 focus-visible:outline-ring"
+    >
     <figure
       className="w-full min-w-0 overflow-hidden border-y border-foreground bg-card text-card-foreground"
       aria-labelledby="live-repo-caption"
@@ -144,15 +149,13 @@ export function SignalFlowGraphic({ apiBase }: { apiBase: string }) {
       <div className="min-h-[27rem] p-4 sm:p-5">
         <AnimatePresence mode="wait" initial={false}>
           {selected ? (
-            <motion.a
+            <motion.div
               key={selected.repo}
-              href={`/${selected.repo}`}
-              aria-label={`Open the ${selected.repo} repository report`}
               initial={{ opacity: 0, x: reduceMotion ? 0 : 10 }}
               animate={{ opacity: 1, x: 0 }}
               exit={{ opacity: 0, x: reduceMotion ? 0 : -7 }}
               transition={{ duration, ease: EASE_OUT }}
-              className="group block outline-none focus-visible:outline-2 focus-visible:outline-offset-2 focus-visible:outline-ring"
+              className="group block"
             >
               <div className="flex items-start justify-between gap-4 border-b border-foreground pb-4">
                 <div className="min-w-0">
@@ -256,7 +259,7 @@ export function SignalFlowGraphic({ apiBase }: { apiBase: string }) {
                 </div>
                 <p className="font-mono text-xs text-muted-foreground">stars · health</p>
               </div>
-            </motion.a>
+            </motion.div>
           ) : (
             <div className="grid min-h-[27rem] place-items-center text-sm text-muted-foreground" aria-live="polite">
               Connecting to live repository activity…
@@ -265,5 +268,6 @@ export function SignalFlowGraphic({ apiBase }: { apiBase: string }) {
         </AnimatePresence>
       </div>
     </figure>
+    </a>
   );
 }

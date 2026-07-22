@@ -34,18 +34,19 @@ pub fn defs(theme: &Theme) -> String {
     )
 }
 
-/// A subtle top-layer field makes every rendered chart share the same pixel
-/// grain without obscuring labels or links.
+/// A subtle background field makes every rendered chart share the same pixel
+/// grain. It is inserted immediately after the root element so every label,
+/// link, line, and avatar remains above it.
 pub fn decorate(mut svg: String, theme: &Theme) -> String {
     if svg.contains("data-gitdebt-texture=\"true\"") {
         return svg;
     }
-    let layer = format!(
-        "\n{}\n  <rect data-gitdebt-texture=\"true\" width=\"100%\" height=\"100%\" fill=\"url(#gd-pixel-field)\" mask=\"url(#gd-pixel-field-mask)\" opacity=\"0.28\" pointer-events=\"none\" />\n",
-        defs(theme),
-    );
+    let field = "\n  <rect data-gitdebt-texture=\"true\" width=\"100%\" height=\"100%\" fill=\"url(#gd-pixel-field)\" mask=\"url(#gd-pixel-field-mask)\" opacity=\"0.28\" pointer-events=\"none\" />\n";
+    if let Some(index) = svg.find('>') {
+        svg.insert_str(index + 1, field);
+    }
     if let Some(index) = svg.rfind("</svg>") {
-        svg.insert_str(index, &layer);
+        svg.insert_str(index, &format!("\n{}\n", defs(theme)));
     }
     svg
 }
@@ -81,5 +82,9 @@ mod tests {
         assert!(first.contains("data-gitdebt-texture=\"true\""));
         assert!(first.contains("shape-rendering=\"crispEdges\""));
         assert!(!first.contains("var(--"));
+        assert!(
+            first.find("data-gitdebt-texture").expect("texture field")
+                < first.find("<text>").expect("chart content")
+        );
     }
 }

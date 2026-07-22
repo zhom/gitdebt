@@ -464,9 +464,7 @@ async fn process(job: &AnalysisJob, ctx: &AnalysisCtx) -> Result<usize> {
         // predates enrichment) must not strand every `github_login` as NULL
         // until the repository happens to receive another commit.
         let github = user_scoped_github(job, ctx).await;
-        if let Err(e) = enrich_author_logins(&ctx.db, &handle, repo, &github).await {
-            tracing::warn!(repo, error = %e, "author-login enrichment retry failed");
-        }
+        run_author_enrichment(&ctx.db, &handle, repo, &github).await;
         return Ok(0);
     }
 
@@ -567,11 +565,7 @@ async fn process(job: &AnalysisJob, ctx: &AnalysisCtx) -> Result<usize> {
     // behavior).
     update_work_progress(&ctx.db, repo, "finishing", Some(n), n).await?;
     let github = user_scoped_github(job, ctx).await;
-    let enrich = async {
-        if let Err(e) = enrich_author_logins(&ctx.db, &handle, repo, &github).await {
-            tracing::warn!(repo, error = %e, "author-login enrichment failed");
-        }
-    };
+    let enrich = run_author_enrichment(&ctx.db, &handle, repo, &github);
     let line_counts = async {
         if let Err(e) = run_line_counts(&ctx.db, &handle, repo).await {
             tracing::warn!(repo, error = %e, "line counts failed");
@@ -682,6 +676,37 @@ async fn run_line_counts(db: &Db, handle: &RepoHandle, repo: &str) -> Result<()>
 /// letting a since-created GitHub account eventually resolve.
 const AUTHOR_ENRICH_TTL: chrono::Duration = chrono::Duration::days(30);
 const AUTHOR_ENRICH_MAX_PER_RUN: i64 = 24;
+const AUTHOR_ENRICH_TIMEOUT: Duration = Duration::from_secs(15);
+
+/// Author identity is presentation-only metadata. A depleted shared GitHub
+/// budget must never keep a durable repository-analysis worker occupied until
+/// the hourly reset, so every best-effort enrichment pass gets a small fixed
+/// wall-clock budget. The unresolved rows remain eligible for a later run.
+async fn run_author_enrichment(
+    db: &Db,
+    handle: &RepoHandle,
+    repo: &str,
+    github: &Arc<GithubClient>,
+) {
+    match tokio::time::timeout(
+        AUTHOR_ENRICH_TIMEOUT,
+        enrich_author_logins(db, handle, repo, github),
+    )
+    .await
+    {
+        Ok(Ok(())) => {}
+        Ok(Err(error)) => {
+            tracing::warn!(repo, %error, "author-login enrichment failed");
+        }
+        Err(_) => {
+            tracing::info!(
+                repo,
+                timeout_seconds = AUTHOR_ENRICH_TIMEOUT.as_secs(),
+                "author-login enrichment deferred after reaching its time budget"
+            );
+        }
+    }
+}
 
 /// For every author row whose `github_login` is null (or whose avatar is
 /// still a gravatar fallback) AND that hasn't been attempted within

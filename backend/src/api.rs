@@ -3858,9 +3858,9 @@ impl LeaderboardMetric {
     }
 }
 
-/// Trailing window (days) for the velocity metric — "stars added in the
-/// last 7 days", per the export/leaderboard API contract.
-const LEADERBOARD_WINDOW_DAYS: i64 = 7;
+/// Supported trailing windows for daily, weekly, and monthly momentum.
+const LEADERBOARD_WINDOW_DEFAULT: i64 = 7;
+const LEADERBOARD_WINDOWS: &[i64] = &[1, 7, 30];
 /// Default + max page size. The default matches the contract (`per=50`).
 const LEADERBOARD_PER_DEFAULT: i64 = 50;
 const LEADERBOARD_PER_MAX: i64 = 100;
@@ -3871,6 +3871,7 @@ const LEADERBOARD_PAGE_MAX: i64 = 200;
 #[derive(Debug, Default, Clone, Deserialize)]
 struct LeaderboardQuery {
     metric: Option<String>,
+    window: Option<i64>,
     per: Option<i64>,
     page: Option<i64>,
 }
@@ -3880,19 +3881,24 @@ struct LeaderboardQuery {
 /// ranking); `per`/`page` are clamped into DoS-safe bounds.
 fn leaderboard_params(
     metric: Option<&str>,
+    window: Option<i64>,
     per: Option<i64>,
     page: Option<i64>,
-) -> Result<(LeaderboardMetric, i64, i64), &'static str> {
+) -> Result<(LeaderboardMetric, i64, i64, i64), &'static str> {
     let metric = match metric.unwrap_or("stars") {
         "stars" => LeaderboardMetric::Stars,
         "velocity" => LeaderboardMetric::Velocity,
         _ => return Err("invalid metric (expected stars or velocity)"),
     };
+    let window = window.unwrap_or(LEADERBOARD_WINDOW_DEFAULT);
+    if !LEADERBOARD_WINDOWS.contains(&window) {
+        return Err("invalid window (expected 1, 7, or 30)");
+    }
     let per = per
         .unwrap_or(LEADERBOARD_PER_DEFAULT)
         .clamp(1, LEADERBOARD_PER_MAX);
     let page = page.unwrap_or(0).clamp(0, LEADERBOARD_PAGE_MAX);
-    Ok((metric, per, page))
+    Ok((metric, window, per, page))
 }
 
 /// One leaderboard row: `(slug, total stars, stars added in the trailing
@@ -3902,10 +3908,39 @@ fn leaderboard_params(
 async fn load_leaderboard_rows(
     state: &ApiState,
     metric: LeaderboardMetric,
+    window_days: i64,
     limit: i64,
     offset: i64,
 ) -> Result<Vec<(String, i64, i64)>, ApiError> {
     let pool = &state.analyzer.cache.db().pool;
+    let snapshot_rows = sqlx::query(
+        "SELECT repo, stars, velocity FROM leaderboard_snapshots \
+         WHERE metric = $1 AND window_days = $2 \
+         ORDER BY rank ASC LIMIT $3 OFFSET $4",
+    )
+    .bind(metric.as_str())
+    .bind(window_days as i32)
+    .bind(limit)
+    .bind(offset)
+    .fetch_all(pool)
+    .await
+    .map_err(anyhow::Error::from)?;
+    if !snapshot_rows.is_empty() {
+        return snapshot_rows
+            .into_iter()
+            .map(|row| {
+                Ok((
+                    row.try_get("repo").map_err(anyhow::Error::from)?,
+                    row.try_get("stars").map_err(anyhow::Error::from)?,
+                    row.try_get("velocity").map_err(anyhow::Error::from)?,
+                ))
+            })
+            .collect::<Result<Vec<_>, ApiError>>();
+    }
+
+    // First-start fallback while the initial durable snapshot is building.
+    // It preserves availability without making the expensive aggregation the
+    // steady-state request path.
     let sql = match metric {
         // Most-starred: order by the metadata star count. The LATERAL
         // velocity count only runs for the LIMIT rows actually returned
@@ -3944,7 +3979,7 @@ async fn load_leaderboard_rows(
     let rows = sqlx::query(sql)
         .bind(limit)
         .bind(offset)
-        .bind(LEADERBOARD_WINDOW_DAYS as i32)
+        .bind(window_days as i32)
         .fetch_all(pool)
         .await
         .map_err(anyhow::Error::from)?;
@@ -3958,7 +3993,7 @@ async fn load_leaderboard_rows(
     Ok(out)
 }
 
-/// `GET /api/leaderboard.json?metric=stars|velocity&per=50&page=0` —
+/// `GET /api/leaderboard.json?metric=stars|velocity&window=1|7|30&per=50&page=0` —
 /// ranked repos from the repos/repo_stargazers tables only. No GitHub
 /// calls on this path. Memoized 5 min in its OWN moka cache (see the
 /// `leaderboard_cache` field docs — the param-derived key space must not
@@ -3968,14 +4003,16 @@ async fn leaderboard_json(
     State(state): State<ApiState>,
     Query(q): Query<LeaderboardQuery>,
 ) -> Result<impl IntoResponse, ApiError> {
-    let (metric, per, page) =
-        leaderboard_params(q.metric.as_deref(), q.per, q.page).map_err(ApiError::bad_request)?;
-    let key = format!("leaderboard:{}:{per}:{page}", metric.as_str());
+    let (metric, window, per, page) =
+        leaderboard_params(q.metric.as_deref(), q.window, q.per, q.page)
+            .map_err(ApiError::bad_request)?;
+    let key = format!("leaderboard:{}:{window}:{per}:{page}", metric.as_str());
     // Single-flight: the trailing-window velocity GROUP BY / stars LATERAL
     // is the heaviest read on the largest table; coalesce concurrent misses
     // for the same page onto one query instead of a stampede.
     let json = single_flight(&state.leaderboard_cache, key, async {
-        let rows = load_leaderboard_rows(&state, metric, per, page.saturating_mul(per)).await?;
+        let rows =
+            load_leaderboard_rows(&state, metric, window, per, page.saturating_mul(per)).await?;
         let repos: Vec<serde_json::Value> = rows
             .iter()
             .enumerate()
@@ -3992,7 +4029,7 @@ async fn leaderboard_json(
             "metric": metric.as_str(),
             "page": page,
             "per_page": per,
-            "window_days": LEADERBOARD_WINDOW_DAYS,
+            "window_days": window,
             "repos": repos,
         }))?)
     })
@@ -4698,35 +4735,40 @@ mod tests {
 
     #[test]
     fn leaderboard_params_defaults() {
-        let (metric, per, page) = leaderboard_params(None, None, None).unwrap();
+        let (metric, window, per, page) = leaderboard_params(None, None, None, None).unwrap();
         assert_eq!(metric, LeaderboardMetric::Stars);
+        assert_eq!(window, LEADERBOARD_WINDOW_DEFAULT);
         assert_eq!(per, LEADERBOARD_PER_DEFAULT);
         assert_eq!(page, 0);
     }
 
     #[test]
     fn leaderboard_params_accepts_both_metrics() {
-        let (metric, _, _) = leaderboard_params(Some("stars"), None, None).unwrap();
+        let (metric, _, _, _) = leaderboard_params(Some("stars"), Some(1), None, None).unwrap();
         assert_eq!(metric, LeaderboardMetric::Stars);
-        let (metric, _, _) = leaderboard_params(Some("velocity"), None, None).unwrap();
+        let (metric, window, _, _) =
+            leaderboard_params(Some("velocity"), Some(30), None, None).unwrap();
         assert_eq!(metric, LeaderboardMetric::Velocity);
+        assert_eq!(window, 30);
     }
 
     #[test]
     fn leaderboard_params_rejects_unknown_metric() {
         // Fail loudly, never silently fall back to a different ranking.
-        assert!(leaderboard_params(Some("downloads"), None, None).is_err());
-        assert!(leaderboard_params(Some("STARS"), None, None).is_err());
-        assert!(leaderboard_params(Some(""), None, None).is_err());
+        assert!(leaderboard_params(Some("downloads"), None, None, None).is_err());
+        assert!(leaderboard_params(Some("STARS"), None, None, None).is_err());
+        assert!(leaderboard_params(Some(""), None, None, None).is_err());
+        assert!(leaderboard_params(None, Some(2), None, None).is_err());
     }
 
     #[test]
     fn leaderboard_params_clamps_bounds() {
         // per: 1..=LEADERBOARD_PER_MAX; page: 0..=LEADERBOARD_PAGE_MAX.
-        let (_, per, page) = leaderboard_params(None, Some(0), Some(-5)).unwrap();
+        let (_, _, per, page) = leaderboard_params(None, None, Some(0), Some(-5)).unwrap();
         assert_eq!(per, 1);
         assert_eq!(page, 0);
-        let (_, per, page) = leaderboard_params(None, Some(10_000), Some(i64::MAX)).unwrap();
+        let (_, _, per, page) =
+            leaderboard_params(None, None, Some(10_000), Some(i64::MAX)).unwrap();
         assert_eq!(per, LEADERBOARD_PER_MAX);
         assert_eq!(page, LEADERBOARD_PAGE_MAX);
         // Offsets computed from the clamped values can't overflow.

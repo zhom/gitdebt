@@ -17,6 +17,7 @@ pub mod export;
 pub mod gh_archive;
 pub mod gh_archive_hourly;
 pub mod github;
+pub mod leaderboard;
 pub mod og;
 pub mod progress;
 pub mod queue;

@@ -152,6 +152,29 @@ CREATE INDEX IF NOT EXISTS idx_repos_history_star_count
     ON repos (star_count DESC, repo ASC)
     WHERE history_complete AND NOT missing AND star_count IS NOT NULL;
 
+-- Daily, Postgres-owned leaderboard materialization. Public request paths read
+-- these small rows instead of grouping the multi-million-row star tables.
+-- Refreshes replace all rows in one transaction, so readers see either the
+-- previous complete snapshot or the next complete snapshot, never a partial
+-- ranking.
+CREATE TABLE IF NOT EXISTS leaderboard_snapshots (
+    metric       TEXT NOT NULL,
+    window_days  INTEGER NOT NULL,
+    rank         BIGINT NOT NULL,
+    repo         TEXT NOT NULL,
+    stars        BIGINT NOT NULL,
+    velocity     BIGINT NOT NULL,
+    computed_at  TIMESTAMPTZ NOT NULL,
+    PRIMARY KEY (metric, window_days, repo),
+    UNIQUE (metric, window_days, rank)
+);
+CREATE TABLE IF NOT EXISTS leaderboard_snapshot_state (
+    id           BOOLEAN PRIMARY KEY DEFAULT TRUE CHECK (id),
+    computed_at  TIMESTAMPTZ NOT NULL
+);
+CREATE INDEX IF NOT EXISTS idx_leaderboard_snapshot_page
+    ON leaderboard_snapshots (metric, window_days, rank);
+
 CREATE OR REPLACE VIEW active_repo_star_history AS
     SELECT stars.repo, stars.position, stars.starred_at
     FROM repo_stargazers AS stars
@@ -794,6 +817,9 @@ mod tests {
         assert!(SCHEMA.contains("idx_repos_history_star_count"));
         assert!(SCHEMA.contains("idx_repo_lines_repo_prefix"));
         assert!(SCHEMA.contains("ON repo_lines (repo text_pattern_ops)"));
+        assert!(SCHEMA.contains("CREATE TABLE IF NOT EXISTS leaderboard_snapshots"));
+        assert!(SCHEMA.contains("UNIQUE (metric, window_days, rank)"));
+        assert!(SCHEMA.contains("CREATE TABLE IF NOT EXISTS leaderboard_snapshot_state"));
     }
 
     /// The `repo_stargazers` secondary indexes must NOT be created inline in

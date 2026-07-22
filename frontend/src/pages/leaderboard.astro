@@ -30,7 +30,7 @@ async function fetchJson<T>(url: string): Promise<T | null> {
     try {
       const res = await fetch(url, {
         headers: { accept: "application/json" },
-        signal: AbortSignal.timeout(5_000),
+        signal: AbortSignal.timeout(20_000),
       });
       if (res.ok) return (await res.json()) as T;
       if (res.status < 500 && res.status !== 429) return null;
@@ -47,14 +47,17 @@ async function fetchJson<T>(url: string): Promise<T | null> {
 
 async function fetchBoard(
   metric: "stars" | "velocity",
+  window = 7,
 ): Promise<LeaderboardResponse | null> {
   return fetchJson<LeaderboardResponse>(
-    `${apiBase}/api/leaderboard.json?metric=${metric}&per=50&page=0`,
+    `${apiBase}/api/leaderboard.json?metric=${metric}&window=${window}&per=50&page=0`,
   );
 }
 
-const [velocityBoard, starsBoard, totalAnalyzed] = await Promise.all([
-  fetchBoard("velocity"),
+const [dailyBoard, weeklyBoard, monthlyBoard, starsBoard, totalAnalyzed] = await Promise.all([
+  fetchBoard("velocity", 1),
+  fetchBoard("velocity", 7),
+  fetchBoard("velocity", 30),
   fetchBoard("stars"),
   (async () => {
     const result = await fetchJson<{ total?: number }>(
@@ -64,11 +67,16 @@ const [velocityBoard, starsBoard, totalAnalyzed] = await Promise.all([
   })(),
 ]);
 
-const trending = velocityBoard?.repos ?? [];
+const trending = weeklyBoard?.repos ?? [];
+const momentumBoards = [
+  { id: "trending-daily", label: "Daily", days: 1, repos: dailyBoard?.repos ?? [] },
+  { id: "trending-weekly", label: "Weekly", days: 7, repos: weeklyBoard?.repos ?? [] },
+  { id: "trending-monthly", label: "Monthly", days: 30, repos: monthlyBoard?.repos ?? [] },
+];
 const mostStarred = starsBoard?.repos ?? [];
-const loaded = velocityBoard !== null || starsBoard !== null;
-const hasRows = trending.length > 0 || mostStarred.length > 0;
-const windowDays = velocityBoard?.window_days ?? 7;
+const loaded = dailyBoard !== null || weeklyBoard !== null || monthlyBoard !== null || starsBoard !== null;
+const hasRows = momentumBoards.some((board) => board.repos.length > 0) || mostStarred.length > 0;
+const windowDays = weeklyBoard?.window_days ?? 7;
 
 const top = trending[0] ?? null;
 const topStarred = mostStarred[0] ?? null;
@@ -227,14 +235,26 @@ const rowClass = "border-b border-border";
             </p>
           )}
           <p class="font-mono text-base text-muted-foreground sm:text-xs">
-            Data updated {updatedDate} · refreshed continuously as star history is fetched
+            Data updated {updatedDate} · rankings refreshed daily from cached public history
           </p>
           <nav class="flex flex-wrap gap-2 pt-1" aria-label="Leaderboard sections">
             <a
-              href="#trending"
+              href="#trending-daily"
               class="inline-flex min-h-11 items-center rounded-md border border-border bg-background px-3 py-2 font-mono text-base text-muted-foreground hover:bg-accent hover:text-accent-foreground sm:min-h-0 sm:py-1.5 sm:text-xs"
             >
-              Trending ({windowDays}d)
+              Daily
+            </a>
+            <a
+              href="#trending-weekly"
+              class="dither-control inline-flex min-h-11 items-center px-3 py-2 font-mono text-base text-muted-foreground hover:text-foreground sm:min-h-0 sm:py-1.5 sm:text-xs"
+            >
+              Weekly
+            </a>
+            <a
+              href="#trending-monthly"
+              class="dither-control inline-flex min-h-11 items-center px-3 py-2 font-mono text-base text-muted-foreground hover:text-foreground sm:min-h-0 sm:py-1.5 sm:text-xs"
+            >
+              Monthly
             </a>
             <a
               href="#most-starred"
@@ -265,19 +285,16 @@ const rowClass = "border-b border-border";
           </section>
         )}
 
-        {trending.length > 0 && (
-          <section id="trending" class="scroll-mt-20 space-y-4">
+        {momentumBoards.map((board) => board.repos.length > 0 && (
+          <section id={board.id} class="scroll-mt-20 space-y-4">
             <h2 class="flex items-center gap-2 text-xl font-semibold tracking-tight">
               <span class="size-1.5 shrink-0 rounded-full bg-signal" aria-hidden="true"></span>
-              Trending: stars gained in the last {windowDays} days
+              {board.label} momentum · stars gained in {board.days}d
             </h2>
-            {vsPair && vsLabel && (
+            {board.days === 7 && vsPair && vsLabel && (
               <p class="text-base text-muted-foreground sm:text-sm">
                 Neck and neck at the top?{" "}
-                <a
-                  href={`/vs/${vsPair[0]}/${vsPair[1]}`}
-                  class="underline decoration-signal/60 underline-offset-4 hover:decoration-signal"
-                >
+                <a href={`/vs/${vsPair[0]}/${vsPair[1]}`} class="underline decoration-signal/60 underline-offset-4 hover:decoration-signal">
                   Compare {vsLabel} star history
                 </a>.
               </p>
@@ -289,25 +306,17 @@ const rowClass = "border-b border-border";
                     <tr class="border-b border-border">
                       <th class={thClass}>#</th>
                       <th class={thClass}>Repository</th>
-                      <th class={`${thClass} text-right`}>+{windowDays}d</th>
+                      <th class={`${thClass} text-right`}>+{board.days}d</th>
                       <th class={`${thClass} text-right`}>Total stars</th>
                     </tr>
                   </thead>
                   <tbody class="tabular-nums">
-                    {trending.map((r) => (
+                    {board.repos.map((r) => (
                       <tr class={rowClass}>
                         <td class="py-3 pr-4 font-mono text-base text-muted-foreground sm:text-xs">{r.rank}</td>
-                        <td class="py-3 pr-4">
-                          <a href={`/${r.repo}`} class="font-medium hover:text-signal">
-                            {r.repo}
-                          </a>
-                        </td>
-                        <td class="py-3 pr-4 text-right font-medium text-signal">
-                          +{r.velocity.toLocaleString()}
-                        </td>
-                        <td class="py-3 text-right text-muted-foreground">
-                          {formatCompact(r.stars)}
-                        </td>
+                        <td class="py-3 pr-4"><a href={`/${r.repo}`} class="font-medium hover:text-signal">{r.repo}</a></td>
+                        <td class="py-3 pr-4 text-right font-medium text-signal">+{r.velocity.toLocaleString()}</td>
+                        <td class="py-3 text-right text-muted-foreground">{formatCompact(r.stars)}</td>
                       </tr>
                     ))}
                   </tbody>
@@ -315,7 +324,7 @@ const rowClass = "border-b border-border";
               </div>
             </div>
           </section>
-        )}
+        ))}
 
         {mostStarred.length > 0 && (
           <section id="most-starred" class="scroll-mt-20 space-y-4">

@@ -37,6 +37,7 @@ async fn main() -> Result<()> {
     let db = Db::connect(&database_url).await?;
     tracing::info!("postgres connected; schema applied");
     let cache = Cache::new(db.clone());
+    gitdebt::leaderboard::spawn(db.clone());
 
     let rate = Arc::new(RateLimitTracker::load(db).await?);
     let github = Arc::new(GithubClient::new(token.as_deref(), rate.clone())?);

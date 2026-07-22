@@ -1,0 +1,41 @@
+# gitdebt agent reference
+
+Gitdebt is an open-source public GitHub repository analytics service. It provides cumulative star history, recent star velocity, contributor avatars, ownership concentration, language activity, commit cadence, high-churn files, bug-magnet files, TODO/FIXME trends, badges, profile summaries, and shareable SVG/PNG/WebP media.
+
+## Data boundary
+
+- Public repositories only. Private repositories are neither analyzed nor included in aggregate statistics.
+- Star timelines contain timestamps and the opaque GH Archive event identifier needed for idempotency. Gitdebt does not collect actors, stargazer profiles, or event payloads.
+- Complete star history and repository-health aggregates are persisted on gitdebt's server and served from Postgres-backed read paths.
+- Cold work is queued. The progress endpoint reports current phase, queue position, elapsed time, and ETA.
+
+## URL conventions
+
+- Repository HTML: `https://gitdebt.com/{owner}/{repo}`
+- Repository Markdown: `https://gitdebt.com/{owner}/{repo}.md`
+- Profile HTML: `https://gitdebt.com/u/{login}`
+- Profile Markdown: `https://gitdebt.com/u/{login}.md`
+- Comparison HTML: `https://gitdebt.com/vs/{owner1}/{repo1}/{owner2}/{repo2}`
+- Add `.md` to any emitted HTML page URL for the corresponding Markdown representation.
+
+## Public API
+
+- Analyze/cache snapshot: `GET https://api.gitdebt.com/api/repos/{owner}/{repo}/analyze`
+- Star history JSON: `GET https://api.gitdebt.com/api/repos/{owner}/{repo}/stars.json`
+- Star history CSV: `GET https://api.gitdebt.com/api/repos/{owner}/{repo}/stars.csv`
+- Repository-health JSON: `GET https://api.gitdebt.com/api/repos/{owner}/{repo}/stats.json`
+- Progress snapshot: `GET https://api.gitdebt.com/api/repos/{owner}/{repo}/progress.json`
+- Progress SSE: `GET https://api.gitdebt.com/api/repos/{owner}/{repo}/progress`
+- Platform activity: `GET https://api.gitdebt.com/api/activity.json`
+- Leaderboard: `GET https://api.gitdebt.com/api/leaderboard.json`
+
+## Shareable media
+
+- Star history: `/api/repos/{owner}/{repo}/chart.svg`
+- Contributors: `/api/repos/{owner}/{repo}/stats/contributors.svg`
+- Maintenance pulse: `/api/repos/{owner}/{repo}/stats/commit-trend.svg`
+- Language activity: `/api/repos/{owner}/{repo}/stats/lines.svg`
+- Commit calendar: `/api/repos/{owner}/{repo}/stats/heatmap.svg`
+- Profile card: `/api/users/{login}/card.svg`
+
+SVG URLs accept `theme=light|dark`. Static README output is the default. Use `animate=1` only when animation is explicitly wanted. PNG and WebP variants use the corresponding file extension.

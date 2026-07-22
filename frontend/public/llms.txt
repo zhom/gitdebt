@@ -1,0 +1,26 @@
+# gitdebt
+
+> Cool statistics for public GitHub repositories: star history, growth, contributors, ownership risk, language activity, churn, bug magnets, maintenance cadence, and README-ready media.
+
+Gitdebt analyzes public repositories only. Private repositories are ignored and never counted. Star-history read surfaces use gitdebt's Postgres cache; repository-health analysis runs asynchronously against the public Git repository.
+
+## Preferred representations
+
+- Add `.md` to any emitted HTML page URL for its Markdown representation.
+- Use the page's `<link rel="alternate" type="text/markdown">` to discover that representation.
+- Repository star history: `https://api.gitdebt.com/api/repos/{owner}/{repo}/stars.json`
+- Repository health: `https://api.gitdebt.com/api/repos/{owner}/{repo}/stats.json`
+- Queue status and ETA: `https://api.gitdebt.com/api/repos/{owner}/{repo}/progress.json`
+
+## Primary pages
+
+- https://gitdebt.com/
+- https://gitdebt.com/report
+- https://gitdebt.com/leaderboard
+- https://gitdebt.com/compare
+- https://gitdebt.com/badges
+- https://gitdebt.com/about
+
+## More detail
+
+- https://gitdebt.com/llms-full.txt

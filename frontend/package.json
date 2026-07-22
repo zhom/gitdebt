@@ -12,7 +12,7 @@
     "dev": "astro dev",
     "start": "astro dev",
     "check": "astro check",
-    "build": "astro check && astro build && node scripts/audit-routing.mjs && node scripts/audit-seo.mjs --prune-noindex-sitemap",
+    "build": "astro check && astro build && node scripts/audit-routing.mjs && node scripts/audit-seo.mjs --prune-noindex-sitemap && node scripts/audit-agent-surfaces.mjs",
     "test": "node --test scripts/*.test.mjs",
     "test:routing": "node --test scripts/static-routing.test.mjs",
     "seo:audit": "node scripts/audit-seo.mjs",

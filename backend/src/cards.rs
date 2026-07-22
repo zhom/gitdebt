@@ -856,7 +856,7 @@ fn repo_cells(data: &RepoCardData, opts: &RepoCardOptions) -> Vec<RepoCell> {
             RepoMetric::Commits => data.commits.map(|v| RepoCell {
                 glyph: GlyphKind::Commit,
                 value: fmt(v),
-                label: "commits analyzed",
+                label: "repository commits",
             }),
             RepoMetric::Age => data.created_year.map(|y| RepoCell {
                 glyph: GlyphKind::Clock,

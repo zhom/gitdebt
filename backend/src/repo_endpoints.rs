@@ -337,6 +337,9 @@ async fn repo_stats_json(
         "repo": full,
         "revision": revision,
         "total_commits": total_commits.max(0),
+        "attributed_commits": analyzed_commits.max(0),
+        // Backward-compatible alias. This is the filtered denominator used
+        // for ownership math, not the repository's displayed commit total.
         "analyzed_commits": analyzed_commits.max(0),
         "analysis_scope_commits": scope_commits.unwrap_or(0).max(0),
         "analysis_truncated": truncated,

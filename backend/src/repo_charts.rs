@@ -1066,7 +1066,7 @@ fn render_bus_factor_inner(
     }}
   ]]></style>
   <text class="title" x="{padding}" y="36">Bus factor</text>
-  <text class="subtitle" x="{padding}" y="58">People with at least 1% of {total} commits · {repo}</text>
+  <text class="subtitle" x="{padding}" y="58">Contributors with at least 1% of attributed commits · {repo}</text>
   <text class="bf-caption" x="{right_x:.0}" y="34" text-anchor="end">OWNERSHIP RISK · FACTOR {bus_factor}</text>
   <text class="bf-number" x="{right_x:.0}" y="70" text-anchor="end">{risk}</text>
 {people}
@@ -1081,7 +1081,6 @@ fn render_bus_factor_inner(
         track = theme.track,
         accent = theme.accent,
         padding = padding,
-        total = humanize(total_commits),
         bus_factor = bus_factor,
         risk = risk,
         right_x = right_x,

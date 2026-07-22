@@ -14,6 +14,7 @@ type Stats = {
   ready: boolean;
   total_commits: number;
   analyzed_commits: number;
+  attributed_commits?: number;
   analysis_scope_commits: number;
   analysis_truncated: boolean;
   bus_factor: number;
@@ -142,7 +143,7 @@ export function InteractiveRepoSignals(props: Props) {
   const maintenance = useMemo(() => monthly(stats?.commit_days ?? []), [stats?.commit_days]);
   if (!stats) return <FallbackSignals {...props} />;
 
-  const totalAuthored = Math.max(1, stats.analyzed_commits);
+  const totalAuthored = Math.max(1, stats.attributed_commits ?? stats.analyzed_commits);
   const filesByFix = [...stats.files]
     .filter((file) => file.fix_commits > 0)
     .sort((a, b) => b.fix_commits - a.fix_commits)
@@ -165,7 +166,7 @@ export function InteractiveRepoSignals(props: Props) {
             <div>
               <p className="font-mono text-xs tracking-wide text-muted-foreground uppercase">Risk · factor {stats.bus_factor}</p>
               <p className="mt-1 text-4xl font-semibold tracking-tight">{risk}</p>
-              <p className="mt-3 text-xs text-muted-foreground">{compact(stats.total_commits)} total commits · {compact(stats.analyzed_commits)} non-merge commits mapped</p>
+              <p className="mt-3 text-xs text-muted-foreground">{compact(stats.total_commits)} total repository commits</p>
             </div>
             <div className="flex items-center overflow-visible pl-3">
               {majorAuthors.map((author, index) => <ContributorAvatar key={`${author.login}-${author.label}`} author={author} index={index} />)}

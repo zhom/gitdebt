@@ -1,4 +1,4 @@
-import { useEffect, useRef, useState } from "react";
+import { useEffect, useMemo, useRef, useState } from "react";
 import {
   animate,
   motion,
@@ -8,8 +8,10 @@ import {
 } from "motion/react";
 import { ExternalLink, Loader2 } from "lucide-react";
 
+import { BalancedText } from "@/components/BalancedText";
 import { ButtonLink } from "@/components/ButtonLink";
 import { DitherMeter } from "@/components/DitherMeter";
+import { StarCurveStory } from "@/components/StarCurveStory";
 import { StatStrip } from "@/components/StatStrip";
 import { BODY, CAPTION, EYEBROW, HEADING, PANEL, TITLE } from "@/components/style-tokens";
 import { BRAND } from "@/lib/dither";
@@ -86,6 +88,10 @@ type Props = {
 
 const POLL_MS = 20_000;
 const PROGRESS_POLL_MS = 4_000;
+
+/** The hero's standing description, flowed around the repo's star curve. */
+const HERO_BLURB =
+  "Star momentum, maintenance concentration, contributor health, and codebase change — one report built from public repository data.";
 
 function needsPolling(data: AnalyzeResponse): boolean {
   if (data.not_found || data.history_status === "not_public") return false;
@@ -280,6 +286,15 @@ export function RepoHero({ owner, repo, apiBase, initialData }: Props) {
     };
   }, [owner, repo, apiBase, initialData]);
 
+  const storyPoints = useMemo(
+    () =>
+      (data?.history ?? []).map((point) => ({
+        date: point.date,
+        value: point.stars,
+      })),
+    [data?.history],
+  );
+
   const slug = data?.repo ?? `${owner}/${repo}`;
   const latest = data?.history[data.history.length - 1]?.date ?? null;
   const year = data ? firstStarYear(data) : null;
@@ -289,7 +304,9 @@ export function RepoHero({ owner, repo, apiBase, initialData }: Props) {
     return (
       <section className="space-y-6">
         <div className="space-y-2">
-          <h1 className={TITLE}>Repository not public or not found</h1>
+          <BalancedText as="h1" className={TITLE}>
+            Repository not public or not found
+          </BalancedText>
           <p className={cn(BODY, "max-w-[62ch]")}>
             GitHub did not expose {slug} as a public repository. Check the owner
             and repository name, or open it on GitHub if you have private
@@ -349,11 +366,14 @@ export function RepoHero({ owner, repo, apiBase, initialData }: Props) {
     <section className="space-y-6">
       <header className="flex flex-col gap-4 sm:flex-row sm:items-end sm:justify-between">
         <div className="space-y-2">
-          <h1 className={TITLE}>{slug}</h1>
-          <p className={cn(BODY, "max-w-[62ch]")}>
-            Star momentum, maintenance concentration, contributor health, and
-            codebase change — one report built from public repository data.
-          </p>
+          <BalancedText as="h1" className={TITLE}>
+            {slug}
+          </BalancedText>
+          <StarCurveStory
+            text={HERO_BLURB}
+            points={storyPoints}
+            className="max-w-[62ch]"
+          />
         </div>
         <ButtonLink
           href={`https://github.com/${owner}/${repo}`}

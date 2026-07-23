@@ -271,39 +271,66 @@ fn render_single_svg(
     let baseline = y_at(0.0);
     let first_x = x_at(xs[0]);
     let last_x = x_at(*xs.last().unwrap_or(&xs[0]));
-    // The `wave` motion displaces the underfill's top edge and advances the
-    // Bayer phase per frame; the crisp line above stays put.
-    let (area, area_fill, wave_defs) = match wave {
-        None => (
+    // The dithered underfill has three modes. Default: a flat wash. GIF frame
+    // (`wave` is `Some`): the crest is displaced and the Bayer phase baked for
+    // that frame. On-site SVG (`animate`): a seeded wavy crest plus a dither
+    // that marches its Bayer phase forever via SMIL. Every mode collapses to a
+    // fully-painted, non-blank fill when a consumer strips the animation.
+    let (area, area_fill, wave_defs) = if let Some(w) = wave {
+        let area = wave_area_path(
+            &xs,
+            series,
+            &x_at,
+            &y_at,
+            baseline,
+            geom.pad,
+            geom.plot_w,
+            &w,
+        );
+        // Advance the pattern by one full 8px tile per cycle, snapped to the
+        // 2px cell grid so cells stay crisp (a marching threshold phase, not a
+        // sub-pixel smear).
+        let phase = if w.frames == 0 {
+            0
+        } else {
+            (w.frame * 4 / w.frames) * 2
+        };
+        let dense = crate::texture::dense_cells();
+        let defs = format!(
+            "  <defs><pattern id=\"gd-wave-fill\" width=\"8\" height=\"8\" patternUnits=\"userSpaceOnUse\" patternTransform=\"translate({phase}.5 .5)\"><g shape-rendering=\"crispEdges\" opacity=\"0.96\" transform=\"scale(2)\">{dense}</g></pattern></defs>\n",
+        );
+        (area, "url(#gd-wave-fill)".to_string(), defs)
+    } else if animate {
+        // Frame-0 crest gives a static wavy silhouette; the `<animateTransform>`
+        // marches the dither one full 8px tile per cycle (seamless loop) and is
+        // gated by the same `.motion` reduced-motion switch as the line draw.
+        // Stripping SMIL leaves the crest + phase-0 wash — never a flat monotone.
+        let crest = WaveSpec {
+            frame: 0,
+            frames: 1,
+            seed: crate::animated_gif::fnv1a(&cfg.repo),
+        };
+        let area = wave_area_path(
+            &xs,
+            series,
+            &x_at,
+            &y_at,
+            baseline,
+            geom.pad,
+            geom.plot_w,
+            &crest,
+        );
+        let dense = crate::texture::dense_cells();
+        let defs = format!(
+            "  <defs><pattern id=\"gd-wave-fill\" width=\"8\" height=\"8\" patternUnits=\"userSpaceOnUse\" patternTransform=\"translate(.5 .5)\"><g shape-rendering=\"crispEdges\" opacity=\"0.96\" transform=\"scale(2)\">{dense}</g><animateTransform class=\"motion\" attributeName=\"patternTransform\" type=\"translate\" from=\"0.5 0.5\" to=\"8.5 0.5\" dur=\"1.6s\" repeatCount=\"indefinite\" /></pattern></defs>\n",
+        );
+        (area, "url(#gd-wave-fill)".to_string(), defs)
+    } else {
+        (
             format!("{path} L {last_x:.1} {baseline:.1} L {first_x:.1} {baseline:.1} Z"),
             crate::texture::FILL.to_string(),
             String::new(),
-        ),
-        Some(w) => {
-            let area = wave_area_path(
-                &xs,
-                series,
-                &x_at,
-                &y_at,
-                baseline,
-                geom.pad,
-                geom.plot_w,
-                &w,
-            );
-            // Advance the pattern by one full 8px tile per cycle, snapped
-            // to the 2px cell grid so cells stay crisp (a marching
-            // threshold phase, not a sub-pixel smear).
-            let phase = if w.frames == 0 {
-                0
-            } else {
-                (w.frame * 4 / w.frames) * 2
-            };
-            let dense = crate::texture::dense_cells();
-            let defs = format!(
-                "  <defs><pattern id=\"gd-wave-fill\" width=\"8\" height=\"8\" patternUnits=\"userSpaceOnUse\" patternTransform=\"translate({phase}.5 .5)\"><g shape-rendering=\"crispEdges\" opacity=\"0.96\" transform=\"scale(2)\">{dense}</g></pattern></defs>\n",
-            );
-            (area, "url(#gd-wave-fill)".to_string(), defs)
-        }
+        )
     };
     let dash = approximate_path_length(&xs, series, &x_at, &y_at);
     let dash_offset = ((dash as f32) * (1.0 - progress)).round() as u32;
@@ -1312,6 +1339,39 @@ mod tests {
         assert!(!svg.contains("suspicious"));
         assert!(!svg.contains("fake"));
         assert!(!svg.contains("var(--"));
+    }
+
+    #[test]
+    fn animated_svg_waves_the_dither_fill_and_stays_static_by_default() {
+        let arrivals: Vec<_> = (0..24).map(|i| at(i * 86_400)).collect();
+        let series = cumulative_series(&arrivals);
+        let cfg = ChartConfig {
+            repo: "owner/repo".into(),
+            ..ChartConfig::default()
+        };
+
+        // On-site animate: the underfill swaps to the wave pattern and marches
+        // its dither, while the line keeps its single draw-in <animate>.
+        let anim = render_svg(&series, &cfg, &DARK, &animated_opts());
+        assert!(anim.contains("id=\"gd-wave-fill\""));
+        assert!(anim.contains("url(#gd-wave-fill)"));
+        assert!(anim.contains("<animateTransform"));
+        assert!(anim.contains("attributeName=\"patternTransform\""));
+        assert!(anim.contains("class=\"motion\""));
+        // Exactly one line-draw <animate> (the space-terminated tag), unchanged.
+        assert_eq!(anim.matches("<animate ").count(), 1);
+        // SMIL-stripped fallback is a fully-painted chart, never blank.
+        assert!(anim.contains("stroke-dashoffset=\"0\""));
+        assert!(anim.contains("prefers-reduced-motion: reduce"));
+        // Deterministic bytes.
+        assert_eq!(anim, render_svg(&series, &cfg, &DARK, &animated_opts()));
+
+        // Default (static) chart is a flat wash: no marching transform, and the
+        // area keeps the shared pixel-fill pattern.
+        let stat = render_svg(&series, &cfg, &DARK, &ChartOpts::default());
+        assert!(!stat.contains("animateTransform"));
+        assert!(!stat.contains("url(#gd-wave-fill)"));
+        assert!(stat.contains(crate::texture::FILL));
     }
 
     #[test]

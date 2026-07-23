@@ -122,20 +122,17 @@ export function useDitherSurface(opts: DitherSurfaceOptions) {
     ),
     handlers: animated
       ? {
+          // The pulse anchors where the pointer first crossed into the host and
+          // breathes in place from there. It deliberately does not track
+          // `onPointerMove`: once the pulsation has started it stays put instead
+          // of chasing the cursor around the button. A press only deepens the
+          // same ring (`down()` with no coordinates keeps the anchor).
           onPointerEnter: (event: ReactPointerEvent<HTMLElement>) => {
             const { x, y } = local(event);
             ctrl.current?.enter(x, y);
           },
-          onPointerMove: (event: ReactPointerEvent<HTMLElement>) => {
-            if (!pulse) return;
-            const { x, y } = local(event);
-            ctrl.current?.move(x, y);
-          },
           onPointerLeave: () => ctrl.current?.leave(),
-          onPointerDown: (event: ReactPointerEvent<HTMLElement>) => {
-            const { x, y } = local(event);
-            ctrl.current?.down(x, y);
-          },
+          onPointerDown: () => ctrl.current?.down(),
           onPointerUp: () => ctrl.current?.up(),
           onPointerCancel: () => ctrl.current?.up(),
         }

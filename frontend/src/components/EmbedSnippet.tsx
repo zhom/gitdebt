@@ -72,6 +72,8 @@ type Format = "svg" | "gif" | "png" | "webp";
 type ThemeChoice = "auto" | "light" | "dark";
 
 const STATIC_FORMATS: Format[] = ["svg", "png", "webp"];
+/** Repo star-history charts are the only surface with a looping wave GIF. */
+const GIF_CHART_RE = /^\/api\/repos\/[^/]+\/[^/]+\/chart\.svg(?:\?|$)/;
 const THEMES: { id: ThemeChoice; label: string }[] = [
   { id: "auto", label: "Auto" },
   { id: "light", label: "Light" },
@@ -123,7 +125,11 @@ export function EmbedSnippet({
   variant = "panel",
 }: Props) {
   const [mode, setMode] = useState<Mode>("markdown");
-  const [format, setFormat] = useState<Format>("svg");
+  // Default the shareable to the looping wave GIF where one exists — it is the
+  // only format that actually animates once pasted into a GitHub README.
+  const [format, setFormat] = useState<Format>(() =>
+    GIF_CHART_RE.test(chartPath) ? "gif" : "svg",
+  );
   const [theme, setTheme] = useState<ThemeChoice>("auto");
   const [animatedSvg, setAnimatedSvg] = useState(false);
   const [open, setOpen] = useState(false);
@@ -180,8 +186,7 @@ export function EmbedSnippet({
     };
   }, [open, variant]);
 
-  const supportsGif =
-    /^\/api\/repos\/[^/]+\/[^/]+\/chart\.svg(?:\?|$)/.test(chartPath);
+  const supportsGif = GIF_CHART_RE.test(chartPath);
   const formats: readonly Format[] = supportsGif
     ? (["svg", "gif", "png", "webp"] as const)
     : STATIC_FORMATS;

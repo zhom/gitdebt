@@ -3441,10 +3441,10 @@ fn needs_downloads(metrics: &[Metric]) -> bool {
 /// Render-revision constant baked into every media cache key (badges,
 /// cards, OG images, GIFs, charts). Bump it whenever renderer output
 /// changes for identical data so stale in-process/CDN entries can never
-/// serve the previous look under the same key. `r16` = the canonical robot
-/// artwork on every mark surface (replacing the hand-authored pixel grid)
-/// and the single badge style.
-pub(crate) const RENDER_REVISION: &str = "r16";
+/// serve the previous look under the same key. `r17` = the animated
+/// star-history SVG now waves its dithered underfill (marching Bayer phase)
+/// instead of only drawing the line in.
+pub(crate) const RENDER_REVISION: &str = "r17";
 
 struct RepoRenderReadiness {
     stars: bool,

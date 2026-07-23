@@ -6,18 +6,24 @@
 //!
 //!   1. **Resolve the login's repos.** The `login → repos` mapping is
 //!      cached in Postgres (`login_repo_lists` / `login_repos`, see
-//!      `cache.rs`) with a [`LOGIN_REPOS_TTL`]. On a cold or stale login we
-//!      make ONE rate-limited repos-list call ([`GithubClient::user_repos`]
-//!      — works for users and orgs), guarded by the non-blocking
-//!      `has_budget` probe so an exhausted GitHub bucket degrades to the
-//!      stale cached list instead of hanging the request. The list is
-//!      capped at the top [`MAX_AGGREGATE_REPOS`] repos by star count
-//!      (client-side sort — the API can't sort by stars).
+//!      `cache.rs`) with a [`LOGIN_REPOS_TTL`]. A login may be a user OR an
+//!      organization, which GitHub lists through different endpoints, so
+//!      the kind is resolved from `/users/{login}` and stored — never
+//!      assumed. On a cold or stale login the request path spends at most
+//!      [`SYNC_LIST_FETCH_COST`] GitHub calls (the account probe plus ONE
+//!      repositories page); an account with more pages is completed by a
+//!      detached background refresh, so no request ever paginates GitHub.
+//!      Both are guarded by the non-blocking `has_budget` probe, so an
+//!      exhausted bucket degrades to the stale cached list instead of
+//!      hanging the request. The list is capped at the top
+//!      [`MAX_AGGREGATE_REPOS`] repos by star count (client-side sort — no
+//!      repos endpoint can sort by stars).
 //!   2. **Sum the cached star history.** Per-day star deltas come from
-//!      `repo_stargazers` aggregated **in SQL** (one row per repo per
-//!      calendar day — never one row per stargazer in memory), then are
-//!      merged by the pure [`merge_day_deltas`] + [`deltas_to_series`]
-//!      math. Only repos with `stargazers_complete = TRUE` contribute
+//!      `repo_stargazers` summed across the whole repo set **in SQL** (one
+//!      row per calendar day — never one row per repo per day, and never
+//!      one row per stargazer in memory), then folded into a cumulative
+//!      series by the pure [`deltas_to_series`]. Only repos with
+//!      `stargazers_complete = TRUE` contribute
 //!      (readers never trust partial data); cold/incomplete repos are
 //!      enqueued on the existing `star_fetch_queue` — the request NEVER
 //!      blocks on fetching stars — and reported in `repos_pending`.
@@ -31,7 +37,7 @@
 //! be free of clocks and randomness (it is; `BTreeMap` keeps day merging
 //! deterministic).
 
-use std::collections::{BTreeMap, HashMap, HashSet};
+use std::collections::{HashMap, HashSet};
 use std::sync::Arc;
 
 use anyhow::Result;
@@ -86,8 +92,8 @@ pub const MAX_HISTORY_POINTS: usize = 400;
 // tombstone cannot bound the aggregate burn rate: a client cycling made-up
 // logins inside the analyze governor would otherwise drain the shared PAT
 // bucket and stall the background star-fetch workers site-wide. The fix is
-// a process-wide fixed-window budget on live repos-list fetches,
-// pessimistically costed at the [`GithubClient::user_repos`] page cap.
+// a process-wide fixed-window budget on live repos-list fetches, costed at
+// the number of GitHub calls each kind of fetch can make.
 // Exhausted window → same degrade path as "no GitHub budget": stale cached
 // list, else `Busy` (503, retry later). The window mutex also closes the
 // probe race (N concurrent requests can no longer all pass `has_budget`
@@ -96,16 +102,25 @@ pub const MAX_HISTORY_POINTS: usize = 400;
 /// Fixed-window length for the live repos-list budget.
 const LIVE_LIST_WINDOW_SECS: i64 = 60;
 
-/// Pessimistic per-fetch cost in GitHub API calls: `user_repos` paginates
-/// up to 10 pages (`github.rs::REPO_LIST_MAX_PAGES`). Debiting the worst
-/// case keeps the accounting simple and errs toward protecting the budget.
-const LIVE_LIST_FETCH_COST: u32 = 10;
+/// Repositories pages a REQUEST may walk. One: a request path that follows
+/// `Link: next` is synchronous GitHub pagination, and for an organization
+/// with thousands of repositories that is seconds of latency inside the
+/// handler. The remaining pages are completed off-request.
+const SYNC_LIST_PAGES: usize = 1;
 
-/// Per-window budget in API-call units. 30/min with a flat cost of 10 →
-/// at most 3 live list fetches per minute process-wide: worst case
-/// ~1,800 GitHub calls/hr (every login a max-page org), ~180/hr for the
-/// junk-login pattern (one 404 call each) — the shared 5k/hr PAT keeps
-/// majority headroom for the background workers under any request mix.
+/// Exact per-fetch cost of the request-path resolution in GitHub calls:
+/// the `/users/{login}` account probe plus [`SYNC_LIST_PAGES`] page.
+const SYNC_LIST_FETCH_COST: u32 = 1 + SYNC_LIST_PAGES as u32;
+
+/// Pessimistic cost of the detached full-list refresh: the account probe
+/// plus every page the walk is allowed. Debiting the worst case up front
+/// keeps the accounting simple and errs toward protecting the budget.
+const FULL_LIST_FETCH_COST: u32 = 1 + crate::github::REPO_LIST_MAX_PAGES as u32;
+
+/// Per-window budget in API-call units. 30/min → at most 10 request-path
+/// resolutions or 2 full background refreshes per minute process-wide:
+/// worst case ~1,800 GitHub calls/hr — the shared 5k/hr PAT keeps majority
+/// headroom for the background workers under any request mix.
 const LIVE_LIST_CALLS_PER_WINDOW: u32 = 30;
 
 /// Pure fixed-window accounting: `state` is `(window_index, spent)`.
@@ -131,8 +146,9 @@ fn window_try_spend(
     true
 }
 
-/// Try to debit one live repos-list fetch from the process-wide window.
-fn try_spend_live_list_fetch() -> bool {
+/// Try to debit `cost` GitHub calls of repos-list work from the
+/// process-wide window.
+fn try_spend_live_list_fetch(cost: u32) -> bool {
     static WINDOW: std::sync::Mutex<(i64, u32)> = std::sync::Mutex::new((0, 0));
     let mut state = WINDOW
         .lock()
@@ -141,9 +157,18 @@ fn try_spend_live_list_fetch() -> bool {
         &mut state,
         Utc::now().timestamp(),
         LIVE_LIST_WINDOW_SECS,
-        LIVE_LIST_FETCH_COST,
+        cost,
         LIVE_LIST_CALLS_PER_WINDOW,
     )
+}
+
+/// Logins whose detached full-list refresh is already running. Without it,
+/// every request arriving while a huge organization is being walked would
+/// start its own walk of the same account.
+fn background_refresh_guard() -> &'static std::sync::Mutex<HashSet<String>> {
+    static IN_FLIGHT: std::sync::OnceLock<std::sync::Mutex<HashSet<String>>> =
+        std::sync::OnceLock::new();
+    IN_FLIGHT.get_or_init(|| std::sync::Mutex::new(HashSet::new()))
 }
 
 /// Errors the API layer maps to distinct HTTP statuses. Everything else
@@ -179,6 +204,18 @@ pub struct UserAggregate {
     pub repos_analyzed: u32,
     /// Owned repositories still waiting on or running code-health analysis.
     pub repos_analyzing: u32,
+    /// The account's public-repository count as GitHub reports it, when
+    /// known. The aggregate covers at most [`MAX_AGGREGATE_REPOS`] of them,
+    /// so this is what makes the coverage of a large organization legible
+    /// instead of a silently truncated total.
+    pub repos_total: Option<u64>,
+    /// `User` or `Organization`, as resolved from GitHub — never inferred.
+    pub account_type: Option<String>,
+    /// The top-by-stars pick was made over a `pushed`-ordered prefix that a
+    /// deeper walk can still improve. Self-heals when the detached
+    /// full-list refresh lands. Coverage of the account is `repos_total`
+    /// against `repos_cap`, not this flag.
+    pub list_truncated: bool,
     /// Full summed total (not window-filtered), like `/analyze`.
     pub total_stars: u64,
     pub series: Vec<Point>,
@@ -187,7 +224,8 @@ pub struct UserAggregate {
 impl UserAggregate {
     /// The `/api/users/:login/analyze` JSON body. Locked contract:
     /// `{login,repos_included,repos_pending,repos_analyzed,repos_analyzing,`
-    /// `total_stars,history:[{date,stars}]}`.
+    /// `total_stars,history:[{date,stars}]}`, plus the additive coverage
+    /// keys `{repos_total,repos_cap,account_type,list_truncated}`.
     /// `history` is downsampled to ≤ [`MAX_HISTORY_POINTS`], same policy as
     /// the repo `/analyze` payload.
     pub fn to_json(&self) -> serde_json::Value {
@@ -197,6 +235,10 @@ impl UserAggregate {
             "repos_pending": self.repos_pending,
             "repos_analyzed": self.repos_analyzed,
             "repos_analyzing": self.repos_analyzing,
+            "repos_total": self.repos_total,
+            "repos_cap": MAX_AGGREGATE_REPOS,
+            "account_type": self.account_type,
+            "list_truncated": self.list_truncated,
             "total_stars": self.total_stars,
             "history": chart::downsample(&self.series, MAX_HISTORY_POINTS),
         })
@@ -217,10 +259,19 @@ pub fn is_valid_login(s: &str) -> bool {
 /// `ext_ping`/export), validates both segments (a malformed `full_name`
 /// is dropped, never propagated), dedups, and breaks star ties by slug so
 /// the output is fully deterministic.
+///
+/// Private repositories are dropped here rather than trusted to be absent.
+/// A signed-in visitor's own profile is listed with their OAuth token, and
+/// a broad grant makes `/users/{login}/repos` return repositories the
+/// public cannot see; gitdebt is a public-data product, so a private slug
+/// must never reach the cache, the queues, or a rendered surface.
 pub fn top_repos_by_stars(items: &[RepoListItem], cap: usize) -> Vec<(String, i64)> {
     let mut seen: HashSet<String> = HashSet::new();
     let mut out: Vec<(String, i64)> = Vec::new();
     for it in items {
+        if it.private {
+            continue;
+        }
         let Some((owner, name)) = it.full_name.split_once('/') else {
             continue;
         };
@@ -241,21 +292,6 @@ pub fn top_repos_by_stars(items: &[RepoListItem], cap: usize) -> Vec<(String, i6
     out
 }
 
-/// Merge several repos' per-day star-delta series into one summed per-day
-/// series, date-ascending. Overlapping days add; days unique to one repo
-/// pass through; empty inputs contribute nothing. Negative deltas (can't
-/// occur from the `COUNT(*)` loader) are clamped to 0 defensively, same as
-/// `export::accumulate`. Deterministic: `BTreeMap` orders by date.
-pub fn merge_day_deltas(per_repo: &[Vec<(NaiveDate, i64)>]) -> Vec<(NaiveDate, i64)> {
-    let mut acc: BTreeMap<NaiveDate, i64> = BTreeMap::new();
-    for series in per_repo {
-        for (day, delta) in series {
-            *acc.entry(*day).or_insert(0) += (*delta).max(0);
-        }
-    }
-    acc.into_iter().collect()
-}
-
 /// Fold merged per-day deltas (date-ascending) into a cumulative series of
 /// chart [`Point`]s (one per day, at midnight UTC — deterministic) plus the
 /// full summed total. `Point::stars` is `u32`; the running total saturates
@@ -274,39 +310,34 @@ pub fn deltas_to_series(deltas: &[(NaiveDate, i64)]) -> (Vec<Point>, u64) {
     (out, total)
 }
 
-/// Per-day star deltas for a set of repos, aggregated **in SQL** (one row
-/// per repo per calendar day, UTC-bucketed for session-TZ independence),
-/// grouped into per-repo vectors. Same caller-gates-completeness contract
-/// as `export::load_day_deltas`: callers must only pass repos whose
-/// `stargazers_complete` flag is set — this reads raw rows.
-pub async fn load_day_deltas_by_repo(
-    db: &Db,
-    repos: &[String],
-) -> Result<Vec<Vec<(NaiveDate, i64)>>> {
+/// Per-day star deltas summed across a set of repos, date-ascending,
+/// aggregated **in SQL**: one row per calendar day for the whole set, not
+/// one per repo per day. Overlapping days add and days unique to one repo
+/// pass through, which is exactly what the summed series needs — grouping
+/// per repo first shipped 50× the rows to the process only to fold them
+/// back together in memory. Days are UTC-bucketed so the result does not
+/// depend on the session time zone.
+///
+/// Same caller-gates-completeness contract as `export::load_day_deltas`:
+/// callers must only pass repos whose `stargazers_complete` flag is set —
+/// this reads raw rows.
+pub async fn load_merged_day_deltas(db: &Db, repos: &[String]) -> Result<Vec<(NaiveDate, i64)>> {
     if repos.is_empty() {
         return Ok(Vec::new());
     }
     let rows = sqlx::query(
-        "SELECT repo, (starred_at AT TIME ZONE 'UTC')::date AS day, COUNT(*) AS delta \
+        "SELECT (starred_at AT TIME ZONE 'UTC')::date AS day, COUNT(*)::BIGINT AS delta \
          FROM active_repo_star_history \
          WHERE repo = ANY($1) \
-         GROUP BY 1, 2 \
-         ORDER BY 1, 2",
+         GROUP BY 1 \
+         ORDER BY 1",
     )
     .bind(repos)
     .fetch_all(&db.pool)
     .await?;
-    let mut out: Vec<Vec<(NaiveDate, i64)>> = Vec::new();
-    let mut cur: Option<String> = None;
+    let mut out = Vec::with_capacity(rows.len());
     for row in rows {
-        let repo: String = row.try_get("repo")?;
-        let day: NaiveDate = row.try_get("day")?;
-        let delta: i64 = row.try_get("delta")?;
-        if cur.as_deref() != Some(repo.as_str()) {
-            out.push(Vec::new());
-            cur = Some(repo);
-        }
-        out.last_mut().expect("pushed above").push((day, delta));
+        out.push((row.try_get("day")?, row.try_get("delta")?));
     }
     Ok(out)
 }
@@ -339,14 +370,37 @@ pub async fn load_repo_states(db: &Db, repos: &[String]) -> Result<HashMap<Strin
     Ok(out)
 }
 
+/// A resolved repo list plus what the resolution learned about the account
+/// itself. The two travel together so a reported coverage number always
+/// describes the list it is attached to.
+#[derive(Debug, Clone, Default)]
+struct ResolvedList {
+    repos: Vec<(String, i64)>,
+    kind: Option<crate::github::AccountKind>,
+    public_repos: Option<i64>,
+    truncated: bool,
+}
+
+impl ResolvedList {
+    fn from_cache(repos: Vec<(String, i64)>, meta: Option<&crate::cache::LoginReposMeta>) -> Self {
+        Self {
+            repos,
+            kind: meta.and_then(|m| m.account_kind),
+            public_repos: meta.and_then(|m| m.public_repos),
+            truncated: meta.is_some_and(|m| m.list_truncated),
+        }
+    }
+}
+
 /// Build the aggregate for a login. Non-blocking on star data (cold repos
-/// are enqueued, never fetched inline); at most one live GitHub call (the
-/// TTL'd repos-list) and only when budget headroom exists. The caller
-/// validates the login ([`is_valid_login`]); this normalizes to lowercase.
+/// are enqueued, never fetched inline) and non-paginating on GitHub (the
+/// request path spends at most [`SYNC_LIST_FETCH_COST`] calls, and only
+/// when budget headroom exists). The caller validates the login
+/// ([`is_valid_login`]); this normalizes to lowercase.
 pub async fn build(ctx: &AnalyzerCtx, login: &str) -> Result<UserAggregate, AggregateError> {
     let login = login.to_ascii_lowercase();
-    let repos = resolve_login_repos(ctx, &login, None).await?;
-    build_from_repos(ctx, login, repos, true, None).await
+    let resolved = resolve_login_repos(ctx, &login, None).await?;
+    build_from_repos(ctx, login, resolved, true, None).await
 }
 
 /// Authenticated self-profile build. The caller has already proved that
@@ -360,8 +414,8 @@ pub async fn build_for_user(
     github: Arc<GithubClient>,
 ) -> Result<UserAggregate, AggregateError> {
     let login = login.to_ascii_lowercase();
-    let repos = resolve_login_repos(ctx, &login, Some(github.as_ref())).await?;
-    build_from_repos(ctx, login, repos, true, Some(user_id)).await
+    let resolved = resolve_login_repos(ctx, &login, Some(github.as_ref())).await?;
+    build_from_repos(ctx, login, resolved, true, Some(user_id)).await
 }
 
 /// Build an aggregate exclusively from cached Postgres state. Static-site
@@ -381,17 +435,22 @@ pub async fn build_readonly(
         .get_login_repos(&login)
         .await?
         .ok_or(AggregateError::Busy)?;
-    build_from_repos(ctx, login, repos, false, None).await
+    let resolved = ResolvedList::from_cache(repos, meta.as_ref());
+    build_from_repos(ctx, login, resolved, false, None).await
 }
 
 async fn build_from_repos(
     ctx: &AnalyzerCtx,
     login: String,
-    repos: Vec<(String, i64)>,
+    resolved: ResolvedList,
     enqueue: bool,
     user_id: Option<i64>,
 ) -> Result<UserAggregate, AggregateError> {
-    let slugs: Vec<String> = repos.into_iter().map(|(slug, _)| slug).collect();
+    let slugs: Vec<String> = resolved
+        .repos
+        .iter()
+        .map(|(slug, _)| slug.clone())
+        .collect();
 
     let db = ctx.cache.db();
     let states = load_repo_states(db, &slugs).await?;
@@ -471,8 +530,7 @@ async fn build_from_repos(
         }
     }
 
-    let per_repo = load_day_deltas_by_repo(db, &included).await?;
-    let merged = merge_day_deltas(&per_repo);
+    let merged = load_merged_day_deltas(db, &included).await?;
     let (series, total_stars) = deltas_to_series(&merged);
     let repos_analyzed = if analysis_candidates.is_empty() {
         0
@@ -521,20 +579,137 @@ async fn build_from_repos(
         repos_pending: pending,
         repos_analyzed,
         repos_analyzing,
+        repos_total: resolved
+            .public_repos
+            .and_then(|count| u64::try_from(count).ok()),
+        account_type: resolved.kind.map(|kind| kind.as_str().to_string()),
+        list_truncated: resolved.truncated,
         total_stars,
         series,
     })
 }
 
+/// Outcome of one live resolution attempt, separated from the transport
+/// error so the caller can tell "GitHub says this login does not exist"
+/// from "we could not ask right now".
+enum RefreshOutcome {
+    Resolved(ResolvedList),
+    LoginMissing,
+    Failed,
+}
+
+/// One live resolution: probe the account (which decides the endpoint AND
+/// gives the authoritative 404), list at most `max_pages` of repositories,
+/// then replace the cached list atomically. Never paginates past
+/// `max_pages`; the caller decides how many a given context may afford.
+async fn refresh_login_repos(
+    cache: &crate::cache::Cache,
+    github: &GithubClient,
+    login: &str,
+    max_pages: usize,
+) -> RefreshOutcome {
+    let account = match github.user(login).await {
+        Ok(Some(account)) => account,
+        Ok(None) => return RefreshOutcome::LoginMissing,
+        Err(error) => {
+            tracing::warn!(login, %error, "login account probe failed");
+            return RefreshOutcome::Failed;
+        }
+    };
+    let kind = account.kind();
+    let list = match github.login_repos(login, kind, max_pages).await {
+        Ok(Some(list)) => list,
+        // The account exists but its repositories endpoint 404s. Treating
+        // that as a missing login would tombstone a live account, so it is
+        // a plain failure and the cached list stands.
+        Ok(None) => {
+            tracing::warn!(
+                login,
+                kind = kind.as_str(),
+                "repos endpoint 404 for live account"
+            );
+            return RefreshOutcome::Failed;
+        }
+        Err(error) => {
+            tracing::warn!(login, %error, "login repos-list fetch failed");
+            return RefreshOutcome::Failed;
+        }
+    };
+    let top = top_repos_by_stars(&list.items, MAX_AGGREGATE_REPOS);
+    // Persisted truncation means "a deeper walk would still improve this
+    // list", not merely "GitHub had more pages". An account past the full
+    // page cap can never be completed, so recording it as improvable would
+    // re-walk ten pages of it on every view, forever. How much of the
+    // account the aggregate covers is reported from `public_repos`, which
+    // is exact either way.
+    let deepenable = list.truncated && max_pages < crate::github::REPO_LIST_MAX_PAGES;
+    let facts = crate::cache::LoginListFacts {
+        kind,
+        public_repos: account.public_repos,
+        truncated: deepenable,
+    };
+    // Best-effort cache write: we already hold the data, so a write failure
+    // degrades to "not cached", never to a failed request.
+    if let Err(error) = cache.put_login_repos(login, &top, facts).await {
+        tracing::warn!(login, %error, "put_login_repos failed");
+    }
+    RefreshOutcome::Resolved(ResolvedList {
+        repos: top,
+        kind: Some(kind),
+        public_repos: account.public_repos,
+        truncated: deepenable,
+    })
+}
+
+/// Finish a page-capped list off the request path. Runs with the shared
+/// PAT, never a visitor's OAuth token: a detached task outlives the request
+/// that started it, and the completed list is public data either way.
+fn spawn_full_list_refresh(ctx: &AnalyzerCtx, login: &str) {
+    {
+        let mut in_flight = background_refresh_guard()
+            .lock()
+            .expect("background refresh guard mutex never poisoned");
+        if !in_flight.insert(login.to_string()) {
+            return;
+        }
+    }
+    if !try_spend_live_list_fetch(FULL_LIST_FETCH_COST) {
+        background_refresh_guard()
+            .lock()
+            .expect("background refresh guard mutex never poisoned")
+            .remove(login);
+        return;
+    }
+    let cache = ctx.cache.clone();
+    let github = ctx.github.clone();
+    let login = login.to_string();
+    tokio::spawn(async move {
+        if github.has_budget().await {
+            refresh_login_repos(
+                &cache,
+                github.as_ref(),
+                &login,
+                crate::github::REPO_LIST_MAX_PAGES,
+            )
+            .await;
+        }
+        background_refresh_guard()
+            .lock()
+            .expect("background refresh guard mutex never poisoned")
+            .remove(&login);
+    });
+}
+
 /// Resolve the login's top-repos list: fresh cache hit → serve it; cold or
-/// stale → one budget-probed live repos-list call, cached atomically;
-/// fetch failure / no budget → stale-but-complete fallback; nothing at all
-/// → `Busy`. A 404 login is tombstoned (TTL'd) and surfaces `LoginNotFound`.
+/// stale → one budget-probed account probe plus a single repositories page,
+/// cached atomically, with the remaining pages completed off-request; fetch
+/// failure / no budget → stale-but-complete fallback; nothing at all →
+/// `Busy`. A 404 login is tombstoned (TTL'd) and surfaces `LoginNotFound`.
 async fn resolve_login_repos(
     ctx: &AnalyzerCtx,
     login: &str,
     user_github: Option<&GithubClient>,
-) -> Result<Vec<(String, i64)>, AggregateError> {
+) -> Result<ResolvedList, AggregateError> {
     let cache = &ctx.cache;
     let meta = cache.get_login_repos_meta(login).await?;
     if let Some(m) = &meta
@@ -546,11 +721,18 @@ async fn resolve_login_repos(
         if m.complete
             && let Some(rows) = cache.get_login_repos(login).await?
         {
-            return Ok(rows);
+            // A fresh list that a page cap cut short is still incomplete
+            // knowledge of the account; finish it in the background so a
+            // large organization converges instead of staying capped for a
+            // whole TTL.
+            if m.list_truncated {
+                spawn_full_list_refresh(ctx, login);
+            }
+            return Ok(ResolvedList::from_cache(rows, Some(m)));
         }
     }
 
-    // Cold or stale. One live repos-list call through the shared
+    // Cold or stale. A bounded live resolution through the shared
     // rate-limited client — but only when the bucket has headroom
     // (`acquire` would otherwise sleep until the reset, hanging the
     // request into the global timeout) AND the process-wide live-fetch
@@ -564,7 +746,7 @@ async fn resolve_login_repos(
             "no GitHub budget headroom for repos-list; falling back to cached list"
         );
         false
-    } else if user_github.is_none() && !try_spend_live_list_fetch() {
+    } else if user_github.is_none() && !try_spend_live_list_fetch(SYNC_LIST_FETCH_COST) {
         tracing::warn!(
             login,
             "live repos-list window budget exhausted; falling back to cached list"
@@ -574,35 +756,26 @@ async fn resolve_login_repos(
         true
     };
     if live_allowed {
-        match github.user_repos(login).await {
-            Ok(Some(items)) => {
-                let top = top_repos_by_stars(&items, MAX_AGGREGATE_REPOS);
-                // Best-effort cache write: we already hold the data, a
-                // write failure shouldn't fail the request.
-                if let Err(e) = cache.put_login_repos(login, &top).await {
-                    tracing::warn!(login, error = %e, "put_login_repos failed");
+        match refresh_login_repos(cache, github, login, SYNC_LIST_PAGES).await {
+            RefreshOutcome::Resolved(resolved) => {
+                if resolved.truncated {
+                    spawn_full_list_refresh(ctx, login);
                 }
-                return Ok(top);
+                return Ok(resolved);
             }
-            Ok(None) => {
-                if let Err(e) = cache.mark_login_missing(login).await {
-                    tracing::warn!(login, error = %e, "mark_login_missing failed");
+            RefreshOutcome::LoginMissing => {
+                if let Err(error) = cache.mark_login_missing(login).await {
+                    tracing::warn!(login, %error, "mark_login_missing failed");
                 }
                 return Err(AggregateError::LoginNotFound);
             }
-            Err(e) => {
-                tracing::warn!(
-                    login,
-                    error = %e,
-                    "login repos-list fetch failed; falling back to cached list"
-                );
-            }
+            RefreshOutcome::Failed => {}
         }
     }
 
     // Stale-but-complete beats an error (same degrade policy as usage.rs).
     if let Some(rows) = cache.get_login_repos(login).await? {
-        return Ok(rows);
+        return Ok(ResolvedList::from_cache(rows, meta.as_ref()));
     }
     // A stale tombstone we couldn't re-verify is still our best knowledge.
     if meta.as_ref().is_some_and(|m| m.missing) {
@@ -625,6 +798,32 @@ mod tests {
             stargazers_count: stars,
             fork: false,
             private: false,
+        }
+    }
+
+    fn private_item(full_name: &str, stars: i64) -> RepoListItem {
+        RepoListItem {
+            private: true,
+            ..item(full_name, stars)
+        }
+    }
+
+    fn aggregate_of(
+        repos_total: Option<u64>,
+        series: Vec<Point>,
+        total_stars: u64,
+    ) -> UserAggregate {
+        UserAggregate {
+            login: "octocat".into(),
+            repos_included: 2,
+            repos_pending: 1,
+            repos_analyzed: 1,
+            repos_analyzing: 1,
+            repos_total,
+            account_type: Some("Organization".into()),
+            list_truncated: false,
+            total_stars,
+            series,
         }
     }
 
@@ -652,6 +851,21 @@ mod tests {
         assert!(!is_valid_login("\0"));
         // Over GitHub's 39-char cap.
         assert!(!is_valid_login(&"a".repeat(40)));
+    }
+
+    #[test]
+    fn top_repos_never_keeps_a_private_repository() {
+        // A signed-in visitor's token can surface private repositories on
+        // the user repos endpoint; none of them may reach the cache.
+        let items = vec![
+            private_item("o/secret", 9_000),
+            item("o/public", 5),
+            private_item("o/other-secret", 1),
+        ];
+        assert_eq!(
+            top_repos_by_stars(&items, 50),
+            vec![("o/public".to_string(), 5)]
+        );
     }
 
     #[test]
@@ -698,16 +912,28 @@ mod tests {
 
     #[test]
     fn live_fetch_constants_leave_worker_headroom() {
-        // The worst-case hourly burn (every fetch a max-page org) must
-        // stay well under half the shared 5k/hr PAT budget so background
-        // workers never starve behind request-path spend.
+        // The worst-case hourly burn (every window spent on max-page
+        // background walks) must stay well under half the shared 5k/hr PAT
+        // budget so background workers never starve behind request spend.
         let per_hour = (3_600 / LIVE_LIST_WINDOW_SECS) as u32 * LIVE_LIST_CALLS_PER_WINDOW;
         assert!(
             per_hour <= 2_500,
             "live-list worst case {per_hour}/hr too high"
         );
-        // The flat cost matches github.rs's REPO_LIST_MAX_PAGES cap.
-        assert_eq!(LIVE_LIST_FETCH_COST, 10);
+        // A request resolves an account with a probe and ONE page; only the
+        // detached refresh is costed at the full page cap.
+        assert_eq!(SYNC_LIST_PAGES, 1);
+        assert_eq!(SYNC_LIST_FETCH_COST, 2);
+        assert_eq!(
+            FULL_LIST_FETCH_COST,
+            crate::github::REPO_LIST_MAX_PAGES as u32 + 1
+        );
+        const {
+            assert!(
+                SYNC_LIST_FETCH_COST < FULL_LIST_FETCH_COST,
+                "the request path must be the cheaper of the two"
+            )
+        };
     }
 
     #[test]
@@ -757,52 +983,6 @@ mod tests {
     }
 
     #[test]
-    fn merge_overlapping_days_sum() {
-        let a = vec![(d("2020-01-01"), 3), (d("2020-01-05"), 2)];
-        let b = vec![(d("2020-01-01"), 4), (d("2020-01-03"), 1)];
-        let merged = merge_day_deltas(&[a, b]);
-        assert_eq!(
-            merged,
-            vec![
-                (d("2020-01-01"), 7), // 3 + 4 overlap
-                (d("2020-01-03"), 1),
-                (d("2020-01-05"), 2),
-            ]
-        );
-    }
-
-    #[test]
-    fn merge_single_repo_passes_through_sorted() {
-        // Even out-of-order input from a single repo comes out sorted.
-        let a = vec![(d("2020-02-01"), 2), (d("2020-01-01"), 1)];
-        let merged = merge_day_deltas(&[a]);
-        assert_eq!(merged, vec![(d("2020-01-01"), 1), (d("2020-02-01"), 2)]);
-    }
-
-    #[test]
-    fn merge_empty_inputs() {
-        assert!(merge_day_deltas(&[]).is_empty());
-        // Empty repos among non-empty contribute nothing.
-        let merged = merge_day_deltas(&[vec![], vec![(d("2020-01-01"), 5)], vec![]]);
-        assert_eq!(merged, vec![(d("2020-01-01"), 5)]);
-    }
-
-    #[test]
-    fn merge_clamps_negative_deltas() {
-        let merged = merge_day_deltas(&[vec![(d("2020-01-01"), -3), (d("2020-01-02"), 2)]]);
-        assert_eq!(merged, vec![(d("2020-01-01"), 0), (d("2020-01-02"), 2)]);
-    }
-
-    #[test]
-    fn merge_is_deterministic() {
-        let a = vec![(d("2020-01-02"), 1), (d("2020-01-01"), 9)];
-        let b = vec![(d("2020-01-01"), 1)];
-        let once = merge_day_deltas(&[a.clone(), b.clone()]);
-        let twice = merge_day_deltas(&[a, b]);
-        assert_eq!(once, twice);
-    }
-
-    #[test]
     fn deltas_accumulate_into_cumulative_points() {
         let deltas = vec![
             (d("2020-01-01"), 3),
@@ -834,11 +1014,15 @@ mod tests {
     }
 
     #[test]
-    fn aggregate_of_two_repos_matches_hand_sum() {
-        // repo A: 1 star on day 1, 1 on day 3. repo B: 2 stars on day 2.
-        let a = vec![(d("2021-01-01"), 1), (d("2021-01-03"), 1)];
-        let b = vec![(d("2021-01-02"), 2)];
-        let (series, total) = deltas_to_series(&merge_day_deltas(&[a, b]));
+    fn cross_repo_day_sums_accumulate_in_order() {
+        // The shape `load_merged_day_deltas` returns for two repos whose
+        // star days interleave: one row per calendar day, already summed.
+        let merged = vec![
+            (d("2021-01-01"), 1),
+            (d("2021-01-02"), 2),
+            (d("2021-01-03"), 1),
+        ];
+        let (series, total) = deltas_to_series(&merged);
         assert_eq!(total, 4);
         let got: Vec<(String, u32)> = series
             .iter()
@@ -857,16 +1041,7 @@ mod tests {
     #[test]
     fn user_aggregate_json_shape() {
         let (series, total) = deltas_to_series(&[(d("2020-01-01"), 3), (d("2020-01-02"), 1)]);
-        let agg = UserAggregate {
-            login: "octocat".into(),
-            repos_included: 2,
-            repos_pending: 1,
-            repos_analyzed: 1,
-            repos_analyzing: 1,
-            total_stars: total,
-            series,
-        };
-        let v = agg.to_json();
+        let v = aggregate_of(Some(2_913), series, total).to_json();
         assert_eq!(v["login"], "octocat");
         assert_eq!(v["repos_included"], 2);
         assert_eq!(v["repos_pending"], 1);
@@ -880,7 +1055,30 @@ mod tests {
         assert!(v["history"][0].get("at").is_none());
         // Exactly the contract keys, nothing extra.
         let keys: Vec<&String> = v.as_object().unwrap().keys().collect();
-        assert_eq!(keys.len(), 7);
+        assert_eq!(keys.len(), 11);
+    }
+
+    /// An organization with more public repositories than the cap must say
+    /// so: the payload carries the account's own total and the cap that was
+    /// applied, so a reader can state the coverage instead of presenting a
+    /// truncated sum as the whole account.
+    #[test]
+    fn user_aggregate_states_coverage_of_a_capped_account() {
+        let (series, total) = deltas_to_series(&[(d("2020-01-01"), 3)]);
+        let v = aggregate_of(Some(2_913), series, total).to_json();
+        assert_eq!(v["repos_total"], 2_913);
+        assert_eq!(v["repos_cap"], MAX_AGGREGATE_REPOS);
+        assert_eq!(v["account_type"], "Organization");
+        assert_eq!(v["list_truncated"], false);
+        assert!(
+            v["repos_total"].as_u64().unwrap() > v["repos_cap"].as_u64().unwrap(),
+            "the fixture must exercise the over-cap case"
+        );
+
+        // An account we have never probed reports an unknown total rather
+        // than a fabricated one.
+        let unknown = aggregate_of(None, Vec::new(), 0).to_json();
+        assert!(unknown["repos_total"].is_null());
     }
 
     #[test]
@@ -891,16 +1089,7 @@ mod tests {
             .collect();
         let (series, total) = deltas_to_series(&deltas);
         assert_eq!(total, 1000);
-        let agg = UserAggregate {
-            login: "big".into(),
-            repos_included: 1,
-            repos_pending: 0,
-            repos_analyzed: 2,
-            repos_analyzing: 0,
-            total_stars: total,
-            series,
-        };
-        let v = agg.to_json();
+        let v = aggregate_of(None, series, total).to_json();
         let hist = v["history"].as_array().unwrap();
         assert!(hist.len() <= MAX_HISTORY_POINTS);
         // First and last points survive downsampling exactly.

@@ -12,7 +12,7 @@ import {
   KPI,
   PANEL,
 } from "@/components/style-tokens";
-import { BAYER4, INK, OFF_TIER } from "@/lib/dither";
+import { BAYER4, INK, OFF_TIER, SWATCH } from "@/lib/dither";
 import { cn } from "@/lib/utils";
 
 /**
@@ -195,7 +195,12 @@ export function InteractiveRepoSignals(props: Props) {
         <section className={cn(PANEL, "sm:col-span-2")}>
           <SignalHeader apiBase={apiBase} slug={slug} embedLink={embedLink} name="commit-trend" label="Maintenance pulse" />
           <div className="px-2 py-3 sm:px-3.5">
-            <DitherAreaChart points={maintenance} height={360} valueLabel="commits / month" />
+            <DitherAreaChart
+              points={maintenance}
+              height={360}
+              valueLabel="commits / month"
+              seed={`${slug}:commit-trend`}
+            />
           </div>
         </section>
       </div>
@@ -271,7 +276,13 @@ export function InteractiveRepoSignals(props: Props) {
         <section className={cn(PANEL, "sm:col-span-2")}>
           <SignalHeader apiBase={apiBase} slug={slug} embedLink={embedLink} name="todo-trend" label="TODO/FIXME trend" />
           <div className="px-2 py-3 sm:px-3.5">
-            <DitherAreaChart points={stats.todo_days} height={280} valueLabel="debt markers" />
+            <DitherAreaChart
+              points={stats.todo_days}
+              height={280}
+              valueLabel="debt markers"
+              seed={`${slug}:todo-trend`}
+              fill={SWATCH.orange}
+            />
           </div>
         </section>
       </div>

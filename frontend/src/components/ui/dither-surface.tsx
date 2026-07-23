@@ -1,17 +1,22 @@
 "use client";
 
-import { useEffect, useRef } from "react";
+import { useEffect, useRef, type PointerEvent as ReactPointerEvent } from "react";
 
 import {
   RasterBuffer,
   gridFor,
-  makeIntensity,
+  makeSurfaceMotion,
   paintPanel,
   prefersReducedMotion,
-  type IntensityController,
+  stampPulse,
   type RGB,
+  type SurfaceController,
+  type SurfaceMotion,
   type Variant,
 } from "@/lib/dither";
+
+/** Seconds for one breath of the hover pulse. */
+const PULSE_PERIOD = 1.6;
 
 export type DitherSurfaceOptions = {
   /** Stable module-level tuple: the paint effect keys off its identity. */
@@ -24,6 +29,8 @@ export type DitherSurfaceOptions = {
   className?: string;
   /** Global alpha multiplier. Quiet beds sit near 0.15; controls stay at 1. */
   alpha?: number;
+  /** Breathes a dithered ring at the pointer while the host is hovered. */
+  pulse?: boolean;
 };
 
 const CANVAS_CLASS =
@@ -37,8 +44,8 @@ const CANVAS_CLASS =
  */
 export function useDitherSurface(opts: DitherSurfaceOptions) {
   const canvasRef = useRef<HTMLCanvasElement>(null);
-  const ctrl = useRef<IntensityController | null>(null);
-  const { fill, variant, edge, cell, className, alpha } = opts;
+  const ctrl = useRef<SurfaceController | null>(null);
+  const { fill, variant, edge, cell, className, alpha, pulse } = opts;
 
   useEffect(() => {
     const canvas = canvasRef.current;
@@ -50,7 +57,7 @@ export function useDitherSurface(opts: DitherSurfaceOptions) {
     host.classList.remove("dither-fallback");
 
     let buf: RasterBuffer | null = null;
-    const paint = (intensity: number) => {
+    const paint = (m: SurfaceMotion) => {
       const box = host.getBoundingClientRect();
       const { cols, rows } = gridFor(box.width, box.height, cell);
       if (!buf || buf.cols !== cols || buf.rows !== rows) {
@@ -58,25 +65,52 @@ export function useDitherSurface(opts: DitherSurfaceOptions) {
         canvas.width = cols;
         canvas.height = rows;
       }
-      paintPanel(buf, fill, variant ?? "gradient", intensity, { edge, alpha });
+      paintPanel(buf, fill, variant ?? "gradient", m.intensity, { edge, alpha });
+      if (pulse && m.pulse > 0) {
+        const breath =
+          0.5 + 0.5 * Math.sin((m.time / PULSE_PERIOD) * Math.PI * 2);
+        const base = Math.max(5, Math.min(cols, rows) * 0.8);
+        stampPulse(buf, fill, {
+          x: m.px * cols,
+          y: m.py * rows,
+          radius: base * (0.55 + 0.45 * breath),
+          // A wider ring carries less alpha, so the breath reads as one gesture.
+          energy: m.pulse * (0.95 - 0.35 * breath),
+        });
+      }
       ctx.putImageData(buf.image, 0, 0);
     };
 
-    const c = makeIntensity(paint);
+    const c = makeSurfaceMotion(paint, { continuous: pulse });
     ctrl.current = c;
     // rAF runs after layout, so the box read below is free.
-    const raf = requestAnimationFrame(() => paint(0));
+    const raf = requestAnimationFrame(() => c.repaint());
     const ro = new ResizeObserver(() => c.repaint());
     ro.observe(host);
+    const io =
+      pulse && typeof IntersectionObserver === "function"
+        ? new IntersectionObserver((entries) => {
+            for (const entry of entries) c.setVisible(entry.isIntersecting);
+          })
+        : null;
+    io?.observe(host);
     return () => {
       cancelAnimationFrame(raf);
       ro.disconnect();
+      io?.disconnect();
       c.stop();
       ctrl.current = null;
     };
-  }, [fill, variant, edge, cell, alpha]);
+  }, [fill, variant, edge, cell, alpha, pulse]);
 
   const animated = (opts.animated ?? true) && !prefersReducedMotion();
+  const local = (event: ReactPointerEvent<HTMLElement>) => {
+    const box = event.currentTarget.getBoundingClientRect();
+    return {
+      x: box.width > 0 ? (event.clientX - box.left) / box.width : 0.5,
+      y: box.height > 0 ? (event.clientY - box.top) / box.height : 0.5,
+    };
+  };
   return {
     canvasRef,
     surface: (
@@ -88,9 +122,20 @@ export function useDitherSurface(opts: DitherSurfaceOptions) {
     ),
     handlers: animated
       ? {
-          onPointerEnter: () => ctrl.current?.enter(),
+          onPointerEnter: (event: ReactPointerEvent<HTMLElement>) => {
+            const { x, y } = local(event);
+            ctrl.current?.enter(x, y);
+          },
+          onPointerMove: (event: ReactPointerEvent<HTMLElement>) => {
+            if (!pulse) return;
+            const { x, y } = local(event);
+            ctrl.current?.move(x, y);
+          },
           onPointerLeave: () => ctrl.current?.leave(),
-          onPointerDown: () => ctrl.current?.down(),
+          onPointerDown: (event: ReactPointerEvent<HTMLElement>) => {
+            const { x, y } = local(event);
+            ctrl.current?.down(x, y);
+          },
           onPointerUp: () => ctrl.current?.up(),
           onPointerCancel: () => ctrl.current?.up(),
         }

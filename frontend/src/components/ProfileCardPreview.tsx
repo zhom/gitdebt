@@ -84,7 +84,7 @@ export function ProfileCardPreview({
 
   return (
     <motion.a
-      href={`/u/${login}`}
+      href={`/${login}`}
       className="dither-fallback relative isolate block max-w-full overflow-hidden rounded-lg p-1.5 outline-none focus-visible:ring-2 focus-visible:ring-accent/30 focus-visible:ring-offset-2 focus-visible:ring-offset-background"
       whileHover={reduceMotion ? undefined : { y: -2, scale: 1.006 }}
       whileTap={reduceMotion ? undefined : { scale: 0.992 }}

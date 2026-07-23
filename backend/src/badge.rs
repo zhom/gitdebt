@@ -1,8 +1,9 @@
 //! Compact, configurable badge SVG renderer.
 //!
 //! Renders a small embeddable badge showing any subset of `stars`, `forks`,
-//! and `downloads` for a repo, in one of four visual styles, plus the
-//! evidence-backed signal badge. Pure + deterministic (same input → same
+//! and `downloads` for a repo, plus the evidence-backed signal badge. One
+//! visual style ships: the dithered panel. Pure + deterministic (same input →
+//! same
 //! bytes) so the badge endpoint is upstream-cacheable; theme colors are
 //! baked as concrete hex (no CSS vars) so the badge renders correctly as a
 //! README `<img>` regardless of the viewer's OS/page theme — same rationale
@@ -86,27 +87,21 @@ impl Metric {
 }
 
 /// Visual style. Auto-sized width; per-theme baked hex.
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+///
+/// gitdebt ships exactly one badge look. `flat`, `modern`, `glass`, and
+/// `terminal` were four near-identical variants of it; they remain accepted
+/// `?style=` values so README embeds published against them keep rendering.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
 pub enum BadgeStyle {
-    /// shields.io-like: bordered chip, flat segments, leading accent strip.
-    Flat,
-    /// Rounded pill, soft shadow, leading accent dot.
-    Modern,
-    /// Translucent-style lifted panel with a top highlight.
-    Glass,
-    /// Prompt-and-cursor dark chip (always dark, theme-independent).
-    Terminal,
+    #[default]
+    Dither,
 }
 
 impl BadgeStyle {
-    /// Parse `?style=`. Unknown → `Flat` (the safe shields-like default).
-    pub fn parse(s: Option<&str>) -> Self {
-        match s.map(str::trim).map(str::to_ascii_lowercase).as_deref() {
-            Some("modern") => BadgeStyle::Modern,
-            Some("glass") => BadgeStyle::Glass,
-            Some("terminal") => BadgeStyle::Terminal,
-            _ => BadgeStyle::Flat,
-        }
+    /// Parse `?style=`. Every value — legacy, unknown, or absent — resolves
+    /// to the single shipped style.
+    pub fn parse(_s: Option<&str>) -> Self {
+        BadgeStyle::Dither
     }
 }
 
@@ -171,11 +166,13 @@ pub fn humanize(n: u64) -> String {
 /// Uniform badge height across the whole family (metric styles + signal +
 /// empty) so side-by-side README embeds align.
 pub const HEIGHT: f32 = 28.0;
-/// Reserved trailing zone for the brand mark: 5px gap + 14px mark + 5px
+/// Reserved trailing zone for the brand mark: 5px gap + [`MARK_W`] + 5px
 /// right margin.
-const BRAND_W: f32 = 24.0;
-/// Equal to `brand::MARK_GRID` so every mark cell is a whole device pixel.
-const MARK_SIZE: f32 = 14.0;
+const BRAND_W: f32 = 28.0;
+/// Width of the robot mark. The artwork is 1.43:1, so 18px of width buys
+/// 12.6px of height inside the 28px badge — the narrowest the head, screen
+/// cutout, and both eyes still resolve at 1× in a README.
+const MARK_W: f32 = 18.0;
 /// Horizontal padding inside each segment.
 const SEG_PAD_X: f32 = 9.0;
 /// Width reserved for a metric glyph (icon).
@@ -215,11 +212,15 @@ fn pinned_text(x: f32, y: f32, fill: &str, class: &str, text: &str, advance: f32
     )
 }
 
-/// One laid-out segment with its x offset + width.
+/// One laid-out segment at its x offset.
 struct Placed {
     seg: Segment,
     x: f32,
-    w: f32,
+}
+
+/// Rendered width of one segment: padding, glyph, gap, pinned text, padding.
+fn segment_width(seg: &Segment) -> f32 {
+    SEG_PAD_X + GLYPH_W + GLYPH_GAP + seg.value.chars().count() as f32 * CHAR_W + SEG_PAD_X
 }
 
 /// Compute per-segment widths + total content width for the given segments.
@@ -228,12 +229,10 @@ fn layout(segments: &[Segment]) -> (f32, Vec<Placed>) {
     let mut x = 0.0_f32;
     let mut placed = Vec::with_capacity(segments.len());
     for seg in segments {
-        let text_w = seg.value.chars().count() as f32 * CHAR_W;
-        let w = SEG_PAD_X + GLYPH_W + GLYPH_GAP + text_w + SEG_PAD_X;
+        let w = segment_width(seg);
         placed.push(Placed {
             seg: seg.clone(),
             x,
-            w,
         });
         x += w;
     }
@@ -327,18 +326,21 @@ fn wash_rect(x: f32, y: f32, w: f32, h: f32, rx: f32, tier: usize, opacity: &str
     )
 }
 
-/// Trailing brand mark — the gitdebt robot, right-aligned inside the
-/// reserved [`BRAND_W`] zone. [`MARK_SIZE`] is deliberately equal to the
-/// mark's pixel-grid resolution so every cell lands on a whole device
-/// pixel. The ink is the badge's foreground, never an accent: the logo
-/// must read as the logo, not as a colored chip.
+/// Left edge of the mark inside the reserved [`BRAND_W`] zone.
+fn mark_x(total: f32) -> f32 {
+    total - BRAND_W + 5.0
+}
+
+/// Top edge of the vertically centred mark.
+fn mark_y() -> f32 {
+    (HEIGHT - brand::mark_height(MARK_W)) / 2.0
+}
+
+/// Trailing brand mark — the canonical gitdebt robot, right-aligned inside
+/// the reserved [`BRAND_W`] zone. The ink is the badge's foreground, never
+/// an accent: the logo must read as the logo, not as a colored chip.
 fn brand_mark(total: f32, ink: &str) -> String {
-    brand::pixel_mark(
-        total - BRAND_W + 5.0,
-        (HEIGHT - MARK_SIZE) / 2.0,
-        MARK_SIZE,
-        ink,
-    )
+    brand::logo_mark(mark_x(total), mark_y(), MARK_W, ink)
 }
 
 /// Shared SVG header. `defs` lets a style inject filters or other defs.
@@ -374,7 +376,6 @@ fn segment_content(
     text_color: &str,
     glyph_color: &str,
     animate: bool,
-    anim: SegAnim,
     index: usize,
 ) -> String {
     let glyph_x = p.x + SEG_PAD_X;
@@ -385,24 +386,16 @@ fn segment_content(
 
     // The animation is authored so the resting (post-freeze) state equals
     // the element's static attributes — required for the GitHub frozen
-    // frame. We animate `opacity` (and, for fade-slide, an additive
-    // transform so the static transform list survives SMIL).
+    // frame. The transform is additive so the static transform list
+    // survives SMIL's default replace semantics.
     let (anim_tag, start_transform) = if animate {
         let delay = reveal_delay(index);
-        match anim {
-            SegAnim::FadeIn => (
-                format!(
-                    "<animate class=\"motion\" attributeName=\"opacity\" from=\"0\" to=\"1\" begin=\"{delay:.2}s\" dur=\"{REVEAL_SECONDS:.1}s\" fill=\"freeze\" />"
-                ),
-                String::new(),
+        (
+            format!(
+                "<animate class=\"motion\" attributeName=\"opacity\" from=\"0\" to=\"1\" begin=\"{delay:.2}s\" dur=\"{REVEAL_SECONDS:.1}s\" fill=\"freeze\" /><animateTransform class=\"motion\" attributeName=\"transform\" type=\"translate\" from=\"0 4\" to=\"0 0\" begin=\"{delay:.2}s\" dur=\"{REVEAL_SECONDS:.1}s\" fill=\"freeze\" additive=\"sum\" calcMode=\"spline\" keySplines=\"0.23 1 0.32 1\" />"
             ),
-            SegAnim::FadeSlide => (
-                format!(
-                    "<animate class=\"motion\" attributeName=\"opacity\" from=\"0\" to=\"1\" begin=\"{delay:.2}s\" dur=\"{REVEAL_SECONDS:.1}s\" fill=\"freeze\" /><animateTransform class=\"motion\" attributeName=\"transform\" type=\"translate\" from=\"0 4\" to=\"0 0\" begin=\"{delay:.2}s\" dur=\"{REVEAL_SECONDS:.1}s\" fill=\"freeze\" additive=\"sum\" calcMode=\"spline\" keySplines=\"0.23 1 0.32 1\" />"
-                ),
-                " transform=\"translate(0 0)\"".to_string(),
-            ),
-        }
+            " transform=\"translate(0 0)\"".to_string(),
+        )
     } else {
         (String::new(), String::new())
     };
@@ -413,13 +406,6 @@ fn segment_content(
     )
 }
 
-/// Which per-segment animation a style uses for its reveal.
-#[derive(Clone, Copy)]
-enum SegAnim {
-    FadeIn,
-    FadeSlide,
-}
-
 // Renderer
 
 /// Render the badge to an SVG string. Auto-sized; deterministic; theme hex
@@ -427,19 +413,14 @@ enum SegAnim {
 pub fn render_badge(input: &BadgeInput, theme: &Theme) -> String {
     let segments = input.segments();
     if segments.is_empty() {
-        return empty_badge(input.style, theme);
+        return empty_badge(theme);
     }
     let (width, placed) = layout(&segments);
-
-    match input.style {
-        BadgeStyle::Flat => render_flat(&placed, width, theme, input.animate),
-        BadgeStyle::Modern => render_modern(&placed, width, theme, input.animate),
-        BadgeStyle::Glass => render_glass(&placed, width, theme, input.animate),
-        BadgeStyle::Terminal => render_terminal(&placed, width, theme, input.animate),
-    }
+    let BadgeStyle::Dither = input.style;
+    render_dither(&placed, width, theme, input.animate)
 }
 
-fn render_flat(placed: &[Placed], width: f32, theme: &Theme, animate: bool) -> String {
+fn render_dither(placed: &[Placed], width: f32, theme: &Theme, animate: bool) -> String {
     let wave = texture::wave_ink(theme);
     let label = aria_label(placed);
     let total = width + BRAND_W;
@@ -475,14 +456,7 @@ fn render_flat(placed: &[Placed], width: f32, theme: &Theme, animate: bool) -> S
                 border = theme.border,
             ));
         }
-        body.push_str(&segment_content(
-            p,
-            theme.fg,
-            wave,
-            animate,
-            SegAnim::FadeIn,
-            i,
-        ));
+        body.push_str(&segment_content(p, theme.fg, wave, animate, i));
     }
     body.push_str(&brand_mark(total, theme.fg));
     format!(
@@ -492,194 +466,8 @@ fn render_flat(placed: &[Placed], width: f32, theme: &Theme, animate: bool) -> S
     )
 }
 
-fn render_modern(placed: &[Placed], width: f32, theme: &Theme, animate: bool) -> String {
-    let wave = texture::wave_ink(theme);
-    let label = aria_label(placed);
-    let total = width + 8.0 + BRAND_W;
-    let defs = format!(
-        "  <defs><filter id=\"mshadow\" x=\"-20%\" y=\"-20%\" width=\"140%\" height=\"160%\"><feDropShadow dx=\"0\" dy=\"1\" stdDeviation=\"1.2\" flood-color=\"{}\" flood-opacity=\"0.18\" /></filter>{}</defs>\n",
-        if theme.dark { "#000000" } else { "#737373" },
-        texture::tier_pattern(theme.fg, 2.0, 1),
-    );
-    let mut body = String::new();
-    body.push_str(&format!(
-        "  <rect x=\"0.5\" y=\"0.5\" width=\"{w:.1}\" height=\"{h:.1}\" rx=\"14\" fill=\"{bg}\" stroke=\"{border}\" stroke-width=\"1\" filter=\"url(#mshadow)\" />\n",
-        w = total - 1.0,
-        h = HEIGHT - 1.0,
-        bg = if theme.dark { "#0f0f0f" } else { "#ffffff" },
-        border = theme.border,
-    ));
-    body.push_str(&wash_rect(
-        2.0,
-        2.0,
-        total - 4.0,
-        HEIGHT - 4.0,
-        12.0,
-        1,
-        "0.08",
-    ));
-    // Leading accent dot.
-    body.push_str(&format!(
-        "  <circle cx=\"9\" cy=\"{cy:.1}\" r=\"2.5\" fill=\"{wave}\" />\n",
-        cy = HEIGHT / 2.0,
-    ));
-    for (i, p) in placed.iter().enumerate() {
-        // Modern shifts segments right a touch to clear the dot.
-        let pp = Placed {
-            seg: p.seg.clone(),
-            x: p.x + 8.0,
-            w: p.w,
-        };
-        body.push_str(&segment_content(
-            &pp,
-            theme.fg,
-            wave,
-            animate,
-            SegAnim::FadeSlide,
-            i,
-        ));
-    }
-    body.push_str(&brand_mark(total, theme.fg));
-    format!(
-        "{header}{css}{body}</svg>",
-        header = svg_header(total, &label, &defs),
-        css = badge_style_css(),
-    )
-}
-
-fn render_glass(placed: &[Placed], width: f32, theme: &Theme, animate: bool) -> String {
-    let wave = texture::wave_ink(theme);
-    let label = aria_label(placed);
-    let panel = if theme.dark { "#1c1c1c" } else { "#f0f0f0" };
-    let total = width + BRAND_W;
-    let mut body = String::new();
-    body.push_str(&format!(
-        "  <rect x=\"0.5\" y=\"0.5\" width=\"{w:.1}\" height=\"{h:.1}\" rx=\"10\" fill=\"{panel}\" stroke=\"{border}\" stroke-width=\"1\" />\n",
-        w = total - 1.0,
-        h = HEIGHT - 1.0,
-        panel = panel,
-        border = theme.border,
-    ));
-    body.push_str(&wash_rect(
-        1.0,
-        1.0,
-        total - 2.0,
-        HEIGHT - 2.0,
-        9.0,
-        3,
-        "0.10",
-    ));
-    // Top glass highlight.
-    body.push_str(&format!(
-        "  <rect x=\"3\" y=\"2\" width=\"{w:.1}\" height=\"8\" rx=\"5\" fill=\"#ffffff\" opacity=\"{op}\" />\n",
-        w = total - 6.0,
-        op = if theme.dark { "0.05" } else { "0.5" },
-    ));
-    for (i, p) in placed.iter().enumerate() {
-        if i > 0 {
-            body.push_str(&format!(
-                "  <line x1=\"{x:.1}\" y1=\"7\" x2=\"{x:.1}\" y2=\"{y2:.1}\" stroke=\"{border}\" stroke-width=\"1\" opacity=\"0.4\" />\n",
-                x = p.x,
-                y2 = HEIGHT - 7.0,
-                border = theme.border,
-            ));
-        }
-        body.push_str(&segment_content(
-            p,
-            theme.fg,
-            wave,
-            animate,
-            SegAnim::FadeIn,
-            i,
-        ));
-    }
-    // Highlight sweep: a thin bar that slides left→right and freezes
-    // off-screen-right (so the frozen GitHub frame shows a clean panel).
-    // `additive="sum"` keeps the static transform authoritative once frozen.
-    if animate {
-        body.push_str(&format!(
-            "  <rect x=\"{end:.1}\" y=\"0\" width=\"12\" height=\"{h:.1}\" fill=\"#ffffff\" opacity=\"0.18\" transform=\"translate(0 0)\"><animateTransform class=\"motion\" attributeName=\"transform\" type=\"translate\" from=\"-{distance:.1} 0\" to=\"0 0\" dur=\"0.6s\" begin=\"0s\" fill=\"freeze\" additive=\"sum\" calcMode=\"linear\" /></rect>\n",
-            h = HEIGHT,
-            end = total,
-            distance = total + 12.0,
-        ));
-    }
-    body.push_str(&brand_mark(total, theme.fg));
-    format!(
-        "{header}{css}{body}</svg>",
-        header = svg_header(total, &label, &wash_defs(theme, 3)),
-        css = badge_style_css(),
-    )
-}
-
-fn render_terminal(placed: &[Placed], width: f32, theme: &Theme, animate: bool) -> String {
-    // Prompt-style dark chip with a blinking cursor (the cursor "pulse" is
-    // the animation; it freezes visible).
-    let bg = "#0a0a0a";
-    let fg = "#fafafa";
-    // Terminal is intentionally theme-independent (always a dark chip), so
-    // the accent is the dark wave ink regardless of the requested theme.
-    let _ = theme;
-    let accent = "#9b7bff";
-    let label = aria_label(placed);
-    let total = width + 14.0 + BRAND_W;
-    let defs = format!("  <defs>{}</defs>\n", texture::tier_pattern(fg, 2.0, 1));
-    let mut body = String::new();
-    body.push_str(&format!(
-        "  <rect x=\"0\" y=\"0\" width=\"{w:.1}\" height=\"{h:.1}\" rx=\"5\" fill=\"{bg}\" />\n",
-        w = total,
-        h = HEIGHT,
-    ));
-    body.push_str(&wash_rect(0.0, 0.0, total, HEIGHT, 5.0, 1, "0.10"));
-    // Leading `›` prompt marker.
-    body.push_str(&format!(
-        "  <text x=\"7\" y=\"{ty:.1}\" fill=\"{accent}\" textLength=\"{advance:.1}\" lengthAdjust=\"spacingAndGlyphs\">&#8250;</text>\n",
-        ty = HEIGHT / 2.0 + 4.0,
-        advance = CHAR_W,
-    ));
-    for (i, p) in placed.iter().enumerate() {
-        let pp = Placed {
-            seg: p.seg.clone(),
-            x: p.x + 14.0,
-            w: p.w,
-        };
-        body.push_str(&segment_content(
-            &pp,
-            fg,
-            accent,
-            animate,
-            SegAnim::FadeIn,
-            i,
-        ));
-    }
-    // Blinking cursor block at the end of the content run.
-    let cursor_x = width + 14.0 - 8.0;
-    if animate {
-        body.push_str(&format!(
-            "  <rect x=\"{x:.1}\" y=\"{y:.1}\" width=\"6\" height=\"12\" fill=\"{fg}\" opacity=\"1\"><animate class=\"motion\" attributeName=\"opacity\" values=\"1;0.2;1\" dur=\"0.8s\" repeatCount=\"2\" fill=\"freeze\" /></rect>\n",
-            x = cursor_x,
-            y = HEIGHT / 2.0 - 6.0,
-        ));
-    } else {
-        body.push_str(&format!(
-            "  <rect x=\"{x:.1}\" y=\"{y:.1}\" width=\"6\" height=\"12\" fill=\"{fg}\" />\n",
-            x = cursor_x,
-            y = HEIGHT / 2.0 - 6.0,
-        ));
-    }
-    body.push_str(&brand_mark(total, fg));
-    format!(
-        "{header}{css}{body}</svg>",
-        header = svg_header(total, &label, &defs),
-        css = badge_style_css(),
-    )
-}
-
-fn empty_badge(style: BadgeStyle, theme: &Theme) -> String {
-    let (bg, fg, mark_ink) = match style {
-        BadgeStyle::Terminal => ("#0a0a0a", "#fafafa", "#fafafa"),
-        _ => (panel_tone(theme), theme.muted, theme.fg),
-    };
+fn empty_badge(theme: &Theme) -> String {
+    let (bg, fg, mark_ink) = (panel_tone(theme), theme.muted, theme.fg);
     let text = "no metrics";
     let advance = text.chars().count() as f32 * SIGNAL_CHAR_W;
     let content_w = SEG_PAD_X + advance + SEG_PAD_X;
@@ -854,7 +642,7 @@ pub fn render_signal_badge(
             &l.detail,
             l.detail_w
         ),
-        mark = brand::pixel_mark(l.mark_x, (HEIGHT - MARK_SIZE) / 2.0, MARK_SIZE, theme.fg),
+        mark = brand::logo_mark(l.mark_x, mark_y(), MARK_W, theme.fg),
     )
 }
 
@@ -870,14 +658,25 @@ mod tests {
     use super::*;
     use crate::theme::{DARK, LIGHT};
 
-    fn full_input(style: BadgeStyle, animate: bool) -> BadgeInput {
+    fn full_input(animate: bool) -> BadgeInput {
         BadgeInput {
             stars: Some(12_345),
             forks: Some(1_234),
             downloads: Some(2_500_000),
             metrics: vec![Metric::Stars, Metric::Forks, Metric::Downloads],
-            style,
+            style: BadgeStyle::Dither,
             animate,
+        }
+    }
+
+    fn no_metrics_input() -> BadgeInput {
+        BadgeInput {
+            stars: None,
+            forks: None,
+            downloads: None,
+            metrics: vec![Metric::Stars],
+            style: BadgeStyle::Dither,
+            animate: false,
         }
     }
 
@@ -944,7 +743,7 @@ mod tests {
             l.detail_x + l.detail_w + SIGNAL_TAIL_GAP <= l.mark_x + 0.01,
             "detail must clear the brand chip: {l:?}"
         );
-        assert!(l.mark_x + MARK_SIZE <= l.width);
+        assert!(l.mark_x + MARK_W <= l.width);
         assert!((SIGNAL_MIN_W..=SIGNAL_MAX_W).contains(&l.width));
     }
 
@@ -983,35 +782,21 @@ mod tests {
 
     #[test]
     fn every_text_is_pinned_with_text_length() {
-        for style in [
-            BadgeStyle::Flat,
-            BadgeStyle::Modern,
-            BadgeStyle::Glass,
-            BadgeStyle::Terminal,
-        ] {
-            let svg = render_badge(&full_input(style, false), &LIGHT);
-            let texts = svg.matches("<text").count();
-            let pinned = svg.matches("textLength=").count();
-            assert_eq!(texts, pinned, "{style:?}: every <text> must be pinned");
-            assert!(svg.contains("lengthAdjust=\"spacingAndGlyphs\""));
-            assert!(svg.contains(FONT_MONO));
-        }
+        let svg = render_badge(&full_input(false), &LIGHT);
+        assert_eq!(
+            svg.matches("<text").count(),
+            svg.matches("textLength=").count(),
+            "every <text> must be pinned"
+        );
+        assert!(svg.contains("lengthAdjust=\"spacingAndGlyphs\""));
+        assert!(svg.contains(FONT_MONO));
+
         let signal = render_signal_badge("star momentum", "+12 stars / 30d", true, &DARK, false);
         assert_eq!(
             signal.matches("<text").count(),
             signal.matches("textLength=").count()
         );
-        let empty = render_badge(
-            &BadgeInput {
-                stars: None,
-                forks: None,
-                downloads: None,
-                metrics: vec![Metric::Stars],
-                style: BadgeStyle::Flat,
-                animate: false,
-            },
-            &LIGHT,
-        );
+        let empty = render_badge(&no_metrics_input(), &LIGHT);
         assert_eq!(
             empty.matches("<text").count(),
             empty.matches("textLength=").count()
@@ -1021,128 +806,71 @@ mod tests {
     #[test]
     fn all_badges_share_one_uniform_height() {
         let expect = format!("height=\"{:.0}\"", HEIGHT);
-        for style in [
-            BadgeStyle::Flat,
-            BadgeStyle::Modern,
-            BadgeStyle::Glass,
-            BadgeStyle::Terminal,
-        ] {
-            let svg = render_badge(&full_input(style, false), &DARK);
-            assert!(svg.contains(&expect), "{style:?} must be {HEIGHT}px tall");
-        }
+        assert!(render_badge(&full_input(false), &DARK).contains(&expect));
         let signal = render_signal_badge("star momentum", "+9 stars / 30d", false, &DARK, false);
         assert!(
             signal.contains(&expect),
             "signal badge must match the family height"
         );
-        let empty = render_badge(
-            &BadgeInput {
-                stars: None,
-                forks: None,
-                downloads: None,
-                metrics: vec![Metric::Stars],
-                style: BadgeStyle::Glass,
-                animate: false,
-            },
-            &DARK,
-        );
-        assert!(empty.contains(&expect));
+        assert!(render_badge(&no_metrics_input(), &DARK).contains(&expect));
     }
 
     #[test]
-    fn every_badge_carries_the_pixel_logo_in_the_foreground_ink() {
-        for style in [
-            BadgeStyle::Flat,
-            BadgeStyle::Modern,
-            BadgeStyle::Glass,
-            BadgeStyle::Terminal,
-        ] {
-            for theme in [&LIGHT, &DARK] {
-                let svg = render_badge(&full_input(style, false), theme);
+    fn every_badge_carries_the_real_logo_in_the_foreground_ink() {
+        for theme in [&LIGHT, &DARK] {
+            for svg in [
+                render_badge(&full_input(false), theme),
+                render_badge(&no_metrics_input(), theme),
+                render_signal_badge("star momentum", "+9 / 30d", true, theme, false),
+            ] {
                 assert!(svg.contains("data-gitdebt-logo=\"true\""));
-                // The 512px robot path data must not appear at badge scale.
+                // The canonical path, not a hand-drawn stand-in.
+                assert!(svg.contains("M320.5 110.5"));
+                // At badge scale the artwork's pattern would be sub-pixel.
+                assert!(!svg.contains("gitdebt-dither"), "mark leaks the pattern");
+                // Foreground ink, never an accent chip.
                 assert!(
-                    !svg.contains("scale(0.0"),
-                    "{style:?} scales the robot down"
-                );
-                assert!(
-                    !svg.contains("gitdebt-dither"),
-                    "{style:?} leaks the logo pattern"
-                );
-                // Terminal is theme-independent; every other style inks the
-                // mark with the theme foreground, never an accent chip.
-                let ink = if style == BadgeStyle::Terminal {
-                    "#fafafa"
-                } else {
-                    theme.fg
-                };
-                assert!(
-                    svg.contains(
-                        "data-gitdebt-logo=\"true\" aria-label=\"gitdebt\" transform=\"translate("
-                    ) && svg.contains(&format!("fill=\"{ink}\" shape-rendering=\"crispEdges\"")),
-                    "{style:?}/{}: mark must be inked with {ink}",
-                    theme.dark,
+                    svg.contains(&format!("fill=\"{}\"", theme.fg)),
+                    "mark must be inked with the theme foreground"
                 );
             }
         }
-        // Empty + signal badges use the same mark.
-        let empty = render_badge(
-            &BadgeInput {
-                stars: None,
-                forks: None,
-                downloads: None,
-                metrics: vec![Metric::Stars],
-                style: BadgeStyle::Flat,
-                animate: false,
-            },
-            &DARK,
-        );
-        assert!(empty.contains("data-gitdebt-logo=\"true\""));
-        assert!(empty.contains(&format!("fill=\"{}\" shape-rendering", DARK.fg)));
-        let signal = render_signal_badge("star momentum", "+9 / 30d", true, &DARK, false);
-        assert!(signal.contains(&format!("fill=\"{}\" shape-rendering", DARK.fg)));
     }
 
-    /// The regression this guards: the brand zone previously rendered a
-    /// flat dithered chip, i.e. a near-uniform block of ink. Rasterize a
-    /// badge and read the mark's cell grid back out — it must reproduce
-    /// the authored robot bitmap, with holes.
+    /// The regression this guards: compact surfaces once carried a
+    /// hand-authored 14x14 bitmap instead of the repository artwork.
+    /// Rasterize a real badge at real embed densities and compare the brand
+    /// zone against a rasterization of the canonical asset.
     #[test]
-    fn rasterized_brand_mark_is_the_robot_glyph_not_a_block() {
-        const SCALE: f32 = 6.0;
-        let svg = render_badge(&full_input(BadgeStyle::Flat, false), &DARK);
-        let (rgba, w, _h) = crate::raster::rasterize_rgba(&svg, SCALE).expect("raster");
-        let (total_w, _placed) = layout(&full_input(BadgeStyle::Flat, false).segments());
-        let total = total_w + BRAND_W;
-        let origin_x = (total - BRAND_W + 5.0) * SCALE;
-        let origin_y = ((HEIGHT - MARK_SIZE) / 2.0) * SCALE;
-        let cell = (MARK_SIZE / brand::MARK_GRID as f32) * SCALE;
+    fn rasterized_brand_mark_matches_the_canonical_logo() {
+        let input = full_input(false);
+        let (width, _placed) = layout(&input.segments());
+        let total = width + BRAND_W;
 
-        let mut lit = 0usize;
-        for row in 0..brand::MARK_GRID {
-            for col in 0..brand::MARK_GRID {
-                let px = (origin_x + (col as f32 + 0.5) * cell) as usize;
-                let py = (origin_y + (row as f32 + 0.5) * cell) as usize;
-                let i = (py * w as usize + px) * 4;
-                // Dark theme: the mark is near-white on a near-black panel.
-                let bright = rgba[i] > 128 && rgba[i + 1] > 128 && rgba[i + 2] > 128;
-                let expected = brand::MARK_BITMAP[row].as_bytes()[col] == b'#';
-                assert_eq!(
-                    bright,
-                    expected,
-                    "cell ({col},{row}) mismatch: rgba={:?}",
-                    &rgba[i..i + 4]
+        for scale in [1.0_f32, 2.0, 6.0] {
+            for theme in [&DARK, &LIGHT] {
+                let svg = render_badge(&input, theme);
+                let (mismatch, ink) = brand::mark_fidelity(
+                    &svg,
+                    brand::MarkBox {
+                        x: mark_x(total),
+                        y: mark_y(),
+                        width: MARK_W,
+                        scale,
+                        ink: theme.fg,
+                        canvas: panel_tone(theme),
+                    },
                 );
-                if bright {
-                    lit += 1;
-                }
+                assert!(
+                    mismatch < 0.05,
+                    "@{scale}x the badge mark differs from the canonical logo by {mismatch:.3}"
+                );
+                assert!(
+                    (0.25..0.75).contains(&ink),
+                    "@{scale}x mark coverage {ink:.3} reads as a block, not a glyph"
+                );
             }
         }
-        let cells = brand::MARK_GRID * brand::MARK_GRID;
-        assert!(
-            (cells / 6..cells / 2).contains(&lit),
-            "mark ink coverage must read as a glyph, got {lit}/{cells}"
-        );
     }
 
     #[test]
@@ -1153,18 +881,19 @@ mod tests {
                 forks: Some(9_999),
                 downloads: Some(123_456_789),
                 metrics: Metric::parse_list(None),
-                style: BadgeStyle::Flat,
+                style: BadgeStyle::Dither,
                 animate: false,
             }
             .segments(),
         );
         let last = placed.last().unwrap();
-        assert!(last.x + last.w <= width + 0.01);
-        // Flat total = width + BRAND_W; the chip starts at total-BRAND_W+5.
+        let last_w = segment_width(&last.seg);
+        assert!(last.x + last_w <= width + 0.01);
+        // Total = width + BRAND_W; the mark starts at total-BRAND_W+5.
         let total = width + BRAND_W;
         let chip_x = total - BRAND_W + 5.0;
         assert!(
-            last.x + last.w <= chip_x,
+            last.x + last_w <= chip_x,
             "content must clear the chip zone"
         );
     }
@@ -1203,14 +932,29 @@ mod tests {
         );
     }
 
+    /// Legacy README embeds must keep rendering after the collapse to one
+    /// style, so every historical `?style=` value stays valid input.
     #[test]
-    fn style_parse() {
-        assert_eq!(BadgeStyle::parse(Some("flat")), BadgeStyle::Flat);
-        assert_eq!(BadgeStyle::parse(Some("modern")), BadgeStyle::Modern);
-        assert_eq!(BadgeStyle::parse(Some("glass")), BadgeStyle::Glass);
-        assert_eq!(BadgeStyle::parse(Some("terminal")), BadgeStyle::Terminal);
-        assert_eq!(BadgeStyle::parse(Some("garbage")), BadgeStyle::Flat);
-        assert_eq!(BadgeStyle::parse(None), BadgeStyle::Flat);
+    fn every_legacy_style_value_resolves_to_the_single_style() {
+        for value in [
+            Some("flat"),
+            Some("modern"),
+            Some("glass"),
+            Some("terminal"),
+            Some(" Terminal "),
+            Some("garbage"),
+            Some(""),
+            None,
+        ] {
+            assert_eq!(BadgeStyle::parse(value), BadgeStyle::Dither, "{value:?}");
+        }
+        // And they all render identical bytes.
+        let mut input = full_input(false);
+        input.style = BadgeStyle::parse(Some("terminal"));
+        assert_eq!(
+            render_badge(&input, &DARK),
+            render_badge(&full_input(false), &DARK)
+        );
     }
 
     #[test]
@@ -1220,7 +964,7 @@ mod tests {
             forks: Some(20),
             downloads: Some(30),
             metrics: vec![Metric::Forks, Metric::Stars],
-            style: BadgeStyle::Flat,
+            style: BadgeStyle::Dither,
             animate: false,
         };
         let segs = input.segments();
@@ -1237,7 +981,7 @@ mod tests {
             forks: None,
             downloads: None,
             metrics: vec![Metric::Stars, Metric::Forks, Metric::Downloads],
-            style: BadgeStyle::Flat,
+            style: BadgeStyle::Dither,
             animate: false,
         };
         let segs = input.segments();
@@ -1279,73 +1023,59 @@ mod tests {
 
     #[test]
     fn animation_tags_only_when_animate_true() {
-        for style in [
-            BadgeStyle::Flat,
-            BadgeStyle::Modern,
-            BadgeStyle::Glass,
-            BadgeStyle::Terminal,
-        ] {
-            let off = render_badge(&full_input(style, false), &LIGHT);
+        let off = render_badge(&full_input(false), &LIGHT);
+        assert!(
+            !off.contains("<animate"),
+            "animate=0 must have no <animate>: {off}"
+        );
+        assert!(off.contains("data-gitdebt-logo=\"true\""));
+
+        let on = render_badge(&full_input(true), &LIGHT);
+        assert!(on.contains("<animate"), "animate=1 must animate: {on}");
+        assert!(on.contains("prefers-reduced-motion: reduce"));
+        assert!(
+            !on.contains("<g opacity=\"0\""),
+            "SMIL-stripped badge content must stay visible"
+        );
+        // Every animate must freeze so the GitHub final frame is correct.
+        for frag in on.split("<animate").skip(1) {
+            let tag_end = frag
+                .find("/>")
+                .or_else(|| frag.find('>'))
+                .unwrap_or(frag.len());
+            let tag = &frag[..tag_end];
             assert!(
-                !off.contains("<animate"),
-                "{style:?} animate=0 must have no <animate>: {off}"
+                tag.contains("fill=\"freeze\"") || tag.contains("repeatCount"),
+                "animate tag must freeze or repeat-then-freeze: {tag}"
             );
-            assert!(off.contains("data-gitdebt-logo=\"true\""));
-            let on = render_badge(&full_input(style, true), &LIGHT);
+        }
+        // Every animateTransform must be additive so static transforms
+        // survive SMIL playback (the pennant bug class).
+        for frag in on.split("<animateTransform").skip(1) {
+            let tag_end = frag.find("/>").unwrap_or(frag.len());
+            let tag = &frag[..tag_end];
             assert!(
-                on.contains("<animate"),
-                "{style:?} animate=1 must contain <animate>: {on}"
+                tag.contains("additive=\"sum\""),
+                "animateTransform must be additive: {tag}"
             );
-            assert!(on.contains("prefers-reduced-motion: reduce"));
-            assert!(
-                !on.contains("<g opacity=\"0\""),
-                "{style:?}: SMIL-stripped badge content must stay visible"
-            );
-            // Every animate must freeze so the GitHub final frame is correct.
-            for frag in on.split("<animate").skip(1) {
-                let tag_end = frag
-                    .find("/>")
-                    .or_else(|| frag.find('>'))
-                    .unwrap_or(frag.len());
-                let tag = &frag[..tag_end];
-                assert!(
-                    tag.contains("fill=\"freeze\"") || tag.contains("repeatCount"),
-                    "{style:?}: animate tag must freeze or repeat-then-freeze: {tag}"
-                );
-            }
-            // Every animateTransform must be additive so static transforms
-            // survive SMIL playback (the pennant bug class).
-            for frag in on.split("<animateTransform").skip(1) {
-                let tag_end = frag.find("/>").unwrap_or(frag.len());
-                let tag = &frag[..tag_end];
-                assert!(
-                    tag.contains("additive=\"sum\""),
-                    "{style:?}: animateTransform must be additive: {tag}"
-                );
-            }
         }
     }
 
     #[test]
-    fn reveal_stagger_is_capped_and_glass_uses_transform() {
-        let modern = render_badge(&full_input(BadgeStyle::Modern, true), &LIGHT);
-        assert!(modern.contains("begin=\"0.00s\""));
-        assert!(modern.contains("begin=\"0.04s\""));
-        assert!(modern.contains("begin=\"0.08s\""));
-        assert!(!modern.contains("begin=\"0.12s\""));
-        assert!(modern.contains("dur=\"0.2s\""));
-
-        let glass = render_badge(&full_input(BadgeStyle::Glass, true), &LIGHT);
-        assert!(glass.contains("<animateTransform"));
-        assert!(glass.contains("calcMode=\"linear\""));
-        assert!(!glass.contains("attributeName=\"x\""));
+    fn reveal_stagger_is_capped() {
+        let on = render_badge(&full_input(true), &LIGHT);
+        assert!(on.contains("begin=\"0.00s\""));
+        assert!(on.contains("begin=\"0.04s\""));
+        assert!(on.contains("begin=\"0.08s\""));
+        assert!(!on.contains("begin=\"0.12s\""));
+        assert!(on.contains("dur=\"0.2s\""));
     }
 
     #[test]
     fn frozen_frame_shows_final_value() {
         // The static text content must already be the final value, so the
         // GitHub-sanitized (no-SMIL) render shows correct numbers.
-        let svg = render_badge(&full_input(BadgeStyle::Modern, true), &LIGHT);
+        let svg = render_badge(&full_input(true), &LIGHT);
         assert!(svg.contains("12.3k")); // stars
         assert!(svg.contains("1.2k")); // forks
         assert!(svg.contains("2.5M")); // downloads
@@ -1353,8 +1083,8 @@ mod tests {
 
     #[test]
     fn per_theme_colors_baked() {
-        let light = render_badge(&full_input(BadgeStyle::Flat, false), &LIGHT);
-        let dark = render_badge(&full_input(BadgeStyle::Flat, false), &DARK);
+        let light = render_badge(&full_input(false), &LIGHT);
+        let dark = render_badge(&full_input(false), &DARK);
         // Ink + the theme's wave accent, no CSS variables.
         assert!(light.contains("#0a0a0a"));
         assert!(light.contains("#5b2cff"));
@@ -1366,22 +1096,14 @@ mod tests {
 
     #[test]
     fn deterministic_same_bytes() {
-        let a = render_badge(&full_input(BadgeStyle::Glass, true), &DARK);
-        let b = render_badge(&full_input(BadgeStyle::Glass, true), &DARK);
+        let a = render_badge(&full_input(true), &DARK);
+        let b = render_badge(&full_input(true), &DARK);
         assert_eq!(a, b);
     }
 
     #[test]
     fn empty_when_no_metrics_available() {
-        let input = BadgeInput {
-            stars: None,
-            forks: None,
-            downloads: None,
-            metrics: vec![Metric::Stars],
-            style: BadgeStyle::Flat,
-            animate: false,
-        };
-        let svg = render_badge(&input, &LIGHT);
+        let svg = render_badge(&no_metrics_input(), &LIGHT);
         assert!(svg.contains("no metrics"));
         assert!(svg.contains("data-gitdebt-logo=\"true\""));
         assert!(svg.starts_with("<svg"));
@@ -1391,25 +1113,20 @@ mod tests {
     fn value_is_xml_escaped() {
         // Defensive: humanized values are digits + suffix, never need
         // escaping, but the path must still be safe.
-        let svg = render_badge(&full_input(BadgeStyle::Flat, false), &LIGHT);
+        let svg = render_badge(&full_input(false), &LIGHT);
         assert!(svg.starts_with("<svg"));
         assert!(!svg.contains("<script"));
     }
 
     #[test]
-    fn every_style_rasterizes_frozen_frame() {
+    fn every_badge_rasterizes_frozen_frame() {
         // The .png/.webp variants run through the raster freezer; confirm
-        // each style's animated SVG produces valid PNG bytes after the SMIL
-        // → frozen-frame rewrite (catches filter parse failures).
-        for style in [
-            BadgeStyle::Flat,
-            BadgeStyle::Modern,
-            BadgeStyle::Glass,
-            BadgeStyle::Terminal,
-        ] {
-            let svg = render_badge(&full_input(style, true), &LIGHT);
+        // the animated SVG produces valid PNG bytes after the SMIL →
+        // frozen-frame rewrite (catches filter parse failures).
+        for input in [full_input(true), no_metrics_input()] {
+            let svg = render_badge(&input, &LIGHT);
             let png = crate::raster::rasterize(&svg, crate::raster::RasterFormat::Png, 2.0)
-                .unwrap_or_else(|e| panic!("{style:?} raster failed: {e}"));
+                .expect("badge raster");
             assert_eq!(&png[..8], &[0x89, 0x50, 0x4E, 0x47, 0x0D, 0x0A, 0x1A, 0x0A]);
         }
         let signal = render_signal_badge("star momentum", "+279 stars / 30d", true, &DARK, true);

@@ -7,5 +7,7 @@
 /profile/ /profile 301
 /terms/ /terms 301
 /.md /index.md 301
+/u/:login/ /:login 301
+/u/:login /:login 301
 /:first/:second/ /:first/:second 301
 /vs/:owner1/:repo1/:owner2/:repo2/ /vs/:owner1/:repo1/:owner2/:repo2 301

@@ -1,5 +1,6 @@
 import { readdir } from "node:fs/promises";
 import path from "node:path";
+import { isReservedFirstSegment } from "../src/lib/static-routing.mjs";
 
 const apiBase = (process.env.PUBLIC_API_BASE ?? "https://api.gitdebt.com").replace(/\/$/, "");
 const limit = Math.min(1_000, Math.max(1, Number(process.env.STATIC_REPO_LIMIT ?? 1_000)));
@@ -36,23 +37,9 @@ const apiRepos = Array.isArray(catalog.repos)
   ? catalog.repos.map((row) => row?.slug).filter((slug) => typeof slug === "string")
   : [];
 const repos = new Set(apiRepos);
-const reserved = new Set([
-  "_astro",
-  "about",
-  "badges",
-  "compare",
-  "leaderboard",
-  "privacy",
-  "profile",
-  "report",
-  "sitemaps",
-  "terms",
-  "u",
-  "vs",
-]);
 const dist = path.resolve("dist");
 for (const owner of await readdir(dist, { withFileTypes: true })) {
-  if (!owner.isDirectory() || reserved.has(owner.name)) continue;
+  if (!owner.isDirectory() || isReservedFirstSegment(owner.name)) continue;
   for (const file of await readdir(path.join(dist, owner.name), { withFileTypes: true })) {
     if (!file.isFile() || !file.name.endsWith(".html")) continue;
     const repo = file.name.slice(0, -5);

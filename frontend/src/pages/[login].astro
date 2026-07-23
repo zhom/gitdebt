@@ -1,0 +1,168 @@
+---
+import "@/styles/globals.css";
+import { catalogReposFor, staticLoginPaths } from "@/lib/build-catalog";
+import { staticApiBase } from "@/lib/static-api-base";
+import BaseHead from "@/components/BaseHead.astro";
+import Seo from "@/components/Seo.astro";
+import SiteHeader from "@/components/SiteHeader.astro";
+import SiteFooter from "@/components/SiteFooter.astro";
+import {
+  LiveUserProfile,
+  type UserAnalyze,
+  type UserStats,
+} from "@/components/LiveUserProfile";
+import { profileLogin } from "@/lib/static-routing.mjs";
+import { firstStarYear, gainedInTrailingDays } from "@/lib/star-insights";
+
+export async function getStaticPaths() {
+  return staticLoginPaths();
+}
+
+const login = profileLogin(Astro.params.login ?? "");
+if (!login) {
+  return new Response("Not found", { status: 404 });
+}
+
+const apiBase = staticApiBase();
+const site = (Astro.site ?? new URL("https://gitdebt.com")).href.replace(/\/$/, "");
+const canonicalPath = `/${login}`;
+const canonical = `${site}${canonicalPath}`;
+
+async function fetchJson<T>(path: string): Promise<T | null> {
+  try {
+    const res = await fetch(`${apiBase}${path}`, {
+      headers: { accept: "application/json" },
+      signal: AbortSignal.timeout(5_000),
+    });
+    if (!res.ok) return null;
+    return (await res.json()) as T;
+  } catch {
+    return null;
+  }
+}
+
+let data: UserAnalyze | null = null;
+let fetchError: string | null = null;
+try {
+  const res = await fetch(`${apiBase}/api/users/${login}/analyze?enqueue=0`, {
+    headers: { accept: "application/json" },
+    signal: AbortSignal.timeout(5_000),
+  });
+  if (res.ok) {
+    data = (await res.json()) as UserAnalyze;
+  } else if (res.status === 404) {
+    return new Response("User not found", { status: 404 });
+  } else {
+    fetchError = `backend returned ${res.status}`;
+  }
+} catch (err) {
+  fetchError = err instanceof Error ? err.message : String(err);
+}
+
+// Code signals come from the Postgres-only profile aggregate. A miss is
+// never fatal: the star report still renders without it.
+const stats = data ? await fetchJson<UserStats>(`/api/users/${login}/stats.json`) : null;
+
+// The build catalog is already loaded and memoized for `getStaticPaths`, so
+// linking a maintainer's tracked repos costs no extra request.
+const ownedRepos = data ? await catalogReposFor(login) : [];
+
+const hasData = data !== null && data.repos_included > 0 && data.history.length > 0;
+const firstYear = stats?.since_year ?? (data ? firstStarYear(data.history) : null);
+const gained90 = data ? gainedInTrailingDays(data.history, 90) : null;
+
+const title = `${login} — GitHub star history and repo health · gitdebt`;
+const description = hasData
+  ? `${login}'s public repos have earned ${data!.total_stars.toLocaleString()} GitHub stars${
+      firstYear ? ` since ${firstYear}` : ""
+    }${
+      gained90 !== null && gained90 > 0 ? `, ${gained90.toLocaleString()} in the last 90 days` : ""
+    }. Aggregate star history across ${data!.repos_included} repos, plus commit activity, language footprint and embeddable README assets.`
+  : `Aggregate GitHub star history for ${login}'s public repos, with commit activity, language footprint and embeddable README assets.`;
+
+const ogImage = `${apiBase}/api/users/${login}/og.png`;
+
+const noindex = !hasData || fetchError !== null;
+
+const jsonLd: Record<string, unknown>[] = [
+  {
+    "@context": "https://schema.org",
+    "@type": "CollectionPage",
+    name: `${login} — star history and repo health`,
+    url: canonical,
+    description,
+    about: {
+      "@type": "Thing",
+      name: login,
+      sameAs: `https://github.com/${login}`,
+    },
+    ...(hasData && {
+      mainEntity: {
+        "@type": "ItemList",
+        name: `${login}'s tracked GitHub repositories`,
+        numberOfItems: data!.repos_included,
+        itemListElement: ownedRepos.map((slug, index) => ({
+          "@type": "ListItem",
+          position: index + 1,
+          name: slug,
+          url: `${site}/${slug}`,
+        })),
+      },
+    }),
+  },
+  {
+    "@context": "https://schema.org",
+    "@type": "BreadcrumbList",
+    itemListElement: [
+      { "@type": "ListItem", position: 1, name: "gitdebt", item: `${site}/` },
+      { "@type": "ListItem", position: 2, name: login, item: canonical },
+    ],
+  },
+];
+---
+
+<!doctype html>
+<html lang="en">
+  <head>
+    <BaseHead />
+    <Seo
+      title={title}
+      description={description}
+      canonicalPath={canonicalPath}
+      ogImage={ogImage}
+      noindex={noindex}
+      jsonLd={jsonLd}
+    />
+  </head>
+  <body>
+    <div class="isolate flex min-h-dvh flex-col">
+      <SiteHeader />
+
+      <main id="main-content" class="mx-auto w-full max-w-6xl flex-1 px-6 py-12">
+        <nav aria-label="Breadcrumb" class="font-mono text-[11px] text-muted-foreground">
+          <a
+            href="/"
+            class="rounded outline-none transition-colors duration-150 hover:text-foreground focus-visible:ring-2 focus-visible:ring-accent/30"
+            >gitdebt</a
+          >
+          <span class="px-1.5 text-border" aria-hidden="true">/</span>
+          <span class="text-foreground">{login}</span>
+        </nav>
+
+        <div class="mt-8">
+          <LiveUserProfile
+            client:load
+            apiBase={apiBase}
+            login={login}
+            siteOrigin={site}
+            analyze={data}
+            stats={stats}
+            repos={ownedRepos}
+          />
+        </div>
+      </main>
+
+      <SiteFooter />
+    </div>
+  </body>
+</html>

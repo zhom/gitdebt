@@ -1,8 +1,7 @@
 import { ChevronDown, Share2 } from "lucide-react";
 
-import { CopyButton } from "@/components/CopyButton";
-import { CAPTION, HEADING, PANEL } from "@/components/style-tokens";
-import { cn } from "@/lib/utils";
+import { CodeBlock, type CodeLanguage } from "@/components/CodeBlock";
+import { CAPTION, HEADING } from "@/components/style-tokens";
 
 type Props = {
   apiBase: string;
@@ -60,19 +59,21 @@ export function ReportShare({
             description="Send the full interactive analysis."
             value={pageUrl}
             label="Copy report link"
-            primary
+            language="text"
           />
           <ShareOption
             title="Star-history chart"
             description="Responsive light and dark README embed."
             value={chartEmbed}
             label="Copy README embed"
+            language="html"
           />
           <ShareOption
             title="Compact stats badge"
             description="Stars and forks without the full studio."
             value={badgeEmbed}
             label="Copy badge embed"
+            language="html"
           />
         </div>
       </details>
@@ -85,27 +86,28 @@ function ShareOption({
   description,
   value,
   label,
-  primary = false,
+  language,
 }: {
   title: string;
   description: string;
   value: string;
   label: string;
-  primary?: boolean;
+  language: CodeLanguage;
 }) {
   return (
-    <div className={cn(PANEL, "flex flex-col items-start gap-3 p-3.5")}>
+    <div className="flex flex-col items-stretch gap-3">
       <div className="space-y-1">
         <p className="text-[13px]">{title}</p>
         <p className={CAPTION}>{description}</p>
       </div>
-      <CopyButton
-        value={value}
-        idleLabel={label}
-        ariaLabel={`${label}: ${title}`}
-        variant={primary ? "primary" : "outline"}
-        size="sm"
+      <CodeBlock
         className="mt-auto"
+        code={value}
+        language={language}
+        label={title}
+        copyLabel={label}
+        copyAriaLabel={`${label}: ${title}`}
+        maxHeightClass="max-h-40"
       />
     </div>
   );

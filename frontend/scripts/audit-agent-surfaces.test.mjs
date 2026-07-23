@@ -58,3 +58,41 @@ test("page sitemap and emitted comparison pages share one path source", () => {
   assert.match(sitemap, /staticComparisonPaths\(\)/);
   assert.match(comparison, /staticComparisonPaths\(\)/);
 });
+
+test("profiles live at the root and share one login source", () => {
+  const root = path.resolve(import.meta.dirname, "..");
+  const read = (relative) => fs.readFileSync(path.join(root, relative), "utf8");
+
+  assert.ok(
+    !fs.existsSync(path.join(root, "src/pages/u")),
+    "the legacy /u profile route must be gone",
+  );
+  assert.match(read("src/pages/[login].astro"), /staticLoginPaths\(\)/);
+  assert.match(read("src/pages/sitemaps/pages.xml.ts"), /staticLogins\(\)/);
+  assert.match(read("src/pages/[...path].md.ts"), /staticLogins\(\)/);
+
+  for (const relative of [
+    "src/pages/[login].astro",
+    "src/pages/sitemaps/pages.xml.ts",
+    "src/pages/[...path].md.ts",
+    "src/lib/agent-markdown.ts",
+    "src/components/ProfileCardPreview.tsx",
+    "src/pages/[owner]/[repo].astro",
+  ]) {
+    assert.doesNotMatch(
+      read(relative),
+      /\/u\/\$\{/,
+      `${relative} still links the legacy /u profile prefix`,
+    );
+  }
+});
+
+test("the profile drops the monthly commit-volume surface", () => {
+  const root = path.resolve(import.meta.dirname, "..");
+  const profile = fs.readFileSync(
+    path.join(root, "src/components/LiveUserProfile.tsx"),
+    "utf8",
+  );
+  assert.doesNotMatch(profile, /name: "commit-trend"/);
+  assert.match(profile, /name: "languages"/);
+});

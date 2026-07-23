@@ -663,7 +663,7 @@ pub fn render_user_card(
     let footer_y = grid_y + rows.len().div_ceil(2) as f32 * 58.0;
 
     body.push_str(&format!(
-        "  <a href=\"https://gitdebt.com/u/{login}\" target=\"_blank\" rel=\"noopener\"><text class=\"m\" x=\"24\" y=\"{y:.1}\" fill=\"{muted}\">gitdebt.com/u/{login} ↗</text></a>\n",
+        "  <a href=\"https://gitdebt.com/{login}\" target=\"_blank\" rel=\"noopener\"><text class=\"m\" x=\"24\" y=\"{y:.1}\" fill=\"{muted}\">gitdebt.com/{login} ↗</text></a>\n",
         y = footer_y + 20.0,
         muted = theme.muted,
     ));
@@ -1623,11 +1623,35 @@ mod tests {
     #[test]
     fn footer_links_to_matching_pages() {
         let user = render_user_card(&sample_user(), &UserCardOptions::default(), &LIGHT).unwrap();
-        assert!(user.contains("https://gitdebt.com/u/octocat"));
+        assert!(user.contains("https://gitdebt.com/octocat"));
         assert!(user.contains("data-gitdebt-logo=\"true\""));
         let repo = render_repo_card(&sample_repo(), &full_repo_opts(false), &LIGHT).unwrap();
         assert!(repo.contains("https://gitdebt.com"));
         assert!(repo.contains("https://github.com/rust-lang/rust"));
+    }
+
+    /// The profile card's footer lockup once carried a hand-drawn stand-in.
+    /// Rasterize the real card and hold its mark against the asset.
+    #[test]
+    fn card_footer_lockups_carry_the_canonical_logo() {
+        for theme in [&LIGHT, &DARK] {
+            let user =
+                render_user_card(&sample_user(), &UserCardOptions::default(), theme).unwrap();
+            let repo = render_repo_card(&sample_repo(), &full_repo_opts(false), theme).unwrap();
+            for svg in [&user, &repo] {
+                assert!(svg.contains("M320.5 110.5"), "footer mark is the artwork");
+            }
+
+            for svg in [&user, &repo] {
+                let place = crate::brand::MarkBox::locate(svg, 2.0, theme.muted, theme.bg);
+                let (mismatch, ink) = crate::brand::mark_fidelity(svg, place);
+                assert!(mismatch < 0.05, "card lockup drifted: {mismatch:.3}");
+                assert!(
+                    (0.25..0.75).contains(&ink),
+                    "card lockup coverage {ink:.3} reads as a block"
+                );
+            }
+        }
     }
 
     #[test]

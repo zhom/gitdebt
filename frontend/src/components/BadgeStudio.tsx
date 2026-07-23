@@ -2,6 +2,7 @@ import { useMemo, useState } from "react";
 import { AnimatePresence, motion, useReducedMotion } from "motion/react";
 import { ChevronDown } from "lucide-react";
 
+import { TOKEN_CLASS, tokenize } from "@/components/CodeBlock";
 import { CopyButton } from "@/components/CopyButton";
 import { BODY, EYEBROW, PANEL } from "@/components/style-tokens";
 import { DitherCheckbox } from "@/components/ui/dither-checkbox";
@@ -20,7 +21,6 @@ import { useRenderedTheme } from "@/lib/rendered-theme";
 import { cn } from "@/lib/utils";
 
 type Metric = "stars" | "forks" | "downloads";
-type BadgeStyle = "flat" | "modern" | "glass" | "terminal";
 type BadgeSource = "auto" | "npm" | "crates" | "pypi" | "docker";
 type ThemeChoice = "auto" | "light" | "dark";
 
@@ -28,13 +28,6 @@ const METRICS: { id: Metric; label: string }[] = [
   { id: "stars", label: "Stars" },
   { id: "forks", label: "Forks" },
   { id: "downloads", label: "Downloads" },
-];
-
-const STYLES: { id: BadgeStyle; label: string; desc: string }[] = [
-  { id: "flat", label: "Flat", desc: "Classic shields look" },
-  { id: "modern", label: "Modern", desc: "Rounded, soft shadow" },
-  { id: "glass", label: "Glass", desc: "Translucent, blurred" },
-  { id: "terminal", label: "Terminal", desc: "Mono, monochrome" },
 ];
 
 const SOURCES: { id: BadgeSource; label: string }[] = [
@@ -59,14 +52,12 @@ type Props = {
 
 function badgeQuery(opts: {
   metrics: Metric[];
-  style: BadgeStyle;
   animate: boolean;
   source: BadgeSource;
   theme: "light" | "dark";
 }): string {
   const params = new URLSearchParams();
   params.set("metrics", opts.metrics.join(","));
-  params.set("style", opts.style);
   params.set("animate", opts.animate ? "1" : "0");
   params.set("source", opts.source);
   params.set("theme", opts.theme);
@@ -76,7 +67,6 @@ function badgeQuery(opts: {
 
 export function BadgeStudio({ apiBase, owner, repo }: Props) {
   const [metrics, setMetrics] = useState<Metric[]>(["stars", "downloads"]);
-  const [style, setStyle] = useState<BadgeStyle>("modern");
   const [animate, setAnimate] = useState(false);
   const [source, setSource] = useState<BadgeSource>("auto");
   const [theme, setTheme] = useState<ThemeChoice>("auto");
@@ -94,12 +84,12 @@ export function BadgeStudio({ apiBase, owner, repo }: Props) {
   }
 
   const lightUrl = useMemo(
-    () => `${badgeBase}?${badgeQuery({ metrics, style, animate, source, theme: "light" })}`,
-    [badgeBase, metrics, style, animate, source],
+    () => `${badgeBase}?${badgeQuery({ metrics, animate, source, theme: "light" })}`,
+    [badgeBase, metrics, animate, source],
   );
   const darkUrl = useMemo(
-    () => `${badgeBase}?${badgeQuery({ metrics, style, animate, source, theme: "dark" })}`,
-    [badgeBase, metrics, style, animate, source],
+    () => `${badgeBase}?${badgeQuery({ metrics, animate, source, theme: "dark" })}`,
+    [badgeBase, metrics, animate, source],
   );
 
   const resolvedThemeUrl =
@@ -117,14 +107,12 @@ export function BadgeStudio({ apiBase, owner, repo }: Props) {
 
   const embedLightUrl = `${badgeBase}?${badgeQuery({
     metrics,
-    style,
     animate: false,
     source,
     theme: "light",
   })}`;
   const embedDarkUrl = `${badgeBase}?${badgeQuery({
     metrics,
-    style,
     animate: false,
     source,
     theme: "dark",
@@ -193,52 +181,6 @@ export function BadgeStudio({ apiBase, owner, repo }: Props) {
                 </motion.p>
               )}
             </AnimatePresence>
-          </div>
-
-          <div>
-            <p className={EYEBROW}>Style</p>
-            <div className="mt-3 grid grid-cols-1 gap-2 sm:grid-cols-2">
-              {STYLES.map((s) => {
-                const previewUrl = `${badgeBase}?${badgeQuery({
-                  metrics: metrics.length ? metrics : ["stars"],
-                  style: s.id,
-                  animate: false,
-                  source,
-                  theme: "dark",
-                })}`;
-                return (
-                  <label
-                    key={s.id}
-                    htmlFor={`badge-style-${s.id}`}
-                    className={cn(
-                      PANEL,
-                      "group flex cursor-pointer flex-col gap-2 p-3.5 text-left text-[13px] transition-[border-color,background-color] duration-150 hover:border-foreground/25 has-checked:border-foreground/40 has-checked:bg-card/60 has-focus-visible:ring-2 has-focus-visible:ring-accent/30",
-                    )}
-                  >
-                    <input
-                      id={`badge-style-${s.id}`}
-                      name="style"
-                      value={s.id}
-                      type="radio"
-                      checked={style === s.id}
-                      onChange={() => setStyle(s.id)}
-                      className="sr-only"
-                    />
-                    <span className="flex min-h-7 items-center">
-                      <img
-                        src={previewUrl}
-                        alt=""
-                        loading="lazy"
-                        decoding="async"
-                        className="block h-5 w-auto"
-                      />
-                    </span>
-                    <span className="font-mono text-[12px] text-foreground">{s.label}</span>
-                    <span className="text-[11px] text-muted-foreground">{s.desc}</span>
-                  </label>
-                );
-              })}
-            </div>
           </div>
 
           <div className="grid gap-5 sm:grid-cols-2">
@@ -384,8 +326,16 @@ function BadgeEmbed({ markdown, html }: { markdown: string; html: string }) {
         />
       </figcaption>
       <div className="relative">
-        <pre className="overflow-x-auto px-4 py-4 font-mono text-[12px] leading-relaxed text-foreground">
-          <code>{snippet}</code>
+        <pre className="overflow-x-auto px-4 py-4 font-mono text-[12px] leading-relaxed">
+          <code>
+            {tokenize(snippet, mode === "html" ? "html" : "markdown").map(
+              (token, index) => (
+                <span key={index} className={TOKEN_CLASS[token.kind]}>
+                  {token.text}
+                </span>
+              ),
+            )}
+          </code>
         </pre>
         <CopyButton
           value={snippet}

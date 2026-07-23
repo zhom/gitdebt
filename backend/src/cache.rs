@@ -156,6 +156,29 @@ pub struct LoginReposMeta {
     pub fetched_at: Option<DateTime<Utc>>,
     pub complete: bool,
     pub missing: bool,
+    /// GitHub's account kind for this login, as resolved at fetch time.
+    /// `None` on rows written before the kind was recorded, or on a
+    /// tombstone.
+    pub account_kind: Option<crate::github::AccountKind>,
+    /// The account's public-repository count at fetch time. The cached list
+    /// is capped, so this is what tells a reader how much of the account
+    /// the cap actually covers.
+    pub public_repos: Option<i64>,
+    /// A deeper repos-list walk would still improve this list: the fetch
+    /// stopped at a page budget below the full cap. False once no further
+    /// walk can add anything, including for an account larger than the cap
+    /// itself — coverage is reported from `public_repos`, not from here.
+    pub list_truncated: bool,
+}
+
+/// What a repos-list fetch learned about the account itself, written
+/// alongside the list in the same transaction so the kind and the coverage
+/// numbers can never describe a different fetch than the rows do.
+#[derive(Debug, Clone, Copy)]
+pub struct LoginListFacts {
+    pub kind: crate::github::AccountKind,
+    pub public_repos: Option<i64>,
+    pub truncated: bool,
 }
 
 /// A privacy-safe row for the landing-page activity pulse. This is derived
@@ -1066,17 +1089,37 @@ impl Cache {
     /// themselves come from [`get_login_repos`]. Returns `None` when the
     /// login has never been fetched.
     pub async fn get_login_repos_meta(&self, login: &str) -> Result<Option<LoginReposMeta>> {
-        let row: Option<(Option<DateTime<Utc>>, bool, bool)> = sqlx::query_as(
-            "SELECT fetched_at, complete, missing FROM login_repo_lists WHERE login = $1",
+        /// `(fetched_at, complete, missing, account_type, public_repos,
+        /// list_truncated)` in the order the statement selects them.
+        type MetaRow = (
+            Option<DateTime<Utc>>,
+            bool,
+            bool,
+            Option<String>,
+            Option<i64>,
+            bool,
+        );
+        let row: Option<MetaRow> = sqlx::query_as(
+            "SELECT fetched_at, complete, missing, account_type, public_repos, list_truncated \
+             FROM login_repo_lists WHERE login = $1",
         )
         .bind(login)
         .fetch_optional(&self.db.pool)
         .await?;
-        Ok(row.map(|(fetched_at, complete, missing)| LoginReposMeta {
-            fetched_at,
-            complete,
-            missing,
-        }))
+        Ok(row.map(
+            |(fetched_at, complete, missing, account_type, public_repos, list_truncated)| {
+                LoginReposMeta {
+                    fetched_at,
+                    complete,
+                    missing,
+                    account_kind: account_type
+                        .as_deref()
+                        .map(crate::github::AccountKind::parse),
+                    public_repos,
+                    list_truncated,
+                }
+            },
+        ))
     }
 
     /// Cached `(repo_slug, stars)` list for a login, in rank order (stars
@@ -1116,34 +1159,53 @@ impl Cache {
     /// half-replaced set. Also clears any `missing` tombstone (a successful
     /// fetch is positive evidence the login exists). Rank is the input
     /// order (callers pass stars-descending).
-    pub async fn put_login_repos(&self, login: &str, repos: &[(String, i64)]) -> Result<()> {
+    pub async fn put_login_repos(
+        &self,
+        login: &str,
+        repos: &[(String, i64)],
+        facts: LoginListFacts,
+    ) -> Result<()> {
         let now = Utc::now();
         let mut tx = self.db.pool.begin().await?;
         sqlx::query(
-            "INSERT INTO login_repo_lists (login, fetched_at, complete, missing) \
-             VALUES ($1, $2, FALSE, FALSE) \
+            "INSERT INTO login_repo_lists \
+                 (login, fetched_at, complete, missing, \
+                  account_type, public_repos, list_truncated) \
+             VALUES ($1, $2, FALSE, FALSE, $3, $4, $5) \
              ON CONFLICT (login) DO UPDATE SET \
-                fetched_at = EXCLUDED.fetched_at, complete = FALSE, missing = FALSE",
+                fetched_at = EXCLUDED.fetched_at, complete = FALSE, missing = FALSE, \
+                account_type = EXCLUDED.account_type, \
+                public_repos = EXCLUDED.public_repos, \
+                list_truncated = EXCLUDED.list_truncated",
         )
         .bind(login)
         .bind(now)
+        .bind(facts.kind.as_str())
+        .bind(facts.public_repos)
+        .bind(facts.truncated)
         .execute(&mut *tx)
         .await?;
         sqlx::query("DELETE FROM login_repos WHERE login = $1")
             .bind(login)
             .execute(&mut *tx)
             .await?;
-        for (rank, (repo, stars)) in repos.iter().enumerate() {
-            sqlx::query(
-                "INSERT INTO login_repos (login, repo, stars, rank) VALUES ($1, $2, $3, $4)",
-            )
-            .bind(login)
-            .bind(repo)
-            .bind(*stars)
-            .bind(rank as i64)
-            .execute(&mut *tx)
-            .await?;
-        }
+        // One statement, not one per repo: a cold organization writes the
+        // whole capped list, and per-row round trips dominated that write.
+        let slugs: Vec<&str> = repos.iter().map(|(repo, _)| repo.as_str()).collect();
+        let stars: Vec<i64> = repos.iter().map(|(_, stars)| *stars).collect();
+        let ranks: Vec<i64> = (0..repos.len() as i64).collect();
+        sqlx::query(
+            "INSERT INTO login_repos (login, repo, stars, rank) \
+             SELECT $1, entry.repo, entry.stars, entry.rank \
+             FROM UNNEST($2::text[], $3::bigint[], $4::bigint[]) \
+                  AS entry(repo, stars, rank)",
+        )
+        .bind(login)
+        .bind(&slugs)
+        .bind(&stars)
+        .bind(&ranks)
+        .execute(&mut *tx)
+        .await?;
         sqlx::query("UPDATE login_repo_lists SET complete = TRUE WHERE login = $1")
             .bind(login)
             .execute(&mut *tx)
@@ -1161,10 +1223,13 @@ impl Cache {
         let now = Utc::now();
         let mut tx = self.db.pool.begin().await?;
         sqlx::query(
-            "INSERT INTO login_repo_lists (login, fetched_at, complete, missing) \
-             VALUES ($1, $2, FALSE, TRUE) \
+            "INSERT INTO login_repo_lists \
+                 (login, fetched_at, complete, missing, \
+                  account_type, public_repos, list_truncated) \
+             VALUES ($1, $2, FALSE, TRUE, NULL, NULL, FALSE) \
              ON CONFLICT (login) DO UPDATE SET \
-                fetched_at = EXCLUDED.fetched_at, complete = FALSE, missing = TRUE",
+                fetched_at = EXCLUDED.fetched_at, complete = FALSE, missing = TRUE, \
+                account_type = NULL, public_repos = NULL, list_truncated = FALSE",
         )
         .bind(login)
         .bind(now)

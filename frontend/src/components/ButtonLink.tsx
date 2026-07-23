@@ -15,7 +15,10 @@ const CANVAS_FILL: Record<string, RGB> = {
   default: BRAND,
   primary: BRAND,
   accent: SWATCH.blue,
+  soft: BRAND,
 };
+
+const CANVAS_ALPHA: Record<string, number> = { soft: 0.42 };
 
 export type ButtonLinkProps = React.AnchorHTMLAttributes<HTMLAnchorElement> &
   ButtonVariants;
@@ -32,6 +35,8 @@ export const ButtonLink = React.forwardRef<HTMLAnchorElement, ButtonLinkProps>(
       fill: fill ?? BRAND,
       variant: "gradient",
       animated: textured,
+      alpha: CANVAS_ALPHA[variant ?? "default"],
+      pulse: textured,
     });
     return (
       <a

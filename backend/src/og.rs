@@ -230,8 +230,9 @@ pub fn render_default_card(theme: &Theme) -> String {
     // Subtle grid motif behind everything (decorative, faint).
     body.push_str(&grid_motif(theme));
 
-    // Large centered-ish robot mark + wordmark.
-    body.push_str(&brand::logo_mark(80.0, 172.0, 140.0, fg, card_bg(theme)));
+    // Large robot mark + wordmark. 148px of mark width keeps the artwork
+    // above the size where its dither pattern still resolves.
+    body.push_str(&brand::logo_mark(84.0, 207.0, 148.0, fg));
     body.push_str(&format!(
         "  <text x=\"248\" y=\"300\" fill=\"{fg}\" font-family=\"{FONT_SANS}\" font-size=\"120\" font-weight=\"800\" letter-spacing=\"-0.02em\">gitdebt</text>\n",
     ));
@@ -440,7 +441,7 @@ fn wordmark(theme: &Theme) -> String {
     let fg = card_fg(theme);
     format!(
         "{}  <text x=\"152\" y=\"108\" fill=\"{fg}\" font-family=\"{FONT_SANS}\" font-size=\"44\" font-weight=\"800\" letter-spacing=\"-0.01em\">gitdebt</text>\n",
-        brand::logo_mark(80.0, 52.0, 64.0, fg, card_bg(theme)),
+        brand::logo_mark(84.0, 73.0, 56.0, fg),
     )
 }
 
@@ -1016,6 +1017,28 @@ mod tests {
         assert!(svg.contains("fill=\"#fafafa\""));
         assert!(svg.contains("fill=\"#0a0a0a\""));
         assert!(!svg.contains("<image"));
+    }
+
+    /// Social cards are the one surface large enough for the artwork's own
+    /// dither fill, so they must carry it — and still be the same glyph.
+    #[test]
+    fn social_cards_carry_the_dithered_artwork() {
+        for theme in [&LIGHT, &DARK] {
+            let svg = render_default_card(theme);
+            assert!(svg.contains("M320.5 110.5"));
+            assert!(svg.contains("<pattern"), "the hero mark keeps its dither");
+            assert!(
+                !svg.contains("id=\"gitdebt-dither\""),
+                "pattern id is scoped"
+            );
+        }
+        // The user card's wordmark mark is small enough to go solid.
+        let user = render_user_og(&sample_user_data(), &DARK);
+        assert!(user.contains("M320.5 110.5"));
+        let place = crate::brand::MarkBox::locate(&user, 1.0, card_fg(&DARK), card_bg(&DARK));
+        let (mismatch, ink) = crate::brand::mark_fidelity(&user, place);
+        assert!(mismatch < 0.05, "og wordmark drifted: {mismatch:.3}");
+        assert!((0.25..0.75).contains(&ink));
     }
 
     #[test]

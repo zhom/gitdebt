@@ -5,27 +5,16 @@ import { BODY, HEADING, TITLE } from "@/components/style-tokens";
 import { ChartViewer } from "@/components/ChartViewer";
 import { EarnedBadges } from "@/components/EarnedBadges";
 import { InteractiveRepoSignals } from "@/components/InteractiveRepoSignals";
+import { LiveUserProfile } from "@/components/LiveUserProfile";
 import { RepoHero } from "@/components/RepoHero";
 import { UsageSection } from "@/components/UsageSection";
+import {
+  isReservedFirstSegment,
+  missingProfileReportTarget,
+} from "@/lib/static-routing.mjs";
 import { cn } from "@/lib/utils";
 
 const SLUG_RE = /^([A-Za-z0-9._-]+)\/([A-Za-z0-9._-]+)$/;
-const RESERVED_FIRST_SEGMENTS = new Set([
-  "_astro",
-  "404",
-  "about",
-  "api",
-  "badges",
-  "compare",
-  "leaderboard",
-  "privacy",
-  "profile",
-  "report",
-  "sitemaps",
-  "terms",
-  "u",
-  "vs",
-]);
 
 function selectedRepo(): { owner: string; repo: string } | null {
   if (typeof window === "undefined") return null;
@@ -33,13 +22,24 @@ function selectedRepo(): { owner: string; repo: string } | null {
   const pathRepo = window.location.pathname.replace(/^\/+|\/+$/g, "");
   const raw = queryRepo ?? pathRepo;
   const match = raw.trim().match(SLUG_RE);
-  if (!match || RESERVED_FIRST_SEGMENTS.has(match[1].toLowerCase()))
-    return null;
+  if (!match || isReservedFirstSegment(match[1])) return null;
   return { owner: match[1].toLowerCase(), repo: match[2].toLowerCase() };
+}
+
+function selectedProfile(): string | null {
+  if (typeof window === "undefined") return null;
+  return missingProfileReportTarget(window.location.pathname)?.slice(1) ?? null;
 }
 
 export function LiveRepoReport({ apiBase }: { apiBase: string }) {
   const selected = useMemo(selectedRepo, []);
+  const profile = useMemo(selectedProfile, []);
+
+  // A single missing segment is a maintainer, not a repository: the whole
+  // point of profiles at the root is that github.com/<name> rewrites here.
+  if (!selected && profile) {
+    return <LiveUserProfile apiBase={apiBase} login={profile} />;
+  }
 
   if (!selected) {
     return (

@@ -1,5 +1,6 @@
 import { CATEGORIES } from "@/data/categories";
 import { staticApiBase } from "@/lib/static-api-base";
+import { profileLogin } from "@/lib/static-routing.mjs";
 
 export type CatalogRepo = {
   slug: string;
@@ -103,10 +104,37 @@ export async function staticRepoPaths() {
   });
 }
 
-export async function staticLoginPaths() {
+/**
+ * Publishable maintainer logins, sorted. Profiles live at the root path, so a
+ * login that collides with a route the application owns is dropped rather
+ * than published: `profileLogin` is the single arbiter of that collision.
+ */
+export async function staticLogins(): Promise<string[]> {
   const repos = await loadBuildCatalog();
-  const logins = [...new Set(repos.map(({ slug }) => slug.split("/")[0]))];
+  const logins = new Set<string>();
+  for (const { slug } of repos) {
+    const login = profileLogin(slug.split("/")[0]);
+    if (login) logins.add(login);
+  }
+  return [...logins].sort();
+}
+
+export async function staticLoginPaths() {
+  const logins = await staticLogins();
   return logins.map((login) => ({ params: { login } }));
+}
+
+/** Catalog slugs owned by `login`, capped for display. */
+export async function catalogReposFor(
+  login: string,
+  limit = 24,
+): Promise<string[]> {
+  const repos = await loadBuildCatalog();
+  const prefix = `${login.toLowerCase()}/`;
+  return repos
+    .map(({ slug }) => slug)
+    .filter((slug) => slug.startsWith(prefix))
+    .slice(0, limit);
 }
 
 export function staticCategoryPaths() {

@@ -234,6 +234,7 @@ export function ChartViewer({
         logScale={logScale}
         axis={type}
         priority={priority}
+        seed={liveRepo ?? label ?? path}
       />
     </figure>
   );
@@ -248,6 +249,7 @@ function InteractiveChart({
   logScale,
   axis,
   priority,
+  seed,
 }: {
   src: string;
   alt: string;
@@ -255,6 +257,7 @@ function InteractiveChart({
   logScale: boolean;
   axis: ChartType;
   priority: boolean;
+  seed: string;
 }) {
   const parsed = useMemo(
     () =>
@@ -268,11 +271,15 @@ function InteractiveChart({
   if (parsed.length >= 2) {
     return (
       <DitherAreaChart
-        points={parsed.map((point) => ({ date: point.date, value: point.stars }))}
+        points={parsed.map((point) => ({
+          date: point.date,
+          value: point.stars,
+        }))}
         axis={axis}
         logScale={logScale}
         height={500}
         valueLabel="stars"
+        seed={seed}
         className="rounded-b-[inherit]"
       />
     );

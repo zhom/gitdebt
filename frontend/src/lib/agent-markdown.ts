@@ -25,7 +25,7 @@ export function renderAgentMarkdown(
   }
 
   if (page.kind === "profile") {
-    const canonical = absolute(site, `/u/${page.login}`);
+    const canonical = absolute(site, `/${page.login}`);
     return `${documentHeader(`${page.login} public GitHub profile statistics`, canonical)}> Aggregate statistics for public repositories owned by ${page.login}. Private repositories are ignored.\n\n- [GitHub profile](https://github.com/${page.login})\n- [Live profile analysis](${apiBase}/api/users/${page.login}/analyze)\n- [Aggregate star-history SVG](${apiBase}/api/users/${page.login}/chart.svg)\n- [Maintainer profile card](${apiBase}/api/users/${page.login}/card.svg)\n`;
   }
 

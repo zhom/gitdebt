@@ -1,6 +1,19 @@
 import { useEffect, useMemo, useRef, useState } from "react";
 import { motion, useReducedMotion } from "motion/react";
 
+import {
+  BAYER4,
+  OFF_TIER,
+  RasterBuffer,
+  SWATCH,
+  clamp01,
+  makeSurfaceMotion,
+  makeWaves,
+  waveOffset,
+  type RGB,
+  type SurfaceController,
+  type SurfaceMotion,
+} from "@/lib/dither";
 import { SPRING } from "@/lib/motion";
 
 export type DitherPoint = { date: string; value: number };
@@ -14,19 +27,18 @@ type Props = {
   valueFormatter?: (value: number) => string;
   interactive?: boolean;
   className?: string;
+  fill?: RGB;
+  /** Keys the wave phases so a series ripples identically on every render. */
+  seed?: string;
 };
 
 type Sample = { at: number; value: number; approximate: boolean };
 
-const BAYER = [
-  [0, 8, 2, 10],
-  [12, 4, 14, 6],
-  [3, 11, 1, 9],
-  [15, 7, 13, 5],
-].map((row) => row.map((value) => (value + 0.5) / 16));
-
-const CELL = 3;
+const CELL = 2;
 const PLOT = { left: 54, right: 16, top: 18, bottom: 32 };
+
+/** Density at the value contour; the fill ramps from here to 1 at the floor. */
+const RAMP = 0.66;
 
 function compact(value: number): string {
   return new Intl.NumberFormat("en", {
@@ -91,29 +103,49 @@ export function DitherAreaChart({
   valueFormatter = (value) => Math.round(value).toLocaleString(),
   interactive = true,
   className = "",
+  fill = SWATCH.blue,
+  seed,
 }: Props) {
   const rootRef = useRef<HTMLDivElement>(null);
   const canvasRef = useRef<HTMLCanvasElement>(null);
   const [size, setSize] = useState({ width: 0, height });
-  const [hover, setHover] = useState<(Sample & { fraction: number }) | null>(null);
-  const hoverRef = useRef(false);
+  const [hover, setHover] = useState<(Sample & { fraction: number }) | null>(
+    null,
+  );
+  const surfaceRef = useRef<SurfaceController | null>(null);
+  const pointerRef = useRef({ inside: false, px: 0.5, py: 0.5 });
   const reducedMotion = useReducedMotion();
 
   const parsed = useMemo(
     () =>
       points
         .map((point) => ({ at: Date.parse(point.date), value: point.value }))
-        .filter((point) => Number.isFinite(point.at) && Number.isFinite(point.value))
+        .filter(
+          (point) => Number.isFinite(point.at) && Number.isFinite(point.value),
+        )
         .sort((a, b) => a.at - b.at),
     [points],
   );
   const max = Math.max(1, ...parsed.map((point) => point.value));
 
+  const waveKey =
+    seed ??
+    `${valueLabel}:${parsed.length}:${parsed[0]?.at ?? 0}:${parsed.at(-1)?.at ?? 0}`;
+  const waves = useMemo(() => makeWaves(waveKey), [waveKey]);
+
   useEffect(() => {
     const root = rootRef.current;
     if (!root) return;
-    const resize = () =>
-      setSize({ width: root.getBoundingClientRect().width, height });
+    const resize = () => {
+      const width = root.getBoundingClientRect().width;
+      // A fresh object here would rebuild the paint surface on every observer
+      // callback and drop the hover state mid-gesture.
+      setSize((prev) =>
+        prev.width === width && prev.height === height
+          ? prev
+          : { width, height },
+      );
+    };
     resize();
     const observer = new ResizeObserver(resize);
     observer.observe(root);
@@ -131,97 +163,105 @@ export function DitherAreaChart({
     const rows = Math.max(8, Math.round(size.height / CELL));
     canvas.width = cols;
     canvas.height = rows;
+    const buf = new RasterBuffer(cols, rows);
     const left = Math.round(PLOT.left / CELL);
     const right = cols - Math.round(PLOT.right / CELL);
     const top = Math.round(PLOT.top / CELL);
     const bottom = rows - Math.round(PLOT.bottom / CELL);
     const plotWidth = Math.max(1, right - left);
     const plotHeight = Math.max(1, bottom - top);
-    let intensity = reducedMotion ? (hoverRef.current ? 1 : 0) : 0;
-    let raf = 0;
+    // The ripple is scaled by intensity, so the resting surface stays static
+    // and byte-identical between paints.
+    const gain = reducedMotion ? 0 : 1;
 
-    const draw = () => {
-      const target = hoverRef.current ? 1 : 0;
-      intensity += (target - intensity) * (reducedMotion ? 1 : 0.17);
-      ctx.clearRect(0, 0, cols, rows);
-      const styles = getComputedStyle(root);
-      // One series, one fill. Hover raises intensity; nothing ripples, so the
-      // same inputs always produce the same pixels.
-      const wave =
-        styles.getPropertyValue("--swatch-blue").trim() || styles.color;
+    const paint = (m: SurfaceMotion) => {
+      buf.clear();
+      const swell = m.intensity * gain;
       for (let x = left; x <= right; x += 1) {
-        const fraction = (x - left) / plotWidth;
-        const sample = sampleAt(parsed, fraction, axis);
+        const u = (x - left) / plotWidth;
+        const sample = sampleAt(parsed, u, axis);
         const lineY = Math.max(
           top,
           Math.min(
             bottom,
-            Math.round(bottom - valueFraction(sample.value, max, logScale) * plotHeight),
+            Math.round(
+              bottom - valueFraction(sample.value, max, logScale) * plotHeight,
+            ),
           ),
         );
         const depth = Math.max(1, bottom - lineY);
+        const ripple = swell * waveOffset(waves, u, m.time);
         for (let y = lineY; y <= bottom; y += 1) {
-          const depthFraction = (y - lineY) / depth;
-          const density = Math.min(
-            0.985,
-            0.34 + depthFraction * 0.6 + intensity * 0.14,
-          );
-          const threshold = BAYER[y & 3][x & 3];
-          if (density <= threshold) continue;
-          ctx.globalAlpha = 0.62 + density * 0.34;
-          ctx.fillStyle = wave;
-          ctx.fillRect(x, y, 1, 1);
+          const raw = (y - lineY) / depth;
+          const density = clamp01(1 - RAMP * (1 - raw) + ripple);
+          const lit = density > BAYER4[y & 3][x & 3] - 0.1 * m.intensity;
+          const k = (0.3 + density * 0.7) * (1 + 0.22 * m.intensity);
+          buf.set(x, y, fill, lit ? k : k * OFF_TIER);
         }
-        ctx.globalAlpha = 0.96;
-        ctx.fillStyle = wave;
-        ctx.fillRect(x, lineY, 1, 1);
+        // Crisp value contour, so the ripple never blurs the reading.
+        buf.set(x, lineY, fill, 0.72 + 0.24 * clamp01(m.intensity));
+        if (lineY + 1 <= bottom) buf.set(x, lineY + 1, fill, 0.36);
       }
-      ctx.globalAlpha = 1;
-      if (Math.abs(intensity - target) > 0.002) {
-        raf = requestAnimationFrame(draw);
-      }
+      ctx.putImageData(buf.image, 0, 0);
     };
 
-    draw();
-    const repaint = () => {
-      cancelAnimationFrame(raf);
-      raf = requestAnimationFrame(draw);
-    };
-    root.addEventListener("gitdebt:chart-repaint", repaint);
+    const surface = makeSurfaceMotion(paint, { continuous: true });
+    surfaceRef.current = surface;
+    surface.repaint();
+    // A series or size change rebuilds the surface; if the pointer never left,
+    // the ripple picks up instead of dropping to rest under the cursor.
+    const pointer = pointerRef.current;
+    if (pointer.inside) surface.enter(pointer.px, pointer.py);
+    const io =
+      typeof IntersectionObserver === "function"
+        ? new IntersectionObserver((entries) => {
+            for (const entry of entries)
+              surface.setVisible(entry.isIntersecting);
+          })
+        : null;
+    io?.observe(root);
     return () => {
-      cancelAnimationFrame(raf);
-      root.removeEventListener("gitdebt:chart-repaint", repaint);
+      io?.disconnect();
+      surface.stop();
+      surfaceRef.current = null;
     };
-  }, [axis, logScale, max, parsed, reducedMotion, size]);
+  }, [axis, fill, logScale, max, parsed, reducedMotion, size, waves]);
 
-  function setPointer(clientX: number) {
-    const root = rootRef.current;
-    if (!root || parsed.length < 2) return;
-    const bounds = root.getBoundingClientRect();
+  function localFraction(clientX: number, clientY: number) {
+    const bounds = rootRef.current?.getBoundingClientRect();
+    if (!bounds) return { u: 0, px: 0.5, py: 0.5 };
     const plotWidth = Math.max(1, bounds.width - PLOT.left - PLOT.right);
-    const fraction = Math.max(
-      0,
-      Math.min(1, (clientX - bounds.left - PLOT.left) / plotWidth),
-    );
-    setHover({ ...sampleAt(parsed, fraction, axis), fraction });
+    return {
+      u: clamp01((clientX - bounds.left - PLOT.left) / plotWidth),
+      px:
+        bounds.width > 0 ? clamp01((clientX - bounds.left) / bounds.width) : 0.5,
+      py:
+        bounds.height > 0
+          ? clamp01((clientY - bounds.top) / bounds.height)
+          : 0.5,
+    };
   }
 
-  function setHovered(value: boolean) {
-    hoverRef.current = value;
-    rootRef.current?.dispatchEvent(new Event("gitdebt:chart-repaint"));
-    if (!value) setHover(null);
+  function track(clientX: number, clientY: number) {
+    const { u, px, py } = localFraction(clientX, clientY);
+    pointerRef.current = { inside: true, px, py };
+    surfaceRef.current?.move(px, py);
+    if (!interactive || parsed.length < 2) return;
+    setHover({ ...sampleAt(parsed, u, axis), fraction: u });
   }
 
-  const ticks = parsed.length < 2
-    ? []
-    : [0, 1 / 3, 2 / 3, 1].map((fraction) => sampleAt(parsed, fraction, axis));
+  const ticks =
+    parsed.length < 2
+      ? []
+      : [0, 1 / 3, 2 / 3, 1].map((fraction) => sampleAt(parsed, fraction, axis));
   const hoverY = hover
     ? PLOT.top +
       (1 - valueFraction(hover.value, max, logScale)) *
         Math.max(1, size.height - PLOT.top - PLOT.bottom)
     : 0;
   const hoverX = hover
-    ? PLOT.left + hover.fraction * Math.max(1, size.width - PLOT.left - PLOT.right)
+    ? PLOT.left +
+      hover.fraction * Math.max(1, size.width - PLOT.left - PLOT.right)
     : 0;
 
   return (
@@ -229,14 +269,25 @@ export function DitherAreaChart({
       ref={rootRef}
       className={`relative w-full overflow-hidden bg-transparent text-foreground ${className}`}
       style={{ height }}
-      onPointerEnter={() => setHovered(true)}
-      onPointerMove={interactive ? (event) => setPointer(event.clientX) : undefined}
-      onPointerDown={interactive ? (event) => setPointer(event.clientX) : undefined}
-      onPointerLeave={() => setHovered(false)}
+      onPointerEnter={(event) => {
+        const { px, py } = localFraction(event.clientX, event.clientY);
+        pointerRef.current = { inside: true, px, py };
+        surfaceRef.current?.enter(px, py);
+      }}
+      onPointerMove={(event) => track(event.clientX, event.clientY)}
+      onPointerDown={(event) => track(event.clientX, event.clientY)}
+      onPointerLeave={() => {
+        pointerRef.current.inside = false;
+        surfaceRef.current?.leave();
+        setHover(null);
+      }}
       role="img"
       aria-label={`${valueLabel} over time`}
     >
-      <svg className="pointer-events-none absolute inset-0 size-full" aria-hidden="true">
+      <svg
+        className="pointer-events-none absolute inset-0 size-full"
+        aria-hidden="true"
+      >
         {[0, 0.5, 1].map((fraction) => {
           const y = PLOT.top + fraction * (height - PLOT.top - PLOT.bottom);
           const value = max * (1 - fraction);
@@ -250,7 +301,12 @@ export function DitherAreaChart({
                 className="stroke-border/65"
                 vectorEffect="non-scaling-stroke"
               />
-              <text x={PLOT.left - 9} y={y + 4} textAnchor="end" className="fill-muted-foreground font-mono text-[10px]">
+              <text
+                x={PLOT.left - 9}
+                y={y + 4}
+                textAnchor="end"
+                className="fill-muted-foreground font-mono text-[10px]"
+              >
                 {compact(value)}
               </text>
             </g>
@@ -259,9 +315,19 @@ export function DitherAreaChart({
         {ticks.map((tick, index) => (
           <text
             key={`${tick.at}-${index}`}
-            x={PLOT.left + (index / Math.max(1, ticks.length - 1)) * Math.max(1, size.width - PLOT.left - PLOT.right)}
+            x={
+              PLOT.left +
+              (index / Math.max(1, ticks.length - 1)) *
+                Math.max(1, size.width - PLOT.left - PLOT.right)
+            }
             y={height - 10}
-            textAnchor={index === 0 ? "start" : index === ticks.length - 1 ? "end" : "middle"}
+            textAnchor={
+              index === 0
+                ? "start"
+                : index === ticks.length - 1
+                  ? "end"
+                  : "middle"
+            }
             className="fill-muted-foreground font-mono text-[10px]"
           >
             {new Date(tick.at).toLocaleDateString(undefined, {
@@ -296,7 +362,14 @@ export function DitherAreaChart({
           />
           <motion.output
             initial={{ opacity: 0, y: -4 }}
-            animate={{ opacity: 1, x: Math.min(Math.max(8, hoverX - 72), Math.max(8, size.width - 152)), y: 8 }}
+            animate={{
+              opacity: 1,
+              x: Math.min(
+                Math.max(8, hoverX - 72),
+                Math.max(8, size.width - 152),
+              ),
+              y: 8,
+            }}
             transition={reducedMotion ? { duration: 0 } : SPRING.snappy}
             className="pointer-events-none absolute top-0 left-0 z-20 w-36 border border-border bg-popover/90 px-3 py-2 text-popover-foreground shadow-sm backdrop-blur-xl"
             aria-live="polite"
@@ -310,7 +383,8 @@ export function DitherAreaChart({
               })}
             </span>
             <span className="mt-0.5 block text-sm font-semibold tabular-nums">
-              {hover.approximate ? "≈ " : ""}{valueFormatter(hover.value)} {valueLabel}
+              {hover.approximate ? "≈ " : ""}
+              {valueFormatter(hover.value)} {valueLabel}
             </span>
           </motion.output>
         </>

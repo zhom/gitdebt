@@ -1235,6 +1235,23 @@ const PROFILE_NON_BOT_AUTHOR: &str = "author.author_name NOT LIKE '%[bot]%' \
        AND (author.github_login IS NULL OR author.github_login NOT LIKE '%[bot]%') \
        AND COALESCE(author.github_login, '') <> ALL($2::text[])";
 
+/// How many of a login's owned repositories the Postgres-only code signals
+/// fan out over, most-starred first.
+///
+/// An organization can own thousands of tracked repositories, and every
+/// code signal (commit heatmap, activity ranking, language footprint, bus
+/// factor) is a group-by across all of them. Left unbounded, one profile
+/// view of a large organization reads millions of daily-commit and
+/// per-author rows — work that grows with the account rather than with the
+/// page. Two hundred keeps every one of those queries an index scan over a
+/// bounded slug set while still covering every repository of all but a
+/// handful of accounts; past it, the marginal repository moves a rendered
+/// signal by less than a pixel. The account-wide totals
+/// (`repos_tracked`/`total_stars`/`total_forks`) stay uncapped, and
+/// `repos_scanned` reports the covered slice so a capped profile states its
+/// coverage instead of presenting a slice as the whole account.
+const PROFILE_MAX_REPOS: i64 = 200;
+
 /// Rolling window for the "recent commit volume" ranking, in days.
 const PROFILE_ACTIVE_WINDOW_DAYS: i64 = 90;
 /// Rolling window for the aggregated commit heatmap: 52 weeks back from
@@ -1281,6 +1298,11 @@ struct UserStats {
     /// gate every code-derived number on this.
     ready: bool,
     repos_tracked: i64,
+    /// Owned repositories the code signals below actually cover, capped at
+    /// [`PROFILE_MAX_REPOS`]. Equal to `repos_tracked` for every account
+    /// under the cap; smaller for a large organization, which is what lets
+    /// a reader say "top 200 of 2,913" instead of implying full coverage.
+    repos_scanned: i64,
     repos_analyzed: i64,
     total_stars: i64,
     total_forks: i64,
@@ -1301,12 +1323,44 @@ struct UserStats {
     commit_days: Vec<UserDay>,
 }
 
+/// The bounded owned-repository set every profile code signal reads:
+/// publicly-proven, untombstoned repos owned by `login`, most-starred first
+/// then slug, capped at [`PROFILE_MAX_REPOS`]. The tie-break keeps a
+/// rendered profile byte-identical for a given database state.
+///
+/// Resolved once per profile render — one owner-prefix pass over `repos`,
+/// served by `idx_repos_repo_prefix` — and then bound as a slug array, so
+/// the downstream queries become per-repo index lookups instead of
+/// owner-prefix scans over `repo_commit_days`, `repo_lines` and
+/// `repo_author_stats`, the three tables that grow with commit history
+/// rather than with repository count.
+async fn load_profile_scope(pool: &sqlx::PgPool, login: &str) -> Result<Vec<String>, ApiError> {
+    let rows = sqlx::query(
+        "SELECT repo FROM repos \
+         WHERE repo LIKE $1 || '/%' \
+           AND NOT missing \
+           AND metadata_fetched_at IS NOT NULL \
+         ORDER BY star_count DESC NULLS LAST, repo ASC \
+         LIMIT $2",
+    )
+    .bind(login)
+    .bind(PROFILE_MAX_REPOS)
+    .fetch_all(pool)
+    .await?;
+    let mut repos = Vec::with_capacity(rows.len());
+    for row in &rows {
+        repos.push(row.try_get::<String, _>("repo")?);
+    }
+    Ok(repos)
+}
+
 /// Aggregate the profile report from Postgres. `login` must already be
 /// [`cards::is_valid_login`]-validated: it is interpolated into a `LIKE`
 /// prefix bind, and that validation guarantees no LIKE metacharacter can
 /// widen the owner match.
 async fn load_user_stats(db: &crate::db::Db, login: &str) -> Result<UserStats, ApiError> {
     let pool = &db.pool;
+    let scope = load_profile_scope(pool, login).await?;
 
     let owned = sqlx::query(
         "SELECT COUNT(*) AS repos_tracked, \
@@ -1348,7 +1402,7 @@ async fn load_user_stats(db: &crate::db::Db, login: &str) -> Result<UserStats, A
     let contributed_repos: i64 = authored.try_get("contribs")?;
     let first_at: Option<DateTime<Utc>> = authored.try_get("first_at")?;
 
-    let languages = load_user_language_bars(pool, login).await?;
+    let languages = load_user_language_bars(pool, &scope).await?;
 
     let top_rows = sqlx::query(
         "SELECT repos.repo AS repo, \
@@ -1358,12 +1412,10 @@ async fn load_user_stats(db: &crate::db::Db, login: &str) -> Result<UserStats, A
                 repos.history_complete AS history_complete \
          FROM repos \
          LEFT JOIN repo_history history ON history.repo = repos.repo \
-         WHERE repos.repo LIKE $1 || '/%' \
-           AND NOT repos.missing \
-           AND repos.metadata_fetched_at IS NOT NULL \
+         WHERE repos.repo = ANY($1::text[]) \
          ORDER BY stars DESC, repos.repo ASC LIMIT 8",
     )
-    .bind(login)
+    .bind(&scope)
     .fetch_all(pool)
     .await?;
     let mut top_repos: Vec<UserRepoRow> = Vec::with_capacity(top_rows.len());
@@ -1394,16 +1446,13 @@ async fn load_user_stats(db: &crate::db::Db, login: &str) -> Result<UserStats, A
     let active_rows = sqlx::query(
         "SELECT days.repo AS repo, SUM(days.commits)::BIGINT AS commits_recent \
          FROM repo_commit_days days \
-         JOIN repos public_repo ON public_repo.repo = days.repo \
-         WHERE days.repo LIKE $1 || '/%' \
-           AND public_repo.missing = FALSE \
-           AND public_repo.metadata_fetched_at IS NOT NULL \
+         WHERE days.repo = ANY($1::text[]) \
            AND days.day >= CURRENT_DATE - $2::INT \
          GROUP BY days.repo \
          HAVING SUM(days.commits) > 0 \
          ORDER BY commits_recent DESC, days.repo ASC LIMIT 8",
     )
-    .bind(login)
+    .bind(&scope)
     .bind(PROFILE_ACTIVE_WINDOW_DAYS as i32)
     .fetch_all(pool)
     .await?;
@@ -1422,7 +1471,7 @@ async fn load_user_stats(db: &crate::db::Db, login: &str) -> Result<UserStats, A
         .collect::<Result<_, sqlx::Error>>()?;
 
     let (from, to) = profile_heatmap_window();
-    let commit_days = load_user_commit_days(pool, login, from, to)
+    let commit_days = load_user_commit_days(pool, &scope, from, to)
         .await?
         .into_iter()
         .map(|day| UserDay {
@@ -1437,11 +1486,8 @@ async fn load_user_stats(db: &crate::db::Db, login: &str) -> Result<UserStats, A
     // costs one query instead of one per repo.
     let bus_sql = format!(
         "WITH owned AS ( \
-                 SELECT repos.repo FROM repos \
-                 JOIN repo_history history ON history.repo = repos.repo \
-                 WHERE repos.repo LIKE $1 || '/%' \
-                   AND NOT repos.missing \
-                   AND repos.metadata_fetched_at IS NOT NULL \
+                 SELECT history.repo FROM repo_history history \
+                 WHERE history.repo = ANY($1::text[]) \
                    AND history.last_analyzed_at IS NOT NULL \
              ), ranked AS ( \
                  SELECT author.repo AS repo, \
@@ -1464,7 +1510,7 @@ async fn load_user_stats(db: &crate::db::Db, login: &str) -> Result<UserStats, A
                     COUNT(*) AS scored FROM bus"
     );
     let bus = sqlx::query(sqlx::AssertSqlSafe(bus_sql))
-        .bind(login)
+        .bind(&scope)
         .bind(PROFILE_BOT_LOGINS)
         .fetch_one(pool)
         .await?;
@@ -1475,6 +1521,7 @@ async fn load_user_stats(db: &crate::db::Db, login: &str) -> Result<UserStats, A
         login: login.to_string(),
         ready: repos_analyzed > 0,
         repos_tracked,
+        repos_scanned: scope.len() as i64,
         repos_analyzed,
         total_stars,
         total_forks,
@@ -1543,13 +1590,18 @@ async fn load_repo_sparklines(
     Ok(out)
 }
 
-/// Owner-scoped language totals, ordered by total lines (falling back to
-/// the file census for language sets tokei reported without line counts).
-/// The `language` tie-break keeps rendered bytes deterministic.
+/// Language totals across a [`ProfileScope`], ordered by total lines
+/// (falling back to the file census for language sets tokei reported
+/// without line counts). The `language` tie-break keeps rendered bytes
+/// deterministic. The scope is already tombstone- and visibility-filtered,
+/// so this reads `repo_lines` by slug instead of re-joining `repos`.
 async fn load_user_language_bars(
     pool: &sqlx::PgPool,
-    login: &str,
+    repos: &[String],
 ) -> Result<Vec<UserLanguage>, ApiError> {
+    if repos.is_empty() {
+        return Ok(Vec::new());
+    }
     let rows = sqlx::query(
         "SELECT lines.language AS language, \
                 SUM(lines.files)::BIGINT AS files, \
@@ -1557,10 +1609,7 @@ async fn load_user_language_bars(
                 SUM(lines.lines_blank)::BIGINT AS blank, \
                 SUM(lines.lines_comment)::BIGINT AS comment \
          FROM repo_lines lines \
-         JOIN repos public_repo ON public_repo.repo = lines.repo \
-         WHERE lines.repo LIKE $1 || '/%' \
-           AND public_repo.missing = FALSE \
-           AND public_repo.metadata_fetched_at IS NOT NULL \
+         WHERE lines.repo = ANY($1::text[]) \
          GROUP BY lines.language \
          HAVING SUM(lines.lines_code + lines.lines_blank + lines.lines_comment) > 0 \
              OR SUM(lines.files) > 0 \
@@ -1569,7 +1618,7 @@ async fn load_user_language_bars(
                   ELSE SUM(lines.files) END DESC, lines.language ASC \
          LIMIT 12",
     )
-    .bind(login)
+    .bind(repos)
     .fetch_all(pool)
     .await?;
     let mut out = Vec::with_capacity(rows.len());
@@ -1585,24 +1634,28 @@ async fn load_user_language_bars(
     Ok(out)
 }
 
-/// Commit days summed across the login's owned tracked repos.
+/// Commit days summed across a [`ProfileScope`]. Bound as a slug array so
+/// the read is `(repo, day)` index scans over the bounded set — an
+/// owner-prefix scan here reads every daily row of every repository the
+/// account owns, which for a large organization is millions of rows per
+/// profile view.
 async fn load_user_commit_days(
     pool: &sqlx::PgPool,
-    login: &str,
+    repos: &[String],
     from: chrono::NaiveDate,
     to: chrono::NaiveDate,
 ) -> Result<Vec<crate::repo_charts::DayCount>, ApiError> {
+    if repos.is_empty() {
+        return Ok(Vec::new());
+    }
     let rows = sqlx::query(
         "SELECT days.day AS day, SUM(days.commits)::BIGINT AS commits \
          FROM repo_commit_days days \
-         JOIN repos public_repo ON public_repo.repo = days.repo \
-         WHERE days.repo LIKE $1 || '/%' \
-           AND public_repo.missing = FALSE \
-           AND public_repo.metadata_fetched_at IS NOT NULL \
+         WHERE days.repo = ANY($1::text[]) \
            AND days.day BETWEEN $2 AND $3 \
          GROUP BY days.day ORDER BY days.day ASC",
     )
-    .bind(login)
+    .bind(repos)
     .bind(from)
     .bind(to)
     .fetch_all(pool)
@@ -1737,10 +1790,11 @@ async fn render_user_stat_svg(
 ) -> Result<String, ApiError> {
     let pool = &state.analyzer.cache.db().pool;
     let label = format!("@{login}");
+    let scope = load_profile_scope(pool, login).await?;
     Ok(match kind {
         UserStatKind::CommitActivity => {
             let (from, to) = profile_heatmap_window();
-            let days = load_user_commit_days(pool, login, from, to).await?;
+            let days = load_user_commit_days(pool, &scope, from, to).await?;
             crate::repo_charts::render_heatmap(
                 &label,
                 "Commits across tracked repos · last 52 weeks",
@@ -1753,7 +1807,7 @@ async fn render_user_stat_svg(
         UserStatKind::CommitTrend => {
             let days = load_user_commit_days(
                 pool,
-                login,
+                &scope,
                 chrono::NaiveDate::from_ymd_opt(2005, 1, 1).expect("2005-01-01 is a valid date"),
                 Utc::now().date_naive(),
             )
@@ -1761,7 +1815,7 @@ async fn render_user_stat_svg(
             crate::repo_charts::render_commit_trend(&label, &days, theme)
         }
         UserStatKind::Languages => {
-            let bars: Vec<crate::repo_charts::LanguageBar> = load_user_language_bars(pool, login)
+            let bars: Vec<crate::repo_charts::LanguageBar> = load_user_language_bars(pool, &scope)
                 .await?
                 .into_iter()
                 .map(|row| crate::repo_charts::LanguageBar {
@@ -3387,10 +3441,10 @@ fn needs_downloads(metrics: &[Metric]) -> bool {
 /// Render-revision constant baked into every media cache key (badges,
 /// cards, OG images, GIFs, charts). Bump it whenever renderer output
 /// changes for identical data so stale in-process/CDN entries can never
-/// serve the previous look under the same key. `r15` = the pixel-grid
-/// brand mark on badges, the dithered commit-activity heatmap, and
-/// per-language chart inks.
-pub(crate) const RENDER_REVISION: &str = "r15";
+/// serve the previous look under the same key. `r16` = the canonical robot
+/// artwork on every mark surface (replacing the hand-authored pixel grid)
+/// and the single badge style.
+pub(crate) const RENDER_REVISION: &str = "r16";
 
 struct RepoRenderReadiness {
     stars: bool,
@@ -4500,7 +4554,8 @@ async fn load_user_card_data(
     let contribs: i64 = authored.try_get("contribs")?;
     let first_at: Option<chrono::DateTime<chrono::Utc>> = authored.try_get("first_at")?;
 
-    let langs = load_top_langs(db, LangScope::Owner, login).await?;
+    let scope = load_profile_scope(&db.pool, login).await?;
+    let langs = load_owner_top_langs(db, &scope).await?;
 
     Ok(cards::UserCardData {
         login: login.to_string(),
@@ -4515,48 +4570,48 @@ async fn load_user_card_data(
     })
 }
 
-#[derive(Clone, Copy)]
-enum LangScope {
-    Owner,
-    Repo,
+/// Card languages across a [`ProfileScope`]. Ties are broken by name so
+/// rendered card bytes remain deterministic.
+async fn load_owner_top_langs(
+    db: &crate::db::Db,
+    repos: &[String],
+) -> Result<Vec<(String, i64)>, ApiError> {
+    if repos.is_empty() {
+        return Ok(Vec::new());
+    }
+    let rows = sqlx::query(
+        "SELECT lines.language, SUM(lines.lines_code)::BIGINT AS lines \
+         FROM repo_lines lines \
+         WHERE lines.repo = ANY($1::text[]) \
+         GROUP BY lines.language ORDER BY lines DESC, lines.language LIMIT 5",
+    )
+    .bind(repos)
+    .fetch_all(&db.pool)
+    .await?;
+    collect_top_langs(rows)
 }
 
-/// Ties are broken by name so rendered card bytes remain deterministic.
-async fn load_top_langs(
+/// Card languages for a single repository.
+async fn load_repo_top_langs(
     db: &crate::db::Db,
-    scope: LangScope,
-    bind: &str,
+    repo: &str,
 ) -> Result<Vec<(String, i64)>, ApiError> {
-    let rows = match scope {
-        LangScope::Owner => {
-            sqlx::query(
-                "SELECT lines.language, SUM(lines.lines_code)::BIGINT AS lines \
-                 FROM repo_lines lines \
-                 JOIN repos public_repo ON public_repo.repo = lines.repo \
-                 WHERE lines.repo LIKE $1 || '/%' \
-                   AND public_repo.missing = FALSE \
-                   AND public_repo.metadata_fetched_at IS NOT NULL \
-                 GROUP BY lines.language ORDER BY lines DESC, lines.language LIMIT 5",
-            )
-            .bind(bind)
-            .fetch_all(&db.pool)
-            .await?
-        }
-        LangScope::Repo => {
-            sqlx::query(
-                "SELECT lines.language, SUM(lines.lines_code)::BIGINT AS lines \
-                 FROM repo_lines lines \
-                 JOIN repos public_repo ON public_repo.repo = lines.repo \
-                 WHERE lines.repo = $1 \
-                   AND public_repo.missing = FALSE \
-                   AND public_repo.metadata_fetched_at IS NOT NULL \
-                 GROUP BY lines.language ORDER BY lines DESC, lines.language LIMIT 5",
-            )
-            .bind(bind)
-            .fetch_all(&db.pool)
-            .await?
-        }
-    };
+    let rows = sqlx::query(
+        "SELECT lines.language, SUM(lines.lines_code)::BIGINT AS lines \
+         FROM repo_lines lines \
+         JOIN repos public_repo ON public_repo.repo = lines.repo \
+         WHERE lines.repo = $1 \
+           AND public_repo.missing = FALSE \
+           AND public_repo.metadata_fetched_at IS NOT NULL \
+         GROUP BY lines.language ORDER BY lines DESC, lines.language LIMIT 5",
+    )
+    .bind(repo)
+    .fetch_all(&db.pool)
+    .await?;
+    collect_top_langs(rows)
+}
+
+fn collect_top_langs(rows: Vec<sqlx::postgres::PgRow>) -> Result<Vec<(String, i64)>, ApiError> {
     let mut out = Vec::with_capacity(rows.len());
     for row in rows {
         let language: String = row.try_get("language")?;
@@ -4672,7 +4727,7 @@ async fn load_repo_card_data(
     .fetch_one(&db.pool)
     .await?;
 
-    let langs = load_top_langs(db, LangScope::Repo, repo_full).await?;
+    let langs = load_repo_top_langs(db, repo_full).await?;
 
     Ok(cards::RepoCardData {
         slug: repo_full.to_string(),
@@ -6123,6 +6178,17 @@ mod tests {
         }
     }
 
+    /// `cleanup_card_rows` plus the daily-commit rows the profile report
+    /// reads but the card does not.
+    async fn cleanup_profile_scope_rows(state: &ApiState, prefix: &str) {
+        sqlx::query("DELETE FROM repo_commit_days WHERE repo LIKE $1")
+            .bind(format!("{prefix}%"))
+            .execute(&state.analyzer.cache.db().pool)
+            .await
+            .expect("cleanup");
+        cleanup_card_rows(state, prefix).await;
+    }
+
     /// Seed one owned repository: a publicly-proven `repos` row plus an
     /// optional analysis state.
     async fn seed_card_repo(
@@ -6203,7 +6269,7 @@ mod tests {
     /// every login. A previous fix to this function shipped without a test
     /// that ran the SQL, which is exactly how that reached production. This
     /// test covers the owned-repos query, the authored-commits query and
-    /// both `load_top_langs` scopes.
+    /// both language scopes.
     ///
     /// It also pins the readiness contract: a repository whose analysis is
     /// current still counts as analyzed while its author rows are
@@ -6327,7 +6393,7 @@ mod tests {
             "owner scope sums the prefix and excludes the foreign repo"
         );
 
-        let repo_langs = load_top_langs(&db, LangScope::Repo, &analyzed)
+        let repo_langs = load_repo_top_langs(&db, &analyzed)
             .await
             .expect("repo-scope language SQL must execute");
         assert_eq!(
@@ -6349,6 +6415,146 @@ mod tests {
 
         cleanup_card_rows(&state, &prefix).await;
         cleanup_card_rows(&state, foreign_prefix).await;
+    }
+
+    /// Organizations are first-class profile subjects, and the big ones own
+    /// thousands of repositories. Every code signal must fan out over the
+    /// bounded [`PROFILE_MAX_REPOS`] scope — most-starred first — while the
+    /// account-wide totals stay uncapped, so the report states its coverage
+    /// (`repos_scanned` vs `repos_tracked`) instead of quietly presenting a
+    /// slice of an organization as all of it.
+    #[tokio::test]
+    async fn profile_signals_stay_bounded_for_a_massive_organization() {
+        let Some(state) = test_db_state().await else {
+            eprintln!("skipping: set GITDEBT_TEST_DATABASE_URL to run");
+            return;
+        };
+        let db = state.analyzer.cache.db().clone();
+        let login = "gitdebt-test-bigorg";
+        let prefix = format!("{login}/");
+        cleanup_profile_scope_rows(&state, &prefix).await;
+
+        // 25 repositories past the cap. Star counts descend with `n`, so
+        // the last 25 are exactly the ones the cap must drop, and they
+        // carry marker rows no in-scope repository has.
+        let over_cap = PROFILE_MAX_REPOS + 25;
+        let seeds: [(&str, i64); 4] = [
+            (
+                "INSERT INTO repos (repo, star_count, forks_count, metadata_fetched_at, missing) \
+                 SELECT $1 || n, $2 - n, 1, NOW(), FALSE FROM generate_series(1, $3) n",
+                0,
+            ),
+            (
+                "INSERT INTO repo_history \
+                     (repo, last_analyzed_sha, head_sha, last_analyzed_at, \
+                      total_commits, analysis_revision) \
+                 SELECT $1 || n, 'sha', 'sha', NOW(), 3, $2 FROM generate_series(1, $3) n",
+                crate::repo_analysis::CURRENT_ANALYSIS_REVISION as i64,
+            ),
+            (
+                "INSERT INTO repo_lines (repo, language, files, lines_code) \
+                 SELECT $1 || n, \
+                        CASE WHEN n <= $2 THEN 'ScopeLang' ELSE 'OverCapLang' END, 1, 10 \
+                 FROM generate_series(1, $3) n",
+                PROFILE_MAX_REPOS,
+            ),
+            (
+                "INSERT INTO repo_commit_days (repo, day, commits) \
+                 SELECT $1 || n, \
+                        CURRENT_DATE - CASE WHEN n <= $2 THEN 1 ELSE 2 END, \
+                        CASE WHEN n <= $2 THEN 5 ELSE 7 END \
+                 FROM generate_series(1, $3) n",
+                PROFILE_MAX_REPOS,
+            ),
+        ];
+        for (statement, second) in seeds {
+            sqlx::query(statement)
+                .bind(&prefix)
+                .bind(second)
+                .bind(over_cap)
+                .execute(&db.pool)
+                .await
+                .expect("seed organization rows");
+        }
+        sqlx::query(
+            "INSERT INTO repo_author_stats \
+                 (repo, author_email, author_name, github_login, commits, \
+                  first_commit_at, last_commit_at) \
+             SELECT $1 || n, 'solo@example.com', 'Solo', 'solo', 9, NOW(), NOW() \
+             FROM generate_series(1, $2) n",
+        )
+        .bind(&prefix)
+        .bind(over_cap)
+        .execute(&db.pool)
+        .await
+        .expect("seed authors");
+
+        let scope = load_profile_scope(&db.pool, login)
+            .await
+            .expect("scope resolves");
+        assert_eq!(scope.len() as i64, PROFILE_MAX_REPOS, "the scope is capped");
+        assert!(
+            scope.contains(&format!("{prefix}1")),
+            "the most-starred repository is in scope"
+        );
+        assert!(
+            !scope.contains(&format!("{prefix}{over_cap}")),
+            "the least-starred repository past the cap is dropped"
+        );
+
+        let stats = load_user_stats(&db, login).await.expect("profile SQL runs");
+        assert_eq!(
+            stats.repos_tracked, over_cap,
+            "the account-wide count stays uncapped"
+        );
+        assert_eq!(
+            stats.repos_scanned, PROFILE_MAX_REPOS,
+            "the code signals report the slice they actually cover"
+        );
+        assert!(
+            stats.repos_scanned < stats.repos_tracked,
+            "this fixture must exercise the capped case"
+        );
+
+        // Every fanned-out signal is confined to the scope.
+        let languages: Vec<&str> = stats
+            .languages
+            .iter()
+            .map(|row| row.language.as_str())
+            .collect();
+        assert_eq!(languages, vec!["ScopeLang"]);
+        let heatmap_days: Vec<i64> = stats.commit_days.iter().map(|day| day.value).collect();
+        assert_eq!(
+            heatmap_days,
+            vec![5 * PROFILE_MAX_REPOS],
+            "only in-scope repositories contribute commit days"
+        );
+        assert_eq!(stats.active_repos.len(), 8);
+        assert!(
+            stats
+                .active_repos
+                .iter()
+                .all(|row| scope.contains(&row.repo)),
+            "the activity ranking never reaches past the scope"
+        );
+        assert_eq!(stats.top_repos.len(), 8);
+        assert_eq!(stats.top_repos[0].repo, format!("{prefix}1"));
+        assert_eq!(
+            stats.solo_maintained, PROFILE_MAX_REPOS,
+            "the bus-factor pass scores exactly the scope"
+        );
+
+        // An account under the cap reports full coverage.
+        let small = "gitdebt-test-smallorg";
+        let small_prefix = format!("{small}/");
+        cleanup_profile_scope_rows(&state, &small_prefix).await;
+        seed_card_repo(&state, &format!("{small_prefix}only"), 4, 0, None).await;
+        let small_stats = load_user_stats(&db, small).await.expect("profile SQL runs");
+        assert_eq!(small_stats.repos_tracked, 1);
+        assert_eq!(small_stats.repos_scanned, 1);
+
+        cleanup_profile_scope_rows(&state, &prefix).await;
+        cleanup_profile_scope_rows(&state, &small_prefix).await;
     }
 
     /// Cache policy for the multi-repo overlay: a mixed warm+cold request

@@ -20,8 +20,9 @@
 
 use std::sync::OnceLock;
 
-use gitdebt::cache::Cache;
+use gitdebt::cache::{Cache, LoginListFacts};
 use gitdebt::db::Db;
+use gitdebt::github::AccountKind;
 use sqlx::postgres::PgPoolOptions;
 use tokio::sync::Mutex;
 
@@ -47,6 +48,15 @@ async fn test_db() -> Option<Db> {
         .await
         .expect("connect test pool");
     Some(Db { pool })
+}
+
+/// Account facts for the cases that don't exercise the account kind.
+fn user_facts() -> LoginListFacts {
+    LoginListFacts {
+        kind: AccountKind::User,
+        public_repos: None,
+        truncated: false,
+    }
 }
 
 async fn cleanup(db: &Db, login: &str) {
@@ -90,7 +100,10 @@ async fn put_then_get_roundtrip_in_rank_order() {
         (format!("{login}/mid"), 50i64),
         (format!("{login}/small"), 5i64),
     ];
-    cache.put_login_repos(login, &repos).await.unwrap();
+    cache
+        .put_login_repos(login, &repos, user_facts())
+        .await
+        .unwrap();
 
     let meta = cache.get_login_repos_meta(login).await.unwrap().unwrap();
     assert!(meta.complete, "put marks the list complete");
@@ -121,7 +134,10 @@ async fn put_replaces_wholesale_not_merges() {
         (format!("{login}/gone"), 100i64),
         (format!("{login}/kept"), 10i64),
     ];
-    cache.put_login_repos(login, &first).await.unwrap();
+    cache
+        .put_login_repos(login, &first, user_facts())
+        .await
+        .unwrap();
 
     // Second fetch: `gone` was deleted upstream, `new` appeared, `kept`'s
     // count changed. The visible set must be exactly the new one.
@@ -129,7 +145,10 @@ async fn put_replaces_wholesale_not_merges() {
         (format!("{login}/new"), 900i64),
         (format!("{login}/kept"), 12i64),
     ];
-    cache.put_login_repos(login, &second).await.unwrap();
+    cache
+        .put_login_repos(login, &second, user_facts())
+        .await
+        .unwrap();
 
     let got = cache.get_login_repos(login).await.unwrap().unwrap();
     assert_eq!(
@@ -192,7 +211,10 @@ async fn missing_tombstone_clears_rows_and_put_clears_tombstone() {
 
     // Cached list exists, then GitHub starts 404ing the login.
     let repos = vec![(format!("{login}/r"), 3i64)];
-    cache.put_login_repos(login, &repos).await.unwrap();
+    cache
+        .put_login_repos(login, &repos, user_facts())
+        .await
+        .unwrap();
     cache.mark_login_missing(login).await.unwrap();
 
     let meta = cache.get_login_repos_meta(login).await.unwrap().unwrap();
@@ -212,11 +234,82 @@ async fn missing_tombstone_clears_rows_and_put_clears_tombstone() {
 
     // A later successful fetch (account recreated / renamed back) clears
     // the tombstone atomically.
-    cache.put_login_repos(login, &repos).await.unwrap();
+    cache
+        .put_login_repos(login, &repos, user_facts())
+        .await
+        .unwrap();
     let meta = cache.get_login_repos_meta(login).await.unwrap().unwrap();
     assert!(!meta.missing);
     assert!(meta.complete);
     assert_eq!(cache.get_login_repos(login).await.unwrap().unwrap(), repos);
+
+    cleanup(&db, login).await;
+}
+
+/// A login is a first-class profile subject whether it is a user or an
+/// organization, and the two are listed through different GitHub endpoints.
+/// The resolved kind must survive the cache round trip, together with the
+/// coverage facts that let a capped organization list describe itself.
+#[tokio::test]
+async fn account_kind_and_coverage_survive_the_cache_round_trip() {
+    let Some(db) = test_db().await else {
+        eprintln!("skipping: set GITDEBT_TEST_DATABASE_URL to run");
+        return;
+    };
+    let cache = Cache::new(db.clone());
+    let login = "gitdebt-test-login-org";
+    cleanup(&db, login).await;
+
+    let repos = vec![(format!("{login}/flagship"), 90_000i64)];
+    cache
+        .put_login_repos(
+            login,
+            &repos,
+            LoginListFacts {
+                kind: AccountKind::Organization,
+                public_repos: Some(2_913),
+                truncated: true,
+            },
+        )
+        .await
+        .unwrap();
+
+    let meta = cache.get_login_repos_meta(login).await.unwrap().unwrap();
+    assert_eq!(meta.account_kind, Some(AccountKind::Organization));
+    assert_eq!(meta.public_repos, Some(2_913));
+    assert!(
+        meta.list_truncated,
+        "a page-capped walk must remember that it was capped"
+    );
+    assert!(meta.complete, "the rows themselves are complete and served");
+    assert_eq!(cache.get_login_repos(login).await.unwrap().unwrap(), repos);
+
+    // The account is re-listed after the background walk finishes: the
+    // truncation flag and the counts are replaced, never merged.
+    cache
+        .put_login_repos(
+            login,
+            &repos,
+            LoginListFacts {
+                kind: AccountKind::Organization,
+                public_repos: Some(2_920),
+                truncated: false,
+            },
+        )
+        .await
+        .unwrap();
+    let meta = cache.get_login_repos_meta(login).await.unwrap().unwrap();
+    assert!(!meta.list_truncated);
+    assert_eq!(meta.public_repos, Some(2_920));
+
+    // A later 404 clears the account facts along with the rows, so a
+    // tombstone never carries stale coverage numbers.
+    cache.mark_login_missing(login).await.unwrap();
+    let meta = cache.get_login_repos_meta(login).await.unwrap().unwrap();
+    assert!(meta.missing);
+    assert_eq!(meta.account_kind, None);
+    assert_eq!(meta.public_repos, None);
+    assert!(!meta.list_truncated);
 
     cleanup(&db, login).await;
 }
@@ -233,7 +326,10 @@ async fn empty_repo_list_is_a_valid_complete_list() {
 
     // A login with zero public repos caches an empty-but-complete list, so
     // the aggregate doesn't re-hit GitHub on every request.
-    cache.put_login_repos(login, &[]).await.unwrap();
+    cache
+        .put_login_repos(login, &[], user_facts())
+        .await
+        .unwrap();
     let meta = cache.get_login_repos_meta(login).await.unwrap().unwrap();
     assert!(meta.complete);
     let got = cache.get_login_repos(login).await.unwrap().unwrap();

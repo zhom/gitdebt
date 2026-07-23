@@ -258,6 +258,11 @@ impl GithubClient {
         Ok(StargazerPage { items, last_page })
     }
 
+    /// Resolve `/users/{login}`. GitHub serves user accounts AND
+    /// organizations from this path, so the response's `type` is the only
+    /// authoritative way to tell them apart — callers must branch on it
+    /// rather than assume an account kind from the URL they intend to use
+    /// next. `Ok(None)` is a definitive 404.
     pub async fn user(&self, login: &str) -> Result<Option<User>, GithubError> {
         let url = format!("{API_BASE}/users/{login}");
         let resp = self.send(&url, None).await?;
@@ -328,22 +333,38 @@ impl GithubClient {
         }
     }
 
-    /// List a login's public repos via `/users/{login}/repos` (works for
-    /// both user accounts and organizations). Returns `Ok(None)` on a 404
-    /// login so the caller can tombstone it.
+    /// List the repositories a login owns, through the endpoint that
+    /// matches the account kind.
+    ///
+    /// The two endpoints are not interchangeable. `/users/{login}/repos`
+    /// takes `type=owner|member|all`, and an authenticated call to it can
+    /// include repositories the caller can see but the public cannot.
+    /// `/orgs/{org}/repos` takes `type=public|private|forks|sources|member`
+    /// and is the only one that can be pinned to `public`. So an
+    /// organization is listed through the org path with an explicit public
+    /// filter — a private repository must never enter a public analytics
+    /// pipeline, not even transiently through a signed-in visitor's token.
     ///
     /// Pagination follows the Link header (`next_link`) per the repo-wide
-    /// discipline — never a page-counter loop — but is bounded by
-    /// [`REPO_LIST_MAX_PAGES`] as a cost cap: the aggregate feature only
-    /// needs the top ~50 repos by stars, and the API can't sort by stars,
-    /// so beyond ~1000 repos we accept an approximate candidate set
-    /// (`sort=pushed` biases it toward active repos) rather than paying
-    /// dozens of calls per giant org.
-    pub async fn user_repos(&self, login: &str) -> Result<Option<Vec<RepoListItem>>, GithubError> {
-        let mut url = format!("{API_BASE}/users/{login}/repos?per_page=100&type=owner&sort=pushed");
-        let mut out: Vec<RepoListItem> = Vec::new();
+    /// discipline — never a page-counter loop — and stops at
+    /// `min(max_pages, REPO_LIST_MAX_PAGES)`. [`RepoList::truncated`]
+    /// reports whether GitHub still had pages left, because the caller's
+    /// "top N by stars" pick is only exact over a complete list (neither
+    /// endpoint can sort by stars; `sort=pushed` biases a truncated walk
+    /// toward active repositories).
+    ///
+    /// `Ok(None)` is a 404 login, so the caller can tombstone it.
+    pub async fn login_repos(
+        &self,
+        login: &str,
+        kind: AccountKind,
+        max_pages: usize,
+    ) -> Result<Option<RepoList>, GithubError> {
+        let page_cap = max_pages.clamp(1, REPO_LIST_MAX_PAGES);
+        let mut url = repo_list_url(login, kind);
+        let mut items: Vec<RepoListItem> = Vec::new();
         let mut pages = 0usize;
-        loop {
+        let truncated = loop {
             let resp = self.send(&url, None).await?;
             match resp.status().as_u16() {
                 200 => {}
@@ -358,14 +379,15 @@ impl GithubClient {
             }
             let next = next_link(&resp);
             let page: Vec<RepoListItem> = resp.json().await?;
-            out.extend(page);
+            items.extend(page);
             pages += 1;
             match next {
-                Some(n) if pages < REPO_LIST_MAX_PAGES => url = n,
-                _ => break,
+                Some(_) if pages >= page_cap => break true,
+                Some(n) => url = n,
+                None => break false,
             }
-        }
-        Ok(Some(out))
+        };
+        Ok(Some(RepoList { items, truncated }))
     }
 
     /// Public repositories owned by the authenticated user. The explicit
@@ -417,9 +439,23 @@ impl GithubClient {
     }
 }
 
-/// Page cap for [`GithubClient::user_repos`] — see its docs. 10 pages ×
-/// 100 repos bounds a single cold login at ≤10 API calls.
-const REPO_LIST_MAX_PAGES: usize = 10;
+/// Page cap for [`GithubClient::login_repos`] — see its docs. 10 pages ×
+/// 100 repos bounds one full list walk at ≤10 API calls.
+pub const REPO_LIST_MAX_PAGES: usize = 10;
+
+/// First-page URL for a login's owned repositories. Split out from the
+/// paginating walk so the endpoint/visibility choice per account kind is
+/// testable without a live GitHub.
+fn repo_list_url(login: &str, kind: AccountKind) -> String {
+    match kind {
+        AccountKind::Organization => {
+            format!("{API_BASE}/orgs/{login}/repos?per_page=100&type=public&sort=pushed")
+        }
+        AccountKind::User => {
+            format!("{API_BASE}/users/{login}/repos?per_page=100&type=owner&sort=pushed")
+        }
+    }
+}
 
 async fn check_status(resp: Response, ctx: &str) -> Result<Response, GithubError> {
     let status = resp.status();
@@ -516,13 +552,64 @@ pub struct Stargazer {
     pub starred_at: DateTime<Utc>,
 }
 
+/// Which GitHub account kind a login resolves to. Only `Organization` gets
+/// the org repos endpoint; every other kind GitHub can report (`User`,
+/// `Bot`, `Mannequin`, or something added later) is listed through the
+/// user path, which is what those accounts actually serve.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+pub enum AccountKind {
+    User,
+    Organization,
+}
+
+impl AccountKind {
+    /// GitHub's `type` discriminator, as stored and re-parsed from cache.
+    pub fn as_str(self) -> &'static str {
+        match self {
+            Self::User => "User",
+            Self::Organization => "Organization",
+        }
+    }
+
+    /// Case-insensitive so a cached value and a live payload agree.
+    pub fn parse(value: &str) -> Self {
+        if value.eq_ignore_ascii_case("Organization") {
+            Self::Organization
+        } else {
+            Self::User
+        }
+    }
+}
+
 /// Subset of the `/users/{login}` payload. The star-history pipeline no
-/// longer scores accounts; the only consumer left is repo-author
-/// enrichment (`repo_analysis`), which reads the display `login`.
+/// longer scores accounts; the remaining consumers are repo-author
+/// enrichment (`repo_analysis`), which reads the display `login`, and the
+/// profile aggregate, which needs the account kind to pick a repos
+/// endpoint and the public-repo count to report list coverage honestly.
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct User {
     pub login: String,
     pub id: u64,
+    #[serde(rename = "type", default)]
+    pub account_type: Option<String>,
+    #[serde(default)]
+    pub public_repos: Option<i64>,
+}
+
+impl User {
+    pub fn kind(&self) -> AccountKind {
+        self.account_type
+            .as_deref()
+            .map_or(AccountKind::User, AccountKind::parse)
+    }
+}
+
+/// One `login_repos` walk: the repositories collected plus whether the page
+/// cap cut the walk short of GitHub's last page.
+#[derive(Debug, Clone)]
+pub struct RepoList {
+    pub items: Vec<RepoListItem>,
+    pub truncated: bool,
 }
 
 /// Slimmed repo-metadata response. GitHub returns ~100 fields on this
@@ -572,6 +659,74 @@ struct CommitResponse {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    /// A login is a user OR an organization, and only the response's
+    /// `type` says which. Deserializing it wrong sends an organization to
+    /// the user repos endpoint, where the org's repositories are not what
+    /// `type=owner` means.
+    #[test]
+    fn account_kind_comes_from_the_payload_not_the_url() {
+        let org: User = serde_json::from_str(
+            r#"{"login":"google","id":1342004,"type":"Organization","public_repos":2913}"#,
+        )
+        .unwrap();
+        assert_eq!(org.kind(), AccountKind::Organization);
+        assert_eq!(org.public_repos, Some(2913));
+
+        let user: User =
+            serde_json::from_str(r#"{"login":"torvalds","id":1024025,"type":"User"}"#).unwrap();
+        assert_eq!(user.kind(), AccountKind::User);
+        assert_eq!(user.public_repos, None);
+
+        // An account kind GitHub adds later (or omits) must not be guessed
+        // into the org endpoint, which would 404 the whole profile.
+        let bot: User =
+            serde_json::from_str(r#"{"login":"dependabot","id":1,"type":"Bot"}"#).unwrap();
+        assert_eq!(bot.kind(), AccountKind::User);
+        let bare: User = serde_json::from_str(r#"{"login":"x","id":2}"#).unwrap();
+        assert_eq!(bare.kind(), AccountKind::User);
+    }
+
+    /// The two repos endpoints take different, non-overlapping `type`
+    /// filters. `public` exists only on the org endpoint, and it is the
+    /// reason an organization is listed there: a private repository must
+    /// never enter a public analytics pipeline.
+    #[test]
+    fn repo_list_endpoint_matches_the_account_kind() {
+        let org = repo_list_url("google", AccountKind::Organization);
+        assert!(
+            org.starts_with("https://api.github.com/orgs/google/repos?"),
+            "{org}"
+        );
+        assert!(org.contains("type=public"), "{org}");
+
+        let user = repo_list_url("torvalds", AccountKind::User);
+        assert!(
+            user.starts_with("https://api.github.com/users/torvalds/repos?"),
+            "{user}"
+        );
+        assert!(user.contains("type=owner"), "{user}");
+
+        // Both pull full pages and bias a capped walk toward active repos,
+        // since neither endpoint can sort by stars.
+        for url in [org, user] {
+            assert!(url.contains("per_page=100"), "{url}");
+            assert!(url.contains("sort=pushed"), "{url}");
+        }
+    }
+
+    #[test]
+    fn account_kind_round_trips_through_its_cached_string() {
+        for kind in [AccountKind::User, AccountKind::Organization] {
+            assert_eq!(AccountKind::parse(kind.as_str()), kind);
+        }
+        assert_eq!(
+            AccountKind::parse("organization"),
+            AccountKind::Organization,
+            "a case-folded cached value must not silently become a user"
+        );
+        assert_eq!(AccountKind::parse(""), AccountKind::User);
+    }
 
     #[test]
     fn parses_next_link_among_multiple() {

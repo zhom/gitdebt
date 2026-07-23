@@ -3,6 +3,7 @@ import { CATEGORIES } from "@/data/categories";
 import {
   loadBuildCatalog,
   staticComparisonPaths,
+  staticLogins,
 } from "@/lib/build-catalog";
 import {
   markdownResponse,
@@ -43,8 +44,10 @@ export async function getStaticPaths() {
     }
   }
 
-  for (const login of new Set(catalog.map(({ slug }) => slug.split("/")[0]))) {
-    pages.set(`u/${login}`, { kind: "profile", login });
+  // Profiles occupy the root path, so a login can never shadow a static page:
+  // `staticLogins` has already dropped every reserved first segment.
+  for (const login of await staticLogins()) {
+    pages.set(login, { kind: "profile", login });
   }
 
   for (const category of CATEGORIES) {
@@ -71,7 +74,7 @@ export const GET: APIRoute = ({ props, site }) => {
   const path = page.kind === "repo"
     ? `/${page.slug}`
     : page.kind === "profile"
-      ? `/u/${page.login}`
+      ? `/${page.login}`
       : page.kind === "category"
         ? `/compare/${page.slug}`
         : page.kind === "comparison"

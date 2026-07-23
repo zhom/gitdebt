@@ -7,17 +7,21 @@ import Seo from "@/components/Seo.astro";
 import SiteHeader from "@/components/SiteHeader.astro";
 import SiteFooter from "@/components/SiteFooter.astro";
 import { BadgeStudio } from "@/components/BadgeStudio";
+import { CopyButton } from "@/components/CopyButton";
+import { TOKEN_CLASS, tokenize } from "@/components/CodeBlock";
 import {
   BODY,
   CAPTION,
   EYEBROW,
   HEADING,
+  PANEL,
   TILE_DESC,
   TILE_TITLE,
   SECTION_HEADER,
   TITLE,
 } from "@/components/style-tokens";
 import { buttonVariants } from "@/components/ui/button";
+import { MEDIA_RENDER_REVISION } from "@/lib/media";
 import { staticApiBase } from "@/lib/static-api-base";
 
 const apiBase = staticApiBase();
@@ -26,10 +30,171 @@ const site = (Astro.site ?? new URL("https://gitdebt.com")).href.replace(/\/$/, 
 
 const exampleOwner = "facebook";
 const exampleRepo = "react";
+const exampleSlug = `${exampleOwner}/${exampleRepo}`;
+const exampleLogin = "facebook";
 
-const title = "GitHub README badges · gitdebt";
+const repoLink = `https://gitdebt.com/${exampleSlug}?ref=readme`;
+const profileLink = `https://gitdebt.com/${exampleLogin}?ref=readme`;
+
+type Embed = {
+  id: string;
+  name: string;
+  desc: string;
+  /** Asset path under the API origin, without a query string. */
+  path: string;
+  link: string;
+  alt: string;
+  /** Only SVG assets have a light/dark pair worth previewing. */
+  themed?: boolean;
+  wide?: boolean;
+};
+
+/** URL a README would carry: no cache-busting, no attribution parameters. */
+function embedUrl(path: string, theme?: "light" | "dark"): string {
+  return theme ? `${apiBase}${path}?theme=${theme}` : `${apiBase}${path}`;
+}
+
+/** Same asset, plus the revision the site uses to stay off stale edge objects. */
+function previewUrl(path: string, theme?: "light" | "dark"): string {
+  const params = new URLSearchParams();
+  if (theme) params.set("theme", theme);
+  params.set("render", MEDIA_RENDER_REVISION);
+  return `${apiBase}${path}?${params.toString()}`;
+}
+
+function markdown(embed: Embed): string {
+  const url = embedUrl(embed.path, embed.themed ? "dark" : undefined);
+  return `[![${embed.alt}](${url})](${embed.link})`;
+}
+
+const media: Embed[] = [
+  {
+    id: "chart",
+    name: "Star history",
+    desc: "The full star curve, served from Postgres. Add from/to for a window or rebase=1 to start every series at zero.",
+    path: `/api/repos/${exampleSlug}/chart.svg`,
+    link: repoLink,
+    alt: `${exampleSlug} star history`,
+    themed: true,
+    wide: true,
+  },
+  {
+    id: "gif",
+    name: "Looping GIF",
+    desc: "The same curve as an animated GIF, for READMEs and sites that strip SVG motion.",
+    path: `/api/repos/${exampleSlug}/chart.gif`,
+    link: repoLink,
+    alt: `${exampleSlug} star history animation`,
+    wide: true,
+  },
+  {
+    id: "repo-card",
+    name: "Repository card",
+    desc: "Stars, forks, contributors, languages, and a 90-day sparkline in one compact panel.",
+    path: `/api/repos/${exampleSlug}/card.svg`,
+    link: repoLink,
+    alt: `${exampleSlug} repository statistics`,
+    themed: true,
+  },
+  {
+    id: "profile-card",
+    name: "Maintainer profile card",
+    desc: "Aggregate public-repository totals for an account, for a profile README.",
+    path: `/api/users/${exampleLogin}/card.svg`,
+    link: profileLink,
+    alt: `${exampleLogin} maintainer statistics`,
+    themed: true,
+  },
+  {
+    id: "og",
+    name: "Social preview",
+    desc: "A 1200x630 PNG for link unfurls on social platforms and chat apps.",
+    path: `/api/repos/${exampleSlug}/og.png`,
+    link: repoLink,
+    alt: `${exampleSlug} on gitdebt`,
+    wide: true,
+  },
+];
+
+const health: Embed[] = [
+  {
+    id: "heatmap",
+    name: "Commit calendar",
+    desc: "Daily commit density across the last year.",
+    path: `/api/repos/${exampleSlug}/stats/heatmap.svg`,
+    link: repoLink,
+    alt: `${exampleSlug} commit calendar`,
+    themed: true,
+    wide: true,
+  },
+  {
+    id: "contributors",
+    name: "Contributors",
+    desc: "Who is actually landing commits, ranked.",
+    path: `/api/repos/${exampleSlug}/stats/contributors.svg`,
+    link: repoLink,
+    alt: `${exampleSlug} contributors`,
+    themed: true,
+  },
+  {
+    id: "bus-factor",
+    name: "Bus factor",
+    desc: "How concentrated the commit history is in a few hands.",
+    path: `/api/repos/${exampleSlug}/stats/bus-factor.svg`,
+    link: repoLink,
+    alt: `${exampleSlug} bus factor`,
+    themed: true,
+  },
+  {
+    id: "commit-trend",
+    name: "Commit trend",
+    desc: "Commit volume over time, so a slowdown is visible.",
+    path: `/api/repos/${exampleSlug}/stats/commit-trend.svg`,
+    link: repoLink,
+    alt: `${exampleSlug} commit trend`,
+    themed: true,
+  },
+  {
+    id: "lines",
+    name: "Language activity",
+    desc: "Lines added and removed per language.",
+    path: `/api/repos/${exampleSlug}/stats/lines.svg`,
+    link: repoLink,
+    alt: `${exampleSlug} language activity`,
+    themed: true,
+  },
+  {
+    id: "top-files",
+    name: "Hottest files",
+    desc: "The files the project keeps returning to.",
+    path: `/api/repos/${exampleSlug}/stats/top-files.svg`,
+    link: repoLink,
+    alt: `${exampleSlug} most-changed files`,
+    themed: true,
+  },
+  {
+    id: "bug-magnets",
+    name: "Bug magnets",
+    desc: "Files whose history is dominated by fix commits.",
+    path: `/api/repos/${exampleSlug}/stats/bug-magnets.svg`,
+    link: repoLink,
+    alt: `${exampleSlug} bug magnets`,
+    themed: true,
+  },
+  {
+    id: "todo-trend",
+    name: "TODO trend",
+    desc: "Whether the in-code backlog is growing or shrinking.",
+    path: `/api/repos/${exampleSlug}/stats/todo-trend.svg`,
+    link: repoLink,
+    alt: `${exampleSlug} TODO trend`,
+    themed: true,
+  },
+];
+
+const title = "GitHub README badges and embeds · gitdebt";
 const description =
-  "Build a theme-aware GitHub README badge for repository stars, forks, and package downloads, then copy accessible Markdown or HTML.";
+  "Embed live GitHub data in a README: a stars, forks, and downloads badge, the star-history chart and GIF, repository and profile cards, a social preview, and eight repository-health charts.";
 const ogImage = `${apiBase}/api/og.png`;
 
 const jsonLd = [
@@ -37,7 +202,7 @@ const jsonLd = [
     "@context": "https://schema.org",
     "@type": "CollectionPage",
     "@id": `${site}/badges#page`,
-    name: "GitHub README badge builder",
+    name: "GitHub README badges and embeds",
     url: `${site}/badges`,
     description,
     isPartOf: {
@@ -113,11 +278,12 @@ const jsonLd = [
         </nav>
 
         <header class="mt-8 max-w-3xl">
-          <h1 class={TITLE}>Build a README badge from live repository data</h1>
+          <h1 class={TITLE}>Everything you can embed in a README</h1>
           <p class:list={["mt-3 max-w-[62ch] text-[15px]", BODY]}>
-            Put stars, forks, and package downloads in one compact,
-            accessible badge. Preview every style, choose a light or dark
-            treatment, and copy production-ready Markdown or HTML.
+            One metrics badge, the star-history chart as SVG or GIF, repository
+            and maintainer cards, a social preview, and eight
+            repository-health charts. Every asset is a plain image URL served
+            from gitdebt's own database.
           </p>
           <p class:list={["mt-3 font-mono", CAPTION]}>
             Free · open source · no account required · static README output
@@ -126,13 +292,13 @@ const jsonLd = [
 
         <section aria-labelledby="studio-title" class="mt-12">
           <div class={SECTION_HEADER}>
-            <h2 id="studio-title" class={HEADING}>
-              Preview {exampleOwner}/{exampleRepo}
-            </h2>
-            <p class={CAPTION}>interactive studio</p>
+            <h2 id="studio-title" class={HEADING}>Metrics badge</h2>
+            <p class={CAPTION}>interactive</p>
           </div>
           <p class:list={["mt-2 max-w-[68ch]", BODY]}>
-            The public example is ready immediately. A repository report opens
+            Stars, forks, and package downloads in one compact chip. Pick the
+            metrics and the theme, then copy Markdown or theme-aware HTML.
+            The example below is ready immediately; a repository report opens
             the same controls with its own owner and name.
           </p>
 
@@ -153,12 +319,149 @@ const jsonLd = [
         </section>
 
         <section
+          aria-labelledby="media-title"
+          class="mt-16 scroll-mt-24 border-t border-border/60 pt-12"
+        >
+          <div class={SECTION_HEADER}>
+            <h2 id="media-title" class={HEADING}>Charts, cards, and previews</h2>
+            <p class={CAPTION}>{exampleSlug}</p>
+          </div>
+          <p class:list={["mt-2 max-w-[68ch]", BODY]}>
+            Live assets for {exampleSlug}. Each snippet is Markdown for the
+            dark asset; swap <code class="font-mono text-foreground"
+              >theme=light</code
+            > for the light one, or use the HTML <code
+              class="font-mono text-foreground">&lt;picture&gt;</code
+            > form to publish both.
+          </p>
+
+          <div class="mt-8 grid gap-6 sm:grid-cols-2">
+            {
+              media.map((embed) => (
+                <figure
+                  class:list={[
+                    PANEL,
+                    "flex flex-col overflow-hidden",
+                    embed.wide && "sm:col-span-2",
+                  ]}
+                >
+                  <figcaption class="border-b border-border/40 px-4 py-3">
+                    <p class="text-[13px] text-foreground">{embed.name}</p>
+                    <p class:list={[CAPTION, "mt-1 max-w-[62ch]"]}>
+                      {embed.desc}
+                    </p>
+                  </figcaption>
+
+                  <div class="flex flex-1 items-center justify-center bg-card/40 px-4 py-6">
+                    {embed.themed ? (
+                      <picture>
+                        <source
+                          media="(prefers-color-scheme: dark)"
+                          srcset={previewUrl(embed.path, "dark")}
+                        />
+                        <img
+                          src={previewUrl(embed.path, "light")}
+                          alt={embed.alt}
+                          loading="lazy"
+                          decoding="async"
+                          class="block h-auto max-w-full"
+                        />
+                      </picture>
+                    ) : (
+                      <img
+                        src={previewUrl(embed.path)}
+                        alt={embed.alt}
+                        loading="lazy"
+                        decoding="async"
+                        class="block h-auto max-w-full"
+                      />
+                    )}
+                  </div>
+
+                  <div class="relative border-t border-border/40">
+                    <pre class="overflow-x-auto px-4 py-4 pr-24 font-mono text-[12px] leading-relaxed"><code>{tokenize(markdown(embed), "markdown").map((token) => (<span class={TOKEN_CLASS[token.kind]}>{token.text}</span>))}</code></pre>
+                    <CopyButton
+                      client:visible
+                      value={markdown(embed)}
+                      ariaLabel={`Copy the ${embed.name} embed snippet`}
+                      className="absolute top-3 right-3 backdrop-blur"
+                    />
+                  </div>
+                </figure>
+              ))
+            }
+          </div>
+        </section>
+
+        <section
+          aria-labelledby="health-title"
+          class="mt-16 scroll-mt-24 border-t border-border/60 pt-12"
+        >
+          <div class={SECTION_HEADER}>
+            <h2 id="health-title" class={HEADING}>Repository-health charts</h2>
+            <p class={CAPTION}>eight assets</p>
+          </div>
+          <p class:list={["mt-2 max-w-[68ch]", BODY]}>
+            Calculated from the public Git history, cached, and served as
+            images. A repository that has never been analyzed renders a
+            placeholder and queues the work instead of blocking the request.
+          </p>
+
+          <div class="mt-8 grid gap-6 sm:grid-cols-2">
+            {
+              health.map((embed) => (
+                <figure
+                  class:list={[
+                    PANEL,
+                    "flex flex-col overflow-hidden",
+                    embed.wide && "sm:col-span-2",
+                  ]}
+                >
+                  <figcaption class="border-b border-border/40 px-4 py-3">
+                    <p class="text-[13px] text-foreground">{embed.name}</p>
+                    <p class:list={[CAPTION, "mt-1 max-w-[62ch]"]}>
+                      {embed.desc}
+                    </p>
+                  </figcaption>
+
+                  <div class="flex flex-1 items-center justify-center bg-card/40 px-4 py-6">
+                    <picture>
+                      <source
+                        media="(prefers-color-scheme: dark)"
+                        srcset={previewUrl(embed.path, "dark")}
+                      />
+                      <img
+                        src={previewUrl(embed.path, "light")}
+                        alt={embed.alt}
+                        loading="lazy"
+                        decoding="async"
+                        class="block h-auto max-w-full"
+                      />
+                    </picture>
+                  </div>
+
+                  <div class="relative border-t border-border/40">
+                    <pre class="overflow-x-auto px-4 py-4 pr-24 font-mono text-[12px] leading-relaxed"><code>{tokenize(markdown(embed), "markdown").map((token) => (<span class={TOKEN_CLASS[token.kind]}>{token.text}</span>))}</code></pre>
+                    <CopyButton
+                      client:visible
+                      value={markdown(embed)}
+                      ariaLabel={`Copy the ${embed.name} embed snippet`}
+                      className="absolute top-3 right-3 backdrop-blur"
+                    />
+                  </div>
+                </figure>
+              ))
+            }
+          </div>
+        </section>
+
+        <section
           aria-labelledby="badge-workflow-title"
           class="mt-16 scroll-mt-24 border-t border-border/60 pt-12"
         >
           <div class={SECTION_HEADER}>
             <h2 id="badge-workflow-title" class={HEADING}>
-              How README badges work
+              How the embeds work
             </h2>
           </div>
           <div class="mt-8 grid gap-x-12 gap-y-10 sm:grid-cols-3">
@@ -166,18 +469,18 @@ const jsonLd = [
               [
                 {
                   step: "01",
-                  title: "Choose metrics",
-                  body: "Show stars, forks, downloads, or a focused subset. Missing package data is omitted instead of reported as zero.",
+                  title: "Point at a repository",
+                  body: "Swap the owner and name in any URL above. Nothing else needs to change, and no account or token is involved.",
                 },
                 {
                   step: "02",
-                  title: "Choose presentation",
-                  body: "Compare four restrained styles and preview explicit light and dark assets before publishing.",
+                  title: "Pick a theme",
+                  body: "Colors are baked per asset because GitHub renders README images against your OS preference, not the page. Publish both with a picture element.",
                 },
                 {
                   step: "03",
-                  title: "Copy the embed",
-                  body: "Use Markdown for one theme or HTML picture sources for automatic GitHub light and dark mode.",
+                  title: "Paste the snippet",
+                  body: "The image URL stays plain and cacheable; only the surrounding link carries README attribution.",
                 },
               ].map(({ step, title, body }) => (
                 <article>
@@ -192,19 +495,19 @@ const jsonLd = [
 
         <section class="mt-16 scroll-mt-24 border-t border-border/60 pt-12">
           <div class={SECTION_HEADER}>
-            <h2 class={HEADING}>Build one for your repository</h2>
+            <h2 class={HEADING}>Build these for your repository</h2>
           </div>
           <p class:list={["mt-2 max-w-[64ch]", BODY]}>
-            Open a repository report and use the badge studio already wired to
-            that project. The copied image URL stays cacheable; only its
-            surrounding link carries README attribution.
+            Open a repository report to get every asset above wired to that
+            project, with the badge studio and embed menus already pointed at
+            it.
           </p>
           <div class="mt-6">
             <a
-              href={`/${exampleOwner}/${exampleRepo}`}
+              href={`/${exampleSlug}`}
               class={buttonVariants({ variant: "outline", size: "lg" })}
             >
-              View {exampleOwner}/{exampleRepo}
+              View {exampleSlug}
             </a>
           </div>
         </section>

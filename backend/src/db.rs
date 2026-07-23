@@ -407,10 +407,11 @@ CREATE TABLE IF NOT EXISTS repo_lines (
     PRIMARY KEY (repo, language)
 );
 CREATE INDEX IF NOT EXISTS idx_repo_lines_code ON repo_lines(repo, lines_code DESC);
--- Owner-prefix language totals for the user profile card (`WHERE repo
--- LIKE $1 || '/%'` in api.rs::load_top_langs) — same non-C-collation LIKE
--- rationale as idx_repos_repo_prefix above.
-CREATE INDEX IF NOT EXISTS idx_repo_lines_repo_prefix ON repo_lines (repo text_pattern_ops);
+-- Profile language totals stopped scanning this table by owner prefix: the
+-- profile resolves a bounded owned-repo set from `repos` first and reads
+-- `repo_lines` by slug, which the primary key already serves. The old
+-- text_pattern_ops index is now write cost with no reader.
+DROP INDEX IF EXISTS idx_repo_lines_repo_prefix;
 
 -- ===========================================================================
 -- External package-download usage cache (npm / crates.io / PyPI / Docker Hub).
@@ -443,12 +444,28 @@ CREATE TABLE IF NOT EXISTS usage_cache (
 -- `complete` is TRUE — the same invariant the stargazer cache honors.
 -- Unlike the forever-tombstone on `repos.missing`, a missing login is
 -- re-checked once the TTL lapses (accounts get renamed/recreated).
+--
+-- `account_type` is GitHub's own `User`/`Organization` discriminator for the
+-- login, captured at fetch time. A login can be either, the two kinds are
+-- listed through different endpoints with different visibility filters, and
+-- guessing produces silently wrong or empty organization profiles — so the
+-- kind is resolved and stored, never inferred. `public_repos` is the
+-- account's authoritative public-repository count, which lets a capped list
+-- state its coverage instead of presenting a truncated set as the whole
+-- account. `list_truncated` records that a deeper walk could still improve
+-- the list, so the background completion knows when to stop retrying.
 CREATE TABLE IF NOT EXISTS login_repo_lists (
-    login        TEXT PRIMARY KEY NOT NULL,
-    fetched_at   TIMESTAMPTZ,
-    complete     BOOLEAN NOT NULL DEFAULT FALSE,
-    missing      BOOLEAN NOT NULL DEFAULT FALSE
+    login          TEXT PRIMARY KEY NOT NULL,
+    fetched_at     TIMESTAMPTZ,
+    complete       BOOLEAN NOT NULL DEFAULT FALSE,
+    missing        BOOLEAN NOT NULL DEFAULT FALSE,
+    account_type   TEXT,
+    public_repos   BIGINT,
+    list_truncated BOOLEAN NOT NULL DEFAULT FALSE
 );
+ALTER TABLE login_repo_lists ADD COLUMN IF NOT EXISTS account_type   TEXT;
+ALTER TABLE login_repo_lists ADD COLUMN IF NOT EXISTS public_repos   BIGINT;
+ALTER TABLE login_repo_lists ADD COLUMN IF NOT EXISTS list_truncated BOOLEAN NOT NULL DEFAULT FALSE;
 CREATE TABLE IF NOT EXISTS login_repos (
     login   TEXT NOT NULL,
     repo    TEXT NOT NULL,
@@ -825,19 +842,21 @@ mod tests {
         );
     }
 
-    /// The public leaderboard + profile-card queries must never regress to
-    /// sequential scans of the append-heavy tables. The small-table indexes
-    /// stay inline in the schema; the owner-prefix LIKE lookups need
-    /// `text_pattern_ops` indexes (a plain PK btree can't serve a LIKE
-    /// prefix under a non-C collation). Purely additive — no completeness
-    /// flag or reader/writer semantics change.
+    /// The public leaderboard + profile queries must never regress to
+    /// sequential scans of the append-heavy tables. The owner-prefix LIKE
+    /// lookup that resolves a login's repositories needs a
+    /// `text_pattern_ops` index — a plain PK btree can't serve a LIKE
+    /// prefix under a non-C collation — and it is the ONE prefix scan a
+    /// profile is allowed: every per-repo table is then read by slug.
     #[test]
     fn schema_keeps_leaderboard_and_card_indexes() {
         assert!(SCHEMA.contains("idx_repos_repo_prefix"));
         assert!(SCHEMA.contains("ON repos (repo text_pattern_ops)"));
         assert!(SCHEMA.contains("idx_repos_history_star_count"));
-        assert!(SCHEMA.contains("idx_repo_lines_repo_prefix"));
-        assert!(SCHEMA.contains("ON repo_lines (repo text_pattern_ops)"));
+        assert!(
+            SCHEMA.contains("DROP INDEX IF EXISTS idx_repo_lines_repo_prefix"),
+            "no reader scans repo_lines by owner prefix any more"
+        );
         assert!(SCHEMA.contains("CREATE TABLE IF NOT EXISTS leaderboard_snapshots"));
         assert!(SCHEMA.contains("UNIQUE (metric, window_days, rank)"));
         assert!(SCHEMA.contains("CREATE TABLE IF NOT EXISTS leaderboard_snapshot_state"));
@@ -915,6 +934,40 @@ mod tests {
             !SCHEMA.contains("actor.login"),
             "archive storage must never retain stargazer identities"
         );
+    }
+
+    /// A login can be a user or an organization, and the two are listed
+    /// through different GitHub endpoints. The resolved kind, the account's
+    /// public-repo count, and the "page cap cut the walk short" flag must
+    /// live next to the cached list — an in-memory-only kind would be
+    /// re-guessed after every restart, and a truncated list with no record
+    /// of the truncation reads as a complete account.
+    #[test]
+    fn login_lists_persist_account_kind_and_coverage() {
+        for column in [
+            "account_type   TEXT",
+            "public_repos   BIGINT",
+            "list_truncated BOOLEAN NOT NULL DEFAULT FALSE",
+        ] {
+            assert!(
+                SCHEMA.contains(column),
+                "missing login-list column: {column}"
+            );
+        }
+        for alter in [
+            "ALTER TABLE login_repo_lists ADD COLUMN IF NOT EXISTS account_type   TEXT",
+            "ALTER TABLE login_repo_lists ADD COLUMN IF NOT EXISTS public_repos   BIGINT",
+            "ALTER TABLE login_repo_lists ADD COLUMN IF NOT EXISTS list_truncated BOOLEAN NOT NULL DEFAULT FALSE",
+        ] {
+            assert!(
+                SCHEMA.contains(alter),
+                "existing installations need this column added idempotently: {alter}"
+            );
+        }
+        // The completeness gate stays the reader's contract: the rows are
+        // only readable once `complete` flips inside the writer's
+        // transaction.
+        assert!(SCHEMA.contains("complete       BOOLEAN NOT NULL DEFAULT FALSE"));
     }
 
     #[test]

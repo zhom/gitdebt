@@ -122,6 +122,16 @@ export class RasterBuffer {
     this.data[i + 3] = (ac * 255 + 0.5) | 0;
   }
 
+  /**
+   * Raises a cell's alpha, keeping `fill` as the colour. Only correct when the
+   * cell already holds the same fill, which is the case for overlays painted
+   * onto a single-fill panel.
+   */
+  add(x: number, y: number, fill: RGB, a: number) {
+    const i = (y * this.cols + x) * 4;
+    this.set(x, y, fill, this.data[i + 3] / 255 + a);
+  }
+
   /** Forces every cell opaque, keeping the premultiplied RGB. */
   opaque() {
     for (let i = 3; i < this.data.length; i += 4) this.data[i] = 255;
@@ -294,6 +304,138 @@ export function paintRail(
   }
 }
 
+/** FNV-1a over the seed string. Keeps wave sets stable across renders. */
+export function hashSeed(seed: string): number {
+  let h = 0x811c9dc5;
+  for (let i = 0; i < seed.length; i++) {
+    h ^= seed.charCodeAt(i);
+    h = Math.imul(h, 0x01000193);
+  }
+  return h >>> 0;
+}
+
+function mulberry32(state: number) {
+  let a = state >>> 0;
+  return () => {
+    a = (a + 0x6d2b79f5) >>> 0;
+    let t = a;
+    t = Math.imul(t ^ (t >>> 15), t | 1);
+    t ^= t + Math.imul(t ^ (t >>> 7), t | 61);
+    return ((t ^ (t >>> 14)) >>> 0) / 4294967296;
+  };
+}
+
+/** One sine component of a surface's undulation. */
+export type Wave = {
+  /** Cycles across the full width. */
+  readonly freq: number;
+  /** Cycles per second. */
+  readonly speed: number;
+  readonly phase: number;
+  /** Density amplitude. The set sums to `WAVE_AMPLITUDE`. */
+  readonly amp: number;
+};
+
+/** Total density swing a wave set can produce, at full gain. */
+export const WAVE_AMPLITUDE = 0.09;
+
+/**
+ * Wave set for a series, derived from `seed` alone so a chart ripples the same
+ * way on every render and across a remount.
+ */
+export function makeWaves(seed: string, count = 3): Wave[] {
+  const random = mulberry32(hashSeed(seed));
+  const raw: { freq: number; speed: number; phase: number; weight: number }[] =
+    [];
+  let total = 0;
+  for (let i = 0; i < count; i++) {
+    const weight = 1 / (i + 1.6);
+    total += weight;
+    raw.push({
+      freq: 0.8 + i * 1.1 + random() * 1.4,
+      speed: (i % 2 === 0 ? 1 : -1) * (0.09 + random() * 0.14),
+      phase: random() * Math.PI * 2,
+      weight,
+    });
+  }
+  return raw.map((w) => ({
+    freq: w.freq,
+    speed: w.speed,
+    phase: w.phase,
+    amp: (w.weight / total) * WAVE_AMPLITUDE,
+  }));
+}
+
+/**
+ * Signed density offset at column fraction `u` and time `t` in seconds.
+ * Bounded by `WAVE_AMPLITUDE`.
+ */
+export function waveOffset(
+  waves: readonly Wave[],
+  u: number,
+  t: number,
+): number {
+  let sum = 0;
+  for (const w of waves) {
+    sum += w.amp * Math.sin((w.freq * u + w.speed * t) * Math.PI * 2 + w.phase);
+  }
+  return sum;
+}
+
+/** Breathing disc stamped into a painted panel at the pointer. */
+export type PulseSpec = {
+  /** Centre in cell coordinates. */
+  x: number;
+  y: number;
+  /** Ring radius in cells. */
+  radius: number;
+  /** 0..1 envelope. Below `PULSE_FLOOR` the stamp is skipped entirely. */
+  energy: number;
+};
+
+/** Envelope below which a pulse contributes nothing visible. */
+export const PULSE_FLOOR = 0.004;
+
+/**
+ * Ceiling on the alpha a pulse may add. The label sits on this surface, so the
+ * bed can brighten but never close on the text contrast.
+ */
+export const PULSE_MAX_ALPHA = 0.22;
+
+/**
+ * Adds a dithered ring plus a soft core to an already-painted single-fill
+ * buffer. Only the ring's bounding box is walked, so cost is independent of
+ * the panel size.
+ */
+export function stampPulse(
+  buf: RasterBuffer,
+  fill: RGB,
+  pulse: PulseSpec,
+  matrix: number[][] = BAYER4,
+) {
+  if (pulse.energy <= PULSE_FLOOR || pulse.radius <= 0) return;
+  const width = Math.max(1.5, pulse.radius * 0.45);
+  const reach = pulse.radius + width * 2;
+  const x0 = Math.max(0, Math.floor(pulse.x - reach));
+  const x1 = Math.min(buf.cols - 1, Math.ceil(pulse.x + reach));
+  const y0 = Math.max(0, Math.floor(pulse.y - reach));
+  const y1 = Math.min(buf.rows - 1, Math.ceil(pulse.y + reach));
+  for (let y = y0; y <= y1; y++) {
+    const dy = y + 0.5 - pulse.y;
+    for (let x = x0; x <= x1; x++) {
+      const dx = x + 0.5 - pulse.x;
+      const d = Math.sqrt(dx * dx + dy * dy);
+      if (d > reach) continue;
+      const band = (d - pulse.radius) / width;
+      const ring = Math.exp(-band * band);
+      const core = 0.4 * clamp01(1 - d / pulse.radius);
+      const p = (ring + core) * pulse.energy;
+      if (p <= matrix[y & 3][x & 3] * 0.85) continue;
+      buf.add(x, y, fill, Math.min(PULSE_MAX_ALPHA, p * 0.3));
+    }
+  }
+}
+
 export const prefersReducedMotion = () =>
   typeof matchMedia === "function" &&
   matchMedia("(prefers-reduced-motion: reduce)").matches;
@@ -307,53 +449,175 @@ export type IntensityController = {
   stop(): void;
 };
 
+/** Everything a surface needs to paint one frame. */
+export type SurfaceMotion = {
+  /** 0 rest, 1 hover, 1.5 press. */
+  intensity: number;
+  /** Accumulated animation seconds. Frozen while the loop is idle. */
+  time: number;
+  /** Pointer position in normalised host coordinates. */
+  px: number;
+  py: number;
+  /** 0..1 pulse envelope, independent of `intensity` so it can outlive a press. */
+  pulse: number;
+};
+
+export type SurfaceController = {
+  enter(px?: number, py?: number): void;
+  move(px: number, py: number): void;
+  leave(): void;
+  down(px?: number, py?: number): void;
+  up(): void;
+  /** Off-screen hosts stop burning frames without losing their state. */
+  setVisible(visible: boolean): void;
+  repaint(): void;
+  stop(): void;
+};
+
+const FRAME_MS = 1000 / 60;
+const INTENSITY_SETTLED = 0.005;
+/** Per-frame lerp fractions at 60Hz, made frame-rate independent below. */
+const INTENSITY_RATE = 0.16;
+const PULSE_RATE = 0.1;
+
 /**
- * Exponential lerp toward a hover/press target: 16% of the remaining gap per
- * frame, self-terminating under 0.01 (~470ms settle, tau ~96ms). At most one
- * rAF is ever in flight, and none at all under reduced motion.
+ * Hover/press/pulse state for one canvas.
+ *
+ * A single self-throttling rAF drives every animated channel. It stops as soon
+ * as intensity settles and no continuous motion is owed, pauses while the host
+ * is off-screen, and never starts at all under reduced motion, where every
+ * transition collapses to a single paint at the target.
  */
-export function makeIntensity(paint: (i: number) => void): IntensityController {
-  let i = 0;
-  let target = 0;
-  let raf = 0;
+export function makeSurfaceMotion(
+  paint: (m: SurfaceMotion) => void,
+  opts: { continuous?: boolean } = {},
+): SurfaceController {
+  const m: SurfaceMotion = {
+    intensity: 0,
+    time: 0,
+    px: 0.5,
+    py: 0.5,
+    pulse: 0,
+  };
+  let targetIntensity = 0;
+  let targetPulse = 0;
   let hovered = false;
+  let visible = true;
+  let raf = 0;
+  let last = 0;
   const reduce = prefersReducedMotion();
-  const tick = () => {
-    const d = target - i;
-    if (Math.abs(d) < 0.01) {
-      i = target;
-      paint(i);
-      raf = 0;
+  const continuous = (opts.continuous ?? false) && !reduce;
+
+  const running = () =>
+    Math.abs(targetIntensity - m.intensity) >= INTENSITY_SETTLED ||
+    Math.abs(targetPulse - m.pulse) >= PULSE_FLOOR ||
+    (continuous && hovered);
+
+  const tick = (now?: number) => {
+    raf = 0;
+    const stamp = typeof now === "number" ? now : last + FRAME_MS;
+    const dt =
+      last === 0 ? FRAME_MS / 1000 : Math.min(0.05, (stamp - last) / 1000);
+    last = stamp;
+    const frames = (dt * 1000) / FRAME_MS;
+    const di = targetIntensity - m.intensity;
+    m.intensity =
+      Math.abs(di) < 0.01
+        ? targetIntensity
+        : m.intensity + di * (1 - Math.pow(1 - INTENSITY_RATE, frames));
+    const dp = targetPulse - m.pulse;
+    m.pulse =
+      Math.abs(dp) < PULSE_FLOOR
+        ? targetPulse
+        : m.pulse + dp * (1 - Math.pow(1 - PULSE_RATE, frames));
+    if (continuous) m.time += dt;
+    // Landing exactly on the target is what lets the loop terminate; a residue
+    // below the settle epsilon would otherwise persist until the next gesture.
+    const done = !running();
+    if (done) {
+      m.intensity = targetIntensity;
+      m.pulse = targetPulse;
+    }
+    paint(m);
+    if (done) last = 0;
+    else schedule();
+  };
+
+  function schedule() {
+    if (raf || reduce || !visible || !running()) return;
+    raf = requestAnimationFrame(tick);
+  }
+
+  const to = (intensity: number) => {
+    targetIntensity = intensity;
+    targetPulse = hovered && continuous ? 1 : 0;
+    if (reduce) {
+      m.intensity = intensity;
+      m.pulse = 0;
+      m.time = 0;
+      paint(m);
       return;
     }
-    i += d * 0.16;
-    paint(i);
-    raf = requestAnimationFrame(tick);
+    schedule();
   };
-  const to = (t: number) => {
-    target = t;
-    if (reduce) {
-      i = t;
-      paint(i);
-    } else if (!raf) {
-      raf = requestAnimationFrame(tick);
+
+  const at = (px?: number, py?: number) => {
+    if (typeof px === "number" && typeof py === "number") {
+      m.px = clamp01(px);
+      m.py = clamp01(py);
     }
   };
+
   return {
-    enter: () => {
+    enter: (px, py) => {
       hovered = true;
+      at(px, py);
       to(1);
+    },
+    move: (px, py) => {
+      at(px, py);
+      schedule();
     },
     leave: () => {
       hovered = false;
       to(0);
     },
-    down: () => to(1.5),
+    down: (px, py) => {
+      at(px, py);
+      to(1.5);
+    },
     up: () => to(hovered ? 1 : 0),
-    repaint: () => paint(i),
+    setVisible: (next) => {
+      visible = next;
+      if (!visible) {
+        if (raf) cancelAnimationFrame(raf);
+        raf = 0;
+        last = 0;
+        return;
+      }
+      if (running()) schedule();
+    },
+    repaint: () => paint(m),
     stop: () => {
       if (raf) cancelAnimationFrame(raf);
       raf = 0;
     },
+  };
+}
+
+/**
+ * Intensity-only view of `makeSurfaceMotion`, for surfaces that own no pointer
+ * position: 16% of the remaining gap per frame, self-terminating under 0.01
+ * (~470ms settle, tau ~96ms).
+ */
+export function makeIntensity(paint: (i: number) => void): IntensityController {
+  const c = makeSurfaceMotion((m) => paint(m.intensity));
+  return {
+    enter: () => c.enter(),
+    leave: () => c.leave(),
+    down: () => c.down(),
+    up: () => c.up(),
+    repaint: () => c.repaint(),
+    stop: () => c.stop(),
   };
 }

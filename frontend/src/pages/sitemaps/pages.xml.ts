@@ -1,8 +1,8 @@
 import type { APIRoute } from "astro";
 import { CATEGORIES } from "@/data/categories";
 import {
-  loadBuildCatalog,
   staticComparisonPaths,
+  staticLogins,
 } from "@/lib/build-catalog";
 
 // All emitted profile routes enter this build-time sitemap. The strict
@@ -38,14 +38,11 @@ const PAGES: { path: string; changefreq: string; priority: string }[] = [
 
 export const GET: APIRoute = async ({ site }) => {
   const SITE = resolveSite(site);
-  const catalog = await loadBuildCatalog();
-  const loginPages = [...new Set(catalog.map(({ slug }) => slug.split("/")[0]))]
-    .sort()
-    .map((login) => ({
-      path: `/u/${login}`,
-      changefreq: "daily",
-      priority: "0.6",
-    }));
+  const loginPages = (await staticLogins()).map((login) => ({
+    path: `/${login}`,
+    changefreq: "daily",
+    priority: "0.6",
+  }));
   const pages = [...PAGES, ...loginPages];
 
   const urls = pages.map(

@@ -4,7 +4,13 @@ import os from "node:os";
 import path from "node:path";
 import { afterEach, test } from "node:test";
 import { auditPagesRouting } from "./audit-routing.mjs";
-import { missingRepoReportTarget } from "../src/lib/static-routing.mjs";
+import {
+  isReservedFirstSegment,
+  missingProfileReportTarget,
+  missingRepoReportTarget,
+  profileLogin,
+  RESERVED_FIRST_SEGMENTS,
+} from "../src/lib/static-routing.mjs";
 
 const temporaryDirectories = [];
 
@@ -83,6 +89,8 @@ function validOutput(directory, redirects = null) {
 /privacy/ /privacy 301
 /profile/ /profile 301
 /terms/ /terms 301
+/u/:login/ /:login 301
+/u/:login /:login 301
 /:first/:second/ /:first/:second 301
 /vs/:owner1/:repo1/:owner2/:repo2/ /vs/:owner1/:repo1/:owner2/:repo2 301
 `,
@@ -138,10 +146,129 @@ test("application, legal, malformed, and non-repo routes stay on the 404", () =>
   }
 });
 
+test("single missing segments resolve to a root profile report", () => {
+  assert.equal(missingProfileReportTarget("/Zhom"), "/zhom");
+  assert.equal(missingProfileReportTarget("/some-user/"), "/some-user");
+  assert.equal(missingProfileReportTarget("/%7Ahom"), "/zhom");
+});
+
+test("reserved first segments are never published or resolved as profiles", () => {
+  for (const segment of [
+    "about",
+    "badges",
+    "compare",
+    "leaderboard",
+    "privacy",
+    "profile",
+    "report",
+    "terms",
+    "vs",
+    "api",
+    "sitemaps",
+    "404",
+    "u",
+    "_astro",
+  ]) {
+    assert.ok(isReservedFirstSegment(segment), `${segment} must be reserved`);
+    assert.equal(profileLogin(segment), null, `${segment} must not be a login`);
+    assert.equal(
+      missingProfileReportTarget(`/${segment}`),
+      null,
+      `/${segment} must not open a profile`,
+    );
+  }
+  for (const asset of ["robots.txt", "favicon.ico", "sitemap-index.xml"]) {
+    assert.ok(RESERVED_FIRST_SEGMENTS.has(asset));
+  }
+});
+
+test("malformed, multi-segment, and over-long logins stay on the 404", () => {
+  for (const pathname of [
+    "/",
+    "/owner/repo",
+    "/one/two/three",
+    "/dot.login",
+    "/-leading",
+    "/trailing-",
+    `/${"a".repeat(40)}`,
+    "/%zz",
+  ]) {
+    assert.equal(
+      missingProfileReportTarget(pathname),
+      null,
+      `${pathname} must not enter the profile fallback`,
+    );
+  }
+});
+
 test("accepts file-format static output with an asset-safe fallback", () => {
   const directory = fixture();
   validOutput(directory);
   assert.deepEqual(auditPagesRouting({ distDir: directory }), []);
+});
+
+test("root profiles coexist with repository pages but reserved names do not", () => {
+  const directory = fixture();
+  validOutput(directory);
+  write(directory, "facebook.html", "<html></html>");
+  assert.deepEqual(auditPagesRouting({ distDir: directory }), []);
+
+  write(directory, "sitemaps.html", "<html></html>");
+  const errors = auditPagesRouting({ distDir: directory });
+  assert.ok(
+    errors.some((error) => error.includes("sitemaps.html")),
+    errors.join("\n"),
+  );
+});
+
+test("requires the legacy /u profile prefix to reach the root in one hop", () => {
+  const directory = fixture();
+  validOutput(
+    directory,
+    `/about/ /about 301
+/badges/ /badges 301
+/compare/ /compare 301
+/leaderboard/ /leaderboard 301
+/report/ /report 301
+/privacy/ /privacy 301
+/profile/ /profile 301
+/terms/ /terms 301
+/:first/:second/ /:first/:second 301
+`,
+  );
+  const errors = auditPagesRouting({ distDir: directory });
+  assert.ok(
+    errors.some((error) =>
+      error.startsWith("Missing legacy profile redirect: /u/:login"),
+    ),
+    errors.join("\n"),
+  );
+});
+
+test("rejects a generic two-segment slash rule declared before /u/:login/", () => {
+  const directory = fixture();
+  validOutput(
+    directory,
+    `/about/ /about 301
+/badges/ /badges 301
+/compare/ /compare 301
+/leaderboard/ /leaderboard 301
+/report/ /report 301
+/privacy/ /privacy 301
+/profile/ /profile 301
+/terms/ /terms 301
+/:first/:second/ /:first/:second 301
+/u/:login/ /:login 301
+/u/:login /:login 301
+`,
+  );
+  const errors = auditPagesRouting({ distDir: directory });
+  assert.ok(
+    errors.some((error) =>
+      error.includes("must be declared before /:first/:second/"),
+    ),
+    errors.join("\n"),
+  );
 });
 
 test("rejects redirect loops, directory output, and asset-shadowing fallbacks", () => {

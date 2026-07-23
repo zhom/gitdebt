@@ -10,7 +10,7 @@ import { ChevronDown, Code2 } from "lucide-react";
 import { AnimatePresence, motion, useReducedMotion } from "motion/react";
 import { createPortal } from "react-dom";
 
-import { CopyButton } from "@/components/CopyButton";
+import { CodeBlock } from "@/components/CodeBlock";
 import { CAPTION, EYEBROW, PANEL } from "@/components/style-tokens";
 import { Button } from "@/components/ui/button";
 import { DitherSwitch } from "@/components/ui/dither-switch";
@@ -270,17 +270,14 @@ export function EmbedSnippet({
 
   const snippetBody = (
     <>
-      <div className="flex items-center justify-between gap-4 border-t border-border/40 px-4 py-3">
-        <p className="min-w-0 truncate font-mono text-[12px] text-muted-foreground">
-          {mode === "markdown" ? "README.md" : "HTML"} · {selectedFormat.toUpperCase()} · {theme}
-        </p>
-        <CopyButton
-          value={snippet}
-          ariaLabel="Copy embed snippet"
-          variant="primary"
-          size="sm"
-          className="shrink-0"
-          idleLabel="Copy embed"
+      <div className="border-t border-border/40 p-3">
+        <CodeBlock
+          code={snippet}
+          language={mode}
+          label={`${mode === "markdown" ? "README.md" : "HTML"} · ${selectedFormat.toUpperCase()} · ${theme}`}
+          copyLabel="Copy embed"
+          copyAriaLabel="Copy embed snippet"
+          maxHeightClass="max-h-48"
         />
       </div>
       {selectedFormat === "gif" && (
@@ -299,7 +296,7 @@ export function EmbedSnippet({
       >
         <Button
           ref={triggerRef}
-          variant="outline"
+          variant="soft"
           size="sm"
           aria-expanded={open}
           onClick={() => setOpen((value) => !value)}

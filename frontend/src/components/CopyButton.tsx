@@ -1,13 +1,9 @@
 import { useEffect, useRef, useState } from "react";
-import { AnimatePresence, motion, useReducedMotion } from "motion/react";
+import { motion, useReducedMotion } from "motion/react";
 import { Check, Copy } from "lucide-react";
 
 import { Button, type ButtonProps } from "@/components/ui/button";
-import {
-  DURATION,
-  EASE_OUT,
-  REDUCED_MOTION_DURATION,
-} from "@/lib/motion";
+import { SPRING } from "@/lib/motion";
 
 type Props = {
   value: string;
@@ -19,17 +15,19 @@ type Props = {
   size?: ButtonProps["size"];
 };
 
+/** How long the confirmation holds before the glyph springs back. */
+const REVERT_MS = 2000;
+
 export function CopyButton({
   value,
   ariaLabel,
   className,
   idleLabel = "Copy",
   successLabel = "Copied",
-  variant = "outline",
+  variant = "soft",
   size = "sm",
 }: Props) {
   const [copied, setCopied] = useState(false);
-  const [feedbackKey, setFeedbackKey] = useState(0);
   const timerRef = useRef<ReturnType<typeof setTimeout> | null>(null);
   const reduceMotion = useReducedMotion();
 
@@ -44,17 +42,20 @@ export function CopyButton({
     try {
       await navigator.clipboard.writeText(value);
       if (timerRef.current) clearTimeout(timerRef.current);
-      setFeedbackKey((key) => key + 1);
       setCopied(true);
-      timerRef.current = setTimeout(() => setCopied(false), 1600);
+      timerRef.current = setTimeout(() => setCopied(false), REVERT_MS);
     } catch {
       setCopied(false);
     }
   }
 
-  const duration = reduceMotion
-    ? REDUCED_MOTION_DURATION
-    : DURATION.feedback;
+  // Both glyphs stay mounted, so a second copy mid-flight retargets the spring
+  // from wherever the icons currently sit instead of restarting from scratch.
+  const transition = reduceMotion ? { duration: 0 } : SPRING.snappy;
+  const glyph = (active: boolean) => ({
+    scale: reduceMotion ? 1 : active ? 1 : 0.4,
+    opacity: active ? 1 : 0,
+  });
 
   return (
     <Button
@@ -64,57 +65,55 @@ export function CopyButton({
       aria-label={ariaLabel}
       className={className}
     >
-      <span className="grid items-center">
-        <span
-          className="invisible col-start-1 row-start-1 inline-flex items-center gap-1.5"
+      <span className="grid size-3.5 shrink-0 place-items-center">
+        <motion.span
+          className="col-start-1 row-start-1 inline-flex"
+          initial={false}
+          animate={glyph(!copied)}
+          transition={transition}
           aria-hidden="true"
         >
-          <Check className="size-3.5 shrink-0" />
-          {successLabel}
-        </span>
-        <span
-          className="invisible col-start-1 row-start-1 inline-flex items-center gap-1.5"
+          <Copy className="size-3.5" strokeWidth={2} />
+        </motion.span>
+        <motion.span
+          className="col-start-1 row-start-1 inline-flex"
+          initial={false}
+          animate={glyph(copied)}
+          transition={transition}
           aria-hidden="true"
         >
-          <Copy className="size-3.5 shrink-0" />
+          <Check className="size-3.5" strokeWidth={2} />
+        </motion.span>
+      </span>
+      <span className="grid">
+        {/* Sized by the wider label, so the button never jumps mid-swap. */}
+        <span className="invisible col-start-1 row-start-1" aria-hidden="true">
           {idleLabel}
         </span>
-        <AnimatePresence initial={false} mode="popLayout">
-          <motion.span
-            key={`${copied ? "copied" : "idle"}-${feedbackKey}`}
-            initial={{
-              opacity: 0,
-              scale: reduceMotion ? 1 : 0.97,
-            }}
-            animate={{ opacity: 1, scale: 1 }}
-            exit={{
-              opacity: 0,
-              scale: reduceMotion ? 1 : 0.97,
-              transition: {
-                duration: reduceMotion ? REDUCED_MOTION_DURATION : 0.1,
-                ease: EASE_OUT,
-              },
-            }}
-            transition={{ duration, ease: EASE_OUT }}
-            className="col-start-1 row-start-1 inline-flex items-center gap-1.5"
-            aria-live="polite"
-          >
-            {copied ? (
-              <Check
-                className="size-3.5 shrink-0"
-                strokeWidth={2}
-                aria-hidden="true"
-              />
-            ) : (
-              <Copy
-                className="size-3.5 shrink-0"
-                strokeWidth={2}
-                aria-hidden="true"
-              />
-            )}
-            {copied ? successLabel : idleLabel}
-          </motion.span>
-        </AnimatePresence>
+        <span className="invisible col-start-1 row-start-1" aria-hidden="true">
+          {successLabel}
+        </span>
+        <motion.span
+          className="col-start-1 row-start-1 text-left"
+          initial={false}
+          animate={{ opacity: copied ? 0 : 1 }}
+          transition={transition}
+          aria-hidden="true"
+        >
+          {idleLabel}
+        </motion.span>
+        <motion.span
+          className="col-start-1 row-start-1 text-left"
+          initial={false}
+          animate={{ opacity: copied ? 1 : 0 }}
+          transition={transition}
+          aria-hidden="true"
+        >
+          {successLabel}
+        </motion.span>
+      </span>
+      <span className="sr-only" aria-live="polite">
+        {copied ? successLabel : ""}
       </span>
     </Button>
   );

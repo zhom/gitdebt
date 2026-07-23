@@ -3,6 +3,7 @@
 import fs from "node:fs";
 import path from "node:path";
 import { pathToFileURL } from "node:url";
+import { profileLogin } from "../src/lib/static-routing.mjs";
 
 const REQUIRED_FILE_ROUTES = [
   "about.html",
@@ -24,6 +25,14 @@ const CANONICAL_SLASH_ROUTES = [
   ["/profile/", "/profile"],
   ["/report/", "/report"],
   ["/terms/", "/terms"],
+];
+
+// Maintainer profiles moved from `/u/{login}` to the root path. The legacy
+// prefix must keep resolving, and the placeholder rule also carries the
+// Markdown alternate (`/u/{login}.md` → `/{login}.md`).
+const LEGACY_PROFILE_REDIRECTS = [
+  ["/u/:login/", "/:login"],
+  ["/u/:login", "/:login"],
 ];
 
 function redirectRules(contents) {
@@ -296,6 +305,25 @@ export function auditPagesRouting({ distDir }) {
     }
   }
 
+  // Maintainer profiles share the root namespace with the application's own
+  // pages, so every root-level document is either a known route or a login
+  // the reserved-segment set allows.
+  const applicationRootPages = new Set([
+    ...REQUIRED_FILE_ROUTES,
+    "404.html",
+    "index.html",
+  ]);
+  for (const entry of fs.readdirSync(absoluteDist, { withFileTypes: true })) {
+    if (!entry.isFile() || !entry.name.endsWith(".html")) continue;
+    if (applicationRootPages.has(entry.name)) continue;
+    const candidate = entry.name.slice(0, -".html".length);
+    if (!profileLogin(candidate)) {
+      errors.push(
+        `Root page ${entry.name} is neither an application route nor a publishable login`,
+      );
+    }
+  }
+
   const redirectsPath = path.join(absoluteDist, "_redirects");
   if (!fs.existsSync(redirectsPath)) {
     errors.push("Missing Cloudflare Pages _redirects");
@@ -318,6 +346,35 @@ export function auditPagesRouting({ distDir }) {
       ) {
         errors.push(`Missing canonical redirect: ${source} → ${destination}`);
       }
+    }
+
+    for (const [source, destination] of LEGACY_PROFILE_REDIRECTS) {
+      if (
+        !rules.some(
+          (rule) =>
+            rule.source === source &&
+            rule.destination === destination &&
+            rule.status === "301",
+        )
+      ) {
+        errors.push(`Missing legacy profile redirect: ${source} → ${destination}`);
+      }
+    }
+
+    // `/u/{login}/` also matches the generic two-segment slash rule, so the
+    // profile rules must be declared first or the legacy path 301s to `/u`.
+    const legacyIndex = rules.findIndex(({ source }) => source === "/u/:login/");
+    const twoSegmentIndex = rules.findIndex(
+      ({ source }) => source === "/:first/:second/",
+    );
+    if (
+      legacyIndex !== -1 &&
+      twoSegmentIndex !== -1 &&
+      legacyIndex > twoSegmentIndex
+    ) {
+      errors.push(
+        "/u/:login/ must be declared before /:first/:second/ or the generic rule wins",
+      );
     }
 
     const sourceCounts = new Map();

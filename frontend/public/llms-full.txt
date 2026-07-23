@@ -13,8 +13,8 @@ Gitdebt is an open-source public GitHub repository analytics service. It provide
 
 - Repository HTML: `https://gitdebt.com/{owner}/{repo}`
 - Repository Markdown: `https://gitdebt.com/{owner}/{repo}.md`
-- Profile HTML: `https://gitdebt.com/u/{login}`
-- Profile Markdown: `https://gitdebt.com/u/{login}.md`
+- Profile HTML: `https://gitdebt.com/{login}`
+- Profile Markdown: `https://gitdebt.com/{login}.md`
 - Comparison HTML: `https://gitdebt.com/vs/{owner1}/{repo1}/{owner2}/{repo2}`
 - Add `.md` to any emitted HTML page URL for the corresponding Markdown representation.
 

@@ -25,6 +25,7 @@ const button = cva(
         default: "text-foreground",
         primary: "text-foreground",
         accent: "text-foreground",
+        soft: "border border-border/60 text-foreground",
         outline:
           "border border-border/60 text-foreground transition-[border-color,background-color] duration-150 hover:border-foreground/25 hover:bg-card/60",
         secondary:
@@ -56,6 +57,15 @@ const CANVAS_FILL: Partial<Record<ButtonVariant, RGB>> = {
   default: BRAND,
   primary: BRAND,
   accent: SWATCH.blue,
+  soft: BRAND,
+};
+
+/**
+ * `soft` keeps the texture but at a fraction of the strength, so a copy or
+ * embed action reads as dithered without competing with the page's one primary.
+ */
+const CANVAS_ALPHA: Partial<Record<ButtonVariant, number>> = {
+  soft: 0.42,
 };
 
 export interface ButtonProps
@@ -73,6 +83,8 @@ export const Button = React.forwardRef<HTMLButtonElement, ButtonProps>(
       fill: fill ?? BRAND,
       variant: "gradient",
       animated: textured,
+      alpha: CANVAS_ALPHA[variant ?? "default"],
+      pulse: textured,
     });
     return (
       <button

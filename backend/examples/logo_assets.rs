@@ -12,6 +12,20 @@ use gitdebt::raster::{RasterFormat, rasterize};
 const SOURCE_SIZE: f32 = 512.0;
 const MARK_PATTERN: &str = "M0 0h24v24H0zM25 25h7v7h-7zM0 27h5v5H0zM27 0h5v5h-5z";
 
+/// Ink bounds of the robot path inside the 512 artboard. Icons place the
+/// glyph by these bounds so a 16px raster spends its pixels on the mark
+/// rather than on the artwork's 40% of empty vertical margin.
+const INK_X: f32 = 41.436;
+const INK_Y: f32 = 108.392;
+const INK_W: f32 = 429.115;
+const INK_H: f32 = 299.305;
+/// Fraction of the icon plate the glyph spans.
+const ICON_FILL: f32 = 0.94;
+
+/// Icon sizes at or below this keep a solid mark: the artwork's 32-unit
+/// dither cell lands under one device pixel and the silhouette dissolves.
+const DITHER_MIN_ICON: u32 = 96;
+
 fn main() {
     let root = Path::new(env!("CARGO_MANIFEST_DIR"))
         .parent()
@@ -19,8 +33,9 @@ fn main() {
     let source_path = root.join("assets/gitdebt-mark.svg");
     let mark = fs::read_to_string(&source_path).expect("read background-free robot mark");
     validate_mark(&mark);
-    let icon = app_icon_svg(&mark);
-    let maskable = maskable_svg(&icon);
+
+    let dithered_icon = app_icon_svg(&svg_body(&mark).replace("fill=\"#000\"", "fill=\"#fff\""));
+    let solid_icon = app_icon_svg(&solid_body(&mark, "#fff"));
 
     write(&root.join("assets/gitdebt-logo.svg"), mark.as_bytes());
     write(&root.join("frontend/public/logo.svg"), mark.as_bytes());
@@ -29,7 +44,7 @@ fn main() {
         root.join("frontend/public/favicon.svg"),
         root.join("extension/icons/icon.svg"),
     ] {
-        write(&destination, icon.as_bytes());
+        write(&destination, solid_icon.as_bytes());
     }
 
     for (destination, size) in [
@@ -42,8 +57,13 @@ fn main() {
         (root.join("extension/icons/icon-48.png"), 48),
         (root.join("extension/icons/icon-128.png"), 128),
     ] {
+        let icon = if size >= DITHER_MIN_ICON {
+            &dithered_icon
+        } else {
+            &solid_icon
+        };
         let png =
-            rasterize(&icon, RasterFormat::Png, size as f32 / SOURCE_SIZE).expect("rasterize logo");
+            rasterize(icon, RasterFormat::Png, size as f32 / SOURCE_SIZE).expect("rasterize logo");
         write(&destination, &png);
     }
 
@@ -52,8 +72,17 @@ fn main() {
         (root.join("frontend/public/icon-maskable-192.png"), 192),
         (root.join("frontend/public/icon-maskable-512.png"), 512),
     ] {
-        let png = rasterize(&maskable, RasterFormat::Png, size as f32 / SOURCE_SIZE)
-            .expect("rasterize maskable logo");
+        let source = if size >= DITHER_MIN_ICON {
+            &dithered_icon
+        } else {
+            &solid_icon
+        };
+        let png = rasterize(
+            &maskable_svg(source),
+            RasterFormat::Png,
+            size as f32 / SOURCE_SIZE,
+        )
+        .expect("rasterize maskable logo");
         write(&destination, &png);
     }
 }
@@ -79,10 +108,22 @@ fn validate_mark(mark: &str) {
     );
 }
 
-fn app_icon_svg(mark: &str) -> String {
-    let light_mark = svg_body(mark).replace("fill=\"#000\"", "fill=\"#fff\"");
+/// The robot path alone, filled flat: no `<defs>`, no pattern reference.
+fn solid_body(mark: &str, ink: &str) -> String {
+    let body = svg_body(mark);
+    let defs_start = body.find("<defs>").expect("logo defs");
+    let defs_end = body.find("</defs>").expect("logo defs close") + "</defs>".len();
+    format!("{}{}", &body[..defs_start], &body[defs_end..])
+        .replace("fill=\"url(#gitdebt-dither)\"", &format!("fill=\"{ink}\""))
+}
+
+/// Rounded plate with the glyph centred by its ink bounds.
+fn app_icon_svg(body: &str) -> String {
+    let scale = ICON_FILL * SOURCE_SIZE / INK_W;
     format!(
-        "<svg xmlns=\"http://www.w3.org/2000/svg\" width=\"512\" height=\"512\" viewBox=\"0 0 512 512\" role=\"img\" aria-label=\"gitdebt robot\"><rect width=\"512\" height=\"512\" rx=\"112\" fill=\"#000\"/>{light_mark}</svg>"
+        "<svg xmlns=\"http://www.w3.org/2000/svg\" width=\"512\" height=\"512\" viewBox=\"0 0 512 512\" role=\"img\" aria-label=\"gitdebt robot\"><rect width=\"512\" height=\"512\" rx=\"112\" fill=\"#000\"/><g transform=\"translate(256 256) scale({scale:.5}) translate({tx:.3} {ty:.3})\">{body}</g></svg>",
+        tx = -(INK_X + INK_W / 2.0),
+        ty = -(INK_Y + INK_H / 2.0),
     )
 }
 

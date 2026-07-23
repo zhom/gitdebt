@@ -201,6 +201,7 @@ export function SignalFlowGraphic({ apiBase }: { apiBase: string }) {
                     points={chartPoints}
                     height={190}
                     valueLabel="stars"
+                    seed={selected.repo}
                   />
                 ) : (
                   <div className="flex min-h-44 flex-col justify-center px-6">

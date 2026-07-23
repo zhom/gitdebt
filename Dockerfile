@@ -7,6 +7,7 @@ WORKDIR /app
 COPY Cargo.toml Cargo.lock ./
 COPY assets ./assets
 COPY backend ./backend
+COPY frontend/src/data/categories.ts ./frontend/src/data/categories.ts
 
 RUN --mount=type=cache,id=gitdebt-cargo-registry,target=/usr/local/cargo/registry \
     --mount=type=cache,id=gitdebt-cargo-git,target=/usr/local/cargo/git \

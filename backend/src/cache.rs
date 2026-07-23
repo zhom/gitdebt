@@ -138,8 +138,12 @@ type RepoSummaryRow = (
 
 impl RepoSummary {
     /// Mirror of [`Cache::repo_stargazers_fresh_within`] over the
-    /// already-loaded summary: complete AND fetched within `ttl`.
+    /// already-loaded summary. Exact GitHub API snapshots are immutable
+    /// once complete; only approximate GH Archive histories age out.
     pub fn stargazers_fresh_within(&self, ttl: chrono::Duration) -> bool {
+        if self.stargazers_complete && self.history_source.as_deref() == Some("github_api") {
+            return true;
+        }
         match (self.stargazers_complete, self.stargazers_fetched_at) {
             (true, Some(fetched_at)) => Utc::now() - fetched_at < ttl,
             _ => false,
@@ -296,6 +300,29 @@ impl Cache {
         Ok(Some(rows))
     }
 
+    /// Complete star history at chart granularity: one cumulative point per
+    /// UTC day. This preserves the same metadata/public/completeness gate as
+    /// [`Self::get_repo_stargazers`] while keeping common read paths bounded
+    /// by repository age rather than star count.
+    pub async fn get_repo_star_series(
+        &self,
+        repo: &str,
+    ) -> Result<Option<Vec<crate::chart::Point>>> {
+        let complete: Option<bool> = sqlx::query_scalar(
+            "SELECT history_complete FROM repos \
+             WHERE repo = $1 AND missing = FALSE \
+               AND metadata_fetched_at IS NOT NULL",
+        )
+        .bind(repo)
+        .fetch_optional(&self.db.pool)
+        .await?;
+        if complete != Some(true) {
+            return Ok(None);
+        }
+        let deltas = crate::export::load_day_deltas(&self.db, repo).await?;
+        Ok(Some(crate::export::cumulative_points(&deltas)))
+    }
+
     /// Atomically replace this repo's stargazer set and mark complete.
     /// Single transaction — the visible state is always either "old data,
     /// complete=false" or "new data, complete=true", never a mix.
@@ -402,17 +429,18 @@ impl Cache {
         Ok(complete == Some(true))
     }
 
-    /// True iff the stargazer set is complete AND was fetched within
-    /// `ttl`. Drives the analyze / ping "is it stale?" decision: a fresh
-    /// complete repo is served straight from cache; a stale one is
-    /// re-enqueued for an incremental refresh.
+    /// True iff the history needs no refresh. Exact GitHub API snapshots are
+    /// never re-fetched after completion. Approximate GH Archive histories
+    /// are fresh only within `ttl` and may be refreshed from later
+    /// partitions.
     pub async fn repo_stargazers_fresh_within(
         &self,
         repo: &str,
         ttl: chrono::Duration,
     ) -> Result<bool> {
-        let row: Option<(bool, Option<DateTime<Utc>>)> = sqlx::query_as(
-            "SELECT history_complete, COALESCE(archive_fetched_at, stargazers_fetched_at) \
+        let row: Option<(bool, Option<DateTime<Utc>>, Option<String>)> = sqlx::query_as(
+            "SELECT history_complete, COALESCE(archive_fetched_at, stargazers_fetched_at), \
+                    history_source \
              FROM repos WHERE repo = $1 AND missing = FALSE \
                AND metadata_fetched_at IS NOT NULL",
         )
@@ -420,7 +448,8 @@ impl Cache {
         .fetch_optional(&self.db.pool)
         .await?;
         match row {
-            Some((true, Some(fetched_at))) => Ok(Utc::now() - fetched_at < ttl),
+            Some((true, _, Some(source))) if source == "github_api" => Ok(true),
+            Some((true, Some(fetched_at), _)) => Ok(Utc::now() - fetched_at < ttl),
             _ => Ok(false),
         }
     }

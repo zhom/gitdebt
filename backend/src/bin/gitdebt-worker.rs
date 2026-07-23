@@ -18,6 +18,7 @@ async fn main() -> Result<()> {
     let cache = services.cache.clone();
     let db = services.db.clone();
     let database_url = services.database_url.clone();
+    bootstrap::spawn_service_heartbeat(db.clone(), "worker");
 
     // Daily leaderboard snapshots. Already replica-safe: the refresh takes a
     // transaction-scoped advisory lock and non-winners return immediately.
@@ -25,15 +26,20 @@ async fn main() -> Result<()> {
 
     // Repo-history analysis pool. Separate queue, separate workload
     // shape: clones are disk-heavy + CPU-heavy, not GitHub-API-bound.
-    // Interactive profile/report requests enqueue durable priority work. Two
-    // workers keep one large clone from serializing every other visible
-    // report; operators with fast local storage can raise this to four.
+    // Interactive profile/report requests enqueue durable priority work.
+    // Default to half the visible CPU quota on a production-sized host while
+    // retaining headroom for Postgres, HTTP, and raster work. The explicit
+    // ceiling prevents a bad env value from launching an unbounded number of
+    // git subprocesses.
     let storage = Arc::new(gitdebt::repo_history::RepoStorage::from_env());
+    let default_analysis_workers = std::thread::available_parallelism()
+        .map(|cpus| cpus.get().div_ceil(2).clamp(1, 8))
+        .unwrap_or(2);
     let requested_analysis_workers: usize = std::env::var("REPO_ANALYSIS_WORKERS")
         .ok()
         .and_then(|s| s.parse().ok())
-        .unwrap_or(2);
-    let analysis_workers = requested_analysis_workers.clamp(1, 4);
+        .unwrap_or(default_analysis_workers);
+    let analysis_workers = requested_analysis_workers.clamp(1, 8);
     if requested_analysis_workers != analysis_workers {
         tracing::warn!(
             requested = requested_analysis_workers,
@@ -55,6 +61,46 @@ async fn main() -> Result<()> {
             "repo-analysis: revived jobs parked by older releases"
         );
     }
+    // Star-history acquisition. With GH Archive enabled the leader-elected
+    // BigQuery coordinator batches repos into shared corpus scans, while
+    // WORKER_COUNT only controls the inexpensive GitHub metadata lookups
+    // needed to resolve stable numeric repo IDs. The legacy GitHub
+    // stargazer-list pool remains an explicit fallback for local/dev installs.
+    let requested_worker_count: usize = std::env::var("WORKER_COUNT")
+        .ok()
+        .and_then(|s| s.parse().ok())
+        .filter(|n| *n >= 1)
+        .unwrap_or(8);
+    let worker_count = requested_worker_count.clamp(1, 16);
+    if requested_worker_count != worker_count {
+        tracing::warn!(
+            requested = requested_worker_count,
+            effective = worker_count,
+            "WORKER_COUNT capped to protect GitHub and socket capacity"
+        );
+    }
+    let star_reset = gitdebt::queue::reset_inflight_on_startup(&db).await?;
+    if star_reset > 0 {
+        tracing::info!(
+            reset_count = star_reset,
+            "star-fetch: reset expired in_progress leases"
+        );
+    }
+
+    // Deployment bootstrap: the comparison catalog is embedded from the
+    // frontend's single source of truth. Offer every curated repo to both
+    // durable queues before starting the pools, so a fresh deployment begins
+    // useful work immediately instead of waiting for a visitor to discover
+    // each comparison page. Fresh jobs and active jobs are deduplicated.
+    let catalog_size = gitdebt::catalog::curated_repos().len();
+    let (catalog_star_jobs, catalog_analysis_jobs) = gitdebt::catalog::enqueue_curated(&db).await?;
+    tracing::info!(
+        catalog_size,
+        catalog_star_jobs,
+        catalog_analysis_jobs,
+        "curated comparison catalog offered to durable queues"
+    );
+
     gitdebt::repo_analysis::spawn_pool(
         gitdebt::repo_analysis::AnalysisCtx {
             db: db.clone(),
@@ -65,24 +111,6 @@ async fn main() -> Result<()> {
         analysis_workers,
     );
     tracing::info!(analysis_workers, "repo-analysis worker pool started");
-
-    // Star-history acquisition. With GH Archive enabled the leader-elected
-    // BigQuery coordinator batches repos into shared corpus scans, while
-    // WORKER_COUNT only controls the inexpensive GitHub metadata lookups
-    // needed to resolve stable numeric repo IDs. The legacy GitHub
-    // stargazer-list pool remains an explicit fallback for local/dev installs.
-    let worker_count: usize = std::env::var("WORKER_COUNT")
-        .ok()
-        .and_then(|s| s.parse().ok())
-        .filter(|n| *n >= 1)
-        .unwrap_or(1);
-    let star_reset = gitdebt::queue::reset_inflight_on_startup(&db).await?;
-    if star_reset > 0 {
-        tracing::info!(
-            reset_count = star_reset,
-            "star-fetch: reset expired in_progress leases"
-        );
-    }
     // Heal legacy rows with complete history but no public-metadata stamp
     // (invisible to every reader). Startup + hourly, bounded, idempotent;
     // the star-fetch claim path writes the metadata. Runs in archive and

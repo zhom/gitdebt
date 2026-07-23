@@ -12,7 +12,12 @@ node_modules
 **/dist
 **/.astro
 
-frontend
+frontend/*
+!frontend/src/
+frontend/src/*
+!frontend/src/data/
+frontend/src/data/*
+!frontend/src/data/categories.ts
 extension
 plans
 

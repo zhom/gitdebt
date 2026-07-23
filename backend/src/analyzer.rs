@@ -18,11 +18,13 @@
 //! the cache only when `stargazers_complete` is set, and the worker only
 //! sets that flag inside the same transaction that committed the rows.
 
-use std::sync::Arc;
+use std::collections::HashSet;
+use std::sync::{Arc, Mutex, OnceLock};
 
 use anyhow::Result;
 use chrono::{DateTime, Utc};
 use serde::Serialize;
+use tokio::sync::Semaphore;
 
 use crate::cache::Cache;
 use crate::chart::{self, Point};
@@ -192,25 +194,30 @@ async fn analyze_repo_with_enqueue(
 
     // Read-side completeness gate: the cache returns the set only when the
     // fetch previously completed.
-    let cached = ctx.cache.get_repo_stargazers(&repo_full).await?;
+    let cached = ctx.cache.get_repo_star_series(&repo_full).await?;
     let fresh = summary
         .as_ref()
         .is_some_and(|s| s.stargazers_fresh_within(STARGAZER_REFRESH_TTL));
 
     let (history, history_complete, total_stars) = match &cached {
         Some(items) => {
-            let full_series = chart::cumulative_series(items);
             let total = summary
                 .as_ref()
                 .and_then(|value| value.star_count)
                 .filter(|value| *value >= 0)
-                .unwrap_or(items.len() as i64)
+                .or_else(|| {
+                    summary
+                        .as_ref()
+                        .and_then(|value| value.history_observed_count)
+                })
+                .unwrap_or_else(|| {
+                    items
+                        .last()
+                        .map(|point| i64::from(point.stars))
+                        .unwrap_or(0)
+                })
                 .clamp(0, u32::MAX as i64) as u32;
-            (
-                chart::downsample(&full_series, MAX_HISTORY_POINTS),
-                true,
-                total,
-            )
+            (chart::downsample(items, MAX_HISTORY_POINTS), true, total)
         }
         None => {
             // Nothing trustworthy cached yet. Surface a best-effort total
@@ -239,17 +246,10 @@ async fn analyze_repo_with_enqueue(
         enqueue_fetch_known(ctx, &repo_full, priority).await;
     }
     let pending = !history_complete;
-    let queued = queue::pending_count(ctx.cache.db()).await.unwrap_or(0);
-
-    // A partial queue job means a large repo is moving through resumable
-    // chunks. Cache readers still enforce the complete-only contract.
-    let backfilling = queue::is_backfilling(ctx.cache.db(), &repo_full)
+    let queue_status = queue::repo_status(ctx.cache.db(), &repo_full)
         .await
-        .unwrap_or(false);
-    let retrying = !history_complete
-        && queue::is_retrying(ctx.cache.db(), &repo_full)
-            .await
-            .unwrap_or(false);
+        .unwrap_or_default();
+    let retrying = !history_complete && queue_status.retrying;
 
     let created_at = summary
         .as_ref()
@@ -260,7 +260,7 @@ async fn analyze_repo_with_enqueue(
         repo: repo_full,
         total_stars,
         created_at,
-        queued: queued.clamp(0, u32::MAX as i64) as u32,
+        queued: queue_status.queued.clamp(0, u32::MAX as i64) as u32,
         history_complete,
         history_kind: if public
             && summary
@@ -274,9 +274,10 @@ async fn analyze_repo_with_enqueue(
         } else {
             "unavailable"
         },
-        history_event_count: cached
+        history_event_count: summary
             .as_ref()
-            .map(|items| items.len().min(u32::MAX as usize) as u32)
+            .and_then(|value| value.history_observed_count)
+            .map(|count| count.clamp(0, i64::from(u32::MAX)) as u32)
             .unwrap_or(0),
         history_coverage_start: summary
             .as_ref()
@@ -292,7 +293,7 @@ async fn analyze_repo_with_enqueue(
                 .and_then(|value| value.history_source.as_deref())
                 == Some("gh_archive"),
         pending,
-        backfilling,
+        backfilling: queue_status.backfilling,
         history_status: if history_complete {
             "ready"
         } else if retrying {
@@ -316,8 +317,8 @@ pub async fn star_series(owner: &str, repo: &str, ctx: &AnalyzerCtx) -> Result<V
     // stargazer set (and one queue job) with /analyze regardless of the
     // URL's case.
     let repo_full = repo_key(owner, repo);
-    match ctx.cache.get_repo_stargazers(&repo_full).await? {
-        Some(items) => {
+    match ctx.cache.get_repo_star_series(&repo_full).await? {
+        Some(series) => {
             let fresh = ctx
                 .cache
                 .repo_stargazers_fresh_within(&repo_full, STARGAZER_REFRESH_TTL)
@@ -326,7 +327,7 @@ pub async fn star_series(owner: &str, repo: &str, ctx: &AnalyzerCtx) -> Result<V
             if !fresh {
                 enqueue_fetch(ctx, &repo_full).await;
             }
-            Ok(chart::cumulative_series(&items))
+            Ok(series)
         }
         None => {
             enqueue_fetch(ctx, &repo_full).await;
@@ -421,6 +422,16 @@ pub async fn enqueue_fetch_known(ctx: &AnalyzerCtx, repo_full: &str, priority: i
 /// older than 1h (authoritative star count + creation date + forks).
 fn maybe_refresh_metadata(owner: &str, repo: &str, ctx: &AnalyzerCtx) {
     let repo_full = format!("{owner}/{repo}");
+    static IN_FLIGHT: OnceLock<Mutex<HashSet<String>>> = OnceLock::new();
+    static CONCURRENCY: Semaphore = Semaphore::const_new(8);
+    let in_flight = IN_FLIGHT.get_or_init(|| Mutex::new(HashSet::new()));
+    if !in_flight
+        .lock()
+        .expect("metadata refresh lock poisoned")
+        .insert(repo_full.clone())
+    {
+        return;
+    }
     let cache = ctx.cache.clone();
     let github = ctx.github.clone();
     let owner_s = owner.to_string();
@@ -432,6 +443,29 @@ fn maybe_refresh_metadata(owner: &str, repo: &str, ctx: &AnalyzerCtx) {
             .await
             .unwrap_or(false)
         {
+            IN_FLIGHT
+                .get()
+                .expect("metadata refresh set initialized")
+                .lock()
+                .expect("metadata refresh lock poisoned")
+                .remove(&repo_full);
+            return;
+        }
+        let _permit = CONCURRENCY
+            .acquire()
+            .await
+            .expect("metadata refresh semaphore closed");
+        if cache
+            .repo_metadata_fresh_within(&repo_full, one_hour)
+            .await
+            .unwrap_or(false)
+        {
+            IN_FLIGHT
+                .get()
+                .expect("metadata refresh set initialized")
+                .lock()
+                .expect("metadata refresh lock poisoned")
+                .remove(&repo_full);
             return;
         }
         match github.repo_metadata(&owner_s, &repo_s).await {
@@ -454,6 +488,12 @@ fn maybe_refresh_metadata(owner: &str, repo: &str, ctx: &AnalyzerCtx) {
                 tracing::debug!(repo = %repo_full, error = %e, "repo_metadata fetch failed")
             }
         }
+        IN_FLIGHT
+            .get()
+            .expect("metadata refresh set initialized")
+            .lock()
+            .expect("metadata refresh lock poisoned")
+            .remove(&repo_full);
     });
 }
 

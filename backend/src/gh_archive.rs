@@ -45,7 +45,11 @@ const HARD_MAX_QUERY_TIMEOUT_SECS: u64 = 600;
 const HARD_MAX_POLL_TIMEOUT_MS: u64 = 20_000;
 const HARD_MAX_RETRIES: usize = 8;
 const HARD_MAX_REPOSITORIES: usize = 5_000;
-const HARD_MAX_RANGE_DAYS: i64 = 366;
+/// The official month tables stay capped at one year per query because the
+/// generated UNION grows with every month. A validated partitioned source
+/// table can safely cover the full GH Archive lifetime in one bounded query.
+const HARD_MAX_PUBLIC_RANGE_DAYS: i64 = 366;
+const HARD_MAX_INDEXED_RANGE_DAYS: i64 = 6_000;
 
 /// A repository to match in GH Archive.
 ///
@@ -90,6 +94,13 @@ pub struct GhArchiveFetch {
 /// deterministic oldest-first order.
 #[async_trait]
 pub trait GhArchiveEventSource: Send + Sync {
+    /// Largest inclusive date window this source accepts. Coordinators use
+    /// this to make actual progress at the configured size instead of
+    /// unconditionally slicing every backfill into calendar months.
+    fn max_range_days(&self) -> i64 {
+        DEFAULT_MAX_RANGE_DAYS
+    }
+
     async fn fetch_star_events(
         &self,
         repositories: &[RepositorySpec],
@@ -276,12 +287,22 @@ impl GhArchiveConfig {
             1,
             HARD_MAX_REPOSITORIES,
         )?;
+        let default_range_days = if config.source_table.is_some() {
+            HARD_MAX_INDEXED_RANGE_DAYS
+        } else {
+            DEFAULT_MAX_RANGE_DAYS
+        };
+        let hard_max_range_days = if config.source_table.is_some() {
+            HARD_MAX_INDEXED_RANGE_DAYS
+        } else {
+            HARD_MAX_PUBLIC_RANGE_DAYS
+        };
         config.max_range_days = parse_i64_env(
             "GH_ARCHIVE_MAX_RANGE_DAYS",
             lookup("GH_ARCHIVE_MAX_RANGE_DAYS"),
-            DEFAULT_MAX_RANGE_DAYS,
+            default_range_days,
             1,
-            HARD_MAX_RANGE_DAYS,
+            hard_max_range_days,
         )?;
 
         if let Some(credentials) = nonempty(lookup("GH_ARCHIVE_GOOGLE_CREDENTIALS_JSON")) {
@@ -330,11 +351,16 @@ impl GhArchiveConfig {
             1,
             HARD_MAX_REPOSITORIES,
         )?;
+        let hard_max_range_days = if self.source_table.is_some() {
+            HARD_MAX_INDEXED_RANGE_DAYS
+        } else {
+            HARD_MAX_PUBLIC_RANGE_DAYS
+        };
         validate_range(
             "GH_ARCHIVE_MAX_RANGE_DAYS",
             self.max_range_days,
             1,
-            HARD_MAX_RANGE_DAYS,
+            hard_max_range_days,
         )?;
         if self.request_timeout.is_zero()
             || self.request_timeout > Duration::from_secs(HARD_MAX_REQUEST_TIMEOUT_SECS)
@@ -598,6 +624,10 @@ impl GhArchiveBigQueryClient {
 
 #[async_trait]
 impl GhArchiveEventSource for GhArchiveBigQueryClient {
+    fn max_range_days(&self) -> i64 {
+        self.config.max_range_days
+    }
+
     async fn fetch_star_events(
         &self,
         repositories: &[RepositorySpec],
@@ -1384,6 +1414,36 @@ mod tests {
                 ..
             }
         ));
+    }
+
+    #[test]
+    fn indexed_source_defaults_to_full_archive_window() {
+        let indexed = GhArchiveConfig::from_lookup(env(&[
+            ("GH_ARCHIVE_ENABLED", "1"),
+            ("GH_ARCHIVE_BIGQUERY_PROJECT", "gitdebt-prod"),
+            (
+                "GH_ARCHIVE_SOURCE_TABLE",
+                "gitdebt-prod.archive.star_events",
+            ),
+        ]))
+        .unwrap()
+        .unwrap();
+        assert_eq!(indexed.max_range_days, HARD_MAX_INDEXED_RANGE_DAYS);
+
+        let public = GhArchiveConfig::from_lookup(env(&[
+            ("GH_ARCHIVE_ENABLED", "1"),
+            ("GH_ARCHIVE_BIGQUERY_PROJECT", "gitdebt-prod"),
+        ]))
+        .unwrap()
+        .unwrap();
+        assert_eq!(public.max_range_days, DEFAULT_MAX_RANGE_DAYS);
+
+        let too_wide = GhArchiveConfig::from_lookup(env(&[
+            ("GH_ARCHIVE_ENABLED", "1"),
+            ("GH_ARCHIVE_BIGQUERY_PROJECT", "gitdebt-prod"),
+            ("GH_ARCHIVE_MAX_RANGE_DAYS", "367"),
+        ]));
+        assert!(too_wide.is_err());
     }
 
     #[test]

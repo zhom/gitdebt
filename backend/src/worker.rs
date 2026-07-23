@@ -418,6 +418,17 @@ async fn process(ctx: &WorkerCtx, job: &queue::Job) -> Result<Outcome> {
             None => return Err(GithubError::NotFound(job.repo.clone()).into()),
         }
     }
+    // An exact GitHub snapshot is immutable once complete. A legacy exact
+    // row may still reach this worker solely to heal its missing public
+    // metadata stamp; settle that queue row after metadata instead of
+    // touching the stargazers endpoint again.
+    if let Some(state) = ctx.cache.get_archive_backfill_state(&job.repo).await?
+        && state.exact_history_complete
+    {
+        return Ok(Outcome::Complete {
+            total: state.authoritative_total.unwrap_or(0).max(0),
+        });
+    }
     let src = GithubPages {
         github: &ctx.github,
         owner: owner.clone(),

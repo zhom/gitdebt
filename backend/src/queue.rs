@@ -50,6 +50,14 @@ pub struct Job {
     pub next_page: u32,
 }
 
+/// Queue state needed by one `/analyze` response, loaded in one round trip.
+#[derive(Debug, Clone, Copy, Default)]
+pub struct RepoQueueStatus {
+    pub queued: i64,
+    pub backfilling: bool,
+    pub retrying: bool,
+}
+
 /// Enqueue a repo for a star-history fetch at the given priority.
 ///
 /// Dedup: if a row already exists and is `in_progress`, it's left alone
@@ -67,7 +75,13 @@ pub async fn enqueue(db: &Db, repo: &str, priority: i64) -> Result<()> {
     // Transient failures stay pending with a durable `next_attempt_at`.
     sqlx::query(
         "INSERT INTO star_fetch_queue (repo, status, priority, enqueued_at) \
-         VALUES ($1, 'pending', $2, $3) \
+         SELECT $1, 'pending', $2, $3 \
+         WHERE NOT EXISTS ( \
+             SELECT 1 FROM repos \
+             WHERE repo = $1 AND history_complete = TRUE \
+               AND history_source = 'github_api' \
+               AND metadata_fetched_at IS NOT NULL \
+         ) \
          ON CONFLICT (repo) DO UPDATE SET \
             priority = GREATEST(star_fetch_queue.priority, EXCLUDED.priority), \
             status = CASE WHEN star_fetch_queue.status IN ('in_progress', 'dead') \
@@ -79,6 +93,45 @@ pub async fn enqueue(db: &Db, repo: &str, priority: i64) -> Result<()> {
     .execute(&db.pool)
     .await?;
     Ok(())
+}
+
+/// Set-based deployment bootstrap for a trusted, already-validated list of
+/// repository slugs. Only cold or stale histories are offered; fresh rows,
+/// tombstones, and terminal queue rows are left untouched. One statement
+/// handles the whole catalog, avoiding hundreds of request-path round trips
+/// and public rate-limit checks during a deploy.
+pub async fn enqueue_cold_or_stale_many(db: &Db, repos: &[String], priority: i64) -> Result<u64> {
+    if repos.is_empty() {
+        return Ok(0);
+    }
+    let result = sqlx::query(
+        "WITH requested(repo) AS ( \
+             SELECT DISTINCT UNNEST($1::TEXT[]) \
+         ), eligible AS ( \
+             SELECT requested.repo \
+             FROM requested \
+             LEFT JOIN repos cached ON cached.repo = requested.repo \
+             WHERE cached.repo IS NULL \
+                OR (cached.missing = FALSE AND ( \
+                    cached.history_complete = FALSE \
+                    OR (cached.history_source = 'gh_archive' AND ( \
+                        cached.archive_fetched_at IS NULL \
+                        OR cached.archive_fetched_at < NOW() - INTERVAL '6 hours' \
+                    )) \
+                )) \
+         ) \
+         INSERT INTO star_fetch_queue (repo, status, priority, enqueued_at) \
+         SELECT repo, 'pending', $2, NOW() FROM eligible \
+         ON CONFLICT (repo) DO UPDATE SET \
+            priority = GREATEST(star_fetch_queue.priority, EXCLUDED.priority) \
+         WHERE star_fetch_queue.status = 'pending' \
+           AND star_fetch_queue.priority < EXCLUDED.priority",
+    )
+    .bind(repos)
+    .bind(priority.max(0))
+    .execute(&db.pool)
+    .await?;
+    Ok(result.rows_affected())
 }
 
 /// True iff the repo currently has a `pending` or `in_progress` row.
@@ -105,6 +158,29 @@ pub async fn pending_count(db: &Db) -> Result<i64> {
     .fetch_one(&db.pool)
     .await?;
     Ok(n)
+}
+
+pub async fn repo_status(db: &Db, repo: &str) -> Result<RepoQueueStatus> {
+    let row: (i64, bool, bool) = sqlx::query_as(
+        "SELECT \
+            (SELECT COUNT(*)::BIGINT FROM star_fetch_queue \
+             WHERE status IN ('pending', 'in_progress')), \
+            EXISTS(SELECT 1 FROM star_fetch_queue \
+             WHERE repo = $1 AND partial = TRUE \
+               AND status IN ('pending', 'in_progress')), \
+            EXISTS(SELECT 1 FROM star_fetch_queue \
+             WHERE repo = $1 AND status IN ('pending', 'in_progress') \
+               AND (attempts > 0 OR last_error LIKE $2))",
+    )
+    .bind(repo)
+    .bind(format!("{PROVIDER_MARKER}%"))
+    .fetch_one(&db.pool)
+    .await?;
+    Ok(RepoQueueStatus {
+        queued: row.0,
+        backfilling: row.1,
+        retrying: row.2,
+    })
 }
 
 /// Count of currently-`pending` jobs (excludes `in_progress` and `dead`).

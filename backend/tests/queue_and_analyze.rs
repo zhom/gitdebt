@@ -182,6 +182,59 @@ async fn queue_dedup_and_claim() {
 }
 
 #[tokio::test]
+async fn catalog_bootstrap_only_enqueues_cold_or_stale_approximate_histories() {
+    let Some(db) = test_db().await else {
+        eprintln!("skipping: set GITDEBT_TEST_DATABASE_URL to run");
+        return;
+    };
+    let prefix = "gitdebt-test-catalog/";
+    cleanup(&db, prefix).await;
+
+    let cold = format!("{prefix}cold");
+    let exact = format!("{prefix}exact");
+    let approximate = format!("{prefix}approximate");
+    let missing = format!("{prefix}missing");
+    sqlx::query(
+        "INSERT INTO repos \
+            (repo, metadata_fetched_at, history_complete, history_source, \
+             stargazers_fetched_at, archive_fetched_at, missing) \
+         VALUES \
+            ($1, NOW(), TRUE, 'github_api', NOW() - INTERVAL '1 year', NULL, FALSE), \
+            ($2, NOW(), TRUE, 'gh_archive', NULL, NOW() - INTERVAL '7 hours', FALSE), \
+            ($3, NOW(), FALSE, NULL, NULL, NULL, TRUE)",
+    )
+    .bind(&exact)
+    .bind(&approximate)
+    .bind(&missing)
+    .execute(&db.pool)
+    .await
+    .unwrap();
+
+    let repos = vec![
+        cold.clone(),
+        exact.clone(),
+        approximate.clone(),
+        missing.clone(),
+    ];
+    assert_eq!(
+        queue::enqueue_cold_or_stale_many(&db, &repos, 0)
+            .await
+            .unwrap(),
+        2
+    );
+    queue::enqueue(&db, &exact, 100).await.unwrap();
+    let queued: Vec<String> =
+        sqlx::query_scalar("SELECT repo FROM star_fetch_queue WHERE repo LIKE $1 ORDER BY repo")
+            .bind(format!("{prefix}%"))
+            .fetch_all(&db.pool)
+            .await
+            .unwrap();
+    assert_eq!(queued, vec![approximate, cold]);
+
+    cleanup(&db, prefix).await;
+}
+
+#[tokio::test]
 async fn transient_star_failures_stay_retryable_with_a_durable_delay() {
     let Some(db) = test_db().await else {
         eprintln!("skipping: set GITDEBT_TEST_DATABASE_URL to run");
@@ -858,6 +911,20 @@ async fn analyze_fresh_complete_repo_returns_history_not_pending() {
             .await
             .unwrap()
     );
+    sqlx::query(
+        "UPDATE repos SET stargazers_fetched_at = NOW() - INTERVAL '1 year' WHERE repo = $1",
+    )
+    .bind(&full)
+    .execute(&db.pool)
+    .await
+    .unwrap();
+    assert!(
+        cache
+            .repo_stargazers_fresh_within(&full, Duration::hours(6))
+            .await
+            .unwrap(),
+        "completed exact snapshots never age out"
+    );
 
     let rate = std::sync::Arc::new(
         gitdebt::rate_limit::RateLimitTracker::load(db.clone())
@@ -878,7 +945,8 @@ async fn analyze_fresh_complete_repo_returns_history_not_pending() {
     assert!(res.history_complete);
     assert!(!res.pending, "fresh complete repo is not pending");
     assert_eq!(res.total_stars, 5);
-    assert_eq!(res.history.len(), 5);
+    assert_eq!(res.history.len(), 1, "same-day stars aggregate in SQL");
+    assert_eq!(res.history[0].stars, 5);
 
     cleanup(&db, prefix).await;
 }
@@ -913,6 +981,13 @@ async fn incremental_append_through_cache() {
 
     let got = cache.get_repo_stargazers(&full).await.unwrap().unwrap();
     assert_eq!(got.len(), 5, "appended tail is present and complete");
+    let chart_series = cache.get_repo_star_series(&full).await.unwrap().unwrap();
+    assert_eq!(
+        chart_series.len(),
+        1,
+        "same-day events must aggregate before common read paths"
+    );
+    assert_eq!(chart_series[0].stars, 5);
     assert_eq!(cache.get_repo_star_count(&full).await.unwrap(), Some(5));
 
     cleanup(&db, prefix).await;
@@ -935,6 +1010,10 @@ async fn completed_history_is_hidden_until_public_metadata_is_recorded() {
     assert!(
         cache.get_repo_stargazers(&full).await.unwrap().is_none(),
         "legacy history without public metadata must never reach readers"
+    );
+    assert!(
+        cache.get_repo_star_series(&full).await.unwrap().is_none(),
+        "daily chart reads must enforce the same completeness/public gate"
     );
     assert!(!cache.repo_stargazers_complete(&full).await.unwrap());
     assert_eq!(cache.get_repo_star_count(&full).await.unwrap(), None);

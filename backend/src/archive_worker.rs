@@ -50,6 +50,7 @@ pub struct ArchiveWorkerCtx {
     cache: Cache,
     batch_size: usize,
     metadata_concurrency: usize,
+    history_window_days: i64,
 }
 
 impl ArchiveWorkerCtx {
@@ -65,12 +66,14 @@ impl ArchiveWorkerCtx {
             1,
             MAX_BATCH_SIZE,
         );
+        let history_window_days = source.max_range_days().max(1);
         Self {
             source,
             github,
             cache,
             batch_size,
             metadata_concurrency: metadata_concurrency.clamp(1, 32),
+            history_window_days,
         }
     }
 }
@@ -306,7 +309,7 @@ async fn process_prepared(
     }
 
     for (start, items) in by_start {
-        let end = archive_window_end(start, cutoff)?;
+        let end = archive_window_end(start, cutoff, ctx.history_window_days)?;
         match fetch_complete(ctx.source.as_ref(), &items, start, end).await {
             Ok(events) => commit_group(ctx, items, start, end, cutoff, events).await?,
             Err(error) => {
@@ -527,16 +530,33 @@ fn provider_retry_delay_seconds(error: &anyhow::Error, failures: u32) -> u64 {
     }
 }
 
-fn archive_window_end(start: NaiveDate, cutoff: NaiveDate) -> Result<NaiveDate> {
-    let month_start = start
-        .with_day(1)
-        .context("cannot calculate archive month start")?;
-    let next_month = month_start
-        .checked_add_months(Months::new(1))
-        .context("archive month overflow")?;
-    Ok(next_month
-        .pred_opt()
-        .context("archive month overflow")?
+fn archive_window_end(
+    start: NaiveDate,
+    cutoff: NaiveDate,
+    max_range_days: i64,
+) -> Result<NaiveDate> {
+    // Keep direct queries over the official month resources calendar-aligned:
+    // a 31-day cross-month range would scan two large tables for almost every
+    // job. Wider ranges are intended for the optimized partitioned source and
+    // should use the full configured window so a fresh deploy can finish a
+    // multi-year backfill in one query.
+    if max_range_days <= 31 {
+        let month_start = start
+            .with_day(1)
+            .context("cannot calculate archive month start")?;
+        let next_month = month_start
+            .checked_add_months(Months::new(1))
+            .context("archive month overflow")?;
+        return Ok(next_month
+            .pred_opt()
+            .context("archive month overflow")?
+            .min(cutoff));
+    }
+    let days =
+        u64::try_from(max_range_days.saturating_sub(1)).context("invalid archive range size")?;
+    Ok(start
+        .checked_add_days(chrono::Days::new(days))
+        .context("archive range overflow")?
         .min(cutoff))
 }
 
@@ -638,6 +658,7 @@ mod tests {
             archive_window_end(
                 NaiveDate::from_ymd_opt(2011, 2, 12).unwrap(),
                 NaiveDate::from_ymd_opt(2026, 7, 19).unwrap(),
+                31,
             )
             .unwrap(),
             NaiveDate::from_ymd_opt(2011, 2, 28).unwrap()
@@ -646,9 +667,32 @@ mod tests {
             archive_window_end(
                 NaiveDate::from_ymd_opt(2026, 7, 1).unwrap(),
                 NaiveDate::from_ymd_opt(2026, 7, 19).unwrap(),
+                31,
             )
             .unwrap(),
             NaiveDate::from_ymd_opt(2026, 7, 19).unwrap()
+        );
+    }
+
+    #[test]
+    fn indexed_archive_uses_the_full_configured_window() {
+        assert_eq!(
+            archive_window_end(
+                NaiveDate::from_ymd_opt(2011, 2, 12).unwrap(),
+                NaiveDate::from_ymd_opt(2026, 7, 19).unwrap(),
+                6_000,
+            )
+            .unwrap(),
+            NaiveDate::from_ymd_opt(2026, 7, 19).unwrap()
+        );
+        assert_eq!(
+            archive_window_end(
+                NaiveDate::from_ymd_opt(2020, 1, 1).unwrap(),
+                NaiveDate::from_ymd_opt(2026, 7, 19).unwrap(),
+                366,
+            )
+            .unwrap(),
+            NaiveDate::from_ymd_opt(2020, 12, 31).unwrap()
         );
     }
 }

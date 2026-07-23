@@ -405,59 +405,19 @@ async fn enqueue_analysis(
     let verified = summary
         .as_ref()
         .is_some_and(|repo| !repo.missing && repo.metadata_fetched_at.is_some());
-    if !verified {
-        let github = if let (Some(user_id), Some(config)) = (user_id, state.gh_app.as_ref()) {
-            match crate::auth::user_access_token(state.analyzer.cache.db(), config, user_id).await {
-                Ok(Some(token)) => state
-                    .analyzer
-                    .github
-                    .for_user_token(&token)
-                    .map(Arc::new)
-                    .unwrap_or_else(|_| state.analyzer.github.clone()),
-                _ => state.analyzer.github.clone(),
-            }
-        } else {
-            state.analyzer.github.clone()
-        };
-        match github.repo_metadata(&owner, &repo).await {
-            Ok(Some(metadata)) => {
-                state
-                    .analyzer
-                    .cache
-                    .put_repo_metadata(
-                        &full,
-                        metadata.id,
-                        metadata.stargazers_count,
-                        metadata.forks_count,
-                        metadata.created_at,
-                    )
-                    .await?;
-            }
-            Ok(None) => {
-                state.analyzer.cache.mark_repo_missing(&full).await?;
-                return Ok((
-                    StatusCode::NOT_FOUND,
-                    Json(serde_json::json!({"queued": false, "repo": full, "reason": "not_found"})),
-                )
-                    .into_response());
-            }
-            Err(error) => {
-                tracing::warn!(repo = %full, error = %error, "repo verification failed");
-                return Ok((
-                    StatusCode::SERVICE_UNAVAILABLE,
-                    Json(serde_json::json!({"queued": false, "repo": full, "reason": "verification_unavailable"})),
-                )
-                    .into_response());
-            }
-        }
-    }
+    // Do not make a GitHub request on this HTTP path. Both durable workers
+    // verify the repository through the public-only metadata decoder before
+    // cloning or ingesting anything, and tombstone 404/private/deleted
+    // slugs. Keeping verification in the worker makes a burst of 100 cold
+    // analysis requests bounded by fast Postgres queue writes instead of
+    // holding 100 HTTP requests open on an upstream API.
 
     // A report visit is the platform activity signal. Record it only after
     // the repository has been verified as public, and keep the counter write
     // off the enqueue request's latency path. The landing-page pulse reads
     // these aggregate repository counters from Postgres; it never exposes a
     // viewer identity or calls GitHub.
-    if request_is_frontend_view(&headers, &state.frontend_origin, query.view) {
+    if verified && request_is_frontend_view(&headers, &state.frontend_origin, query.view) {
         let cache_for_view = state.analyzer.cache.clone();
         let repo_for_view = full.clone();
         tokio::spawn(async move {
@@ -470,7 +430,7 @@ async fn enqueue_analysis(
     // Both pipelines receive the same popularity bump. Star history continues
     // through the existing Postgres-backed GH Archive path; an OAuth token is
     // never pooled into unrelated repositories or persisted on the queue.
-    crate::queue::enqueue(state.analyzer.cache.db(), &full, priority).await?;
+    crate::analyzer::enqueue_fetch_known(&state.analyzer, &full, priority).await;
     let outcome =
         repo_analysis::enqueue_prioritized(state.analyzer.cache.db(), &full, priority, user_id)
             .await?;

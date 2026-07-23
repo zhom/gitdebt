@@ -59,6 +59,31 @@ test("page sitemap and emitted comparison pages share one path source", () => {
   assert.match(comparison, /staticComparisonPaths\(\)/);
 });
 
+test("static repo pages share rate-aware snapshots and comparisons self-heal live", () => {
+  const root = path.resolve(import.meta.dirname, "..");
+  const read = (relative) =>
+    fs.readFileSync(path.join(root, relative), "utf8");
+  for (const relative of [
+    "src/pages/[owner]/[repo].astro",
+    "src/pages/compare/[category].astro",
+    "src/pages/vs/[owner1]/[repo1]/[owner2]/[repo2].astro",
+  ]) {
+    assert.match(
+      read(relative),
+      /loadBuildRepoSnapshot/,
+      `${relative} bypasses the shared deploy snapshot scheduler`,
+    );
+  }
+  assert.match(
+    read("src/lib/build-repo-snapshot.ts"),
+    /STATIC_ANALYZE_INTERVAL_MS/,
+  );
+  assert.match(
+    read("src/pages/vs/[owner1]/[repo1]/[owner2]/[repo2].astro"),
+    /LiveVsComparison[\s\S]*client:load/,
+  );
+});
+
 test("profiles live at the root and share one login source", () => {
   const root = path.resolve(import.meta.dirname, "..");
   const read = (relative) => fs.readFileSync(path.join(root, relative), "utf8");

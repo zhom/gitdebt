@@ -4,6 +4,19 @@ use sqlx::PgConnection;
 use sqlx::PgPool;
 use sqlx::postgres::PgPoolOptions;
 
+const DEFAULT_POOL_MAX: u32 = 24;
+const POOL_ACQUIRE_TIMEOUT: std::time::Duration = std::time::Duration::from_secs(5);
+const POOL_IDLE_TIMEOUT: std::time::Duration = std::time::Duration::from_secs(5 * 60);
+const POOL_MAX_LIFETIME: std::time::Duration = std::time::Duration::from_secs(30 * 60);
+
+fn pool_options(max_connections: u32) -> PgPoolOptions {
+    PgPoolOptions::new()
+        .max_connections(max_connections.max(1))
+        .acquire_timeout(POOL_ACQUIRE_TIMEOUT)
+        .idle_timeout(Some(POOL_IDLE_TIMEOUT))
+        .max_lifetime(Some(POOL_MAX_LIFETIME))
+}
+
 /// Serializes the idempotent startup schema across processes and test tasks.
 ///
 /// PostgreSQL's `CREATE TABLE IF NOT EXISTS` is not safe when two sessions
@@ -224,6 +237,18 @@ CREATE TABLE IF NOT EXISTS api_quota (
     reset_at     BIGINT NOT NULL,
     updated_at   TIMESTAMPTZ NOT NULL
 );
+
+-- Cross-process deployment visibility. The API and worker are separate
+-- binaries by design; without a durable heartbeat an API-only deployment can
+-- look healthy while every cold comparison remains queued forever.
+CREATE TABLE IF NOT EXISTS service_heartbeats (
+    instance_id TEXT PRIMARY KEY NOT NULL,
+    service     TEXT NOT NULL,
+    started_at TIMESTAMPTZ NOT NULL,
+    seen_at    TIMESTAMPTZ NOT NULL
+);
+CREATE INDEX IF NOT EXISTS idx_service_heartbeats_service_seen
+    ON service_heartbeats(service, seen_at DESC);
 
 -- Durable checkpoint for the raw hourly GH Archive follower. An hour and all
 -- of its matching tracked-repo events commit in one transaction, so replay
@@ -640,7 +665,7 @@ impl Db {
         let max_connections: u32 = std::env::var("DB_POOL_MAX")
             .ok()
             .and_then(|s| s.parse().ok())
-            .unwrap_or(60);
+            .unwrap_or(DEFAULT_POOL_MAX);
         Self::connect_with_pool_size(database_url, max_connections).await
     }
 
@@ -652,8 +677,7 @@ impl Db {
     /// per test deadlocks against the queries of tests already in flight, so
     /// only the first test applies the schema and the rest connect with this.
     pub async fn connect_pool_only(database_url: &str, max_connections: u32) -> Result<Self> {
-        let pool = PgPoolOptions::new()
-            .max_connections(max_connections)
+        let pool = pool_options(max_connections)
             .connect(database_url)
             .await
             .context("connect postgres")?;
@@ -662,8 +686,7 @@ impl Db {
 
     /// `connect` with an explicit pool ceiling.
     pub async fn connect_with_pool_size(database_url: &str, max_connections: u32) -> Result<Self> {
-        let pool = PgPoolOptions::new()
-            .max_connections(max_connections)
+        let pool = pool_options(max_connections)
             .connect(database_url)
             .await
             .context("connect postgres")?;
@@ -792,6 +815,12 @@ mod tests {
             SCHEMA_MIGRATION_LOCK_ID, 0,
             "the startup schema lock must use a dedicated non-zero key"
         );
+    }
+
+    #[test]
+    fn schema_tracks_cross_process_worker_liveness() {
+        assert!(SCHEMA.contains("CREATE TABLE IF NOT EXISTS service_heartbeats"));
+        assert!(SCHEMA.contains("idx_service_heartbeats_service_seen"));
     }
 
     #[test]

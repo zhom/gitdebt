@@ -21,7 +21,7 @@
 //! clocks and randomness — they are.
 
 use anyhow::Result;
-use chrono::NaiveDate;
+use chrono::{NaiveDate, TimeZone, Utc};
 use serde::Serialize;
 use sqlx::Row;
 
@@ -138,6 +138,25 @@ pub fn accumulate(deltas: &[(NaiveDate, i64)]) -> Vec<DayStat> {
         });
     }
     out
+}
+
+/// Convert per-day deltas to the cumulative point representation used by
+/// chart renderers. One point per active UTC day is sufficient for a
+/// calendar-scale star-history chart and bounds a 3.5M-star repository to a
+/// few thousand points instead of materializing millions of timestamps.
+pub fn cumulative_points(deltas: &[(NaiveDate, i64)]) -> Vec<Point> {
+    accumulate(deltas)
+        .into_iter()
+        .filter_map(|row| {
+            let at = Utc
+                .from_local_datetime(&row.date.and_hms_opt(0, 0, 0)?)
+                .single()?;
+            Some(Point {
+                at,
+                stars: row.total.min(u64::from(u32::MAX)) as u32,
+            })
+        })
+        .collect()
 }
 
 /// Window-filter running-total day stats. Days before `from` are dropped
@@ -350,6 +369,18 @@ mod tests {
         assert_eq!(rows[0].total, 0);
         assert_eq!(rows[0].delta, 0);
         assert_eq!(rows[1].total, 2);
+    }
+
+    #[test]
+    fn cumulative_points_are_daily_utc_and_running() {
+        let points = cumulative_points(&[(d("2020-01-01"), 3), (d("2020-01-03"), 2)]);
+        assert_eq!(points.len(), 2);
+        assert_eq!(
+            points[0].at,
+            Utc.with_ymd_and_hms(2020, 1, 1, 0, 0, 0).unwrap()
+        );
+        assert_eq!(points[0].stars, 3);
+        assert_eq!(points[1].stars, 5);
     }
 
     #[test]

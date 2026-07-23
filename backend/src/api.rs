@@ -51,9 +51,9 @@ pub struct ApiState {
     /// Pre-serialized JSON bodies for the analyze endpoint, keyed by
     /// `owner/repo`. Short TTL (5 min) so newly-fetched stargazers show
     /// up promptly; long enough to absorb SSR storms on viral pages.
-    /// The underlying analyze pass loads ~tens of MB of cached rows for
-    /// large repos (3.5M starred entries on donutbrowser-class repos),
-    /// so caching the serialized JSON saves real wall-time per hit.
+    /// The underlying analyze pass aggregates complete history to UTC days
+    /// in Postgres, then downsamples the result. Caching still absorbs the
+    /// aggregate query and serialization on repeat hits.
     pub analyze_cache: MokaCache<String, String>,
     /// Hot in-memory cache of rendered repo-history stat SVGs (bug
     /// magnets, top files, heatmap, contributors, todo trend, lines).
@@ -541,6 +541,8 @@ async fn health() -> &'static str {
 
 #[derive(Debug, Serialize)]
 struct PipelineSignals {
+    worker_online: bool,
+    worker_last_seen: Option<DateTime<Utc>>,
     histories_complete: i64,
     histories_pending: i64,
     star_jobs_active: i64,
@@ -559,7 +561,8 @@ struct PipelineSignals {
 
 impl PipelineSignals {
     fn degraded(&self) -> bool {
-        self.star_jobs_provider_delayed > 0
+        (!self.worker_online && (self.star_jobs_active > 0 || self.analysis_jobs_active > 0))
+            || self.star_jobs_provider_delayed > 0
             || self.star_jobs_dead > 0
             || self.analysis_jobs_dead > 0
     }
@@ -568,6 +571,11 @@ impl PipelineSignals {
 async fn load_pipeline_signals(db: &crate::db::Db) -> Result<PipelineSignals, sqlx::Error> {
     let row = sqlx::query(
         "SELECT \
+            EXISTS(SELECT 1 FROM service_heartbeats \
+                WHERE service = 'worker' AND seen_at >= NOW() - INTERVAL '45 seconds') \
+                AS worker_online, \
+            (SELECT MAX(seen_at) FROM service_heartbeats WHERE service = 'worker') \
+                AS worker_last_seen, \
             (SELECT COUNT(*)::BIGINT FROM repos WHERE history_complete = TRUE \
                 AND missing = FALSE AND metadata_fetched_at IS NOT NULL) \
                 AS histories_complete, \
@@ -619,6 +627,8 @@ async fn load_pipeline_signals(db: &crate::db::Db) -> Result<PipelineSignals, sq
     .fetch_one(&db.pool)
     .await?;
     Ok(PipelineSignals {
+        worker_online: row.try_get("worker_online")?,
+        worker_last_seen: row.try_get("worker_last_seen")?,
         histories_complete: row.try_get("histories_complete")?,
         histories_pending: row.try_get("histories_pending")?,
         star_jobs_active: row.try_get("star_jobs_active")?,
@@ -848,21 +858,22 @@ async fn analyze(
     let repo = repo.to_ascii_lowercase();
     let key = format!("{owner}/{repo}");
     let enqueue = query.enqueue != Some(0);
-    let (json, live) = if !enqueue {
-        let result = crate::analyzer::analyze_repo_readonly(&owner, &repo, &state.analyzer).await?;
-        let live = result.pending || result.backfilling;
-        (serde_json::to_string(&result)?, live)
-    } else if let Some(json) = state.analyze_cache.get(&key).await {
-        (json, false)
+    let flight_key = if enqueue {
+        key
     } else {
-        let result = analyze_repo(&owner, &repo, &state.analyzer).await?;
+        format!("readonly:{key}")
+    };
+    let (json, live) = single_flight_analyze(&state.analyze_cache, flight_key, async {
+        let result = if enqueue {
+            analyze_repo(&owner, &repo, &state.analyzer).await?
+        } else {
+            crate::analyzer::analyze_repo_readonly(&owner, &repo, &state.analyzer).await?
+        };
         let live = result.pending || result.backfilling;
         let json = serde_json::to_string(&result)?;
-        if !live {
-            state.analyze_cache.insert(key, json.clone()).await;
-        }
-        (json, live)
-    };
+        Ok((json, live))
+    })
+    .await?;
     let mut headers = HeaderMap::new();
     headers.insert(
         header::CONTENT_TYPE,
@@ -2182,19 +2193,21 @@ async fn ext_ping(
         ));
     }
 
-    let known = cache
-        .repo_stargazers_complete(&repo_full)
-        .await
-        .unwrap_or(false);
-    let fresh = cache
-        .repo_stargazers_fresh_within(&repo_full, PING_STALE_TTL)
-        .await
-        .unwrap_or(false);
-    let cached_stars = if known {
-        cache.get_repo_star_count(&repo_full).await.ok().flatten()
-    } else {
-        None
-    };
+    let summary = cache.get_repo_summary(&repo_full).await.ok().flatten();
+    let known = summary.as_ref().is_some_and(|value| {
+        value.stargazers_complete && !value.missing && value.metadata_fetched_at.is_some()
+    });
+    let exact = known
+        && summary
+            .as_ref()
+            .and_then(|value| value.history_source.as_deref())
+            == Some("github_api");
+    let fresh = summary
+        .as_ref()
+        .is_some_and(|value| value.stargazers_fresh_within(PING_STALE_TTL));
+    let cached_stars = known
+        .then(|| summary.as_ref().and_then(|value| value.star_count))
+        .flatten();
     // `stale` here means "we have it but it's worth refreshing" — by age
     // or by the count drifting past the threshold. Unknown is reported via
     // `known: false`, not `stale`.
@@ -2203,9 +2216,9 @@ async fn ext_ping(
         // No reported count → no count-based drift (age-only freshness).
         _ => false,
     };
-    let stale = known && (!fresh || count_drifted);
+    let stale = known && !exact && (!fresh || count_drifted);
 
-    let enqueued = ping_should_enqueue(cached_stars, body.stars, fresh);
+    let enqueued = !exact && ping_should_enqueue(cached_stars, body.stars, fresh);
     if enqueued {
         // The worker decides full-vs-incremental from the cache state; we
         // just enqueue (idempotent dedup in the queue). The client's
@@ -2444,12 +2457,13 @@ async fn ensure_chart_gif(
     // Deliberately bypass `analyzer::star_series`: that helper may enqueue
     // acquisition. Animated embeds are a pure cached-data read and never
     // spend GitHub budget.
-    let arrivals = state.analyzer.cache.get_repo_stargazers(&repo_full).await?;
+    let arrivals = state
+        .analyzer
+        .cache
+        .get_repo_star_series(&repo_full)
+        .await?;
     let complete = arrivals.is_some();
-    let full = arrivals
-        .as_deref()
-        .map(crate::chart::cumulative_series)
-        .unwrap_or_default();
+    let full = arrivals.unwrap_or_default();
     let series = export::filter_points(&full, &spec);
     let revision = crate::animated_gif::data_revision(&series);
     let theme_key = if theme.dark { "dark" } else { "light" };
@@ -2749,10 +2763,9 @@ async fn ensure_multi_svg(
     let pairs = parse_overlay_repos(q.repos.as_deref())?;
     let key = overlay_key(&pairs, theme, q, &spec);
     single_flight_card(&state.svg_cache, key, async {
-        // Build each repo's full series via the same pipeline as the single
-        // chart. Done sequentially: the per-repo stargazer fetch is itself
-        // internally parallel, and overlay traffic is low-volume vs. the
-        // single-repo embed path.
+        // Build each repo's daily cumulative series via the same pipeline as
+        // the single chart. Done sequentially to keep one large overlay from
+        // occupying the entire Postgres pool.
         let mut series_per_repo: Vec<(String, Vec<Point>)> = Vec::with_capacity(pairs.len());
         let mut pending = false;
         for (owner, repo) in &pairs {
@@ -2946,11 +2959,11 @@ async fn build_usage(
     let stars_total = state
         .analyzer
         .cache
-        .get_repo_stargazers(&repo_full)
+        .get_repo_star_count(&repo_full)
         .await
         .ok()
         .flatten()
-        .map(|v| v.len() as u64)
+        .map(|value| value.max(0) as u64)
         .unwrap_or(0);
     let forks = state
         .analyzer
@@ -3561,11 +3574,11 @@ async fn build_badge_svg(
     let stars = state
         .analyzer
         .cache
-        .get_repo_stargazers(&repo_full)
+        .get_repo_star_count(&repo_full)
         .await
         .ok()
         .flatten()
-        .map(|v| v.len() as u64);
+        .map(|value| value.max(0) as u64);
     let forks = state
         .analyzer
         .cache
@@ -4268,11 +4281,45 @@ struct RenderedCard {
     short_ttl: bool,
 }
 
+enum AnalyzeMiss {
+    Live(String),
+    Failed(ApiError),
+}
+
+/// `/analyze` single-flight with a conditional cache policy. Complete
+/// snapshots are memoized for five minutes; pending/backfilling snapshots use
+/// moka's error arm so concurrent requests still coalesce but the live body
+/// is never cached. This prevents a same-repo burst from repeating the daily
+/// aggregate query or metadata enqueue work 100 times.
+async fn single_flight_analyze(
+    cache: &MokaCache<String, String>,
+    key: String,
+    init: impl std::future::Future<Output = Result<(String, bool), ApiError>>,
+) -> Result<(String, bool), ApiError> {
+    match cache
+        .try_get_with(key, async {
+            let (json, live) = init.await.map_err(AnalyzeMiss::Failed)?;
+            if live {
+                Err(AnalyzeMiss::Live(json))
+            } else {
+                Ok(json)
+            }
+        })
+        .await
+    {
+        Ok(json) => Ok((json, false)),
+        Err(error) => match &*error {
+            AnalyzeMiss::Live(json) => Ok((json.clone(), true)),
+            AnalyzeMiss::Failed(error) => Err(error.clone_shared()),
+        },
+    }
+}
+
 /// Single-flight string memo. Concurrent misses for the same `key` coalesce
 /// onto ONE `init` future (moka `try_get_with`) instead of stampeding the
 /// origin — a celebrity-repo miss on a viral README embed then runs the
-/// heavy load (tens of MB of cached rows) once, not once per concurrent
-/// request. Determinism is preserved: the closure is the same pure render
+/// aggregate/load once, not once per concurrent request. Determinism is
+/// preserved: the closure is the same pure render
 /// as before, only its execution is deduplicated. Errors are never memoized
 /// (moka only caches the `Ok` value); the shared `Arc<ApiError>` is
 /// reconstructed per waiter via [`ApiError::clone_shared`].
@@ -6116,6 +6163,33 @@ mod tests {
         assert!(cache.get("e").await.is_none());
     }
 
+    #[tokio::test]
+    async fn analyze_single_flight_coalesces_one_hundred_live_requests() {
+        use std::sync::atomic::{AtomicUsize, Ordering};
+
+        let cache = test_string_cache();
+        let runs = std::sync::Arc::new(AtomicUsize::new(0));
+        let requests = (0..100).map(|_| {
+            let runs = runs.clone();
+            single_flight_analyze(&cache, "repo".into(), async move {
+                runs.fetch_add(1, Ordering::SeqCst);
+                tokio::time::sleep(Duration::from_millis(20)).await;
+                Ok(("pending".to_string(), true))
+            })
+        });
+        let responses = futures::future::join_all(requests).await;
+        assert!(
+            responses
+                .into_iter()
+                .all(|response| { matches!(response, Ok((ref body, true)) if body == "pending") })
+        );
+        assert_eq!(runs.load(Ordering::SeqCst), 1);
+        assert!(
+            cache.get("repo").await.is_none(),
+            "live snapshots must coalesce without becoming stale cache entries"
+        );
+    }
+
     /// Full `ApiState` over the test database, or `None` (test no-ops)
     /// when `GITDEBT_TEST_DATABASE_URL` is unset — the same gating
     /// convention as the integration suites.
@@ -7202,6 +7276,8 @@ mod tests {
     #[test]
     fn expected_tombstones_do_not_degrade_readiness() {
         let mut pipeline = PipelineSignals {
+            worker_online: true,
+            worker_last_seen: None,
             histories_complete: 0,
             histories_pending: 0,
             star_jobs_active: 0,
@@ -7220,6 +7296,11 @@ mod tests {
         assert!(!pipeline.degraded());
 
         pipeline.star_jobs_dead = 1;
+        assert!(pipeline.degraded());
+
+        pipeline.star_jobs_dead = 0;
+        pipeline.worker_online = false;
+        pipeline.analysis_jobs_active = 1;
         assert!(pipeline.degraded());
     }
 

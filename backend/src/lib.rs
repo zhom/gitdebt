@@ -10,6 +10,7 @@ pub mod bootstrap;
 pub mod brand;
 pub mod cache;
 pub mod cards;
+pub mod catalog;
 pub mod chart;
 pub mod code_count;
 pub mod crypto;

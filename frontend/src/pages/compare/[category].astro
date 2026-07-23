@@ -2,6 +2,7 @@
 import "@/styles/globals.css";
 import { staticCategoryPaths } from "@/lib/build-catalog";
 import { staticApiBase } from "@/lib/static-api-base";
+import { loadBuildRepoSnapshot } from "@/lib/build-repo-snapshot";
 import BaseHead from "@/components/BaseHead.astro";
 import Seo from "@/components/Seo.astro";
 import SiteHeader from "@/components/SiteHeader.astro";
@@ -47,25 +48,8 @@ const site = (Astro.site ?? new URL("https://gitdebt.com")).href.replace(/\/$/, 
 const canonicalPath = `/compare/${category.slug}`;
 const canonical = `${site}${canonicalPath}`;
 
-type AnalyzeResponse = {
-  repo: string;
-  total_stars: number;
-  created_at: string | null;
-  queued: number;
-  history_complete: boolean;
-  not_found?: boolean;
-  history: { date: string; stars: number }[];
-};
-
-const results = await Promise.allSettled(
-  category.repos.map(async (slug) => {
-    const res = await fetch(`${apiBase}/api/repos/${slug}/analyze?enqueue=0`, {
-      headers: { accept: "application/json" },
-      signal: AbortSignal.timeout(5_000),
-    });
-    if (!res.ok) throw new Error(`status ${res.status}`);
-    return (await res.json()) as AnalyzeResponse;
-  }),
+const results = await Promise.all(
+  category.repos.map((slug) => loadBuildRepoSnapshot(slug)),
 );
 
 type MemberRow = {
@@ -80,9 +64,8 @@ type MemberRow = {
 const members: MemberRow[] = [];
 for (let i = 0; i < category.repos.length; i++) {
   const r = results[i];
-  if (r.status !== "fulfilled") continue;
-  const d = r.value;
-  if (d.not_found) continue;
+  const d = r.data;
+  if (!d) continue;
   members.push({
     slug: category.repos[i],
     stars: d.total_stars,

@@ -122,6 +122,48 @@ pub async fn shutdown_signal() {
     }
 }
 
+/// Publish one process's liveness to Postgres. The API uses the worker row to
+/// expose an API-only/mis-targeted deployment immediately instead of letting
+/// cold queue jobs appear to run forever.
+pub fn spawn_service_heartbeat(db: Db, service: &'static str) {
+    let host = std::env::var("HOSTNAME")
+        .ok()
+        .filter(|value| !value.trim().is_empty())
+        .unwrap_or_else(|| "unknown".to_string());
+    let started = chrono::Utc::now();
+    let instance_id = format!(
+        "{service}:{host}:{}:{}",
+        std::process::id(),
+        started.timestamp_millis()
+    );
+    tokio::spawn(async move {
+        if let Err(error) =
+            sqlx::query("DELETE FROM service_heartbeats WHERE seen_at < NOW() - INTERVAL '7 days'")
+                .execute(&db.pool)
+                .await
+        {
+            tracing::warn!(service, %error, "stale service heartbeat cleanup failed");
+        }
+        loop {
+            if let Err(error) = sqlx::query(
+                "INSERT INTO service_heartbeats \
+                    (instance_id, service, started_at, seen_at) \
+                 VALUES ($1, $2, $3, NOW()) \
+                 ON CONFLICT (instance_id) DO UPDATE SET seen_at = NOW()",
+            )
+            .bind(&instance_id)
+            .bind(service)
+            .bind(started)
+            .execute(&db.pool)
+            .await
+            {
+                tracing::warn!(service, %error, "service heartbeat failed");
+            }
+            tokio::time::sleep(Duration::from_secs(15)).await;
+        }
+    });
+}
+
 /// How often a non-leader re-contends for the advisory lock.
 const LEADER_CONTEND_INTERVAL: Duration = Duration::from_secs(60);
 /// How often the leader's lock connection is pinged to detect loss.

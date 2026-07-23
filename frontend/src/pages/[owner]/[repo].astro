@@ -5,6 +5,10 @@ import {
   staticRepoPaths,
 } from "@/lib/build-catalog";
 import { staticApiBase } from "@/lib/static-api-base";
+import {
+  loadBuildRepoSnapshot,
+  type BuildAnalyzeResponse as AnalyzeResponse,
+} from "@/lib/build-repo-snapshot";
 import BaseHead from "@/components/BaseHead.astro";
 import Seo from "@/components/Seo.astro";
 import SiteHeader from "@/components/SiteHeader.astro";
@@ -52,81 +56,17 @@ const repo = rawRepo.toLowerCase();
 
 const apiBase = staticApiBase();
 
-type AnalyzeResponse = {
-  repo: string;
-  total_stars: number;
-  created_at: string | null;
-  queued: number;
-  pending?: boolean;
-  history_complete: boolean;
-  history_kind:
-    | "current_stargazers"
-    | "public_star_actions"
-    | "unavailable";
-  history_event_count: number;
-  history_coverage_start: string | null;
-  history_coverage_end: string | null;
-  history_approximate: boolean;
-  backfilling?: boolean;
-  not_found?: boolean;
-  history: { date: string; stars: number }[];
-};
-
 let data: AnalyzeResponse | null = null;
 let fetchError: string | null = null;
 let repoNotFound = false;
 let usage: UsageResponse | null = null;
 
 async function fetchAnalysis() {
-  const maxAttempts = requiredSnapshot ? 5 : 1;
-
-  for (let attempt = 0; attempt < maxAttempts; attempt += 1) {
-    try {
-      const response = await fetch(
-        `${apiBase}/api/repos/${owner}/${repo}/analyze?enqueue=0`,
-        {
-          headers: { accept: "application/json" },
-          signal: AbortSignal.timeout(5_000),
-        },
-      );
-      const transient =
-        response.status === 408 ||
-        response.status === 425 ||
-        response.status === 429 ||
-        response.status >= 500;
-
-      if (!transient || attempt === maxAttempts - 1) {
-        const result = response.ok
-          ? ((await response.json()) as AnalyzeResponse)
-          : null;
-        return { status: response.status, result };
-      }
-
-      // Astro/Undici can hand us a transient response whose body has already
-      // been consumed by the time the retry branch runs. Draining it helps
-      // connection reuse, but a locked/used body must not abort the retry.
-      if (response.body && !response.bodyUsed && !response.body.locked) {
-        try {
-          await response.arrayBuffer();
-        } catch {
-          // The retry is more important than retaining a transient response.
-        }
-      }
-      const retryAfter = Number(response.headers.get("retry-after"));
-      const delayMs =
-        Number.isFinite(retryAfter) && retryAfter > 0
-          ? Math.min(retryAfter * 1_000, 30_000)
-          : 2_000 * 2 ** attempt;
-      await new Promise((resolve) => setTimeout(resolve, delayMs));
-    } catch (error) {
-      if (attempt === maxAttempts - 1) throw error;
-      await new Promise((resolve) =>
-        setTimeout(resolve, 2_000 * 2 ** attempt),
-      );
-    }
-  }
-
-  throw new Error("analysis request exhausted its retry budget");
+  const snapshot = await loadBuildRepoSnapshot(`${owner}/${repo}`);
+  return {
+    status: snapshot.notFound ? 404 : snapshot.data ? 200 : 503,
+    result: snapshot.data,
+  };
 }
 
 async function fetchUsage() {

@@ -1,8 +1,11 @@
 # gitdebt agent guide
 
 gitdebt is an open-source GitHub star-history and repository-health analytics
-tool. The backend is Rust/Axum/Postgres, the frontend is static Astro/React,
-and `extension/` is a zero-build MV3 browser extension.
+tool. The backend is Rust/Axum/Postgres built as two binaries — `gitdebt-api`
+serves HTTP and `gitdebt-worker` runs ingestion and analysis; any replica
+count of either is safe. The frontend is static Astro/React, and `extension/`
+is a zero-build MV3 browser extension. The visual system is dark-first dither:
+dark is the default theme for the site and for server-rendered assets.
 
 ## Product boundary
 
@@ -17,11 +20,15 @@ and `extension/` is a zero-build MV3 browser extension.
 ## Repository map
 
 ```text
-backend/   Rust API, workers, Postgres cache, charts and rasterization
+backend/   Rust API + worker binaries, Postgres cache, charts, rasterization
 frontend/  Astro 7 static site, React islands, Tailwind v4
 extension/ Browser-native MV3 extension
 scripts/   Local database helpers
 ```
+
+`gitdebt-api` needs Postgres (`DATABASE_URL`) and Redis (`REDIS_URL`);
+`gitdebt-worker` needs Postgres. `scripts/db.sh up` starts both stores
+locally.
 
 Read the relevant module before changing it. Important backend modules:
 

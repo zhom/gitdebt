@@ -134,10 +134,10 @@ export function SignalFlowGraphic({ apiBase }: { apiBase: string }) {
         id="live-repo-caption"
         className="flex min-h-14 items-center justify-between gap-4 border-b border-border px-4 sm:px-5"
       >
-        <p className="inline-flex items-center gap-2 font-mono text-xs tracking-wide text-muted-foreground uppercase">
+        <p className="mono-label inline-flex items-center gap-2">
           <span className="relative flex size-2" aria-hidden="true">
-            <span className="absolute inline-flex size-full motion-safe:animate-ping rounded-full bg-emerald-500 opacity-35" />
-            <span className="relative inline-flex size-2 rounded-full bg-emerald-500" />
+            <span className="absolute inline-flex size-full motion-safe:animate-ping rounded-full bg-(--dither-wave-2) opacity-35" />
+            <span className="relative inline-flex size-2 rounded-full bg-(--dither-wave-2)" />
           </span>
           Live repository
         </p>
@@ -159,7 +159,7 @@ export function SignalFlowGraphic({ apiBase }: { apiBase: string }) {
             >
               <div className="flex items-start justify-between gap-4 border-b border-foreground pb-4">
                 <div className="min-w-0">
-                  <p className="font-mono text-xs text-muted-foreground uppercase">Now inspecting</p>
+                  <p className="mono-label">Now inspecting</p>
                   <p className="mt-1 truncate font-mono text-base font-medium">{selected.repo}</p>
                 </div>
                 <span className="group inline-flex min-h-11 shrink-0 items-center gap-1.5 text-sm text-muted-foreground group-hover:text-foreground sm:min-h-0">
@@ -173,7 +173,7 @@ export function SignalFlowGraphic({ apiBase }: { apiBase: string }) {
 
               <div className="grid grid-cols-3 border-b border-border">
                 <div className="py-5 pr-4">
-                  <p className="flex items-center gap-2 font-mono text-xs text-muted-foreground uppercase">
+                  <p className="mono-label flex items-center gap-2">
                     <Star className="size-3.5" aria-hidden="true" /> Current stars
                   </p>
                   <motion.p
@@ -187,7 +187,7 @@ export function SignalFlowGraphic({ apiBase }: { apiBase: string }) {
                   </motion.p>
                 </div>
                 <div className="border-l border-border py-5 pl-4">
-                  <p className="flex items-center gap-2 font-mono text-xs text-muted-foreground uppercase">
+                  <p className="mono-label flex items-center gap-2">
                     <Eye className="size-3.5" aria-hidden="true" /> Report views
                   </p>
                   <motion.p
@@ -201,7 +201,7 @@ export function SignalFlowGraphic({ apiBase }: { apiBase: string }) {
                   </motion.p>
                 </div>
                 <div className="border-l border-border py-5 pl-4">
-                  <p className="font-mono text-xs text-muted-foreground uppercase">30d gain</p>
+                  <p className="mono-label">30d gain</p>
                   <motion.p
                     key={`gain-${selected.repo}`}
                     initial={{ opacity: 0, y: reduceMotion ? 0 : 6 }}
@@ -236,7 +236,7 @@ export function SignalFlowGraphic({ apiBase }: { apiBase: string }) {
                             ? { duration: 0 }
                             : { duration: 1.4, repeat: Infinity, ease: EASE_OUT }
                         }
-                        className="block h-full w-1/3 rounded-full bg-foreground"
+                        className="signal-dither-fill block h-full w-1/3 rounded-full"
                       />
                     </div>
                     <p className="mt-3 text-sm text-muted-foreground">A measured ETA replaces this as soon as work starts.</p>
@@ -252,7 +252,7 @@ export function SignalFlowGraphic({ apiBase }: { apiBase: string }) {
                         initial={false}
                         animate={{ scaleX: ready ? 1 : 0.08 }}
                         transition={reduceMotion ? { duration: 0.12 } : SPRING.snappy}
-                        className="block h-full origin-left rounded-full bg-foreground"
+                        className="signal-dither-fill block h-full origin-left rounded-full"
                       />
                     </span>
                   ))}

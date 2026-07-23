@@ -64,7 +64,7 @@ function SignalHeader({
 }) {
   return (
     <header className="flex min-h-14 items-center justify-between gap-3 border-b border-border px-5 py-3">
-      <h3 className="inline-flex items-center gap-2 font-mono text-xs tracking-wide text-muted-foreground uppercase">
+      <h3 className="mono-label inline-flex items-center gap-2">
         <span className="size-1.5 bg-foreground" aria-hidden="true" />
         {label}
       </h3>
@@ -164,7 +164,7 @@ export function InteractiveRepoSignals(props: Props) {
           <SignalHeader apiBase={apiBase} slug={slug} embedLink={embedLink} name="bus-factor" label="Ownership concentration" />
           <div className="grid min-h-44 gap-5 px-5 py-5 sm:grid-cols-[10rem_1fr] sm:items-center">
             <div>
-              <p className="font-mono text-xs tracking-wide text-muted-foreground uppercase">Risk · factor {stats.bus_factor}</p>
+              <p className="mono-label">Risk · factor {stats.bus_factor}</p>
               <p className="mt-1 text-4xl font-semibold tracking-tight">{risk}</p>
               <p className="mt-3 text-xs text-muted-foreground">{compact(stats.total_commits)} total repository commits</p>
             </div>
@@ -183,7 +183,7 @@ export function InteractiveRepoSignals(props: Props) {
       </div>
 
       <div>
-        <p className="font-mono text-xs tracking-wide text-muted-foreground uppercase">More repository signals</p>
+        <p className="mono-label">More repository signals</p>
         <h3 className="mt-2 text-xl font-semibold tracking-tight">People, language, cadence, and debt markers</h3>
       </div>
 

@@ -88,7 +88,7 @@ const jsonLd = [
     />
   </head>
   <body>
-    <div class="badge-page isolate flex min-h-dvh flex-col">
+    <div class="isolate flex min-h-dvh flex-col">
       <SiteHeader />
 
       <main
@@ -102,11 +102,11 @@ const jsonLd = [
         </nav>
 
         <header class="max-w-3xl space-y-3">
-          <p class="font-mono text-xs tracking-wide text-muted-foreground uppercase">
+          <p class="mono-label">
             Free · open source · no account required
           </p>
           <h1 class="text-3xl font-semibold tracking-[-0.035em] text-balance sm:text-5xl">
-            Build a README badge that belongs in your repository.
+            Build a README badge from live repository data.
           </h1>
           <p class="max-w-[62ch] text-base leading-relaxed text-pretty text-muted-foreground sm:text-lg">
             Put stars, forks, and package downloads in one compact,
@@ -125,7 +125,7 @@ const jsonLd = [
         <section aria-labelledby="studio-title" class="space-y-4">
           <div class="flex flex-col gap-2 border-b border-border pb-4 sm:flex-row sm:items-end sm:justify-between">
             <div>
-              <p class="font-mono text-xs tracking-wide text-muted-foreground uppercase">
+              <p class="mono-label">
                 Interactive studio
               </p>
               <h2 id="studio-title" class="mt-1 text-xl font-semibold tracking-tight sm:text-2xl">
@@ -158,7 +158,7 @@ const jsonLd = [
             [
               {
                 step: "01",
-                title: "Choose evidence",
+                title: "Choose metrics",
                 body: "Show stars, forks, downloads, or a focused subset. Missing package data is omitted instead of reported as zero.",
               },
               {
@@ -209,36 +209,3 @@ const jsonLd = [
     </div>
   </body>
 </html>
-
-<style>
-  .badge-page {
-    --background: oklch(1 0 0);
-    --foreground: oklch(0.2 0 0);
-    --card: oklch(1 0 0);
-    --card-foreground: oklch(0.2 0 0);
-    --popover: oklch(1 0 0);
-    --popover-foreground: oklch(0.2 0 0);
-    --primary: oklch(0.2 0 0);
-    --primary-foreground: oklch(0.99 0 0);
-    --secondary: oklch(0.965 0 0);
-    --secondary-foreground: oklch(0.24 0 0);
-    --muted: oklch(0.965 0 0);
-    --muted-foreground: oklch(0.5 0 0);
-    --accent: oklch(0.95 0 0);
-    --accent-foreground: oklch(0.2 0 0);
-    --signal: oklch(0.24 0 0);
-    --signal-foreground: oklch(0.99 0 0);
-    --border: oklch(0.2 0 0 / 0.12);
-    --input: oklch(0.2 0 0 / 0.16);
-    --ring: oklch(0.42 0 0);
-    --grid: oklch(0.2 0 0 / 0.045);
-    color: var(--foreground);
-    background-color: var(--background);
-  }
-
-  .badge-page :global(.bg-grid) {
-    background-color: var(--muted);
-    background-image: none;
-  }
-
-</style>

@@ -4,20 +4,16 @@ import { cva, type VariantProps } from "class-variance-authority";
 import { cn } from "@/lib/utils";
 
 const buttonVariants = cva(
-  "dither-control inline-flex items-center justify-center gap-2 whitespace-nowrap rounded-md text-sm font-medium outline-none disabled:pointer-events-none disabled:opacity-50 [&_svg]:pointer-events-none [&_svg:not([class*='size-'])]:size-4 [&_svg]:shrink-0 focus-visible:outline-2 focus-visible:outline-offset-2 focus-visible:outline-ring",
+  "dither-control inline-flex items-center justify-center gap-2 whitespace-nowrap rounded-md font-mono text-sm font-medium outline-none disabled:pointer-events-none disabled:opacity-50 [&_svg]:pointer-events-none [&_svg:not([class*='size-'])]:size-4 [&_svg]:shrink-0 focus-visible:outline-2 focus-visible:outline-offset-2 focus-visible:outline-ring",
   {
     variants: {
       variant: {
-        default:
-          "bg-primary text-primary-foreground hover:bg-primary/90 active:bg-primary/80",
+        default: "dither-primary text-primary-foreground",
         destructive:
-          "bg-destructive text-destructive-foreground hover:bg-destructive/90 active:bg-destructive/80 focus-visible:outline-destructive",
-        outline:
-          "border border-input bg-background hover:bg-accent hover:text-accent-foreground active:bg-accent/70",
-        secondary:
-          "bg-secondary text-secondary-foreground hover:bg-secondary/80 active:bg-secondary/70",
-        ghost:
-          "hover:bg-accent hover:text-accent-foreground active:bg-accent/70",
+          "text-destructive focus-visible:outline-destructive",
+        outline: "border border-input text-foreground",
+        secondary: "text-secondary-foreground",
+        ghost: "text-muted-foreground hover:text-foreground",
         link: "text-foreground underline decoration-primary decoration-2 underline-offset-4 hover:decoration-primary/60",
       },
       size: {

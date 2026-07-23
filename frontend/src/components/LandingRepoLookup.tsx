@@ -99,9 +99,7 @@ export function LandingRepoLookup() {
       </AnimatePresence>
 
       <div className="mt-4 flex flex-wrap items-center gap-x-4 gap-y-2">
-        <p className="font-mono text-xs tracking-wide text-muted-foreground uppercase">
-          Try
-        </p>
+        <p className="mono-label">Try</p>
         {EXAMPLES.map((example) => (
           <button
             key={example}

@@ -87,7 +87,7 @@ const description = hasData
     }. Aggregate star-history chart across ${data!.repos_included} repos, plus a README profile card.`
   : `Aggregate GitHub star history for ${login}'s public repos, with an embeddable README profile card.`;
 
-const ogImage = `${apiBase}/api/og.png`;
+const ogImage = `${apiBase}/api/users/${login}/og.png`;
 
 const noindex = !hasData || fetchError !== null;
 
@@ -154,7 +154,7 @@ const jsonLd: Record<string, unknown>[] = [
 
         {data ? (
           <header class="space-y-3">
-            <p class="font-mono text-xs tracking-wide text-muted-foreground uppercase">
+            <p class="mono-label">
               Maintainer profile
             </p>
             <h1 class="text-3xl font-semibold tracking-tight text-balance sm:text-4xl">
@@ -183,9 +183,9 @@ const jsonLd: Record<string, unknown>[] = [
             </p>
             {pending && (
               <p class="font-mono text-xs text-muted-foreground">
-                Still crunching {data.repos_pending}{" "}
-                {data.repos_pending === 1 ? "repo" : "repos"} — the chart grows as
-                history lands.
+                History for {data.repos_pending}{" "}
+                {data.repos_pending === 1 ? "repo" : "repos"} is still being
+                fetched. The chart updates as each one completes.
               </p>
             )}
             <p class="text-sm">
@@ -258,7 +258,7 @@ const jsonLd: Record<string, unknown>[] = [
               {ownedRepos.map((slug) => (
                 <a
                   href={`/${slug}`}
-                  class="dither-control inline-flex items-center rounded-md border border-border bg-background px-3 py-1.5 font-mono text-sm text-muted-foreground hover:bg-accent hover:text-accent-foreground"
+                  class="dither-control inline-flex items-center rounded-md border px-3 py-1.5 font-mono text-sm text-muted-foreground hover:text-foreground"
                 >
                   {slug}
                 </a>

@@ -1,4 +1,4 @@
-import { useState } from "react";
+import { useId, useState } from "react";
 import { motion, useReducedMotion } from "motion/react";
 
 import {
@@ -26,6 +26,8 @@ export function ComparisonModeGraphic() {
   const [mode, setMode] = useState<Mode>("calendar");
   const reduceMotion = useReducedMotion();
   const active = PATHS[mode];
+  const id = useId().replaceAll(":", "");
+  const firstArea = `${active.first} V188 H20 Z`;
 
   return (
     <figure
@@ -39,14 +41,14 @@ export function ComparisonModeGraphic() {
             Illustrative axes — no repository values
           </p>
         </figcaption>
-        <div className="flex border-b border-border" aria-label="Comparison axis">
+        <div className="flex gap-1" aria-label="Comparison axis">
           {(["calendar", "timeline"] as const).map((option) => (
             <button
               key={option}
               type="button"
               onClick={() => setMode(option)}
               aria-pressed={mode === option}
-              className="relative min-h-11 px-3 font-mono text-xs text-muted-foreground outline-none hover:text-foreground focus-visible:outline-2 focus-visible:outline-offset-2 focus-visible:outline-ring aria-pressed:text-foreground sm:min-h-9"
+              className="dither-control relative min-h-11 px-3 font-mono text-xs text-muted-foreground outline-none hover:text-foreground focus-visible:outline-2 focus-visible:outline-offset-2 focus-visible:outline-ring aria-pressed:text-foreground sm:min-h-9"
             >
               {option === "calendar" ? "Calendar date" : "Equal start"}
               {mode === option && (
@@ -78,6 +80,17 @@ export function ComparisonModeGraphic() {
           }
           className="block h-auto w-full"
         >
+          <defs>
+            <linearGradient id={`${id}-wave`} x1="0" x2="1">
+              <stop offset="0" stopColor="var(--dither-wave-1)" />
+              <stop offset=".55" stopColor="var(--dither-wave-2)" />
+              <stop offset="1" stopColor="var(--dither-wave-3)" />
+            </linearGradient>
+            <pattern id={`${id}-dots`} width="4" height="4" patternUnits="userSpaceOnUse">
+              <rect width="1.4" height="1.4" fill={`url(#${id}-wave)`} />
+              <rect x="2" y="2" width=".8" height=".8" fill={`url(#${id}-wave)`} opacity=".65" />
+            </pattern>
+          </defs>
           <path d="M20 24V188H336" fill="none" stroke="var(--border)" />
           {[76, 132].map((y) => (
             <path
@@ -89,6 +102,18 @@ export function ComparisonModeGraphic() {
             />
           ))}
           <motion.path
+            d={firstArea}
+            animate={{ d: firstArea }}
+            transition={{
+              duration: reduceMotion
+                ? REDUCED_MOTION_DURATION
+                : DURATION.chart + 0.1,
+              ease: EASE_IN_OUT,
+            }}
+            fill={`url(#${id}-dots)`}
+            opacity="0.8"
+          />
+          <motion.path
             d={active.first}
             animate={{ d: active.first }}
             transition={{
@@ -98,7 +123,7 @@ export function ComparisonModeGraphic() {
               ease: EASE_IN_OUT,
             }}
             fill="none"
-            stroke="var(--foreground)"
+            stroke={`url(#${id}-wave)`}
             strokeLinecap="round"
             strokeWidth="2.5"
           />
@@ -142,7 +167,10 @@ export function ComparisonModeGraphic() {
 
         <div className="flex flex-wrap gap-x-6 gap-y-2 border-t border-border pt-4 text-sm">
           <span className="inline-flex items-center gap-2">
-            <span className="h-0.5 w-5 bg-foreground" aria-hidden="true" />
+            <span
+              className="h-0.5 w-5 bg-linear-to-r from-(--dither-wave-1) via-(--dither-wave-2) to-(--dither-wave-3)"
+              aria-hidden="true"
+            />
             Repository A
           </span>
           <span className="inline-flex items-center gap-2 text-muted-foreground">

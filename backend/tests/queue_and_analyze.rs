@@ -45,7 +45,9 @@ async fn test_db() -> Option<Db> {
     // the schema exactly once, then give every test a small runtime-local pool.
     let schema_guard = SCHEMA_LOCK.lock().await;
     if SCHEMA_READY.get().is_none() {
-        let db = Db::connect(&url).await.expect("connect test db");
+        let db = gitdebt::test_db::connect(&url)
+            .await
+            .expect("connect test db");
         SCHEMA_READY.set(()).expect("schema initialized once");
         return Some(db);
     }

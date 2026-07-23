@@ -14,6 +14,10 @@ default-run = "gitdebt-api"
 name = "gitdebt-api"
 path = "src/main.rs"
 
+[[bin]]
+name = "gitdebt-worker"
+path = "src/bin/gitdebt-worker.rs"
+
 [lib]
 name = "gitdebt"
 path = "src/lib.rs"
@@ -48,7 +52,7 @@ md-5.workspace = true
 tempfile.workspace = true
 aes-gcm.workspace = true
 base64.workspace = true
-tower_governor.workspace = true
+redis.workspace = true
 gcp_auth.workspace = true
 flate2.workspace = true
 resvg.workspace = true

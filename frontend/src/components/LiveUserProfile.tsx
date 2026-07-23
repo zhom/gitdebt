@@ -129,9 +129,7 @@ export function LiveUserProfile({
     <div className="space-y-12">
       <header className="flex flex-col gap-5 sm:flex-row sm:items-end sm:justify-between">
         <div className="space-y-3">
-          <p className="font-mono text-xs tracking-wide text-muted-foreground uppercase">
-            Your GitHub profile report
-          </p>
+          <p className="mono-label">Your GitHub profile report</p>
           <h1 className="text-3xl font-semibold tracking-tight sm:text-4xl">
             {login}
           </h1>
@@ -144,7 +142,7 @@ export function LiveUserProfile({
           href={`https://github.com/${login}`}
           target="_blank"
           rel="noreferrer"
-          className="inline-flex min-h-11 items-center gap-2 self-start rounded-md border border-border px-3 py-2 text-sm text-muted-foreground hover:bg-accent hover:text-foreground sm:self-auto"
+          className="dither-control inline-flex min-h-11 items-center gap-2 self-start rounded-md border px-3 py-2 text-sm text-muted-foreground hover:text-foreground sm:self-auto"
         >
           Open GitHub profile
           <ExternalLink className="size-3.5" strokeWidth={1.8} aria-hidden="true" />
@@ -170,9 +168,7 @@ export function LiveUserProfile({
             key={item.label}
             className="border-t border-border py-4 first:border-t-0 sm:border-t-0 sm:px-5 sm:first:pl-0"
           >
-            <dt className="font-mono text-xs tracking-wide text-muted-foreground uppercase">
-              {item.label}
-            </dt>
+            <dt className="mono-label">{item.label}</dt>
             <dd className="mt-1.5 text-xl font-semibold tabular-nums">
               {item.value}
             </dd>
@@ -186,7 +182,7 @@ export function LiveUserProfile({
           role="status"
         >
           <Loader2
-            className="mt-0.5 size-4 shrink-0 motion-safe:animate-spin text-signal"
+            className="mt-0.5 size-4 shrink-0 motion-safe:animate-spin text-(--dither-wave-2)"
             aria-hidden="true"
           />
           <p className="text-sm leading-relaxed text-muted-foreground">
@@ -199,7 +195,7 @@ export function LiveUserProfile({
       )}
 
       {error && (
-        <p className="border-y border-border py-4 text-sm">
+        <p className="border-y border-border py-4 font-mono text-sm text-muted-foreground">
           {error}
         </p>
       )}

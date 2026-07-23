@@ -49,7 +49,7 @@ export function LiveRepoReport({ apiBase }: { apiBase: string }) {
         </p>
         <a
           href="/"
-          className="mt-5 inline-flex min-h-11 items-center rounded-md bg-primary px-4 py-2 font-medium text-primary-foreground"
+          className="dither-primary mt-5 inline-flex min-h-11 items-center rounded-md px-4 py-2 font-medium"
         >
           Open repo lookup
         </a>
@@ -73,8 +73,8 @@ export function LiveRepoReport({ apiBase }: { apiBase: string }) {
       <section className="space-y-4">
         <header className="flex flex-wrap items-end justify-between gap-3">
           <div>
-            <p className="font-mono text-xs tracking-wide text-muted-foreground uppercase">Earned badges</p>
-            <h2 className="mt-1 text-xl font-semibold tracking-tight">Claims backed by repository data</h2>
+            <p className="mono-label">Earned badges</p>
+            <h2 className="mt-1 text-xl font-semibold tracking-tight">Computed from commit and star history</h2>
           </div>
           <p className="max-w-md text-sm text-muted-foreground">Embeddable maintenance, ownership, and star-momentum signals.</p>
         </header>
@@ -94,9 +94,7 @@ export function LiveRepoReport({ apiBase }: { apiBase: string }) {
 
       <section className="space-y-6">
         <header className="max-w-2xl space-y-2">
-          <p className="font-mono text-xs tracking-wide text-muted-foreground uppercase">
-            Maintenance signals
-          </p>
+          <p className="mono-label">Maintenance signals</p>
           <h2 className="text-2xl font-semibold tracking-tight text-balance sm:text-3xl">
             What deserves attention first
           </h2>
@@ -115,9 +113,7 @@ export function LiveRepoReport({ apiBase }: { apiBase: string }) {
 
       <section className="space-y-6">
         <header className="max-w-2xl space-y-2">
-          <p className="font-mono text-xs tracking-wide text-muted-foreground uppercase">
-            Adoption
-          </p>
+          <p className="mono-label">Adoption</p>
           <h2 className="text-2xl font-semibold tracking-tight text-balance sm:text-3xl">
             Attention versus real usage
           </h2>

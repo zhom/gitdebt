@@ -236,7 +236,7 @@ const rowClass = "border-b border-border";
         </nav>
 
         <header class="space-y-3">
-          <p class="font-mono text-xs tracking-wide text-muted-foreground uppercase">
+          <p class="mono-label">
             Category comparison
           </p>
           <h1 class="text-3xl font-semibold tracking-tight text-balance sm:text-4xl">
@@ -267,7 +267,7 @@ const rowClass = "border-b border-border";
           <>
             {!loadedEnough && (
               <section class="border-y border-border py-6">
-                <p class="font-mono text-xs tracking-wide text-muted-foreground uppercase">
+                <p class="mono-label">
                   Current ranking ready
                 </p>
                 <p class="mt-2 max-w-[72ch] text-base/7 text-pretty text-muted-foreground sm:text-sm/6">
@@ -336,14 +336,14 @@ const rowClass = "border-b border-border";
                     <a
                       href={`/vs/${a}/${b}`}
                       data-warm-repos={`${a},${b}`}
-                      class="inline-flex items-center gap-1.5 rounded-md border border-border bg-background px-3 py-1.5 font-mono text-sm text-muted-foreground hover:bg-accent hover:text-accent-foreground"
+                      class="dither-control inline-flex items-center gap-1.5 rounded-md border px-3 py-1.5 font-mono text-sm text-muted-foreground hover:text-foreground"
                     >
                       {a.split("/")[1]} vs {b.split("/")[1]}
                     </a>
                   ))}
                   <a
                     href={`/compare?repos=${encodeURIComponent(reposParam)}`}
-                    class="inline-flex items-center gap-1.5 rounded-md border border-signal/50 bg-background px-3 py-1.5 font-mono text-sm text-foreground hover:bg-accent"
+                    class="dither-control inline-flex items-center gap-1.5 rounded-md border px-3 py-1.5 font-mono text-sm text-foreground"
                   >
                     Open in the compare builder
                   </a>
@@ -371,7 +371,7 @@ const rowClass = "border-b border-border";
           </>
         ) : (
           <section class="border-y border-border py-6">
-            <p class="font-mono text-xs tracking-wide text-muted-foreground uppercase">
+            <p class="mono-label">
               Warming up
             </p>
             <p class="mt-2 max-w-[70ch] text-base/7 text-pretty text-muted-foreground sm:text-sm/6">
@@ -384,7 +384,7 @@ const rowClass = "border-b border-border";
                 <a
                   href={`/${slug}`}
                   data-warm-repos={slug}
-                  class="inline-flex items-center rounded-md border border-border bg-background px-3 py-1.5 font-mono text-sm text-muted-foreground hover:bg-accent hover:text-accent-foreground"
+                  class="dither-control inline-flex items-center rounded-md border px-3 py-1.5 font-mono text-sm text-muted-foreground hover:text-foreground"
                 >
                   {slug}
                 </a>

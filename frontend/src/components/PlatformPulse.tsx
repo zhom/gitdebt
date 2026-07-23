@@ -168,13 +168,11 @@ export function PlatformPulse({ apiBase }: { apiBase: string }) {
     >
       <div className="border-b border-border lg:border-r lg:border-b-0">
         <div className="flex min-h-14 items-center justify-between border-b border-border px-5 py-3">
-          <span className="font-mono text-xs tracking-[0.12em] text-muted-foreground uppercase">
-            Recently viewed
-          </span>
+          <span className="mono-label">Recently viewed</span>
           <span className="inline-flex items-center gap-2 font-mono text-xs text-muted-foreground">
             <span className="relative flex size-2" aria-hidden="true">
-              <span className="absolute inline-flex size-full motion-safe:animate-ping rounded-full bg-emerald-500 opacity-35" />
-              <span className="relative inline-flex size-2 rounded-full bg-emerald-500" />
+              <span className="absolute inline-flex size-full motion-safe:animate-ping rounded-full bg-(--dither-wave-2) opacity-35" />
+              <span className="relative inline-flex size-2 rounded-full bg-(--dither-wave-2)" />
             </span>
             Live platform data
           </span>
@@ -236,7 +234,7 @@ export function PlatformPulse({ apiBase }: { apiBase: string }) {
             {failed
               ? "Live activity is temporarily unavailable."
               : loaded
-                ? "No public report views yet. Open a report to start the live pulse."
+                ? "No repository views recorded yet. Repos appear here when their reports are opened."
                 : "Loading recently viewed repositories…"}
           </div>
         )}
@@ -257,14 +255,14 @@ export function PlatformPulse({ apiBase }: { apiBase: string }) {
             >
               <div className="flex flex-wrap items-start justify-between gap-4">
                 <div>
-                  <p className="font-mono text-xs tracking-[0.12em] text-muted-foreground uppercase">Current signal</p>
+                  <p className="mono-label">Current signal</p>
                   <h3 className="mt-2 text-xl font-semibold tracking-tight">{selected.repo}</h3>
                 </div>
                 <div className="flex flex-wrap gap-2 font-mono text-[11px] uppercase">
-                  <span className={`border px-2 py-1 ${historyReady ? "border-emerald-500/35 bg-emerald-500/10 text-emerald-700 dark:text-emerald-300" : "border-border bg-background text-foreground"}`}>
+                  <span className={`border px-2 py-1 ${historyReady ? "border-(--dither-wave-2)/35 bg-(--dither-wave-2)/10 text-(--dither-wave-2)" : "border-border bg-background text-muted-foreground"}`}>
                     history {historyStatus}
                   </span>
-                  <span className={`border px-2 py-1 ${selected.analysis_ready ? "border-emerald-500/35 bg-emerald-500/10 text-emerald-700 dark:text-emerald-300" : "border-border bg-background text-foreground"}`}>
+                  <span className={`border px-2 py-1 ${selected.analysis_ready ? "border-(--dither-wave-2)/35 bg-(--dither-wave-2)/10 text-(--dither-wave-2)" : "border-border bg-background text-muted-foreground"}`}>
                     health {selected.analysis_ready ? "ready" : "analyzing"}
                   </span>
                 </div>
@@ -272,19 +270,19 @@ export function PlatformPulse({ apiBase }: { apiBase: string }) {
 
               <div className="mt-6 grid grid-cols-3 border-y border-border py-4">
                 <div>
-                  <p className="flex items-center gap-2 font-mono text-xs text-muted-foreground uppercase">
+                  <p className="mono-label flex items-center gap-2">
                     <Star className="size-3.5" aria-hidden="true" /> current stars
                   </p>
                   <p className="mt-2 text-2xl font-semibold tabular-nums">{compact(selected.stars)}</p>
                 </div>
                 <div className="border-l border-border pl-5">
-                  <p className="flex items-center gap-2 font-mono text-xs text-muted-foreground uppercase">
+                  <p className="mono-label flex items-center gap-2">
                     <Eye className="size-3.5" aria-hidden="true" /> platform views
                   </p>
                   <p className="mt-2 text-2xl font-semibold tabular-nums">{compact(selected.views)}</p>
                 </div>
                 <div className="border-l border-border pl-5">
-                  <p className="font-mono text-xs text-muted-foreground uppercase">30d gain</p>
+                  <p className="mono-label">30d gain</p>
                   <p className="mt-2 text-2xl font-semibold tabular-nums">+{compact(selected.gained_30d)}</p>
                 </div>
               </div>
@@ -315,7 +313,7 @@ export function PlatformPulse({ apiBase }: { apiBase: string }) {
                           initial={false}
                           animate={{ scaleX: Math.max(0.015, starProgress.percent / 100) }}
                           transition={reduceMotion ? { duration: 0.12 } : SPRING.snappy}
-                          className="h-full origin-left rounded-full bg-foreground"
+                          className="signal-dither-fill h-full origin-left rounded-full"
                         />
                       </div>
                     )}

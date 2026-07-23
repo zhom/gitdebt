@@ -112,8 +112,8 @@ export function StatCard({
     <figure className="signal-panel relative">
       {caption && (
         <figcaption className="flex items-center justify-between gap-3 border-b border-border bg-muted/40 px-5 py-3">
-          <div className="inline-flex items-center gap-2 font-mono text-xs tracking-wide text-muted-foreground uppercase">
-            <span className="size-1.5 shrink-0 rounded-full bg-signal" aria-hidden="true" />
+          <div className="mono-label inline-flex items-center gap-2">
+            <span className="size-1.5 shrink-0 rounded-full bg-(--dither-wave-2)" aria-hidden="true" />
             {caption}
           </div>
           {embedLink && apiBase && (
@@ -179,15 +179,15 @@ export function StatCard({
               aria-live="polite"
             >
               <div
-                className={`h-32 w-full rounded-md bg-muted/50 ${
+                className={`dither-panel h-32 w-full rounded-md ${
                   phase === "gathering" ? "motion-safe:animate-pulse" : ""
                 }`}
                 aria-hidden="true"
               />
               <p className="text-center font-mono text-base tracking-wide text-muted-foreground sm:text-xs">
                 {phase === "gathering"
-                  ? "Gathering repo-debt data…"
-                  : "Still gathering — check back soon."}
+                  ? "Analyzing repository history…"
+                  : "Analysis is still running. This chart appears when it finishes."}
               </p>
             </motion.div>
           )}

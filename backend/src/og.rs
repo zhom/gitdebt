@@ -30,7 +30,9 @@
 //! Deterministic: same input → same bytes.
 
 use crate::brand;
+use crate::cards::UserCardData;
 use crate::chart::{Point, palette};
+use crate::texture;
 use crate::theme::Theme;
 
 /// Fixed OG card dimensions. Declared `og:image:width`/`height` on the
@@ -42,8 +44,6 @@ pub const OG_HEIGHT: u32 = 630;
 /// Dark-card canvas and slightly lifted sparkline floor.
 const CARD_BG: &str = "#0a0a0a";
 const CARD_PANEL: &str = "#171717";
-/// The strongest white-first brand mark.
-const BRAND_INK: &str = "#0a0a0a";
 
 /// The same font stacks the chart/badge SVGs use. `raster.rs` resolves
 /// every generic family to the bundled Inter, so these render in PNG.
@@ -88,14 +88,14 @@ pub fn render_repo_card(card: &RepoCard, theme: &Theme) -> String {
     let bg = card_bg(theme);
     let fg = card_fg(theme);
     let muted = card_muted(theme);
-    let accent = card_accent(theme);
+    let accent = texture::wave_ink(theme);
 
     let mut body = String::new();
     body.push_str(&wordmark(theme));
 
-    // Eyebrow: the repo slug in mono, accent-colored.
+    // Eyebrow: the repo slug in mono, wave-accent ink.
     body.push_str(&format!(
-        "  <text x=\"80\" y=\"196\" fill=\"{accent}\" font-family=\"{FONT_MONO}\" font-size=\"34\" font-weight=\"600\">{}</text>\n",
+        "  <text x=\"80\" y=\"196\" fill=\"{accent}\" font-family=\"{FONT_MONO}\" font-size=\"34\" font-weight=\"600\" letter-spacing=\"0.02em\">{}</text>\n",
         escape_xml(&card.slug),
     ));
 
@@ -158,24 +158,36 @@ pub fn render_compare_card(entries: &[CompareEntry], theme: &Theme) -> String {
     let mut body = String::new();
     body.push_str(&wordmark(theme));
 
-    // Title: "a vs b" (vs c …). Slugs joined with " vs ".
+    // Title: "a vs b" (vs c …). Slugs joined with " vs ", truncated with
+    // an ellipsis to the canvas budget — a 12-slug compare would otherwise
+    // run far past the 1200px edge.
     let title = entries
         .iter()
         .map(|e| short_slug(&e.slug))
         .collect::<Vec<_>>()
         .join(" vs ");
+    let drawn_title = truncate_title(&title, TITLE_FONT_SIZE, TITLE_MAX_WIDTH);
     body.push_str(&format!(
         "  <text x=\"80\" y=\"212\" fill=\"{fg}\" font-family=\"{FONT_SANS}\" font-size=\"64\" font-weight=\"800\" letter-spacing=\"-0.01em\">{}</text>\n",
-        escape_xml(&title),
+        escape_xml(&drawn_title),
     ));
     body.push_str(&format!(
         "  <text x=\"82\" y=\"256\" fill=\"{muted}\" font-family=\"{FONT_SANS}\" font-size=\"26\" font-weight=\"600\" letter-spacing=\"0.08em\">GITHUB STAR HISTORY</text>\n",
     ));
 
-    // Per-repo star count, each in its series color.
-    let mut row_y = 320.0_f32;
-    for (i, e) in entries.iter().enumerate() {
+    // Per-repo star count, each in its series color. Only
+    // `COMPARE_ROW_SLOTS` baselines fit above the sparkline panel (which
+    // is painted AFTER the rows); when the compare lists more repos, the
+    // last slot becomes a "+N more" line instead of painting rows on or
+    // under the panel.
+    let shown = if entries.len() <= COMPARE_ROW_SLOTS {
+        entries.len()
+    } else {
+        COMPARE_ROW_SLOTS - 1
+    };
+    for (i, e) in entries.iter().take(shown).enumerate() {
         let color = pal[i % pal.len()];
+        let row_y = COMPARE_ROW_TOP + i as f32 * COMPARE_ROW_STEP;
         body.push_str(&format!(
             "  <rect x=\"82\" y=\"{ry:.1}\" width=\"18\" height=\"18\" rx=\"4\" fill=\"{color}\" />\n  <text x=\"112\" y=\"{ty:.1}\" fill=\"{fg}\" font-family=\"{FONT_MONO}\" font-size=\"30\" font-weight=\"600\">{slug} — {stars}</text>\n",
             ry = row_y - 16.0,
@@ -183,11 +195,13 @@ pub fn render_compare_card(entries: &[CompareEntry], theme: &Theme) -> String {
             slug = escape_xml(&short_slug(&e.slug)),
             stars = escape_xml(&format!("{} stars", fmt_count(e.stars))),
         ));
-        row_y += 44.0;
-        // Cap visible rows so a 12-repo compare doesn't overrun the card.
-        if i >= 4 {
-            break;
-        }
+    }
+    if entries.len() > shown {
+        let row_y = COMPARE_ROW_TOP + shown as f32 * COMPARE_ROW_STEP;
+        body.push_str(&format!(
+            "  <text x=\"82\" y=\"{row_y:.1}\" fill=\"{muted}\" font-family=\"{FONT_MONO}\" font-size=\"26\" font-weight=\"600\">+{n} more</text>\n",
+            n = entries.len() - shown,
+        ));
     }
 
     // Overlay sparkline across the lower third.
@@ -235,6 +249,125 @@ pub fn render_default_card(theme: &Theme) -> String {
     )
 }
 
+// User profile card
+
+/// Render the user-profile social card SVG (1200×630): mono eyebrow with
+/// the profile handle, the persona line, a headline star total, a mono
+/// footprint row, and a decorative Bayer density ramp across the lower
+/// third (profiles have no single time series; the ramp is the texture
+/// signature, not fake data). Deterministic; only Postgres-derived
+/// [`UserCardData`] goes in.
+pub fn render_user_og(data: &UserCardData, theme: &Theme) -> String {
+    let bg = card_bg(theme);
+    let fg = card_fg(theme);
+    let muted = card_muted(theme);
+    let accent = texture::wave_ink(theme);
+
+    let mut body = String::new();
+    body.push_str(&wordmark(theme));
+
+    // Eyebrow: the handle in mono, wave-accent ink.
+    body.push_str(&format!(
+        "  <text x=\"80\" y=\"196\" fill=\"{accent}\" font-family=\"{FONT_MONO}\" font-size=\"34\" font-weight=\"600\" letter-spacing=\"0.02em\">@{}</text>\n",
+        escape_xml(&data.login),
+    ));
+
+    // Headline: total stars across tracked repos.
+    body.push_str(&format!(
+        "  <text x=\"78\" y=\"320\" fill=\"{fg}\" font-family=\"{FONT_SANS}\" font-size=\"132\" font-weight=\"800\" letter-spacing=\"-0.02em\">{}</text>\n",
+        escape_xml(&fmt_count(data.stars)),
+    ));
+    body.push_str(&format!(
+        "  <text x=\"82\" y=\"364\" fill=\"{muted}\" font-family=\"{FONT_SANS}\" font-size=\"30\" font-weight=\"600\" letter-spacing=\"0.08em\">TOTAL STARS · {}</text>\n",
+        escape_xml(crate::cards::user_persona(data)),
+    ));
+
+    // Footprint row in mono: commits, contributed repos, tracked repos.
+    // These are lower bounds over tracked repos (the card's honesty rule).
+    let mut parts: Vec<String> = Vec::new();
+    if data.commits > 0 {
+        parts.push(format!("{} commits", fmt_count(data.commits)));
+    }
+    if data.contribs > 0 {
+        parts.push(format!("{} contributed", fmt_count(data.contribs)));
+    }
+    parts.push(format!("{} repos tracked", fmt_count(data.repos_tracked)));
+    body.push_str(&format!(
+        "  <text x=\"82\" y=\"420\" fill=\"{muted}\" font-family=\"{FONT_MONO}\" font-size=\"28\">{}</text>\n",
+        escape_xml(&parts.join("  ·  ")),
+    ));
+
+    body.push_str(&density_ramp(theme));
+    body.push_str(&footer(muted));
+
+    wrap_svg(&body, bg, &format!("gitdebt · @{}", data.login))
+}
+
+/// 1200×630 placeholder for a login gitdebt knows nothing about — mirrors
+/// the user-card "no data yet" behavior at OG dimensions so social embeds
+/// self-heal on the API layer's short TTL.
+pub fn render_user_empty_og(login: &str, theme: &Theme) -> String {
+    let bg = card_bg(theme);
+    let fg = card_fg(theme);
+    let muted = card_muted(theme);
+    let accent = texture::wave_ink(theme);
+
+    let mut body = String::new();
+    body.push_str(&wordmark(theme));
+    body.push_str(&format!(
+        "  <text x=\"80\" y=\"240\" fill=\"{accent}\" font-family=\"{FONT_MONO}\" font-size=\"34\" font-weight=\"600\" letter-spacing=\"0.02em\">@{}</text>\n",
+        escape_xml(login),
+    ));
+    body.push_str(&format!(
+        "  <text x=\"78\" y=\"330\" fill=\"{fg}\" font-family=\"{FONT_SANS}\" font-size=\"64\" font-weight=\"800\">no gitdebt data yet</text>\n",
+    ));
+    body.push_str(&format!(
+        "  <text x=\"82\" y=\"388\" fill=\"{muted}\" font-family=\"{FONT_SANS}\" font-size=\"30\" font-weight=\"500\">analyze a repository at gitdebt.com to start tracking</text>\n",
+    ));
+    body.push_str(&density_ramp(theme));
+    body.push_str(&footer(muted));
+
+    wrap_svg(&body, bg, &format!("gitdebt · @{login}"))
+}
+
+/// Decorative lower-third Bayer density ramp: stacked horizontal bands of
+/// increasing tier density (the pattern-quantized vertical gradient), one
+/// ink, alpha-only. Purely geometric — carries no data.
+fn density_ramp(theme: &Theme) -> String {
+    let mut out = String::from("  <g data-gitdebt-ramp=\"true\">\n");
+    // Six 18px bands from tier 3 up to tier 13, faint → present. (Tier 1
+    // is already defined by the card envelope's grain wash; these ids must
+    // stay disjoint from it.)
+    const BANDS: [(usize, &str); 6] = [
+        (3, "0.10"),
+        (5, "0.14"),
+        (7, "0.18"),
+        (9, "0.22"),
+        (11, "0.26"),
+        (13, "0.30"),
+    ];
+    let top = SPARK_TOP;
+    let band_h = (SPARK_BOTTOM - SPARK_TOP) / BANDS.len() as f32;
+    out.push_str(&format!(
+        "    <defs>{}</defs>\n",
+        BANDS
+            .iter()
+            .map(|(tier, _)| texture::tier_pattern(theme.fg, 3.0, *tier))
+            .collect::<Vec<_>>()
+            .join(""),
+    ));
+    for (i, (tier, alpha)) in BANDS.iter().enumerate() {
+        let y = top + i as f32 * band_h;
+        out.push_str(&format!(
+            "    <rect x=\"{SPARK_LEFT:.1}\" y=\"{y:.1}\" width=\"{w:.1}\" height=\"{band_h:.1}\" fill=\"{fill}\" fill-opacity=\"{alpha}\" />\n",
+            w = SPARK_RIGHT - SPARK_LEFT,
+            fill = texture::tier_fill(*tier),
+        ));
+    }
+    out.push_str("  </g>\n");
+    out
+}
+
 // Shared pieces
 
 /// Y of the sparkline panel's top edge. The panel spans from here to
@@ -243,6 +376,64 @@ const SPARK_TOP: f32 = 452.0;
 const SPARK_BOTTOM: f32 = 560.0;
 const SPARK_LEFT: f32 = 80.0;
 const SPARK_RIGHT: f32 = OG_WIDTH as f32 - 80.0;
+
+/// Compare-card per-repo row geometry: first text baseline + step.
+const COMPARE_ROW_TOP: f32 = 320.0;
+const COMPARE_ROW_STEP: f32 = 44.0;
+/// Row baselines that fit between the subtitle and the sparkline panel:
+/// 320 / 364 / 408. One more slot would land exactly on [`SPARK_TOP`]
+/// (452) and the panel — painted after the rows — would cover it. Tied to
+/// the geometry by `compare_row_slots_stay_above_sparkline_panel`.
+const COMPARE_ROW_SLOTS: usize = 3;
+
+/// Compare-title geometry: the 64px face at x=80 with a mirrored 80px
+/// right margin.
+const TITLE_X: f32 = 80.0;
+const TITLE_FONT_SIZE: f32 = 64.0;
+const TITLE_MAX_WIDTH: f32 = OG_WIDTH as f32 - 2.0 * TITLE_X;
+
+/// Estimated advance (em) of one title glyph. The rasterizer resolves the
+/// stack onto bundled Inter Regular (weight 800 falls back to it), whose
+/// mixed-slug average is ~0.56em at this size. Estimation only has to be
+/// safe, not exact: the wide/narrow classes err generous so an
+/// adversarial all-'M' slug can't blow the budget the way a flat average
+/// would, and over-estimation merely truncates a glyph early.
+fn title_advance_em(c: char) -> f32 {
+    match c {
+        'm' | 'w' | 'M' | 'W' | '…' => 1.0,
+        'i' | 'j' | 'l' | 'f' | 't' | 'r' | 'I' | '.' | '-' | '_' | ' ' => 0.45,
+        'A'..='Z' => 0.80,
+        '0'..='9' => 0.65,
+        _ => 0.62,
+    }
+}
+
+/// Estimated pixel width of a title glyph run at `font_size`.
+fn title_width(text: &str, font_size: f32) -> f32 {
+    text.chars().map(|c| title_advance_em(c) * font_size).sum()
+}
+
+/// Truncate `text` with a trailing ellipsis so its estimated width fits
+/// `max_width` at `font_size`. Pure and deterministic; returns the input
+/// unchanged when it already fits.
+fn truncate_title(text: &str, font_size: f32, max_width: f32) -> String {
+    if title_width(text, font_size) <= max_width {
+        return text.to_string();
+    }
+    let budget = max_width - title_advance_em('…') * font_size;
+    let mut out = String::new();
+    let mut used = 0.0_f32;
+    for c in text.chars() {
+        let w = title_advance_em(c) * font_size;
+        if used + w > budget {
+            break;
+        }
+        out.push(c);
+        used += w;
+    }
+    out.push('…');
+    out
+}
 
 /// gitdebt wordmark top-left: monochrome robot mark + the wordmark in fg.
 fn wordmark(theme: &Theme) -> String {
@@ -305,17 +496,36 @@ fn sparkline_panel(series: &[(String, &Vec<Point>)], theme: &Theme, top: f32) ->
     let x_span = (x_max - x_min).max(1.0);
     let y_max_f = y_max.max(1) as f32;
 
+    let single = active.len() == 1;
     for (i, (_, s)) in active.iter().enumerate() {
         let color = pal[i % pal.len()];
         let mut d = String::new();
+        let mut first_x = plot_left;
+        let mut last_x = plot_left;
         for (j, p) in s.iter().enumerate() {
             let x = plot_left + ((p.at.timestamp() as f32 - x_min) / x_span) * plot_w;
             let y = plot_bottom - (p.stars as f32 / y_max_f) * plot_h;
             if j == 0 {
+                first_x = x;
                 d.push_str(&format!("M {x:.1} {y:.1}"));
             } else {
                 d.push_str(&format!(" L {x:.1} {y:.1}"));
             }
+            last_x = x;
+        }
+        if single {
+            // Dithered underfill — the chart system's pixel-fill signature.
+            out.push_str(&format!(
+                "  <path d=\"{d} L {last_x:.1} {plot_bottom:.1} L {first_x:.1} {plot_bottom:.1} Z\" fill=\"{fill}\" opacity=\"0.55\" />\n",
+                fill = texture::FILL,
+            ));
+        } else {
+            // Overlay: a dithered ghost under-stroke keeps each line's
+            // texture without stacked fills fighting each other.
+            out.push_str(&format!(
+                "  <path d=\"{d}\" fill=\"none\" stroke=\"{fill}\" stroke-width=\"8\" opacity=\"0.38\" stroke-linecap=\"square\" stroke-linejoin=\"miter\" />\n",
+                fill = texture::FILL,
+            ));
         }
         out.push_str(&format!(
             "  <path d=\"{d}\" fill=\"none\" stroke=\"{color}\" stroke-width=\"3\" stroke-linecap=\"round\" stroke-linejoin=\"round\" />\n",
@@ -353,15 +563,33 @@ fn grid_motif(theme: &Theme) -> String {
 /// along the top edge ties it to the
 /// brand. `aria_label` describes the card for accessibility tooling.
 fn wrap_svg(body: &str, bg: &str, aria_label: &str) -> String {
+    // The dark card carries the dark wave trio; the light card the light
+    // trio. `bg` decides (wrap_svg predates a theme parameter here and the
+    // two canvases are fixed hex).
+    let theme = if bg == CARD_BG {
+        &crate::theme::DARK
+    } else {
+        &crate::theme::LIGHT
+    };
+    // Sized texture defs (wave gradient spans the full 1200px) + the two
+    // Bayer density tiers the card body uses. Pattern-based: no per-cell
+    // rects at OG scale.
+    let defs = format!(
+        "{}\n  <defs>{}</defs>",
+        texture::defs_sized(theme, OG_WIDTH as f32, OG_HEIGHT as f32),
+        texture::tier_pattern(theme.fg, 3.0, 1),
+    );
     format!(
         r##"<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 {w} {h}" width="{w}" height="{h}" role="img" aria-label="{label}">
+  {defs}
   <rect x="0" y="0" width="{w}" height="{h}" fill="{bg}" />
-  <rect x="0" y="0" width="{w}" height="6" fill="{accent}" />
+  <rect x="0" y="0" width="{w}" height="{h}" fill="{grain}" fill-opacity="0.05" />
+  <rect x="0" y="0" width="{w}" height="6" fill="url(#gd-dither-wave)" />
 {body}</svg>"##,
         w = OG_WIDTH,
         h = OG_HEIGHT,
         bg = bg,
-        accent = if bg == CARD_BG { "#fafafa" } else { BRAND_INK },
+        grain = texture::tier_fill(1),
         label = escape_xml(aria_label),
         body = body,
     )
@@ -392,9 +620,6 @@ fn card_muted(theme: &Theme) -> &'static str {
 }
 fn card_grid(theme: &Theme) -> &'static str {
     theme.grid
-}
-fn card_accent(theme: &Theme) -> &'static str {
-    theme.accent
 }
 
 /// Compact integer formatting (1234 → "1.2k", 1_500_000 → "1.5M",
@@ -561,6 +786,184 @@ mod tests {
         assert!(svg.contains("#e5e5e5"));
     }
 
+    /// Extract every `<text …>content</text>` element as `(x, y, content)`.
+    /// Minimal deterministic scan for geometry assertions — the renderer
+    /// always emits `x="…"` before `y="…"` on one line.
+    fn text_elements(svg: &str) -> Vec<(f32, f32, String)> {
+        let mut out = Vec::new();
+        for (start, _) in svg.match_indices("<text ") {
+            let rest = &svg[start..];
+            let attrs_end = rest.find('>').expect("text tag closes");
+            let attrs = &rest[..attrs_end];
+            let attr = |name: &str| -> f32 {
+                let marker = format!("{name}=\"");
+                let from = attrs.find(&marker).expect("attr present") + marker.len();
+                let to = attrs[from..].find('"').expect("attr closes") + from;
+                attrs[from..to].parse().expect("numeric attr")
+            };
+            let content_end = rest.find("</text>").expect("text element closes");
+            out.push((
+                attr("x"),
+                attr("y"),
+                rest[attrs_end + 1..content_end].to_string(),
+            ));
+        }
+        out
+    }
+
+    fn compare_entries(n: usize) -> Vec<CompareEntry> {
+        (0..n)
+            .map(|i| CompareEntry {
+                slug: format!("owner/repo-{i:02}"),
+                stars: 100 + i as u64,
+                series: sample_series(5 + i as i64),
+            })
+            .collect()
+    }
+
+    /// The row-slot constant is derived from the panel geometry: every
+    /// slot baseline sits a full step above `SPARK_TOP`, and one more
+    /// slot would land exactly on the panel edge.
+    #[test]
+    fn compare_row_slots_stay_above_sparkline_panel() {
+        let last = COMPARE_ROW_TOP + (COMPARE_ROW_SLOTS as f32 - 1.0) * COMPARE_ROW_STEP;
+        assert!(
+            last + COMPARE_ROW_STEP <= SPARK_TOP,
+            "last slot baseline {last} must clear SPARK_TOP {SPARK_TOP} by a row step"
+        );
+        let next = COMPARE_ROW_TOP + COMPARE_ROW_SLOTS as f32 * COMPARE_ROW_STEP;
+        assert!(next >= SPARK_TOP, "slot count is not derived from geometry");
+    }
+
+    /// A 12-repo compare must not paint rows on or under the sparkline
+    /// panel (drawn after the rows): rows are capped, the omitted repos
+    /// collapse into a "+N more" line, and every row/more baseline stays
+    /// above `SPARK_TOP`.
+    #[test]
+    fn compare_card_caps_rows_and_adds_more_line() {
+        let entries = compare_entries(12);
+        let svg = render_compare_card(&entries, &DARK);
+        // Two rows + the "+10 more" line occupy the three slots.
+        assert!(svg.contains("repo-00 — "));
+        assert!(svg.contains("repo-01 — "));
+        assert!(!svg.contains("repo-02 — "), "row 3+ must be omitted");
+        assert!(svg.contains(">+10 more<"));
+        for (x, y, content) in text_elements(&svg) {
+            let is_row = (x - 112.0).abs() < f32::EPSILON;
+            let is_more = content.starts_with('+') && content.ends_with(" more");
+            if is_row || is_more {
+                assert!(
+                    y < SPARK_TOP,
+                    "baseline {y} of {content:?} reaches the sparkline panel at {SPARK_TOP}"
+                );
+            }
+        }
+    }
+
+    /// Up to three repos fit without omission: all three rows draw at the
+    /// slot baselines and no "+N more" line appears; a fourth repo trips
+    /// the cap.
+    #[test]
+    fn compare_card_three_rows_fit_four_truncate() {
+        let three = render_compare_card(&compare_entries(3), &DARK);
+        for i in 0..3 {
+            assert!(three.contains(&format!("repo-{i:02} — ")));
+        }
+        assert!(!three.contains(" more<"));
+        for (x, y, _) in text_elements(&three) {
+            if (x - 112.0).abs() < f32::EPSILON {
+                assert!(y < SPARK_TOP);
+            }
+        }
+
+        let four = render_compare_card(&compare_entries(4), &DARK);
+        assert!(four.contains("repo-00 — "));
+        assert!(four.contains("repo-01 — "));
+        assert!(!four.contains("repo-02 — "));
+        assert!(four.contains(">+2 more<"));
+    }
+
+    /// A many-slug title truncates with an ellipsis and its estimated
+    /// glyph run never crosses the canvas edge (nor the mirrored right
+    /// margin the budget encodes).
+    #[test]
+    fn compare_card_title_truncates_with_ellipsis_inside_canvas() {
+        let entries: Vec<CompareEntry> = (0..12)
+            .map(|i| CompareEntry {
+                slug: format!("owner/some-rather-long-repository-name-{i:02}"),
+                stars: 10,
+                series: sample_series(4),
+            })
+            .collect();
+        let svg = render_compare_card(&entries, &DARK);
+        assert!(svg.contains('…'), "long title must be truncated");
+        let (x, _, title) = text_elements(&svg)
+            .into_iter()
+            .find(|(_, _, content)| content.contains('…'))
+            .expect("truncated title element");
+        assert_eq!(x, TITLE_X);
+        let end_x = x + title_width(&title, TITLE_FONT_SIZE);
+        assert!(
+            end_x <= TITLE_X + TITLE_MAX_WIDTH,
+            "title run ends at {end_x}, past the {TITLE_MAX_WIDTH} budget"
+        );
+        assert!(end_x <= OG_WIDTH as f32, "title run crosses the canvas");
+        // Deterministic under truncation too.
+        assert_eq!(svg, render_compare_card(&entries, &DARK));
+    }
+
+    /// Short titles are untouched — no ellipsis, exact text preserved.
+    #[test]
+    fn compare_card_short_title_is_not_truncated() {
+        let svg = render_compare_card(&compare_entries(2), &DARK);
+        assert!(!svg.contains('…'));
+        assert!(svg.contains("repo-00 vs repo-01"));
+        assert_eq!(
+            truncate_title("vue vs react", TITLE_FONT_SIZE, TITLE_MAX_WIDTH),
+            "vue vs react"
+        );
+    }
+
+    /// Raster-level verification of the title budget: adversarially wide
+    /// glyphs ('M'/'w' runs — the widest classes) must leave the right
+    /// gutter of the title band untouched in the rendered PNG. A flat
+    /// average-advance estimate would let these run past the edge.
+    #[test]
+    fn compare_card_long_title_rasterizes_without_right_edge_overflow() {
+        use crate::raster::{RasterFormat, rasterize};
+        use resvg::tiny_skia::Pixmap;
+
+        for slug_char in ['M', 'w', 'o'] {
+            let name: String = std::iter::repeat_n(slug_char, 40).collect();
+            let entries = vec![
+                CompareEntry {
+                    slug: format!("o/{name}"),
+                    stars: 1,
+                    series: sample_series(5),
+                },
+                CompareEntry {
+                    slug: format!("o/{name}2"),
+                    stars: 2,
+                    series: sample_series(5),
+                },
+            ];
+            let svg = render_compare_card(&entries, &DARK);
+            let png = rasterize(&svg, RasterFormat::Png, 1.0).expect("rasterize compare card");
+            let pixmap = Pixmap::decode_png(&png).expect("decode png");
+            // Title band (64px face, baseline 212): the right gutter must
+            // be pure background (dark canvas + ≤5% grain ≈ rgb(22,22,22)).
+            for y in 150..=232 {
+                for x in 1160..1200 {
+                    let p = pixmap.pixel(x, y).expect("pixel in bounds");
+                    assert!(
+                        p.red() < 100 && p.green() < 100 && p.blue() < 100,
+                        "glyph ink at ({x},{y}) for {slug_char:?} title — truncation budget too loose"
+                    );
+                }
+            }
+        }
+    }
+
     #[test]
     fn compare_card_is_deterministic() {
         let entries = vec![
@@ -647,6 +1050,96 @@ mod tests {
         assert_eq!(fmt_count(12_345), "12.3k");
         assert_eq!(fmt_count(1_500_000), "1.5M");
         assert_eq!(fmt_count(2_000_000_000), "2.0B");
+    }
+
+    fn sample_user_data() -> UserCardData {
+        UserCardData {
+            login: "octocat".into(),
+            stars: 12_345,
+            commits: 987,
+            contribs: 12,
+            repos_tracked: 8,
+            repos_analyzed: 8,
+            forks: 456,
+            since_year: Some(2015),
+            langs: vec![("Rust".into(), 120_000)],
+        }
+    }
+
+    #[test]
+    fn user_og_is_deterministic_1200x630_and_dithered() {
+        let a = render_user_og(&sample_user_data(), &DARK);
+        let b = render_user_og(&sample_user_data(), &DARK);
+        assert_eq!(a, b);
+        assert!(a.contains("viewBox=\"0 0 1200 630\""));
+        assert!(a.contains("width=\"1200\""));
+        assert!(a.contains("height=\"630\""));
+        assert!(a.contains("@octocat"));
+        assert!(a.contains("12.3k")); // headline stars
+        assert!(a.contains("987 commits"));
+        assert!(a.contains("8 repos tracked"));
+        // Dither language: wave accent + Bayer density ramp, no CSS vars.
+        assert!(a.contains("#9b7bff"));
+        assert!(a.contains("data-gitdebt-ramp=\"true\""));
+        assert!(a.contains("url(#gd-t3)"));
+        assert!(!a.contains("var(--"));
+    }
+
+    #[test]
+    fn user_og_rasterizes_to_exact_dimensions() {
+        use crate::raster::{RasterFormat, rasterize};
+        let svg = render_user_og(&sample_user_data(), &DARK);
+        let png = rasterize(&svg, RasterFormat::Png, 1.0).expect("user og png");
+        assert_eq!(&png[..8], &[0x89, 0x50, 0x4E, 0x47, 0x0D, 0x0A, 0x1A, 0x0A]);
+        let w = u32::from_be_bytes([png[16], png[17], png[18], png[19]]);
+        let h = u32::from_be_bytes([png[20], png[21], png[22], png[23]]);
+        assert_eq!((w, h), (OG_WIDTH, OG_HEIGHT));
+    }
+
+    #[test]
+    fn user_empty_og_renders_placeholder() {
+        let svg = render_user_empty_og("ghost", &DARK);
+        assert!(svg.contains("viewBox=\"0 0 1200 630\""));
+        assert!(svg.contains("@ghost"));
+        assert!(svg.contains("no gitdebt data yet"));
+        assert_eq!(svg, render_user_empty_og("ghost", &DARK));
+        // Escaping holds on the login path too.
+        let evil = render_user_empty_og("<script>", &DARK);
+        assert!(!evil.contains("<script>"));
+    }
+
+    #[test]
+    fn og_cards_carry_the_wave_gradient_top_rule_and_grain() {
+        for svg in [
+            render_repo_card(
+                &RepoCard {
+                    slug: "o/r".into(),
+                    stars: 5,
+                    series: sample_series(10),
+                    ..Default::default()
+                },
+                &DARK,
+            ),
+            render_default_card(&DARK),
+            render_user_og(&sample_user_data(), &DARK),
+        ] {
+            assert!(svg.contains("fill=\"url(#gd-dither-wave)\""));
+            assert!(svg.contains("id=\"gd-dither-wave\""));
+            assert!(svg.contains("url(#gd-t1)"));
+            // The gradient spans the real 1200px surface.
+            assert!(svg.contains("x2=\"1200\""));
+        }
+        // Repo sparkline underfill is the dithered pixel fill.
+        let repo = render_repo_card(
+            &RepoCard {
+                slug: "o/r".into(),
+                stars: 5,
+                series: sample_series(10),
+                ..Default::default()
+            },
+            &DARK,
+        );
+        assert!(repo.contains("fill=\"url(#gd-pixel-fill)\""));
     }
 
     #[test]

@@ -141,9 +141,7 @@ export function CompareBuilder({ apiBase, initialRepos = [] }: Props) {
   return (
     <div className="space-y-8">
       <form onSubmit={compare} className="card-panel p-6">
-        <p className="font-mono text-xs tracking-wide text-muted-foreground uppercase">
-          Repos to overlay
-        </p>
+        <p className="mono-label">Repos to overlay</p>
         <div className="mt-4 space-y-3">
           <AnimatePresence initial={false}>
             {rows.map((row, i) => (
@@ -178,7 +176,7 @@ export function CompareBuilder({ apiBase, initialRepos = [] }: Props) {
                 }}
                 className="flex items-center gap-2"
               >
-                <div className="flex flex-1 items-center rounded-md border border-input bg-background font-mono text-base focus-within:outline-2 focus-within:outline-offset-2 focus-within:outline-ring sm:text-sm">
+                <div className="dither-control flex flex-1 items-center rounded-md border font-mono text-base focus-within:outline-2 focus-within:outline-offset-2 focus-within:outline-ring sm:text-sm">
                   <label
                     htmlFor={`compare-repo-${row.id}`}
                     className="pl-3.5 text-muted-foreground select-none"
@@ -225,7 +223,7 @@ export function CompareBuilder({ apiBase, initialRepos = [] }: Props) {
             type="button"
             onClick={addRow}
             disabled={rows.length >= MAX_REPOS}
-            className="inline-flex min-h-11 items-center justify-center gap-1.5 rounded-md border border-border bg-background px-3 py-2 font-mono text-base text-muted-foreground hover:bg-accent hover:text-accent-foreground active:bg-accent/70 disabled:pointer-events-none disabled:opacity-40 sm:min-h-0 sm:py-1.5 sm:text-sm"
+            className="dither-control inline-flex min-h-11 items-center justify-center gap-1.5 rounded-md border px-3 py-2 font-mono text-base text-muted-foreground hover:text-accent-foreground disabled:pointer-events-none disabled:opacity-40 sm:min-h-0 sm:py-1.5 sm:text-sm"
           >
             <Plus className="size-4 shrink-0" strokeWidth={2} aria-hidden="true" />
             Add repo
@@ -266,7 +264,7 @@ export function CompareBuilder({ apiBase, initialRepos = [] }: Props) {
             <div>
               <a
                 href={vsHref}
-                className="inline-flex min-h-11 items-center gap-2 rounded-md border border-border bg-background px-3 py-2 font-mono text-base text-muted-foreground hover:bg-accent hover:text-accent-foreground sm:min-h-0 sm:py-1.5 sm:text-sm"
+                className="dither-control inline-flex min-h-11 items-center gap-2 rounded-md border px-3 py-2 font-mono text-base text-muted-foreground hover:text-accent-foreground sm:min-h-0 sm:py-1.5 sm:text-sm"
               >
                 Open the {active[0]} vs {active[1]} head-to-head page
                 <ArrowRight className="size-4 shrink-0" strokeWidth={2} aria-hidden="true" />
@@ -329,7 +327,7 @@ function RepoTable({ apiBase, repos }: { apiBase: string; repos: string[] }) {
   return (
     <section className="space-y-4">
       <h3 className="flex items-center gap-2 text-base font-medium">
-        <span className="size-1.5 shrink-0 rounded-full bg-signal" aria-hidden="true" />
+        <span className="size-1.5 shrink-0 rounded-full bg-(--dither-wave-2)" aria-hidden="true" />
         Summary
       </h3>
       <div className="-mx-6 -my-2 overflow-x-auto">
@@ -337,13 +335,13 @@ function RepoTable({ apiBase, repos }: { apiBase: string; repos: string[] }) {
           <table className="w-full text-left text-base sm:text-sm">
             <thead>
               <tr className="border-b border-border">
-                <th className="py-3 pr-4 font-mono text-xs font-medium tracking-wide text-muted-foreground uppercase whitespace-nowrap">
+                <th className="mono-label py-3 pr-4 whitespace-nowrap">
                   Repo
                 </th>
-                <th className="py-3 pr-4 text-right font-mono text-xs font-medium tracking-wide text-muted-foreground uppercase whitespace-nowrap">
+                <th className="mono-label py-3 pr-4 text-right whitespace-nowrap">
                   Total stars
                 </th>
-                <th className="py-3 text-right font-mono text-xs font-medium tracking-wide text-muted-foreground uppercase whitespace-nowrap">
+                <th className="mono-label py-3 text-right whitespace-nowrap">
                   First star
                 </th>
               </tr>

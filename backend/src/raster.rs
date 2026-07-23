@@ -211,14 +211,27 @@ fn demultiply(pixmap: &tiny_skia::Pixmap) -> Vec<u8> {
 /// Robust enough for our SVG output. A future renderer adding a sibling
 /// `<animate>` (rather than a child) would need re-evaluation, but
 /// every current chart nests animates inside their target element.
+///
+/// `<animateTransform>` is frozen too: for `additive="sum"` the end value
+/// composes onto the parent's static `transform` (which is the base the
+/// animation adds to); for the default replace semantics the parent's
+/// `transform` value is rewritten to the end state `{type}({to})`.
 pub fn freeze_svg_animations(svg: &str) -> String {
     let mut out = String::with_capacity(svg.len());
     let bytes = svg.as_bytes();
     let mut cursor = 0;
 
-    while let Some(rel) = find_subseq(&bytes[cursor..], b"<animate ") {
+    loop {
+        let plain = find_subseq(&bytes[cursor..], b"<animate ");
+        let transform = find_subseq(&bytes[cursor..], b"<animateTransform ");
+        let (rel, is_transform) = match (plain, transform) {
+            (Some(p), Some(t)) if t < p => (t, true),
+            (Some(p), _) => (p, false),
+            (None, Some(t)) => (t, true),
+            (None, None) => break,
+        };
         let animate_start = cursor + rel;
-        // Self-closing animate: look for `/>` after `<animate `.
+        // Self-closing animate: look for `/>` after the opening tag.
         let Some(close_rel) = find_subseq(&bytes[animate_start..], b"/>") else {
             // Malformed; emit the rest verbatim and bail out.
             out.push_str(&svg[cursor..]);
@@ -234,6 +247,16 @@ pub fn freeze_svg_animations(svg: &str) -> String {
         // Emit svg[cursor..animate_start] but with parent-attribute patched.
         let segment = &svg[cursor..animate_start];
         match (attr_name, from, to) {
+            (Some(name), Some(_), Some(to)) if is_transform && name == "transform" => {
+                let kind = extract_attr(tag, "type").unwrap_or_else(|| "translate".to_string());
+                let additive = extract_attr(tag, "additive");
+                // Patch the nearest preceding ` transform="..."` across the
+                // emitted document so a sibling `<animate>` processed first
+                // (which already flushed the parent's open tag into `out`)
+                // does not hide the transform attribute from this pass.
+                out.push_str(segment);
+                patch_last_transform(&mut out, &kind, &to, additive.as_deref() == Some("sum"));
+            }
             (Some(name), Some(from), Some(to)) => {
                 let target = format!(" {name}=\"{from}\"");
                 if let Some(pos) = segment.rfind(&target) {
@@ -264,6 +287,35 @@ pub fn freeze_svg_animations(svg: &str) -> String {
 
     out.push_str(&svg[cursor..]);
     out
+}
+
+/// Rewrite the nearest preceding ` transform="..."` in `out` to the
+/// animateTransform's end state. `additive` composes `{kind}({to})` after
+/// the existing base list; replace semantics substitute the whole value
+/// (matching SMIL, where a non-additive transform animation discards the
+/// static transform list while active/frozen). No preceding transform
+/// attribute → left unchanged (renderers always author a static transform
+/// on animated elements, same contract as the plain-attribute freezer).
+fn patch_last_transform(out: &mut String, kind: &str, to: &str, additive: bool) {
+    const NEEDLE: &str = " transform=\"";
+    let Some(pos) = out.rfind(NEEDLE) else {
+        return;
+    };
+    let value_start = pos + NEEDLE.len();
+    let Some(value_len) = out[value_start..].find('"') else {
+        return;
+    };
+    let base = &out[value_start..value_start + value_len];
+    let end_term = format!("{kind}({to})");
+    let new_value = if additive {
+        // Frozen end state = base list ∘ end value.
+        format!("{base} {end_term}")
+    } else {
+        // Replace semantics: the animation's end value wins outright,
+        // whether the static value was authored at the start or end state.
+        end_term
+    };
+    out.replace_range(value_start..value_start + value_len, &new_value);
 }
 
 fn find_subseq(haystack: &[u8], needle: &[u8]) -> Option<usize> {
@@ -351,6 +403,47 @@ mod tests {
     }
 
     #[test]
+    fn freezer_composes_additive_animate_transform_onto_base() {
+        // additive="sum": the frozen end state keeps the static base
+        // transform and appends the animation's end value.
+        let svg = r##"<g transform="translate(8 7)" stroke="#000">
+  <animateTransform attributeName="transform" type="scale" from="0.75" to="1" dur="0.22s" additive="sum" fill="freeze" />
+</g>"##;
+        let out = freeze_svg_animations(svg);
+        assert!(!out.contains("<animateTransform"), "tag removed: {out}");
+        assert!(
+            out.contains(r#"transform="translate(8 7) scale(1)""#),
+            "base transform must survive an additive freeze: {out}"
+        );
+    }
+
+    #[test]
+    fn freezer_replaces_non_additive_animate_transform() {
+        let svg = r##"<rect x="1" transform="translate(0 0)" fill="red">
+  <animateTransform attributeName="transform" type="translate" from="-40 0" to="0 0" dur="0.6s" fill="freeze" />
+</rect>"##;
+        let out = freeze_svg_animations(svg);
+        assert!(!out.contains("<animateTransform"));
+        assert!(
+            out.contains(r#"transform="translate(0 0)""#),
+            "replace semantics land on the end value: {out}"
+        );
+        assert!(!out.contains("-40"));
+    }
+
+    #[test]
+    fn freezer_handles_mixed_animate_and_animate_transform() {
+        let svg = r##"<g opacity="0" transform="translate(0 4)">
+  <animate attributeName="opacity" from="0" to="1" fill="freeze" />
+  <animateTransform attributeName="transform" type="translate" from="0 4" to="0 0" fill="freeze" />
+</g>"##;
+        let out = freeze_svg_animations(svg);
+        assert!(!out.contains("<animate"));
+        assert!(out.contains(r#"opacity="1""#));
+        assert!(out.contains(r#"transform="translate(0 0)""#));
+    }
+
+    #[test]
     fn raster_input_strips_only_reduced_motion_media() {
         let svg = r#"<style>.x { opacity: 1; }
 @media (prefers-reduced-motion: reduce) {
@@ -383,6 +476,39 @@ mod tests {
             rgba.chunks_exact(4).all(|pixel| {
                 pixel[0] > 200 && pixel[1] < 40 && pixel[2] < 40 && pixel[3] == 255
             })
+        );
+    }
+
+    #[test]
+    fn rasterize_honors_text_length_pinning() {
+        // The badge layout pins every <text> with textLength +
+        // lengthAdjust="spacingAndGlyphs" so server-estimated geometry and
+        // client rendering agree. This guards the resvg side: ink from a
+        // deliberately over-long string must stay inside the pinned width.
+        let svg = r##"<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 240 28" width="240" height="28"><rect width="240" height="28" fill="#ffffff" /><text x="10" y="19" textLength="60" lengthAdjust="spacingAndGlyphs" font-family="ui-monospace, SFMono-Regular, Menlo, Consolas, monospace" font-size="12" fill="#000000">wwwwwwwwwwww</text></svg>"##;
+        let (rgba, width, height) = rasterize_rgba(svg, 1.0).expect("raster");
+        assert_eq!((width, height), (240, 28));
+        let ink_in_column_range = |x0: u32, x1: u32| -> bool {
+            for y in 0..height {
+                for x in x0..x1 {
+                    let idx = ((y * width + x) * 4) as usize;
+                    // Any non-white pixel counts as ink.
+                    if rgba[idx] < 200 && rgba[idx + 3] > 0 {
+                        return true;
+                    }
+                }
+            }
+            false
+        };
+        // 12 mono chars at 12px would naturally run ~86px; pinned to 60 the
+        // ink must stop by x≈74 (x=10 + 60 + antialias slack).
+        assert!(
+            ink_in_column_range(10, 70),
+            "pinned text must still render ink"
+        );
+        assert!(
+            !ink_in_column_range(80, 240),
+            "resvg must honor textLength: no ink past the pinned advance"
         );
     }
 

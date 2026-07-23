@@ -168,17 +168,17 @@ export function UsageSection({
   const tabClass = (active: boolean) =>
     `dither-control min-h-11 rounded-md px-3 py-2 font-mono text-base tracking-wide uppercase sm:min-h-0 sm:px-2.5 sm:py-1 sm:text-xs ${
       active
-        ? "bg-accent text-accent-foreground"
-        : "text-muted-foreground hover:bg-accent/60 hover:text-accent-foreground"
+        ? "text-accent-foreground"
+        : "text-muted-foreground hover:text-accent-foreground"
     }`;
 
   if (loading) {
     return (
       <AsyncSwap state="loading">
         <div className="signal-panel p-6">
-          <p className="inline-flex items-center gap-2 font-mono text-xs tracking-wide text-muted-foreground uppercase">
+          <p className="mono-label inline-flex items-center gap-2">
             <Loader2
-              className="size-3.5 shrink-0 motion-safe:animate-spin text-signal"
+              className="size-3.5 shrink-0 motion-safe:animate-spin text-(--dither-wave-2)"
               aria-hidden="true"
             />
             Resolving packages
@@ -192,7 +192,7 @@ export function UsageSection({
     return (
       <AsyncSwap state="empty">
         <figure className="overflow-hidden rounded-xl border border-border border-dashed bg-card">
-          <figcaption className="flex items-center gap-2 border-b border-border px-5 py-3 font-mono text-xs tracking-wide text-muted-foreground uppercase">
+          <figcaption className="mono-label flex items-center gap-2 border-b border-border px-5 py-3">
             <span
               className="size-1.5 shrink-0 rounded-full bg-muted-foreground/50"
               aria-hidden="true"
@@ -225,9 +225,9 @@ export function UsageSection({
       <section className="space-y-6">
         <figure className="signal-panel overflow-visible">
           <figcaption className="flex flex-wrap items-center justify-between gap-3 border-b border-border bg-muted/40 px-5 py-3">
-            <div className="inline-flex items-center gap-2 font-mono text-xs tracking-wide text-muted-foreground uppercase">
+            <div className="mono-label inline-flex items-center gap-2">
               <span
-                className="size-1.5 shrink-0 rounded-full bg-signal"
+                className="size-1.5 shrink-0 rounded-full bg-(--dither-wave-2)"
                 aria-hidden="true"
               />
               Stars vs. usage
@@ -235,10 +235,7 @@ export function UsageSection({
             <div className="flex flex-wrap items-center gap-3">
               {sources.length > 1 && (
                 <div className="inline-flex items-center gap-2">
-                  <label
-                    htmlFor="usage-source"
-                    className="font-mono text-xs tracking-wide text-muted-foreground uppercase"
-                  >
+                  <label htmlFor="usage-source" className="mono-label">
                     Source
                   </label>
                   <div className="grid grid-cols-1">
@@ -247,7 +244,7 @@ export function UsageSection({
                       name="source"
                       value={source}
                       onChange={(e) => setSource(e.target.value as UsageSource)}
-                      className="dither-control col-start-1 row-start-1 min-h-11 appearance-none rounded-md border border-input bg-background py-2 pr-8 pl-3 font-mono text-base text-foreground outline-none focus-visible:outline-2 focus-visible:-outline-offset-1 focus-visible:outline-ring sm:min-h-0 sm:py-1 sm:pr-7 sm:pl-2 sm:text-xs"
+                      className="dither-control col-start-1 row-start-1 min-h-11 appearance-none rounded-md border py-2 pr-8 pl-3 font-mono text-base text-foreground outline-none focus-visible:outline-2 focus-visible:-outline-offset-1 focus-visible:outline-ring sm:min-h-0 sm:py-1 sm:pr-7 sm:pl-2 sm:text-xs"
                     >
                       {sources.map((s) => (
                         <option key={s} value={s}>
@@ -286,9 +283,7 @@ export function UsageSection({
 
           <div className="grid gap-px border-b border-border bg-border sm:grid-cols-2">
             <dl className="bg-card px-5 py-4">
-              <dt className="font-mono text-xs tracking-wide text-muted-foreground uppercase">
-                Resolved packages
-              </dt>
+              <dt className="mono-label">Resolved packages</dt>
               <dd className="mt-2 flex flex-col gap-1.5">
                 {resolvedRows.map((row) => (
                   <a
@@ -309,9 +304,7 @@ export function UsageSection({
             <dl className="grid grid-cols-3 divide-x divide-border bg-card px-5 py-4">
               {totals.map((t) => (
                 <div key={t.label} className="px-2 first:pl-0 last:pr-0">
-                  <dt className="font-mono text-xs tracking-wide text-muted-foreground uppercase">
-                    {t.label}
-                  </dt>
+                  <dt className="mono-label">{t.label}</dt>
                   <dd className="mt-1.5 text-lg font-semibold tabular-nums">
                     {t.value}
                   </dd>

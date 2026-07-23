@@ -138,10 +138,10 @@ export function BadgeStudio({ apiBase, owner, repo }: Props) {
   const html = theme === "auto" ? pictureEmbed : flatEmbed;
 
   const tabClass = (active: boolean) =>
-    `min-h-11 rounded-md px-3 py-2 font-mono text-base tracking-wide uppercase sm:min-h-0 sm:px-2.5 sm:py-1 sm:text-xs ${
+    `dither-control min-h-11 rounded-md px-3 py-2 font-mono text-base tracking-wide uppercase sm:min-h-0 sm:px-2.5 sm:py-1 sm:text-xs ${
       active
-        ? "bg-accent text-accent-foreground"
-        : "text-muted-foreground hover:bg-accent/60 hover:text-accent-foreground"
+        ? "text-accent-foreground"
+        : "text-muted-foreground hover:text-accent-foreground"
     }`;
 
   const noMetrics = metrics.length === 0;
@@ -151,9 +151,7 @@ export function BadgeStudio({ apiBase, owner, repo }: Props) {
       <div className="grid gap-6 lg:grid-cols-[minmax(0,1fr)_minmax(0,1.1fr)]">
         <div className="card-panel space-y-6 p-6">
           <div>
-            <p className="font-mono text-xs tracking-wide text-muted-foreground uppercase">
-              Metrics
-            </p>
+            <p className="mono-label">Metrics</p>
             <div className="mt-3 flex flex-wrap gap-2">
               {METRICS.map((m) => {
                 const active = metrics.includes(m.id);
@@ -161,7 +159,7 @@ export function BadgeStudio({ apiBase, owner, repo }: Props) {
                   <label
                     key={m.id}
                     htmlFor={`badge-metric-${m.id}`}
-                    className="group inline-flex min-h-11 cursor-pointer items-center gap-2 rounded-md border border-border bg-background px-3 py-2 font-mono text-base text-muted-foreground outline-ring outline-offset-2 has-checked:border-signal/40 has-checked:bg-signal/10 has-checked:text-foreground has-focus-visible:outline-2 hover:bg-accent hover:text-accent-foreground sm:min-h-0 sm:py-1.5 sm:text-sm"
+                    className="dither-control group inline-flex min-h-11 cursor-pointer items-center gap-2 rounded-md border px-3 py-2 font-mono text-base text-muted-foreground outline-ring outline-offset-2 has-checked:text-foreground has-focus-visible:outline-2 hover:text-accent-foreground sm:min-h-0 sm:py-1.5 sm:text-sm"
                   >
                     <input
                       id={`badge-metric-${m.id}`}
@@ -173,11 +171,11 @@ export function BadgeStudio({ apiBase, owner, repo }: Props) {
                       className="sr-only"
                     />
                     <span
-                      className="flex size-5 shrink-0 items-center justify-center rounded-sm border border-input group-has-checked:border-signal group-has-checked:bg-signal sm:size-4"
+                      className="flex size-5 shrink-0 items-center justify-center rounded-sm border border-input group-has-checked:border-(--dither-wave-1) group-has-checked:bg-(--dither-wave-1) sm:size-4"
                       aria-hidden="true"
                     >
                       <Check
-                        className="size-3 text-signal-foreground opacity-0 group-has-checked:opacity-100"
+                        className="size-3 text-background opacity-0 group-has-checked:opacity-100"
                         strokeWidth={3}
                       />
                     </span>
@@ -211,9 +209,7 @@ export function BadgeStudio({ apiBase, owner, repo }: Props) {
           </div>
 
           <div>
-            <p className="font-mono text-xs tracking-wide text-muted-foreground uppercase">
-              Style
-            </p>
+            <p className="mono-label">Style</p>
             <div className="mt-3 grid grid-cols-1 gap-3 sm:grid-cols-2">
               {STYLES.map((s) => {
                 const previewUrl = `${badgeBase}?${badgeQuery({
@@ -221,13 +217,13 @@ export function BadgeStudio({ apiBase, owner, repo }: Props) {
                   style: s.id,
                   animate: false,
                   source,
-                  theme: "light",
+                  theme: "dark",
                 })}`;
                 return (
                   <label
                     key={s.id}
                     htmlFor={`badge-style-${s.id}`}
-                    className="group flex cursor-pointer flex-col gap-2 rounded-lg border border-border p-3 text-left text-base outline-ring outline-offset-2 has-checked:border-signal/50 has-checked:ring-2 has-checked:ring-signal/30 has-focus-visible:outline-2 hover:border-input sm:text-sm"
+                    className="dither-panel group flex cursor-pointer flex-col gap-2 rounded-lg p-3 text-left text-base outline-ring outline-offset-2 has-checked:ring-2 has-checked:ring-(--dither-wave-1)/40 has-focus-visible:outline-2 sm:text-sm"
                   >
                     <input
                       id={`badge-style-${s.id}`}
@@ -257,10 +253,7 @@ export function BadgeStudio({ apiBase, owner, repo }: Props) {
 
           <div className="grid gap-5 sm:grid-cols-2">
             <div>
-              <label
-                htmlFor="badge-source"
-                className="block font-mono text-xs tracking-wide text-muted-foreground uppercase"
-              >
+              <label htmlFor="badge-source" className="mono-label block">
                 Source
               </label>
               <div className="mt-3 grid grid-cols-1">
@@ -269,7 +262,7 @@ export function BadgeStudio({ apiBase, owner, repo }: Props) {
                   name="source"
                   value={source}
                   onChange={(e) => setSource(e.target.value as BadgeSource)}
-                  className="col-start-1 row-start-1 min-h-11 w-full appearance-none rounded-md border border-input bg-background py-2 pr-9 pl-3 font-mono text-base text-foreground outline-none focus-visible:outline-2 focus-visible:-outline-offset-1 focus-visible:outline-ring sm:min-h-0 sm:text-sm"
+                  className="dither-control col-start-1 row-start-1 min-h-11 w-full appearance-none rounded-md border py-2 pr-9 pl-3 font-mono text-base text-foreground outline-none focus-visible:outline-2 focus-visible:-outline-offset-1 focus-visible:outline-ring sm:min-h-0 sm:text-sm"
                 >
                   {SOURCES.map((s) => (
                     <option key={s.id} value={s.id}>
@@ -285,10 +278,7 @@ export function BadgeStudio({ apiBase, owner, repo }: Props) {
               </div>
             </div>
             <div>
-              <label
-                htmlFor="badge-theme"
-                className="block font-mono text-xs tracking-wide text-muted-foreground uppercase"
-              >
+              <label htmlFor="badge-theme" className="mono-label block">
                 Theme
               </label>
               <div className="mt-3 grid grid-cols-1">
@@ -297,7 +287,7 @@ export function BadgeStudio({ apiBase, owner, repo }: Props) {
                   name="theme"
                   value={theme}
                   onChange={(e) => setTheme(e.target.value as ThemeChoice)}
-                  className="col-start-1 row-start-1 min-h-11 w-full appearance-none rounded-md border border-input bg-background py-2 pr-9 pl-3 font-mono text-base text-foreground outline-none focus-visible:outline-2 focus-visible:-outline-offset-1 focus-visible:outline-ring sm:min-h-0 sm:text-sm"
+                  className="dither-control col-start-1 row-start-1 min-h-11 w-full appearance-none rounded-md border py-2 pr-9 pl-3 font-mono text-base text-foreground outline-none focus-visible:outline-2 focus-visible:-outline-offset-1 focus-visible:outline-ring sm:min-h-0 sm:text-sm"
                 >
                   {THEMES.map((t) => (
                     <option key={t.id} value={t.id}>
@@ -315,12 +305,10 @@ export function BadgeStudio({ apiBase, owner, repo }: Props) {
           </div>
 
           <div>
-            <p className="font-mono text-xs tracking-wide text-muted-foreground uppercase">
-              Animation
-            </p>
+            <p className="mono-label">Animation</p>
             <label
               htmlFor="badge-animation"
-              className="group mt-3 inline-flex min-h-11 cursor-pointer items-center gap-3 rounded-md border border-border bg-background px-3 py-2 font-mono text-base text-foreground outline-ring outline-offset-2 has-focus-visible:outline-2 hover:bg-accent hover:text-accent-foreground sm:text-sm"
+              className="dither-control group mt-3 inline-flex min-h-11 cursor-pointer items-center gap-3 rounded-md border px-3 py-2 font-mono text-base text-foreground outline-ring outline-offset-2 has-focus-visible:outline-2 sm:text-sm"
             >
               <input
                 id="badge-animation"
@@ -332,7 +320,7 @@ export function BadgeStudio({ apiBase, owner, repo }: Props) {
                 className="sr-only"
               />
               <span
-                className="relative inline-flex h-5 w-9 shrink-0 items-center rounded-full bg-input group-has-checked:bg-signal"
+                className="relative inline-flex h-5 w-9 shrink-0 items-center rounded-full bg-input group-has-checked:bg-(--dither-wave-1)"
                 aria-hidden="true"
               >
                 <span
@@ -346,8 +334,8 @@ export function BadgeStudio({ apiBase, owner, repo }: Props) {
 
         <div className="card-panel flex flex-col overflow-hidden">
           <div className="flex items-center justify-between gap-2 border-b border-border bg-muted/40 px-5 py-3">
-            <div className="inline-flex items-center gap-2 font-mono text-xs tracking-wide text-muted-foreground uppercase">
-              <span className="size-1.5 shrink-0 rounded-full bg-signal" aria-hidden="true" />
+            <div className="mono-label inline-flex items-center gap-2">
+              <span className="size-1.5 shrink-0 rounded-full bg-(--dither-wave-2)" aria-hidden="true" />
               Live preview
             </div>
             <CopyButton
@@ -358,11 +346,11 @@ export function BadgeStudio({ apiBase, owner, repo }: Props) {
                   : "Copy badge URL"
               }
               idleLabel={theme === "auto" ? "Embed" : "URL"}
-              className="inline-flex min-h-11 items-center gap-1.5 rounded-md border border-border bg-background px-3 py-2 font-mono text-base text-muted-foreground hover:bg-accent hover:text-accent-foreground sm:min-h-0 sm:px-2.5 sm:py-1 sm:text-xs"
+              className="dither-control inline-flex min-h-11 items-center gap-1.5 rounded-md border px-3 py-2 font-mono text-base text-muted-foreground hover:text-accent-foreground sm:min-h-0 sm:px-2.5 sm:py-1 sm:text-xs"
             />
           </div>
 
-          <div className="bg-grid flex flex-1 items-center justify-center px-6 py-12">
+          <div className="dither-badge-bed flex flex-1 items-center justify-center px-6 py-12">
             {noMetrics ? (
               <p className="text-base text-muted-foreground sm:text-sm">
                 Pick a metric to preview your badge.
@@ -407,8 +395,8 @@ function BadgeEmbed({
   return (
     <figure className="card-panel overflow-hidden">
       <figcaption className="flex flex-wrap items-center justify-between gap-3 border-b border-border bg-muted/40 px-5 py-3">
-        <div className="inline-flex items-center gap-2 font-mono text-xs tracking-wide text-muted-foreground uppercase">
-          <span className="size-1.5 shrink-0 rounded-full bg-signal" aria-hidden="true" />
+        <div className="mono-label inline-flex items-center gap-2">
+          <span className="size-1.5 shrink-0 rounded-full bg-(--dither-wave-2)" aria-hidden="true" />
           Embed badge
         </div>
         <div className="flex items-center gap-1" role="group" aria-label="Embed format">
@@ -437,7 +425,7 @@ function BadgeEmbed({
         <CopyButton
           value={snippet}
           ariaLabel="Copy badge embed snippet"
-          className="absolute top-3 right-3 inline-flex min-h-11 items-center gap-1.5 rounded-md border border-border bg-background/90 px-3 py-2 font-mono text-base text-muted-foreground backdrop-blur hover:bg-accent hover:text-accent-foreground sm:min-h-0 sm:px-2.5 sm:py-1 sm:text-xs"
+          className="dither-control absolute top-3 right-3 inline-flex min-h-11 items-center gap-1.5 rounded-md border px-3 py-2 font-mono text-base text-muted-foreground backdrop-blur hover:text-accent-foreground sm:min-h-0 sm:px-2.5 sm:py-1 sm:text-xs"
         />
       </div>
     </figure>

@@ -16,6 +16,12 @@ use crate::gh_archive_hourly::{
 
 const HOURLY_COMMIT_LOCK: i64 = 0x6769_7464_6562_7402;
 
+/// Session advisory lock electing the single hourly follower across worker
+/// replicas. Commits were always idempotent under [`HOURLY_COMMIT_LOCK`];
+/// leadership additionally stops non-leaders from redundantly downloading
+/// and parsing every hourly archive.
+pub const FOLLOWER_LEADER_LOCK: i64 = 0x6769_7464_6562_7404;
+
 #[derive(Clone)]
 struct PostgresHourlyArchive {
     db: Db,
@@ -211,9 +217,13 @@ impl HourlyArchiveSink for PostgresHourlyArchive {
     }
 }
 
-/// Start the raw forward follower. Historical BigQuery backfills and this
-/// follower overlap safely because both persist the GH event ID.
-pub fn spawn(db: Db) -> Result<(), HourlyArchiveError> {
+/// Start the raw forward follower behind leader election: configuration is
+/// validated eagerly (a bad env still fails startup on every replica), but
+/// only the replica holding [`FOLLOWER_LEADER_LOCK`] downloads and commits
+/// hourly archives; the rest re-contend about once a minute. Historical
+/// BigQuery backfills and this follower overlap safely because both persist
+/// the GH event ID.
+pub fn spawn(db: Db, database_url: String) -> Result<(), HourlyArchiveError> {
     let config = config_from_env()?;
     let http = reqwest::Client::builder()
         .user_agent(concat!("gitdebt/", env!("CARGO_PKG_VERSION")))
@@ -224,51 +234,64 @@ pub fn spawn(db: Db) -> Result<(), HourlyArchiveError> {
         .build()
         .map_err(|error| HourlyArchiveError::InvalidConfig(error.to_string()))?;
     let store = Arc::new(PostgresHourlyArchive::new(db));
-    let follower = GhArchiveHourlyFollower::new(
+    let follower = Arc::new(GhArchiveHourlyFollower::new(
         config,
         Arc::new(ReqwestHourlyArchiveFetcher::with_default_limit(http)),
         Arc::new(GzipArchiveDecoder),
         store.clone(),
         store.clone(),
-    )?;
-    tokio::spawn(async move {
-        loop {
-            let start = match store.next_hour().await {
-                Ok(hour) => hour,
-                Err(error) => {
-                    tracing::error!(%error, "gh-archive-hourly: checkpoint read failed");
-                    tokio::time::sleep(Duration::from_secs(30)).await;
-                    continue;
+    )?);
+    crate::bootstrap::spawn_leader(
+        database_url,
+        FOLLOWER_LEADER_LOCK,
+        "gh-archive-hourly",
+        move || {
+            let follower = follower.clone();
+            let store = store.clone();
+            async move {
+                follower_loop(follower, store).await;
+            }
+        },
+    );
+    Ok(())
+}
+
+async fn follower_loop(follower: Arc<GhArchiveHourlyFollower>, store: Arc<PostgresHourlyArchive>) {
+    loop {
+        let start = match store.next_hour().await {
+            Ok(hour) => hour,
+            Err(error) => {
+                tracing::error!(%error, "gh-archive-hourly: checkpoint read failed");
+                tokio::time::sleep(Duration::from_secs(30)).await;
+                continue;
+            }
+        };
+        match follower.catch_up(start, Utc::now()).await {
+            Ok(report) => {
+                if report.hours_committed > 0 {
+                    tracing::info!(
+                        hours = report.hours_committed,
+                        matching_events = report.matching_events,
+                        next_hour = %report.next_hour,
+                        "gh-archive-hourly: forward activity committed"
+                    );
                 }
-            };
-            match follower.catch_up(start, Utc::now()).await {
-                Ok(report) => {
-                    if report.hours_committed > 0 {
-                        tracing::info!(
-                            hours = report.hours_committed,
-                            matching_events = report.matching_events,
-                            next_hour = %report.next_hour,
-                            "gh-archive-hourly: forward activity committed"
-                        );
-                    }
-                    let caught_up = report
-                        .eligible_through
-                        .is_none_or(|eligible| report.next_hour > eligible);
-                    tokio::time::sleep(if caught_up {
-                        Duration::from_secs(300)
-                    } else {
-                        Duration::from_secs(1)
-                    })
-                    .await;
-                }
-                Err(error) => {
-                    tracing::error!(%error, "gh-archive-hourly: follower pass failed");
-                    tokio::time::sleep(Duration::from_secs(30)).await;
-                }
+                let caught_up = report
+                    .eligible_through
+                    .is_none_or(|eligible| report.next_hour > eligible);
+                tokio::time::sleep(if caught_up {
+                    Duration::from_secs(300)
+                } else {
+                    Duration::from_secs(1)
+                })
+                .await;
+            }
+            Err(error) => {
+                tracing::error!(%error, "gh-archive-hourly: follower pass failed");
+                tokio::time::sleep(Duration::from_secs(30)).await;
             }
         }
-    });
-    Ok(())
+    }
 }
 
 fn config_from_env() -> Result<HourlyFollowerConfig, HourlyArchiveError> {
@@ -333,6 +356,23 @@ mod tests {
         assert_ne!(HOURLY_COMMIT_LOCK, 0);
     }
 
+    /// The advisory-lock family must never collide: schema migration,
+    /// hourly commit, coordinator leadership, follower leadership.
+    #[test]
+    fn advisory_lock_ids_are_pairwise_distinct() {
+        let ids = [
+            HOURLY_COMMIT_LOCK,
+            FOLLOWER_LEADER_LOCK,
+            crate::archive_worker::COORDINATOR_LEADER_LOCK,
+        ];
+        for (index, left) in ids.iter().enumerate() {
+            assert_ne!(*left, 0);
+            for right in ids.iter().skip(index + 1) {
+                assert_ne!(left, right);
+            }
+        }
+    }
+
     #[test]
     fn imported_time_is_hour_aligned() {
         let now = Utc.with_ymd_and_hms(2026, 7, 20, 12, 37, 0).unwrap();
@@ -346,11 +386,10 @@ mod tests {
 
     #[tokio::test]
     async fn postgres_hour_commit_is_atomic_and_idempotent() {
-        let Ok(url) = std::env::var("GITDEBT_TEST_DATABASE_URL") else {
+        let Some(db) = crate::test_db::shared().await else {
             eprintln!("skipping: set GITDEBT_TEST_DATABASE_URL to run");
             return;
         };
-        let db = Db::connect(&url).await.unwrap();
         let repo = format!("gitdebt-hourly-test/{}", std::process::id());
         let github_id = 9_000_000_000_i64 + i64::from(std::process::id());
         let hour = Utc.with_ymd_and_hms(2090, 1, 1, 3, 0, 0).unwrap();

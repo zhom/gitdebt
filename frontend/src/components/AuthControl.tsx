@@ -86,7 +86,7 @@ export function AuthControl({ apiBase, returnTo = "/" }: Props) {
         href={loginHref}
         aria-label="Login with GitHub"
         aria-busy={loading}
-        className="inline-flex min-h-12 items-center justify-center gap-2 rounded-md bg-primary px-3.5 py-2 text-sm font-medium text-primary-foreground transition-colors duration-150 hover:bg-primary/90 focus-visible:outline-2 focus-visible:outline-offset-2 focus-visible:outline-ring active:bg-primary/85"
+        className="dither-primary inline-flex min-h-12 items-center justify-center gap-2 rounded-md px-3.5 py-2 text-sm font-medium focus-visible:outline-2 focus-visible:outline-offset-2 focus-visible:outline-ring"
       >
         <span>Login</span>
         <GitHubMark className="size-4" />
@@ -96,7 +96,7 @@ export function AuthControl({ apiBase, returnTo = "/" }: Props) {
 
   return (
     <details ref={detailsRef} className="relative">
-      <summary className="flex min-h-11 cursor-pointer list-none items-center gap-2 rounded-md border border-border bg-background px-3 py-2 text-sm font-medium hover:bg-accent focus-visible:outline-2 focus-visible:outline-offset-2 focus-visible:outline-ring [&::-webkit-details-marker]:hidden">
+      <summary className="dither-control flex min-h-11 cursor-pointer list-none items-center gap-2 rounded-md border px-3 py-2 text-sm font-medium focus-visible:outline-2 focus-visible:outline-offset-2 focus-visible:outline-ring [&::-webkit-details-marker]:hidden">
         {user.avatar_url ? (
           <img
             src={user.avatar_url}
@@ -117,7 +117,7 @@ export function AuthControl({ apiBase, returnTo = "/" }: Props) {
         <span className="sr-only">{`Open account menu for ${user.login}`}</span>
       </summary>
 
-      <div className="absolute right-0 z-50 mt-2 w-72 rounded-lg border border-border bg-popover p-3 text-popover-foreground">
+      <div className="dither-menu absolute right-0 z-50 mt-2 w-72 rounded-lg p-3 text-popover-foreground">
         <div className="px-2 py-2">
           <p className="truncate text-sm font-medium">
             {user.name || user.login}

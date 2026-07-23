@@ -4,9 +4,8 @@ services:
     container_name: gitdebt-postgres
     restart: unless-stopped
     environment:
-      # Defaults are fine for local dev. In production, set these via
-      # your secrets store (Dokploy environment variables) — same
-      # values that `DATABASE_URL` consumes from the backend side.
+      # Defaults are fine for local dev; `DATABASE_URL` consumes the same
+      # values from the backend side.
       POSTGRES_DB: ${POSTGRES_DB:-gitdebt}
       POSTGRES_USER: ${POSTGRES_USER:-gitdebt}
       POSTGRES_PASSWORD: ${POSTGRES_PASSWORD:-gitdebt}
@@ -18,6 +17,20 @@ services:
       - postgres-data:/var/lib/postgresql/data
     healthcheck:
       test: ["CMD-SHELL", "pg_isready -U ${POSTGRES_USER:-gitdebt} -d ${POSTGRES_DB:-gitdebt}"]
+      interval: 5s
+      timeout: 5s
+      retries: 10
+
+  redis:
+    image: redis:7-alpine
+    container_name: gitdebt-redis
+    restart: unless-stopped
+    ports:
+      # Non-default host port so a system Redis on 6379 never collides;
+      # matches REDIS_URL=redis://localhost:6390 in backend/.env.example.
+      - "6390:6379"
+    healthcheck:
+      test: ["CMD", "redis-cli", "ping"]
       interval: 5s
       timeout: 5s
       retries: 10

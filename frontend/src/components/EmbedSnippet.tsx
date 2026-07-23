@@ -148,11 +148,7 @@ export function EmbedSnippet({
   const selectedFormat = formats.includes(format) ? format : "svg";
 
   const formatParams =
-    selectedFormat === "svg"
-      ? [`animate=${animatedSvg ? "1" : "0"}`]
-      : selectedFormat === "gif"
-        ? ["motion=draw"]
-        : [];
+    selectedFormat === "svg" ? [`animate=${animatedSvg ? "1" : "0"}`] : [];
   const base = appendParams(
     `${apiBase}${withFormat(chartPath, selectedFormat)}`,
     [...stateParams(state), ...formatParams, `render=${MEDIA_RENDER_REVISION}`],
@@ -181,7 +177,7 @@ export function EmbedSnippet({
 
   const controls = (
     <div className="grid grid-cols-3 gap-2">
-      <label className="grid gap-1 font-mono text-[10px] tracking-wide text-muted-foreground uppercase">
+      <label className="mono-label grid gap-1">
         Theme
         <select
           name="theme"
@@ -196,7 +192,7 @@ export function EmbedSnippet({
           ))}
         </select>
       </label>
-      <label className="grid gap-1 font-mono text-[10px] tracking-wide text-muted-foreground uppercase">
+      <label className="mono-label grid gap-1">
         Image
         <select
           value={selectedFormat}
@@ -206,7 +202,7 @@ export function EmbedSnippet({
           {formats.map((value) => <option key={value} value={value}>{value.toUpperCase()}</option>)}
         </select>
       </label>
-      <label className="grid gap-1 font-mono text-[10px] tracking-wide text-muted-foreground uppercase">
+      <label className="mono-label grid gap-1">
         Snippet
         <select
           value={mode}
@@ -237,13 +233,13 @@ export function EmbedSnippet({
         <CopyButton
           value={snippet}
           ariaLabel="Copy embed snippet"
-          className="dither-control inline-flex min-h-9 shrink-0 items-center gap-1.5 bg-foreground px-3 py-2 font-mono text-xs text-background hover:opacity-85"
+          className="dither-primary inline-flex min-h-9 shrink-0 items-center gap-1.5 rounded-md px-3 py-2 font-mono text-xs"
           idleLabel="Copy embed"
         />
       </div>
       {selectedFormat === "gif" && (
         <p className="border-t border-border px-5 py-3 text-sm text-pretty text-muted-foreground">
-          GIF draws once and uses more bandwidth. Auto emits separate light and dark assets.
+          GIF loops a wave animation and uses more bandwidth than SVG. Auto emits separate light and dark assets.
         </p>
       )}
     </>
@@ -260,7 +256,7 @@ export function EmbedSnippet({
           type="button"
           aria-expanded={open}
           onClick={() => setOpen((value) => !value)}
-          className="dither-control inline-flex min-h-11 items-center gap-2 rounded-md border border-border bg-background px-3 py-2 font-mono text-sm text-foreground transition-colors duration-150 hover:bg-accent focus-visible:outline-2 focus-visible:outline-offset-2 focus-visible:outline-ring sm:min-h-0 sm:text-xs"
+          className="dither-control inline-flex min-h-11 items-center gap-2 rounded-md border px-3 py-2 font-mono text-sm text-foreground focus-visible:outline-2 focus-visible:outline-offset-2 focus-visible:outline-ring sm:min-h-0 sm:text-xs"
         >
           <Code2 className="size-4" strokeWidth={1.75} aria-hidden="true" />
           Add to README
@@ -302,8 +298,8 @@ export function EmbedSnippet({
   return (
     <figure className="overflow-hidden border-y border-border">
       <figcaption className="flex flex-wrap items-center justify-between gap-3 border-b border-border bg-muted/40 px-5 py-3">
-        <div className="inline-flex items-center gap-2 font-mono text-xs tracking-wide text-muted-foreground uppercase">
-          <span className="size-1.5 shrink-0 rounded-full bg-signal" aria-hidden="true" />
+        <div className="mono-label inline-flex items-center gap-2">
+          <span className="size-1.5 shrink-0 rounded-full bg-(--dither-wave-2)" aria-hidden="true" />
           Embed
         </div>
         {controls}

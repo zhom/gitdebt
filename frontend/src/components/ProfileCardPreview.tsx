@@ -83,7 +83,7 @@ export function ProfileCardPreview({
   return (
     <motion.a
       href={`/u/${login}`}
-      className="block max-w-full rounded-xl focus-visible:outline-2 focus-visible:outline-offset-4 focus-visible:outline-ring"
+      className="dither-badge-bed block max-w-full rounded-xl p-1.5 focus-visible:outline-2 focus-visible:outline-offset-4 focus-visible:outline-ring"
       whileHover={reduceMotion ? undefined : { y: -2, scale: 1.006 }}
       whileTap={reduceMotion ? undefined : { scale: 0.992 }}
       transition={SPRING.snappy}

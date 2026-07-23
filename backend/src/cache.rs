@@ -34,9 +34,21 @@ pub struct ArchiveBackfillState {
     pub complete: bool,
     pub authoritative_total: Option<i64>,
     pub exact_history_complete: bool,
+    /// `metadata_fetched_at IS NULL`. Every public read surface gates on
+    /// that timestamp, so a repo with complete history but missing
+    /// metadata is invisible until a metadata fetch heals it — the archive
+    /// coordinator must not settle such a job without writing metadata.
+    pub metadata_missing: bool,
 }
 
-type ArchiveBackfillRow = (Option<i64>, Option<NaiveDate>, bool, Option<i64>, bool);
+type ArchiveBackfillRow = (
+    Option<i64>,
+    Option<NaiveDate>,
+    bool,
+    Option<i64>,
+    bool,
+    bool,
+);
 
 async fn upsert_stargazer_events(
     conn: &mut PgConnection,
@@ -582,20 +594,28 @@ impl Cache {
     ) -> Result<Option<ArchiveBackfillState>> {
         let row: Option<ArchiveBackfillRow> = sqlx::query_as(
             "SELECT github_id, archive_cursor, archive_complete, star_count, \
-                        stargazers_complete \
+                        stargazers_complete, metadata_fetched_at IS NULL \
                  FROM repos WHERE repo = $1",
         )
         .bind(repo)
         .fetch_optional(&self.db.pool)
         .await?;
         Ok(row.map(
-            |(github_id, cursor, complete, authoritative_total, exact_history_complete)| {
+            |(
+                github_id,
+                cursor,
+                complete,
+                authoritative_total,
+                exact_history_complete,
+                metadata_missing,
+            )| {
                 ArchiveBackfillState {
                     github_id,
                     cursor,
                     complete,
                     authoritative_total,
                     exact_history_complete,
+                    metadata_missing,
                 }
             },
         ))

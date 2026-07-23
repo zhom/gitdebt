@@ -26,7 +26,6 @@ const ignored = [
   "dist",
   "README.md",
   "PRIVACY.md",
-  "STORE_LISTING.md",
   ".gitignore",
   "web-ext-artifacts",
   "test",

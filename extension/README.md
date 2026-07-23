@@ -57,9 +57,8 @@ The archives contain the same cross-browser MV3 source. Chrome ignores
 `browser_specific_settings`; Firefox uses it for the extension ID and built-in
 data-collection consent.
 
-Before submission, complete the publisher-account and screenshot items in
-[STORE_LISTING.md](STORE_LISTING.md). Upload the generated archive, not the
-working `extension/` directory.
+When submitting to a store, upload the generated archive, not the working
+`extension/` directory.
 
 ## Permissions
 
@@ -85,5 +84,4 @@ icons/
 test/
 build.mjs
 PRIVACY.md
-STORE_LISTING.md
 ```

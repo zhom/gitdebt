@@ -35,7 +35,7 @@ export const CATEGORIES: Category[] = [
     name: "Frontend frameworks",
     short: "React, Vue, Svelte, Angular, Solid and Preact head to head.",
     intro:
-      "The frontend framework wars are the longest-running rivalry on GitHub, and the star charts tell the story better than any hot take. React's curve is the benchmark every newcomer gets measured against, Vue's climb through the late 2010s was the fastest the ecosystem had seen, and Svelte and Solid show what a post-virtual-DOM pitch does to a growth curve. Watch where the lines cross — that's usually when the blog posts started.",
+      "Frontend frameworks are the longest-running rivalry on GitHub. React's curve is the benchmark every newcomer gets measured against, Vue's climb through the late 2010s was the fastest the ecosystem had seen, and Svelte and Solid show what a post-virtual-DOM pitch does to a growth curve. The points where the lines cross tend to line up with real shifts in adoption.",
     repos: [
       "facebook/react",
       "vuejs/vue",
@@ -108,7 +108,7 @@ export const CATEGORIES: Category[] = [
     name: "JavaScript runtimes",
     short: "Node.js, Deno and Bun — the server-side JS race.",
     intro:
-      "Node.js normalized JavaScript on the server and spent a decade unchallenged. Then Deno arrived with a security-first pitch from Node's own creator, and Bun turned runtime speed into a spectator sport — its first months of stars rank among the fastest climbs GitHub has recorded for infrastructure software. The totals still favor the incumbent; the recent-velocity numbers are a much closer race.",
+      "Node.js normalized JavaScript on the server and spent a decade unchallenged. Then Deno arrived with a security-first pitch from Node's own creator, and Bun's first months of stars rank among the fastest climbs GitHub has recorded for infrastructure software. The totals still favor the incumbent; the recent-velocity numbers are a much closer race.",
     repos: [
       "nodejs/node",
       "denoland/deno",
@@ -180,7 +180,7 @@ export const CATEGORIES: Category[] = [
     name: "Code editors",
     short: "VS Code, Neovim, Vim, Zed and Helix — editor star history.",
     intro:
-      "Editor loyalty is the closest thing programming has to a team sport. VS Code is the biggest open-source editor project ever measured by stars, but the more interesting lines are underneath it: Neovim decisively outgrowing the Vim it forked from, Helix proving a modal editor can be born modern, and Zed converting years of anticipation into one of the sharpest launch spikes in the category's history.",
+      "VS Code is the biggest open-source editor project ever measured by stars, but the more interesting lines are underneath it: Neovim decisively outgrowing the Vim it forked from, Helix proving a modal editor can be born modern, and Zed converting years of anticipation into one of the sharpest launch spikes in the category's history.",
     repos: [
       "microsoft/vscode",
       "neovim/neovim",
@@ -194,7 +194,7 @@ export const CATEGORIES: Category[] = [
     name: "Terminals & multiplexers",
     short: "Alacritty, kitty, WezTerm, Ghostty, Zellij and tmux.",
     intro:
-      "The terminal renaissance is real and the star charts prove it. Alacritty and kitty kicked off the GPU-accelerated era, WezTerm quietly built a power-user following, and Ghostty's 2024 release turned years of private-beta hype into an instant vertical line. On the multiplexer side, tmux's decade-long slow burn against Zellij's newer curve is a neat portrait of stability versus reinvention.",
+      "Terminal emulators picked up a new generation of projects once GPU acceleration arrived. Alacritty and kitty kicked off that era, WezTerm quietly built a power-user following, and Ghostty's 2024 release turned years of private beta into an instant vertical line. On the multiplexer side, tmux's decade-long slow burn against Zellij's newer curve is a portrait of stability versus reinvention.",
     repos: [
       "alacritty/alacritty",
       "kovidgoyal/kitty",

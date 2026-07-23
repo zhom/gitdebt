@@ -37,7 +37,7 @@ export function GrowthTicker({ apiBase }: { apiBase: string }) {
   const repeated = [...repos, ...repos];
 
   return (
-    <div className="group overflow-hidden border-t border-foreground bg-background" aria-label="Repository growth ticker">
+    <div className="group evidence-band overflow-hidden border-t border-foreground bg-background" aria-label="Repository growth ticker">
       <div className="growth-ticker-track flex w-max">
         {repeated.map((repo, index) => (
           <a

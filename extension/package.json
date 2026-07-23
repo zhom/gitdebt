@@ -10,9 +10,9 @@
     "node": ">=20"
   },
   "scripts": {
-    "lint": "web-ext lint --source-dir=. --ignore-files package.json package-lock.json node_modules build.mjs dist README.md PRIVACY.md STORE_LISTING.md .gitignore web-ext-artifacts test",
-    "start:firefox": "web-ext run --source-dir=. --target=firefox-desktop --ignore-files package.json package-lock.json node_modules build.mjs dist README.md PRIVACY.md STORE_LISTING.md .gitignore web-ext-artifacts test",
-    "start:chrome": "web-ext run --source-dir=. --target=chromium --ignore-files package.json package-lock.json node_modules build.mjs dist README.md PRIVACY.md STORE_LISTING.md .gitignore web-ext-artifacts test",
+    "lint": "web-ext lint --source-dir=. --ignore-files package.json package-lock.json node_modules build.mjs dist README.md PRIVACY.md .gitignore web-ext-artifacts test",
+    "start:firefox": "web-ext run --source-dir=. --target=firefox-desktop --ignore-files package.json package-lock.json node_modules build.mjs dist README.md PRIVACY.md .gitignore web-ext-artifacts test",
+    "start:chrome": "web-ext run --source-dir=. --target=chromium --ignore-files package.json package-lock.json node_modules build.mjs dist README.md PRIVACY.md .gitignore web-ext-artifacts test",
     "package": "npm test && npm run lint && node build.mjs",
     "test": "node --test test/*.test.mjs"
   },

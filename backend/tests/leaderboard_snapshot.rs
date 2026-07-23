@@ -1,6 +1,6 @@
 //! Exercises the daily snapshot transaction against real Postgres.
 
-use gitdebt::{db::Db, leaderboard};
+use gitdebt::leaderboard;
 use sqlx::Row;
 
 #[tokio::test]
@@ -9,7 +9,9 @@ async fn refresh_materializes_daily_weekly_monthly_and_star_rows() {
         eprintln!("skipping: set GITDEBT_TEST_DATABASE_URL to run");
         return;
     };
-    let db = Db::connect(&url).await.expect("connect test db");
+    let db = gitdebt::test_db::connect(&url)
+        .await
+        .expect("connect test db");
     let repo = format!("leaderboard-test-{}/public", std::process::id());
 
     sqlx::query("DELETE FROM repo_star_arrivals WHERE repo = $1")

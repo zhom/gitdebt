@@ -211,7 +211,7 @@ const rowClass = "border-b border-border";
         </nav>
 
         <header class="space-y-3">
-          <p class="font-mono text-xs tracking-wide text-muted-foreground uppercase">
+          <p class="mono-label">
             Repo leaderboard
           </p>
           <h1 class="text-3xl font-semibold tracking-tight text-balance sm:text-4xl">
@@ -240,7 +240,7 @@ const rowClass = "border-b border-border";
           <nav class="flex flex-wrap gap-2 pt-1" aria-label="Leaderboard sections">
             <a
               href="#trending-daily"
-              class="inline-flex min-h-11 items-center rounded-md border border-border bg-background px-3 py-2 font-mono text-base text-muted-foreground hover:bg-accent hover:text-accent-foreground sm:min-h-0 sm:py-1.5 sm:text-xs"
+              class="dither-control inline-flex min-h-11 items-center px-3 py-2 font-mono text-base text-muted-foreground hover:text-foreground sm:min-h-0 sm:py-1.5 sm:text-xs"
             >
               Daily
             </a>
@@ -258,7 +258,7 @@ const rowClass = "border-b border-border";
             </a>
             <a
               href="#most-starred"
-              class="inline-flex min-h-11 items-center rounded-md border border-border bg-background px-3 py-2 font-mono text-base text-muted-foreground hover:bg-accent hover:text-accent-foreground sm:min-h-0 sm:py-1.5 sm:text-xs"
+              class="dither-control inline-flex min-h-11 items-center px-3 py-2 font-mono text-base text-muted-foreground hover:text-foreground sm:min-h-0 sm:py-1.5 sm:text-xs"
             >
               Most starred
             </a>
@@ -293,9 +293,9 @@ const rowClass = "border-b border-border";
             </h2>
             {board.days === 7 && vsPair && vsLabel && (
               <p class="text-base text-muted-foreground sm:text-sm">
-                Neck and neck at the top?{" "}
+                Compare the top two directly:{" "}
                 <a href={`/vs/${vsPair[0]}/${vsPair[1]}`} class="underline decoration-signal/60 underline-offset-4 hover:decoration-signal">
-                  Compare {vsLabel} star history
+                  {vsLabel} star history
                 </a>.
               </p>
             )}

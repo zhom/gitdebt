@@ -34,10 +34,10 @@ export function ReportShare({
 
   return (
     <section id="share" className="scroll-mt-24" aria-labelledby="share-title">
-      <details className="group rounded-xl border border-border bg-card p-2">
-        <summary className="flex min-h-16 cursor-pointer list-none items-center justify-between gap-4 rounded-lg bg-primary px-4 py-3 text-primary-foreground transition-colors duration-150 hover:bg-primary/90 focus-visible:outline-2 focus-visible:outline-offset-2 focus-visible:outline-ring active:bg-primary/85 [&::-webkit-details-marker]:hidden sm:px-5">
+      <details className="dither-panel group rounded-xl p-2">
+        <summary className="dither-primary flex min-h-16 cursor-pointer list-none items-center justify-between gap-4 rounded-lg px-4 py-3 focus-visible:outline-2 focus-visible:outline-offset-2 focus-visible:outline-ring [&::-webkit-details-marker]:hidden sm:px-5">
           <div className="flex min-w-0 items-center gap-3">
-            <span className="grid size-9 shrink-0 place-items-center rounded-full border border-white/20 bg-white/10">
+            <span className="grid size-9 shrink-0 place-items-center rounded-full border border-primary-foreground/20 bg-primary-foreground/10">
               <Share2 className="size-4" strokeWidth={1.9} aria-hidden="true" />
             </span>
             <span className="min-w-0 text-left">
@@ -47,7 +47,7 @@ export function ReportShare({
               >
                 Share &amp; embed
               </span>
-              <span className="block truncate text-xs text-white/70 sm:text-sm">
+              <span className="block truncate text-xs text-primary-foreground/70 sm:text-sm">
                 Copy the report, chart, or badge for your README.
               </span>
             </span>
@@ -98,7 +98,7 @@ function ShareOption({
   primary?: boolean;
 }) {
   return (
-    <div className="flex flex-col items-start gap-3 rounded-lg border border-border bg-background p-4">
+    <div className="dither-panel flex flex-col items-start gap-3 rounded-lg p-4">
       <div className="space-y-1">
         <p className="text-sm font-medium">{title}</p>
         <p className="text-sm leading-relaxed text-muted-foreground">
@@ -110,9 +110,7 @@ function ShareOption({
         idleLabel={label}
         ariaLabel={`${label}: ${title}`}
         className={`mt-auto inline-flex min-h-11 items-center rounded-md px-3 py-2 text-sm font-medium focus-visible:outline-2 focus-visible:outline-offset-2 focus-visible:outline-ring ${
-          primary
-            ? "bg-primary text-primary-foreground hover:bg-primary/90"
-            : "border border-border bg-background hover:bg-accent"
+          primary ? "dither-primary" : "dither-control border"
         }`}
       />
     </div>

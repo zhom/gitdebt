@@ -185,7 +185,7 @@ fn bounded_render_series<T: Clone>(series: &[T]) -> Cow<'_, [T]> {
 pub fn render_svg(series: &[Point], cfg: &ChartConfig, theme: &Theme, opts: &ChartOpts) -> String {
     let series = bounded_render_series(series);
     crate::texture::decorate(
-        render_single_svg(&series, cfg, theme, opts, 1.0, opts.animate),
+        render_single_svg(&series, cfg, theme, opts, 1.0, opts.animate, None),
         theme,
     )
 }
@@ -202,7 +202,43 @@ pub(crate) fn render_svg_frame(
 ) -> String {
     let series = bounded_render_series(series);
     crate::texture::decorate(
-        render_single_svg(&series, cfg, theme, opts, progress.clamp(0.0, 1.0), false),
+        render_single_svg(
+            &series,
+            cfg,
+            theme,
+            opts,
+            progress.clamp(0.0, 1.0),
+            false,
+            None,
+        ),
+        theme,
+    )
+}
+
+/// One frame of the looping `wave` motion: the fully drawn chart with the
+/// dithered underfill's top edge displaced by layered sines and the Bayer
+/// threshold phase advanced. Loop-periodic in `frame / frames`, phases
+/// seeded deterministically by the caller.
+#[derive(Debug, Clone, Copy)]
+pub(crate) struct WaveSpec {
+    /// 0-based frame index within the cycle.
+    pub frame: usize,
+    /// Total frames in one seamless cycle.
+    pub frames: usize,
+    /// fnv1a-style seed (slug-derived) → per-repo stable phases.
+    pub seed: u32,
+}
+
+pub(crate) fn render_svg_wave_frame(
+    series: &[Point],
+    cfg: &ChartConfig,
+    theme: &Theme,
+    opts: &ChartOpts,
+    wave: WaveSpec,
+) -> String {
+    let series = bounded_render_series(series);
+    crate::texture::decorate(
+        render_single_svg(&series, cfg, theme, opts, 1.0, false, Some(wave)),
         theme,
     )
 }
@@ -214,6 +250,7 @@ fn render_single_svg(
     opts: &ChartOpts,
     progress: f32,
     animate: bool,
+    wave: Option<WaveSpec>,
 ) -> String {
     if series.is_empty() {
         return empty_svg(cfg, theme);
@@ -234,7 +271,40 @@ fn render_single_svg(
     let baseline = y_at(0.0);
     let first_x = x_at(xs[0]);
     let last_x = x_at(*xs.last().unwrap_or(&xs[0]));
-    let area = format!("{path} L {last_x:.1} {baseline:.1} L {first_x:.1} {baseline:.1} Z");
+    // The `wave` motion displaces the underfill's top edge and advances the
+    // Bayer phase per frame; the crisp line above stays put.
+    let (area, area_fill, wave_defs) = match wave {
+        None => (
+            format!("{path} L {last_x:.1} {baseline:.1} L {first_x:.1} {baseline:.1} Z"),
+            crate::texture::FILL.to_string(),
+            String::new(),
+        ),
+        Some(w) => {
+            let area = wave_area_path(
+                &xs,
+                series,
+                &x_at,
+                &y_at,
+                baseline,
+                geom.pad,
+                geom.plot_w,
+                &w,
+            );
+            // Advance the pattern by one full 8px tile per cycle, snapped
+            // to the 2px cell grid so cells stay crisp (a marching
+            // threshold phase, not a sub-pixel smear).
+            let phase = if w.frames == 0 {
+                0
+            } else {
+                (w.frame * 4 / w.frames) * 2
+            };
+            let dense = crate::texture::dense_cells();
+            let defs = format!(
+                "  <defs><pattern id=\"gd-wave-fill\" width=\"8\" height=\"8\" patternUnits=\"userSpaceOnUse\" patternTransform=\"translate({phase}.5 .5)\"><g shape-rendering=\"crispEdges\" opacity=\"0.96\" transform=\"scale(2)\">{dense}</g></pattern></defs>\n",
+            );
+            (area, "url(#gd-wave-fill)".to_string(), defs)
+        }
+    };
     let dash = approximate_path_length(&xs, series, &x_at, &y_at);
     let dash_offset = ((dash as f32) * (1.0 - progress)).round() as u32;
 
@@ -280,10 +350,10 @@ fn render_single_svg(
     }}
   ]]></style>
   <rect width="{w}" height="{h}" fill="{bg}" />
-  <text class="title" x="{title_x}" y="{title_y}">{repo}</text>
+{wave_defs}  <text class="title" x="{title_x}" y="{title_y}">{repo}</text>
   <text class="subtitle" x="{title_x}" y="{subtitle_y}">{subtitle}</text>
 {axis_lines}
-  <path d="{area}" fill="{pixel_fill}" opacity="0.62" />
+  <path d="{area}" fill="{area_fill}" opacity="0.62" />
   <path d="{path}" fill="none" stroke="{color}" stroke-width="2.5" stroke-linecap="round" stroke-linejoin="round" stroke-dasharray="{dash}" stroke-dashoffset="{dash_offset}">
 {motion}
   </path>
@@ -300,7 +370,8 @@ fn render_single_svg(
         subtitle_y = geom.pad - 6.0,
         path = path,
         area = area,
-        pixel_fill = crate::texture::FILL,
+        area_fill = area_fill,
+        wave_defs = wave_defs,
         dash = dash,
         color = color,
         dash_offset = dash_offset,
@@ -831,6 +902,57 @@ impl YScale {
             nice_y_ticks(self.y_max as f32)
         }
     }
+}
+
+/// The wave-motion underfill: the line's y values displaced downward by
+/// three layered sines that are loop-periodic in `frame / frames` (integer
+/// time multipliers ⇒ frame N == frame 0, a seamless cycle). Phases come
+/// from the caller's seed so every repo gets a stable, unique swell.
+#[allow(clippy::too_many_arguments)]
+fn wave_area_path(
+    xs: &[f32],
+    series: &[Point],
+    x_at: &impl Fn(f32) -> f32,
+    y_at: &impl Fn(f32) -> f32,
+    baseline: f32,
+    pad: f32,
+    plot_w: f32,
+    wave: &WaveSpec,
+) -> String {
+    const TAU: f32 = std::f32::consts::TAU;
+    let t = if wave.frames == 0 {
+        0.0
+    } else {
+        wave.frame as f32 / wave.frames as f32
+    };
+    let p1 = (wave.seed & 0x3ff) as f32 / 1024.0 * TAU;
+    let p2 = ((wave.seed >> 10) & 0x3ff) as f32 / 1024.0 * TAU;
+    let p3 = ((wave.seed >> 20) & 0x3ff) as f32 / 1024.0 * TAU;
+    let mut s = String::new();
+    let mut first_x = pad;
+    let mut last_x = pad;
+    for (i, p) in series.iter().enumerate() {
+        let x = x_at(xs[i]);
+        let u = ((x - pad) / plot_w.max(1.0)).clamp(0.0, 1.0);
+        let swell = (TAU * (2.0 * u + t) + p1).sin() * 1.7
+            + (TAU * (3.7 * u - t) + p2).sin() * 1.1
+            + (TAU * (6.1 * u + 2.0 * t) + p3).sin() * 0.7;
+        let y = y_at(p.stars as f32);
+        // The undulating edge always sits just below the crisp line and
+        // never dips past the baseline.
+        let edge = (y + 3.6 + swell).clamp(y + 0.5, baseline);
+        if i == 0 {
+            first_x = x;
+            s.push_str(&format!("M {x:.1} {edge:.1}"));
+        } else {
+            s.push_str(&format!(" L {x:.1} {edge:.1}"));
+        }
+        last_x = x;
+    }
+    s.push_str(&format!(
+        " L {last_x:.1} {baseline:.1} L {first_x:.1} {baseline:.1} Z"
+    ));
+    s
 }
 
 fn build_path(

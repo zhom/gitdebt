@@ -40,7 +40,7 @@ const returnTo = `${Astro.url.pathname}${Astro.url.search}`;
         navLinks.map((link) => (
           <a
             href={link.href}
-            class="inline-flex min-h-11 items-center rounded-md px-3 text-sm text-muted-foreground transition-colors duration-150 hover:bg-accent hover:text-accent-foreground focus-visible:outline-2 focus-visible:outline-offset-2 focus-visible:outline-ring active:text-foreground"
+            class="inline-flex min-h-11 items-center rounded-md px-3 font-mono text-[0.6875rem] font-medium tracking-[0.14em] uppercase text-muted-foreground transition-colors duration-150 hover:bg-accent hover:text-accent-foreground focus-visible:outline-2 focus-visible:outline-offset-2 focus-visible:outline-ring active:text-foreground"
           >
             {link.label}
           </a>
@@ -71,7 +71,7 @@ const returnTo = `${Astro.url.pathname}${Astro.url.search}`;
           />
         </summary>
         <div
-          class="mobile-nav-panel absolute right-0 mt-2 w-[min(18rem,calc(100vw-2rem))] origin-top-right rounded-lg border border-border bg-popover p-2 text-popover-foreground"
+          class="mobile-nav-panel dither-menu absolute right-0 mt-2 w-[min(18rem,calc(100vw-2rem))] origin-top-right rounded-lg p-2 text-popover-foreground"
           data-mobile-menu-panel
           aria-hidden="true"
           inert
@@ -81,7 +81,7 @@ const returnTo = `${Astro.url.pathname}${Astro.url.search}`;
               navLinks.map((link) => (
                 <a
                   href={link.href}
-                  class="flex min-h-12 items-center rounded-md px-3 text-base text-muted-foreground transition-colors duration-150 hover:bg-accent hover:text-accent-foreground focus-visible:outline-2 focus-visible:-outline-offset-2 focus-visible:outline-ring active:text-foreground"
+                  class="flex min-h-12 items-center rounded-md px-3 font-mono text-sm tracking-[0.12em] uppercase text-muted-foreground transition-colors duration-150 hover:bg-accent hover:text-accent-foreground focus-visible:outline-2 focus-visible:-outline-offset-2 focus-visible:outline-ring active:text-foreground"
                 >
                   {link.label}
                 </a>

@@ -380,8 +380,8 @@ const vsLinks = (categoryRelated.length > 0 ? categoryRelated : FALLBACK_SUGGEST
         <section class="space-y-4">
           <header class="flex flex-wrap items-end justify-between gap-3">
             <div>
-              <p class="font-mono text-xs tracking-wide text-muted-foreground uppercase">Earned badges</p>
-              <h2 class="mt-1 text-xl font-semibold tracking-tight">Claims backed by repository data</h2>
+              <p class="mono-label">Earned badges</p>
+              <h2 class="mt-1 text-xl font-semibold tracking-tight">Computed from commit and star history</h2>
             </div>
             <p class="max-w-md text-sm text-muted-foreground">Embeddable maintenance, ownership, and star-momentum signals.</p>
           </header>
@@ -442,16 +442,15 @@ const vsLinks = (categoryRelated.length > 0 ? categoryRelated : FALLBACK_SUGGEST
 
         <section id="stats" class="scroll-mt-24 space-y-6">
           <header class="max-w-2xl space-y-2">
-            <p class="font-mono text-xs tracking-wide text-muted-foreground uppercase">
+            <p class="mono-label">
               Maintenance signals
             </p>
             <h2 class="text-2xl font-semibold tracking-tight text-balance sm:text-3xl">
-              What deserves attention first
+              Where fixes and churn concentrate
             </h2>
             <p class="text-base leading-relaxed text-pretty text-muted-foreground">
-              Start with fix concentration, file churn, ownership risk, and
-              maintenance cadence. These four views are the fastest way to
-              locate structural pressure in {repoSlug}.
+              Fix concentration, file churn, ownership risk, and maintenance
+              cadence for {repoSlug}, each computed from its commit history.
             </p>
           </header>
           <InteractiveRepoSignals
@@ -464,11 +463,11 @@ const vsLinks = (categoryRelated.length > 0 ? categoryRelated : FALLBACK_SUGGEST
 
         <section class="space-y-6">
           <header class="max-w-2xl space-y-2">
-            <p class="font-mono text-xs tracking-wide text-muted-foreground uppercase">
+            <p class="mono-label">
               Adoption
             </p>
             <h2 class="text-2xl font-semibold tracking-tight text-balance sm:text-3xl">
-              Attention versus real usage
+              Stars versus package downloads
             </h2>
           </header>
           <UsageSection
@@ -483,11 +482,11 @@ const vsLinks = (categoryRelated.length > 0 ? categoryRelated : FALLBACK_SUGGEST
 
         <section class="space-y-4 border-y border-border py-6">
           <header class="space-y-1">
-            <p class="font-mono text-xs tracking-wide text-muted-foreground uppercase">
+            <p class="mono-label">
               Context
             </p>
             <h2 class="text-xl font-semibold tracking-tight">
-              How does {repoSlug} stack up?
+              Compare {repoSlug} with similar projects
             </h2>
           </header>
           <div class="flex flex-wrap items-center gap-2">
@@ -495,7 +494,7 @@ const vsLinks = (categoryRelated.length > 0 ? categoryRelated : FALLBACK_SUGGEST
               <a
                 href={`/vs/${repoSlug}/${other}`}
                 data-warm-repos={`${repoSlug},${other}`}
-                class="dither-control inline-flex min-h-11 items-center gap-1.5 rounded-md border border-border bg-background px-3 py-2 font-mono text-base text-muted-foreground hover:bg-accent hover:text-accent-foreground sm:min-h-0 sm:py-1.5 sm:text-sm"
+                class="dither-control inline-flex min-h-11 items-center gap-1.5 rounded-md border px-3 py-2 font-mono text-base text-muted-foreground hover:text-foreground sm:min-h-0 sm:py-1.5 sm:text-sm"
               >
                 vs {other}
               </a>

@@ -141,9 +141,24 @@ fn card_bg(theme: &Theme) -> &'static str {
     if theme.dark { "#0a0a0a" } else { "#ffffff" }
 }
 
-/// Brand ink accent per theme (categorical palette index 0).
-fn brand(theme: &Theme) -> &'static str {
-    palette(theme)[0]
+/// The single chromatic accent (the wave trio's leading stop), used
+/// sparingly: eyebrow, glyph ink, sparkline.
+fn accent_ink(theme: &Theme) -> &'static str {
+    crate::texture::wave_ink(theme)
+}
+
+/// Card-scale Bayer grain: a low-density tier pattern def plus a quiet
+/// full-surface wash. One ink (theme fg), alpha-only — the dithered
+/// terminal signature at card scale.
+fn card_texture(w: f32, h: f32, rx: f32, theme: &Theme) -> String {
+    format!(
+        "  <defs>{}</defs>\n  <rect x=\"1\" y=\"1\" width=\"{:.1}\" height=\"{:.1}\" rx=\"{:.1}\" fill=\"{}\" fill-opacity=\"0.05\" pointer-events=\"none\" />\n",
+        crate::texture::tier_pattern(theme.fg, 2.0, 2),
+        w - 2.0,
+        h - 2.0,
+        (rx - 1.0).max(0.0),
+        crate::texture::tier_fill(2),
+    )
 }
 
 /// Approx px/char at the 12px repo-card value font.
@@ -155,7 +170,7 @@ const CARD_STYLE: &str = "  <style><![CDATA[ \
 .t { font: 600 18px ui-sans-serif, system-ui, sans-serif; } \
 .ey { font: 700 9px ui-monospace, SFMono-Regular, monospace; letter-spacing: 1.1px; } \
 .ml { font: 600 9px ui-monospace, SFMono-Regular, monospace; letter-spacing: 0.7px; } \
-.mv { font: 650 22px ui-sans-serif, system-ui, sans-serif; letter-spacing: -0.5px; } \
+.mv { font: 600 22px ui-sans-serif, system-ui, sans-serif; letter-spacing: -0.5px; } \
 .rt { font: 600 15px ui-sans-serif, system-ui, sans-serif; } \
 .l { font: 400 14px ui-sans-serif, system-ui, sans-serif; } \
 .v { font: 600 14px ui-sans-serif, system-ui, sans-serif; } \
@@ -551,7 +566,7 @@ pub fn render_user_card(
     }
     let w = opts.width as f32;
     let h = user_card_height(rows.len(), opts.hide_title, opts.hide_rank) as f32;
-    let pal0 = brand(theme);
+    let pal0 = accent_ink(theme);
     let login = escape_xml(&data.login);
     let title = display_title(opts.custom_title.as_deref(), &format!("@{}", data.login));
     let persona = user_persona(data);
@@ -565,6 +580,7 @@ pub fn render_user_card(
         border = theme.border,
         stroke_opacity = if opts.hide_border { "0" } else { "1" },
     ));
+    body.push_str(&card_texture(w, h, 12.0, theme));
     body.push_str(&format!(
         "  <text class=\"ey\" x=\"24\" y=\"25\" fill=\"{pal0}\">{persona}</text>\n",
     ));
@@ -915,12 +931,13 @@ pub fn render_repo_card(
     let grid_rows = cells.len().div_ceil(2);
     let w = opts.width as f32;
     let h = repo_card_height(grid_rows, has_spark, has_langs) as f32;
-    let pal0 = brand(theme);
+    let pal0 = accent_ink(theme);
     let slug = escape_xml(&data.slug);
     let title = display_title(opts.custom_title.as_deref(), &data.slug);
 
     let mut body = String::new();
     body.push_str(&chrome(w, h, theme, opts.hide_border));
+    body.push_str(&card_texture(w, h, 4.5, theme));
 
     // Header: repo glyph + full slug, linked to GitHub.
     body.push_str(&format!(
@@ -932,6 +949,8 @@ pub fn render_repo_card(
     // Metric grid (2 columns, left zone).
     let grid_w = if has_spark { w - 190.0 } else { w - 50.0 };
     let col_w = grid_w / 2.0;
+    // Approx px/char at the 10px label font.
+    const LABEL_CHAR_W: f32 = 5.5;
     for (i, cell) in cells.iter().enumerate() {
         let col = (i % 2) as f32;
         let row = (i / 2) as f32;
@@ -945,12 +964,16 @@ pub fn render_repo_card(
             tx += 22.0;
         }
         let label_x = tx + cell.value.chars().count() as f32 * VALUE_CHAR_W + 6.0;
+        // Keep the label inside its own column so it can never run under
+        // the neighbouring value or the sparkline zone.
+        let label_budget = (((x + col_w - 6.0 - label_x) / LABEL_CHAR_W).floor() as i64).max(1);
+        let label = truncate_chars(cell.label, label_budget as usize);
         body.push_str(&format!(
             "<text class=\"rv\" x=\"{tx:.1}\" y=\"{y:.1}\" fill=\"{fg}\">{value}</text><text class=\"m\" x=\"{label_x:.1}\" y=\"{y:.1}\" fill=\"{muted}\">{label}</text>",
             fg = theme.fg,
             muted = theme.muted,
             value = escape_xml(&cell.value),
-            label = cell.label,
+            label = escape_xml(&label),
         ));
         body.push_str(close);
     }
@@ -1053,13 +1076,17 @@ pub fn render_repo_pending_card(slug: &str, stars: Option<u64>, theme: &Theme) -
     notice_card(slug, &msg, theme)
 }
 
-/// Shared minimal notice card (400×100): title line + muted message.
+/// Shared minimal notice card (400×100): title line + muted message, on
+/// the same quiet dithered surface as the full cards.
 fn notice_card(title: &str, message: &str, theme: &Theme) -> String {
     let (w, h) = (400.0_f32, 100.0_f32);
     format!(
-        "{open}{CARD_STYLE}{chrome}  <text class=\"rt\" x=\"25\" y=\"42\" fill=\"{fg}\">{title}</text>\n  <text class=\"c\" x=\"25\" y=\"66\" fill=\"{muted}\">{message}</text>\n{footer}</svg>",
+        "{open}{CARD_STYLE}{chrome}{texture}  <rect x=\"0\" y=\"8\" width=\"3\" height=\"{strip_h:.0}\" rx=\"1.5\" fill=\"{accent}\" />\n  <text class=\"rt\" x=\"25\" y=\"42\" fill=\"{fg}\">{title}</text>\n  <text class=\"c\" x=\"25\" y=\"66\" fill=\"{muted}\">{message}</text>\n{footer}</svg>",
         open = svg_open(w, h, "gitdebt"),
         chrome = chrome(w, h, theme, false),
+        texture = card_texture(w, h, 4.5, theme),
+        strip_h = h - 16.0,
+        accent = accent_ink(theme),
         fg = theme.fg,
         muted = theme.muted,
         title = escape_xml(&truncate_chars(title, 48)),
@@ -1538,6 +1565,45 @@ mod tests {
             assert!(!svg.contains("<animate"));
             assert!(svg.starts_with("<svg"));
         }
+    }
+
+    #[test]
+    fn user_card_raster_text_stays_at_card_scale() {
+        // Regression: resvg parses only multiple-of-100 weights inside the
+        // `font:` shorthand; a `font: 650 22px …` class made it read `650`
+        // as the SIZE and blast 650px glyphs across the card. Guard by
+        // bounding the lit-pixel share of the dark raster — card-scale
+        // text lights a few percent, runaway glyphs light most of it.
+        let svg = render_user_card(&sample_user(), &UserCardOptions::default(), &DARK).unwrap();
+        let (rgba, w, h) = crate::raster::rasterize_rgba(&svg, 1.0).expect("raster");
+        let lit = rgba
+            .chunks_exact(4)
+            .filter(|px| px[0] > 160 && px[3] > 0)
+            .count();
+        let share = lit as f64 / (w * h) as f64;
+        assert!(
+            share < 0.10,
+            "bright-pixel share {share:.3} — text is rendering far larger than authored"
+        );
+        assert!(share > 0.001, "text must actually render");
+    }
+
+    #[test]
+    fn cards_carry_bayer_texture_and_wave_accent() {
+        let user = render_user_card(&sample_user(), &UserCardOptions::default(), &DARK).unwrap();
+        let repo = render_repo_card(&sample_repo(), &full_repo_opts(false), &DARK).unwrap();
+        let notice = render_repo_pending_card("a/b", None, &DARK);
+        for svg in [&user, &repo, &notice] {
+            // Bayer tier wash: one ink, alpha carried by the consumer.
+            assert!(svg.contains("id=\"gd-t2\""), "tier pattern def present");
+            assert!(svg.contains("fill=\"url(#gd-t2)\""));
+            assert!(svg.contains("fill-opacity=\"0.05\""));
+            // Wave accent (dark trio lead) is the only chroma.
+            assert!(svg.contains("#9b7bff"));
+            assert!(!svg.contains("var(--"));
+        }
+        let light = render_user_card(&sample_user(), &UserCardOptions::default(), &LIGHT).unwrap();
+        assert!(light.contains("#5b2cff"));
     }
 
     #[test]

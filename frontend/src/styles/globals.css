@@ -1,8 +1,6 @@
 @import "tailwindcss";
 @import "tw-animate-css";
 
-@custom-variant dark (&:where([data-theme="dark"], [data-theme="dark"] *));
-
 @theme inline {
   --font-sans:
     -apple-system, BlinkMacSystemFont, "SF Pro Text", "Inter Variable",
@@ -51,75 +49,30 @@
 }
 
 :root {
-  color-scheme: light;
+  color-scheme: dark;
 
   --radius: 0.5rem;
   --motion-ease-out: cubic-bezier(0.23, 1, 0.32, 1);
   --motion-ease-in-out: cubic-bezier(0.77, 0, 0.175, 1);
 
-  --background: oklch(1 0 0);
-  --foreground: oklch(0.145 0 0);
-  --card: oklch(1 0 0);
-  --card-foreground: oklch(0.145 0 0);
-  --popover: oklch(1 0 0);
-  --popover-foreground: oklch(0.145 0 0);
+  --background: oklch(0.14 0.006 265);
+  --foreground: oklch(0.94 0.003 265);
+  --card: oklch(0.17 0.006 265);
+  --card-foreground: oklch(0.94 0.003 265);
+  --popover: oklch(0.185 0.006 265);
+  --popover-foreground: oklch(0.94 0.003 265);
 
-  --primary: oklch(0.145 0 0);
-  --primary-foreground: oklch(1 0 0);
-  --signal: oklch(0.145 0 0);
-  --signal-foreground: oklch(1 0 0);
+  --primary: oklch(0.94 0.003 265);
+  --primary-foreground: oklch(0.14 0.006 265);
+  --signal: oklch(0.94 0.003 265);
+  --signal-foreground: oklch(0.14 0.006 265);
 
-  --secondary: oklch(0.97 0 0);
-  --secondary-foreground: oklch(0.205 0 0);
-  --muted: oklch(0.97 0 0);
-  --muted-foreground: oklch(0.46 0 0);
-  --accent: oklch(0.955 0 0);
-  --accent-foreground: oklch(0.145 0 0);
-
-  --destructive: oklch(0.205 0 0);
-  --destructive-foreground: oklch(1 0 0);
-
-  --chart-1: #171717;
-  --chart-2: #343434;
-  --chart-3: #505050;
-  --chart-4: #686868;
-  --chart-5: #7d7d7d;
-  --chart-6: #424242;
-  --chart-7: #5b5b5b;
-  --chart-8: #717171;
-
-  --border: oklch(0 0 0 / 0.12);
-  --input: oklch(0 0 0 / 0.16);
-  --ring: oklch(0.145 0 0);
-  --grid: oklch(0 0 0 / 0.05);
-  --dither-wave-1: #5b2cff;
-  --dither-wave-2: #087fea;
-  --dither-wave-3: #bf24d6;
-
-  --shadow-card: none;
-}
-
-:root[data-theme="dark"] {
-  color-scheme: dark;
-
-  --background: oklch(0.155 0.004 240);
-  --foreground: oklch(0.94 0.003 240);
-  --card: oklch(0.185 0.004 240);
-  --card-foreground: oklch(0.94 0.003 240);
-  --popover: oklch(0.2 0.004 240);
-  --popover-foreground: oklch(0.94 0.003 240);
-
-  --primary: oklch(0.94 0.003 240);
-  --primary-foreground: oklch(0.155 0.004 240);
-  --signal: oklch(0.94 0.003 240);
-  --signal-foreground: oklch(0.155 0.004 240);
-
-  --secondary: oklch(0.23 0.004 240);
-  --secondary-foreground: oklch(0.91 0.003 240);
-  --muted: oklch(0.225 0.004 240);
-  --muted-foreground: oklch(0.69 0.005 240);
-  --accent: oklch(0.255 0.004 240);
-  --accent-foreground: oklch(0.95 0.003 240);
+  --secondary: oklch(0.215 0.006 265);
+  --secondary-foreground: oklch(0.91 0.003 265);
+  --muted: oklch(0.205 0.006 265);
+  --muted-foreground: oklch(0.7 0.005 265);
+  --accent: oklch(0.24 0.006 265);
+  --accent-foreground: oklch(0.95 0.003 265);
 
   --destructive: oklch(0.77 0.13 24);
   --destructive-foreground: oklch(0.15 0.02 24);
@@ -135,11 +88,13 @@
 
   --border: oklch(1 0 0 / 0.14);
   --input: oklch(1 0 0 / 0.2);
-  --ring: oklch(0.94 0.003 240);
+  --ring: oklch(0.94 0.003 265);
   --grid: oklch(1 0 0 / 0.06);
   --dither-wave-1: #9b7bff;
   --dither-wave-2: #46b3ff;
   --dither-wave-3: #ef72ff;
+
+  --shadow-card: none;
 }
 
 @layer base {
@@ -344,7 +299,7 @@ details[open][data-state="open"] .mobile-nav-panel {
     radial-gradient(color-mix(in oklab, var(--dither-wave-1) 16%, transparent) 0.55px, transparent 0.75px),
     linear-gradient(135deg, transparent 68%, color-mix(in oklab, var(--dither-wave-2) 7%, transparent));
   background-size: 5px 5px, 100% 100%;
-  box-shadow: 0 18px 50px color-mix(in oklab, var(--foreground) 14%, transparent);
+  box-shadow: 0 18px 50px oklch(0 0 0 / 0.5);
 }
 
 .evidence-band {
@@ -380,6 +335,70 @@ details[open][data-state="open"] .mobile-nav-panel {
 
 .dither-primary:hover {
   background-position: 0 0, 100% 0;
+}
+
+/* Keeps the primary treatment stable when composed with .dither-control
+   (e.g. Button default variant): the control hover tint must not override
+   the primary surface. */
+.dither-primary:hover,
+.dither-primary[aria-expanded="true"],
+.dither-primary[aria-pressed="true"] {
+  border-color: transparent;
+  background-color: color-mix(in oklab, var(--primary) 92%, var(--dither-wave-1));
+}
+
+.dither-panel {
+  position: relative;
+  isolation: isolate;
+  border: 1px solid var(--border);
+  background-color: var(--card);
+}
+
+.dither-panel::before {
+  position: absolute;
+  z-index: -1;
+  inset: 0;
+  pointer-events: none;
+  content: "";
+  color: var(--foreground);
+  opacity: 0.07;
+  background-image:
+    radial-gradient(currentColor 0.6px, transparent 0.8px),
+    radial-gradient(currentColor 0.5px, transparent 0.7px);
+  background-position: 0 0, 2px 2px;
+  background-size: 4px 4px;
+  mask-image: radial-gradient(120% 110% at 100% 0%, black, transparent 52%);
+}
+
+.dither-chip {
+  display: inline-flex;
+  align-items: center;
+  gap: 0.375rem;
+  border: 1px solid color-mix(in oklab, var(--border) 82%, var(--dither-wave-1));
+  border-radius: calc(var(--radius) - 2px);
+  padding: 0.1875rem 0.5rem;
+  background-color: color-mix(in oklab, var(--background) 94%, var(--dither-wave-1) 6%);
+  background-image: radial-gradient(
+    color-mix(in oklab, var(--dither-wave-1) 20%, transparent) 0.5px,
+    transparent 0.7px
+  );
+  background-size: 4px 4px;
+  color: var(--muted-foreground);
+  font-family: var(--font-mono);
+  font-size: 0.6875rem;
+  font-variant-numeric: tabular-nums;
+  letter-spacing: 0.08em;
+  text-transform: uppercase;
+}
+
+.mono-label {
+  color: var(--muted-foreground);
+  font-family: var(--font-mono);
+  font-size: 0.6875rem;
+  font-weight: 500;
+  font-variant-numeric: tabular-nums;
+  letter-spacing: 0.14em;
+  text-transform: uppercase;
 }
 
 .evidence-band::before {
@@ -451,26 +470,12 @@ details[open][data-state="open"] .mobile-nav-panel {
 
 @media (prefers-contrast: more) {
   :root {
-    --border: oklch(0 0 0 / 0.3);
-    --input: oklch(0 0 0 / 0.38);
-    --muted-foreground: oklch(0.32 0 0);
+    --border: oklch(1 0 0 / 0.34);
+    --input: oklch(1 0 0 / 0.42);
+    --muted-foreground: oklch(0.82 0.004 265);
   }
 
   :focus-visible {
     outline-width: 3px;
   }
-}
-
-:root[data-theme="dark"] .theme-image-light,
-:root[data-darkreader-scheme="dark"] .theme-image-light {
-  display: none;
-}
-
-.theme-image-dark {
-  display: none;
-}
-
-:root[data-theme="dark"] .theme-image-dark,
-:root[data-darkreader-scheme="dark"] .theme-image-dark {
-  display: block;
 }

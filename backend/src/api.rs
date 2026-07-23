@@ -13,13 +13,8 @@ use std::sync::OnceLock;
 use axum::extract::ConnectInfo;
 use axum_extra::extract::cookie::CookieJar;
 
+use axum::middleware::Next;
 use moka::future::Cache as MokaCache;
-use tower_governor::{
-    GovernorLayer,
-    errors::GovernorError,
-    governor::GovernorConfigBuilder,
-    key_extractor::{KeyExtractor, SmartIpKeyExtractor},
-};
 use tower_http::cors::{Any, CorsLayer};
 use tower_http::limit::RequestBodyLimitLayer;
 use tower_http::timeout::TimeoutLayer;
@@ -41,6 +36,7 @@ use crate::chart::{
 };
 use crate::export::{self, RangeSpec};
 use crate::og::{self, CompareEntry, RepoCard};
+use crate::redis::{Decision, HttpLimiter, RedisHandle, WindowLimit};
 use crate::repo_endpoints::is_valid_slug;
 use crate::theme::theme_for;
 use crate::usage::{self, Resolved, UsageDownloads, UsageOverrides};
@@ -71,6 +67,8 @@ pub struct ApiState {
     /// SVG changes (e.g. queue drained, new data), the cache key flips
     /// naturally because the analyze JSON is also re-derived. Keys:
     /// `{endpoint}:{owner}/{repo}|{theme}|{format}[|extra]`.
+    /// Byte-weighed (entries range from ~10 KB badges to MB-scale GIFs),
+    /// capped at [`RASTER_CACHE_MAX_BYTES`].
     pub raster_cache: MokaCache<String, std::sync::Arc<Vec<u8>>>,
     /// Self-contained avatar data URIs used by contributor media. SVGs loaded
     /// through an `<img>` and the server-side rasterizer cannot reliably load
@@ -101,11 +99,54 @@ pub struct ApiState {
     /// `/api/me` and `/auth/*`. Defaults to local dev frontend.
     pub frontend_origin: String,
     pub metrics_token: Option<String>,
-    /// Bare-clone storage. Shared with the repo-analysis pool; the usage
-    /// endpoint reuses it to read package manifests out of existing clones
-    /// (never clones itself; a missing clone means no manifest-backed package
-    /// association is shown).
+    /// Bare-clone storage. Written by the worker's repo-analysis pool; the
+    /// usage endpoint reuses it (read-only) to read package manifests out of
+    /// existing clones (never clones itself; a missing clone or an absent
+    /// volume means no manifest-backed package association is shown).
     pub storage: std::sync::Arc<crate::repo_history::RepoStorage>,
+    /// Shared Redis for the distributed admission limiter and the cache
+    /// invalidation bus. `None` (debug builds only) falls back to
+    /// per-process limiting and local-only eviction.
+    pub redis: Option<std::sync::Arc<RedisHandle>>,
+}
+
+/// RAM budgets for the byte-holding moka caches. These four caches hold
+/// rendered bodies whose sizes vary by orders of magnitude (a badge SVG is
+/// ~10 KB, a wave GIF can exceed 1 MB), so they are bounded by **weighed
+/// bytes**, not entry counts — `max_capacity` is a byte budget and each
+/// entry weighs its value's byte length. The small JSON/aggregate caches
+/// (analyze, user-agg, leaderboard) stay entry-count-bounded.
+const SVG_CACHE_MAX_BYTES: u64 = 32 * 1024 * 1024;
+const STAT_SVG_CACHE_MAX_BYTES: u64 = 32 * 1024 * 1024;
+const RASTER_CACHE_MAX_BYTES: u64 = 64 * 1024 * 1024;
+const AVATAR_CACHE_MAX_BYTES: u64 = 16 * 1024 * 1024;
+
+/// moka weigher unit: clamp a body length into the non-zero `u32` weight
+/// moka expects (a zero weight would make an entry free; an over-4GiB body
+/// cannot happen but saturates instead of wrapping).
+fn byte_weight(len: usize) -> u32 {
+    u32::try_from(len).unwrap_or(u32::MAX).max(1)
+}
+
+/// Byte-weighed string cache (SVG bodies, avatar data URIs).
+fn weighted_string_cache(max_bytes: u64, ttl: Duration) -> MokaCache<String, String> {
+    MokaCache::builder()
+        .max_capacity(max_bytes)
+        .weigher(|_key: &String, value: &String| byte_weight(value.len()))
+        .time_to_live(ttl)
+        .build()
+}
+
+/// Byte-weighed raster cache (PNG/WebP/GIF bodies).
+fn weighted_bytes_cache(
+    max_bytes: u64,
+    ttl: Duration,
+) -> MokaCache<String, std::sync::Arc<Vec<u8>>> {
+    MokaCache::builder()
+        .max_capacity(max_bytes)
+        .weigher(|_key: &String, value: &std::sync::Arc<Vec<u8>>| byte_weight(value.len()))
+        .time_to_live(ttl)
+        .build()
 }
 
 impl ApiState {
@@ -113,30 +154,20 @@ impl ApiState {
         analyzer: AnalyzerCtx,
         gh_app: Option<GithubAppConfig>,
         storage: std::sync::Arc<crate::repo_history::RepoStorage>,
+        redis: Option<std::sync::Arc<RedisHandle>>,
     ) -> anyhow::Result<Self> {
-        let svg_cache = MokaCache::builder()
-            .max_capacity(2_000)
-            .time_to_live(Duration::from_secs(24 * 60 * 60))
-            .build();
+        let day = Duration::from_secs(24 * 60 * 60);
+        let svg_cache = weighted_string_cache(SVG_CACHE_MAX_BYTES, day);
         let analyze_cache = MokaCache::builder()
             .max_capacity(500)
             .time_to_live(Duration::from_secs(5 * 60))
             .build();
-        let stat_svg_cache = MokaCache::builder()
-            .max_capacity(2_000)
-            .time_to_live(Duration::from_secs(24 * 60 * 60))
-            .build();
-        // Raster cache: smaller capacity than the SVG caches because
-        // PNGs are ~10–100× larger per entry. Keep it tight; raster
-        // bytes are deterministic so re-rasterization on miss is fine.
-        let raster_cache = MokaCache::builder()
-            .max_capacity(1_000)
-            .time_to_live(Duration::from_secs(24 * 60 * 60))
-            .build();
-        let avatar_data_cache = MokaCache::builder()
-            .max_capacity(10_000)
-            .time_to_live(Duration::from_secs(24 * 60 * 60))
-            .build();
+        let stat_svg_cache = weighted_string_cache(STAT_SVG_CACHE_MAX_BYTES, day);
+        // Raster cache: the largest byte budget because PNGs/GIFs are
+        // ~10–100× larger than their source SVGs. Raster bytes are
+        // deterministic so re-rasterization on miss is always safe.
+        let raster_cache = weighted_bytes_cache(RASTER_CACHE_MAX_BYTES, day);
+        let avatar_data_cache = weighted_string_cache(AVATAR_CACHE_MAX_BYTES, day);
         let avatar_http = reqwest::Client::builder()
             .user_agent("gitdebt-avatar-media/1")
             .redirect(reqwest::redirect::Policy::none())
@@ -182,6 +213,7 @@ impl ApiState {
             frontend_origin,
             metrics_token,
             storage,
+            redis,
         })
     }
 }
@@ -222,13 +254,9 @@ pub fn router(state: ApiState) -> Router {
 
     // Cold analyze requests can enqueue GitHub work; isolate them from image
     // traffic so scrapers cannot consume the shared API budget.
-    let analyze_governor = std::sync::Arc::new(
-        GovernorConfigBuilder::default()
-            .per_second(2)
-            .burst_size(20)
-            .key_extractor(CloudflareIpKeyExtractor)
-            .finish()
-            .expect("analyze governor config builds"),
+    let analyze_limiter = HttpLimiter::shared(
+        WindowLimit::per_second("analyze", 2, 20),
+        state.redis.clone(),
     );
     let analyze = Router::new()
         .route("/api/repos/{owner}/{repo}/analyze", get(analyze))
@@ -242,7 +270,10 @@ pub fn router(state: ApiState) -> Router {
         .route("/api/leaderboard.json", get(leaderboard_json))
         .route("/api/activity.json", get(platform_activity))
         .route("/api/sitemap/repos", get(sitemap_repos))
-        .layer(GovernorLayer::new(analyze_governor.clone()));
+        .layer(axum::middleware::from_fn_with_state(
+            analyze_limiter.clone(),
+            admission,
+        ));
 
     // SSE is deliberately outside the global 60-second request timeout.
     // The handler owns a five-minute lifetime, heartbeats, and a process-wide
@@ -257,18 +288,17 @@ pub fn router(state: ApiState) -> Router {
             "/api/repos/{owner}/{repo}/progress.json",
             get(crate::progress::repo_progress_snapshot),
         )
-        .layer(GovernorLayer::new(analyze_governor))
+        .layer(axum::middleware::from_fn_with_state(
+            analyze_limiter,
+            admission,
+        ))
         .layer(public_cors.clone());
 
     // Render parameters create an unbounded cache-key space, so even
     // edge-cached images need an origin-side per-IP ceiling.
-    let images_governor = std::sync::Arc::new(
-        GovernorConfigBuilder::default()
-            .per_second(10)
-            .burst_size(60)
-            .key_extractor(CloudflareIpKeyExtractor)
-            .finish()
-            .expect("images governor config builds"),
+    let images_limiter = HttpLimiter::shared(
+        WindowLimit::per_second("images", 10, 60),
+        state.redis.clone(),
     );
     let images = Router::new()
         .route("/api/repos/{owner}/{repo}/chart.svg", get(chart))
@@ -296,10 +326,15 @@ pub fn router(state: ApiState) -> Router {
         .route("/api/repos/{owner}/{repo}/card.webp", get(repo_card_webp))
         .route("/api/repos/{owner}/{repo}/og.png", get(repo_og_png))
         .route("/api/repos/{owner}/{repo}/og.webp", get(repo_og_webp))
+        .route("/api/users/{login}/og.png", get(user_og_png))
+        .route("/api/users/{login}/og.webp", get(user_og_webp))
         .route("/api/og.png", get(site_og_png))
         .route("/api/og.webp", get(site_og_webp))
         .merge(crate::repo_endpoints::public_router())
-        .layer(GovernorLayer::new(images_governor));
+        .layer(axum::middleware::from_fn_with_state(
+            images_limiter,
+            admission,
+        ));
 
     // Extension origins vary by browser/install. The endpoint accepts no
     // credentials and has its own limiter because it can enqueue work.
@@ -308,17 +343,11 @@ pub fn router(state: ApiState) -> Router {
         .allow_origin(Any)
         .allow_headers(Any)
         .max_age(Duration::from_secs(60 * 60));
-    let ext_governor = std::sync::Arc::new(
-        GovernorConfigBuilder::default()
-            .per_second(1)
-            .burst_size(10)
-            .key_extractor(CloudflareIpKeyExtractor)
-            .finish()
-            .expect("ext governor config builds"),
-    );
+    let ext_limiter =
+        HttpLimiter::shared(WindowLimit::per_second("ext", 1, 10), state.redis.clone());
     let ext = Router::new()
         .route("/api/ext/ping", axum::routing::post(ext_ping))
-        .layer(GovernorLayer::new(ext_governor))
+        .layer(axum::middleware::from_fn_with_state(ext_limiter, admission))
         .layer(ext_cors)
         .layer(RequestBodyLimitLayer::new(EXT_BODY_LIMIT));
 
@@ -346,13 +375,9 @@ pub fn router(state: ApiState) -> Router {
     let webhook = crate::webhook::router().layer(RequestBodyLimitLayer::new(WEBHOOK_BODY_LIMIT));
 
     // Repo-history analysis is disk/CPU intensive despite queue deduplication.
-    let governor_conf = std::sync::Arc::new(
-        GovernorConfigBuilder::default()
-            .per_second(1)
-            .burst_size(5)
-            .key_extractor(CloudflareIpKeyExtractor)
-            .finish()
-            .expect("governor config builds"),
+    let mutating_limiter = HttpLimiter::shared(
+        WindowLimit::per_second("mutating", 1, 5),
+        state.redis.clone(),
     );
     let rate_limited = Router::new()
         .merge(crate::repo_endpoints::mutating_router())
@@ -360,7 +385,10 @@ pub fn router(state: ApiState) -> Router {
             "/api/users/{login}/warm",
             axum::routing::post(warm_user_profile),
         )
-        .layer(GovernorLayer::new(governor_conf))
+        .layer(axum::middleware::from_fn_with_state(
+            mutating_limiter,
+            admission,
+        ))
         .layer(
             CorsLayer::new()
                 .allow_methods([Method::POST])
@@ -389,6 +417,91 @@ pub fn router(state: ApiState) -> Router {
         .merge(progress)
         .with_state(state)
         .layer(TraceLayer::new_for_http())
+}
+
+/// Admission middleware shared by the four rate-limited route classes.
+/// Client identity comes from [`CloudflareIpKeyExtractor`] (forwarding
+/// headers honored only from trusted proxies); the budget check runs
+/// against the shared limiter backend (Redis, or in-process in debug
+/// builds without `REDIS_URL`). Limiter unavailability admits the request.
+async fn admission(
+    State(limiter): State<std::sync::Arc<HttpLimiter>>,
+    request: axum::extract::Request,
+    next: Next,
+) -> axum::response::Response {
+    let key = CloudflareIpKeyExtractor
+        .extract(&request)
+        .map(|ip| ip.to_string())
+        .unwrap_or_else(|| "unknown".to_string());
+    match limiter.check(&key).await {
+        Decision::Allow => next.run(request).await,
+        Decision::Deny { retry_after_secs } => too_many_requests(retry_after_secs),
+    }
+}
+
+/// 429 with the same envelope tower_governor produced: `retry-after` and
+/// `x-ratelimit-after` in seconds plus the plain-text wait hint.
+fn too_many_requests(retry_after_secs: u64) -> axum::response::Response {
+    let wait = HeaderValue::from_str(&retry_after_secs.to_string())
+        .unwrap_or_else(|_| HeaderValue::from_static("1"));
+    let mut headers = HeaderMap::new();
+    headers.insert("x-ratelimit-after", wait.clone());
+    headers.insert(header::RETRY_AFTER, wait);
+    (
+        StatusCode::TOO_MANY_REQUESTS,
+        headers,
+        format!("Too Many Requests! Wait for {retry_after_secs}s"),
+    )
+        .into_response()
+}
+
+/// Subscribe to the Redis invalidation channel and evict the published
+/// keys from THIS replica's local moka caches. Reconnects forever; a lost
+/// subscription only means stale entries age out by TTL, exactly the
+/// pre-Redis behavior. No-op without Redis.
+pub fn spawn_invalidation_listener(state: &ApiState) {
+    let Some(redis) = state.redis.clone() else {
+        return;
+    };
+    let user_agg_cache = state.user_agg_cache.clone();
+    let analyze_cache = state.analyze_cache.clone();
+    tokio::spawn(async move {
+        use futures::StreamExt;
+        loop {
+            let mut pubsub = match redis.pubsub().await {
+                Ok(pubsub) => pubsub,
+                Err(error) => {
+                    tracing::debug!(%error, "invalidation subscriber: connect failed");
+                    tokio::time::sleep(Duration::from_secs(5)).await;
+                    continue;
+                }
+            };
+            if let Err(error) = pubsub.subscribe(crate::redis::INVALIDATION_CHANNEL).await {
+                tracing::warn!(%error, "invalidation subscriber: subscribe failed");
+                tokio::time::sleep(Duration::from_secs(5)).await;
+                continue;
+            }
+            tracing::info!("cache invalidation subscriber connected");
+            let mut messages = pubsub.on_message();
+            while let Some(message) = messages.next().await {
+                let Ok(payload) = message.get_payload::<String>() else {
+                    continue;
+                };
+                let Ok(invalidation) = serde_json::from_str::<crate::redis::Invalidation>(&payload)
+                else {
+                    continue;
+                };
+                for key in &invalidation.user_agg {
+                    user_agg_cache.invalidate(key).await;
+                }
+                for key in &invalidation.analyze {
+                    analyze_cache.invalidate(key).await;
+                }
+            }
+            // Stream ended: the pub/sub connection dropped. Reconnect.
+            tokio::time::sleep(Duration::from_secs(2)).await;
+        }
+    });
 }
 
 async fn health() -> &'static str {
@@ -579,16 +692,29 @@ async fn metrics(
     let raster_available = RASTER_PERMITS.available_permits();
     let (progress_total, progress_available) = crate::progress::connection_metrics();
 
-    // In-memory cache occupancy (approximate; moka counts lazily). Rising
-    // toward `max_capacity` on a param-derived cache means a cache-busting
-    // client is churning distinct keys and evicting warm entries.
+    // In-memory cache occupancy (approximate; moka counts lazily). Entry
+    // counts churning on a param-derived cache mean a cache-busting client
+    // is evicting warm entries. The byte-holding caches are additionally
+    // byte-weighed (`cache_bytes` vs their `*_MAX_BYTES` budgets) — RAM
+    // use is bounded even when entries are MB-scale GIFs.
     let cache_entries = serde_json::json!({
         "svg": state.svg_cache.entry_count(),
         "analyze": state.analyze_cache.entry_count(),
         "stat_svg": state.stat_svg_cache.entry_count(),
         "raster": state.raster_cache.entry_count(),
+        "avatar": state.avatar_data_cache.entry_count(),
         "user_agg": state.user_agg_cache.entry_count(),
         "leaderboard": state.leaderboard_cache.entry_count(),
+    });
+    let cache_bytes = serde_json::json!({
+        "svg": state.svg_cache.weighted_size(),
+        "svg_max": SVG_CACHE_MAX_BYTES,
+        "stat_svg": state.stat_svg_cache.weighted_size(),
+        "stat_svg_max": STAT_SVG_CACHE_MAX_BYTES,
+        "raster": state.raster_cache.weighted_size(),
+        "raster_max": RASTER_CACHE_MAX_BYTES,
+        "avatar": state.avatar_data_cache.weighted_size(),
+        "avatar_max": AVATAR_CACHE_MAX_BYTES,
     });
 
     let body = serde_json::json!({
@@ -600,11 +726,19 @@ async fn metrics(
             "permits_total": RASTER_CONCURRENCY,
             "permits_available": raster_available,
         },
+        // Fail-open admissions signal a Redis outage: requests were allowed
+        // without a shared budget check. Sustained growth here means the
+        // distributed limiter is running blind.
+        "rate_limiter": {
+            "backend": if state.redis.is_some() { "redis" } else { "memory" },
+            "fail_open_total": crate::redis::limiter_fail_open_total(),
+        },
         "progress_streams": {
             "connections_limit": progress_total,
             "connections_active": progress_total.saturating_sub(progress_available),
         },
         "cache_entries": cache_entries,
+        "cache_bytes": cache_bytes,
     });
     let mut h = HeaderMap::new();
     h.insert(
@@ -1010,6 +1144,18 @@ async fn warm_user_profile(
         .analyze_cache
         .invalidate(&format!("user:{login}"))
         .await;
+    // Other replicas hold their own moka caches; publish the evicted keys
+    // on the invalidation bus so they drop the same entries. Fire-and-forget
+    // — a lost message degrades to TTL staleness, never blocks the response.
+    if let Some(redis) = &state.redis {
+        crate::redis::publish_invalidation(
+            redis,
+            crate::redis::Invalidation {
+                user_agg: vec![login.clone()],
+                analyze: vec![format!("user:{login}")],
+            },
+        );
+    }
     let mut headers = HeaderMap::new();
     headers.insert(
         header::CACHE_CONTROL,
@@ -1117,22 +1263,25 @@ async fn user_chart(
     State(state): State<ApiState>,
     Path(login): Path<String>,
     Query(q): Query<ChartQuery>,
+    request_headers: HeaderMap,
 ) -> Result<impl IntoResponse, ApiError> {
     let theme = theme_for(q.theme.as_deref());
     let card = ensure_user_chart_svg(&state, &login, theme, &q).await?;
-    Ok(card_svg_response(card))
+    Ok(card_svg_response(&request_headers, card))
 }
 
 async fn user_chart_png(
     State(state): State<ApiState>,
     Path(login): Path<String>,
     Query(q): Query<ChartQuery>,
+    request_headers: HeaderMap,
 ) -> Result<impl IntoResponse, ApiError> {
     let theme = theme_for(q.theme.as_deref());
     let (bytes, short_ttl) =
         ensure_user_chart_raster(&state, &login, theme, &q, crate::raster::RasterFormat::Png)
             .await?;
     Ok(card_raster_response(
+        &request_headers,
         crate::raster::RasterFormat::Png,
         bytes,
         short_ttl,
@@ -1143,12 +1292,14 @@ async fn user_chart_webp(
     State(state): State<ApiState>,
     Path(login): Path<String>,
     Query(q): Query<ChartQuery>,
+    request_headers: HeaderMap,
 ) -> Result<impl IntoResponse, ApiError> {
     let theme = theme_for(q.theme.as_deref());
     let (bytes, short_ttl) =
         ensure_user_chart_raster(&state, &login, theme, &q, crate::raster::RasterFormat::Webp)
             .await?;
     Ok(card_raster_response(
+        &request_headers,
         crate::raster::RasterFormat::Webp,
         bytes,
         short_ttl,
@@ -1318,7 +1469,8 @@ async fn ext_ping(
 /// (`YYYY-MM-DD`, inclusive) window the series pre-render — the left
 /// edge keeps the true running total unless `rebase=1` rebases it to
 /// the window start. `animate=1` is an explicit SVG-only on-site reveal;
-/// the default is static. `motion=draw` opts into the separate GIF route.
+/// the default is static. `motion=wave|draw` picks the GIF preset (the
+/// GIF route defaults to the looping `wave`).
 #[derive(Debug, Default, Clone, Deserialize)]
 struct ChartQuery {
     theme: Option<String>,
@@ -1360,22 +1512,30 @@ impl ChartQuery {
         let log = if self.opts().log_y { "log" } else { "lin" };
         format!("{axis}:{log}")
     }
-    /// SVG/raster cache fragment, including the explicit animation choice.
+    /// SVG/raster cache fragment, including the explicit animation choice
+    /// and the render revision (a renderer redesign must never serve a
+    /// stale look under an unchanged data key).
     fn opts_key(&self) -> String {
         let animate = if self.opts().animate {
             "anim"
         } else {
             "static"
         };
-        format!("{}:{animate}", self.series_opts_key())
+        format!("{}:{animate}|{RENDER_REVISION}", self.series_opts_key())
     }
+    /// GIF motion preset. Absent → the looping `wave` default; `draw`
+    /// stays supported (play-once reveal); anything else is a 400.
     fn gif_motion(&self) -> Result<&'static str, ApiError> {
-        match self.motion.as_deref() {
-            Some(value) if value.eq_ignore_ascii_case(crate::animated_gif::MOTION_PRESET) => {
-                Ok(crate::animated_gif::MOTION_PRESET)
+        match self.motion.as_deref().map(str::trim) {
+            None => Ok(crate::animated_gif::MOTION_WAVE),
+            Some(value) if value.eq_ignore_ascii_case(crate::animated_gif::MOTION_WAVE) => {
+                Ok(crate::animated_gif::MOTION_WAVE)
+            }
+            Some(value) if value.eq_ignore_ascii_case(crate::animated_gif::MOTION_DRAW) => {
+                Ok(crate::animated_gif::MOTION_DRAW)
             }
             _ => Err(ApiError::bad_request(
-                "chart.gif requires motion=draw; SVG is the static default",
+                "chart.gif supports motion=wave (default) or motion=draw",
             )),
         }
     }
@@ -1385,19 +1545,21 @@ async fn chart(
     State(state): State<ApiState>,
     Path((owner, repo)): Path<(String, String)>,
     Query(q): Query<ChartQuery>,
+    request_headers: HeaderMap,
 ) -> Result<impl IntoResponse, ApiError> {
     if !is_valid_slug(&owner) || !is_valid_slug(&repo) {
         return Err(ApiError::bad_request("invalid owner/repo"));
     }
     let theme = theme_for(q.theme.as_deref());
     let card = ensure_chart_svg(&state, &owner, &repo, theme, &q).await?;
-    Ok(card_svg_response(card))
+    Ok(card_svg_response(&request_headers, card))
 }
 
 async fn chart_png(
     State(state): State<ApiState>,
     Path((owner, repo)): Path<(String, String)>,
     Query(q): Query<ChartQuery>,
+    request_headers: HeaderMap,
 ) -> Result<impl IntoResponse, ApiError> {
     if !is_valid_slug(&owner) || !is_valid_slug(&repo) {
         return Err(ApiError::bad_request("invalid owner/repo"));
@@ -1413,6 +1575,7 @@ async fn chart_png(
     )
     .await?;
     Ok(card_raster_response(
+        &request_headers,
         crate::raster::RasterFormat::Png,
         bytes,
         short_ttl,
@@ -1423,6 +1586,7 @@ async fn chart_webp(
     State(state): State<ApiState>,
     Path((owner, repo)): Path<(String, String)>,
     Query(q): Query<ChartQuery>,
+    request_headers: HeaderMap,
 ) -> Result<impl IntoResponse, ApiError> {
     if !is_valid_slug(&owner) || !is_valid_slug(&repo) {
         return Err(ApiError::bad_request("invalid owner/repo"));
@@ -1438,19 +1602,21 @@ async fn chart_webp(
     )
     .await?;
     Ok(card_raster_response(
+        &request_headers,
         crate::raster::RasterFormat::Webp,
         bytes,
         short_ttl,
     ))
 }
 
-/// Actual README animation. Unlike the SVG route, this is opt-in via
-/// `motion=draw`, reads only complete cached Postgres stargazer timestamps,
-/// and plays once before resting on the complete chart.
+/// Actual README animation. Reads only complete cached Postgres stargazer
+/// timestamps. Defaults to the continuously-looping `wave` preset;
+/// `motion=draw` keeps the play-once reveal.
 async fn chart_gif(
     State(state): State<ApiState>,
     Path((owner, repo)): Path<(String, String)>,
     Query(q): Query<ChartQuery>,
+    request_headers: HeaderMap,
 ) -> Result<impl IntoResponse, ApiError> {
     if !is_valid_slug(&owner) || !is_valid_slug(&repo) {
         return Err(ApiError::bad_request("invalid owner/repo"));
@@ -1472,7 +1638,11 @@ async fn chart_gif(
         HeaderValue::from_str(&filename)
             .map_err(|_| ApiError::bad_request("invalid owner/repo"))?,
     );
-    Ok((headers, (*bytes).clone()))
+    Ok(conditional_media_response(
+        &request_headers,
+        headers,
+        (*bytes).clone(),
+    ))
 }
 
 async fn ensure_chart_gif(
@@ -1482,7 +1652,7 @@ async fn ensure_chart_gif(
     theme: &crate::theme::Theme,
     q: &ChartQuery,
 ) -> Result<(std::sync::Arc<Vec<u8>>, bool), ApiError> {
-    q.gif_motion()?;
+    let motion = q.gif_motion()?;
     let spec = q.range_spec()?;
     let owner = owner.to_ascii_lowercase();
     let repo = repo.to_ascii_lowercase();
@@ -1504,15 +1674,16 @@ async fn ensure_chart_gif(
     let series = export::filter_points(&full, &spec);
     let revision = crate::animated_gif::data_revision(&series);
     let theme_key = if theme.dark { "dark" } else { "light" };
+    // Completeness is part of the key: pending (incomplete-data) encodes
+    // ride the short-TTL policy and must never be answered by a complete
+    // cached body (or vice versa), even when the two would render the
+    // same series bytes.
+    let completeness_key = if complete { "complete" } else { "pending" };
     let key = format!(
-        "chart-gif:{repo_full}|{theme_key}|{}|{}|motion:{}|rev:{revision}",
+        "chart-gif:{repo_full}|{theme_key}|{}|{}|motion:{motion}|rev:{revision}|{completeness_key}|{RENDER_REVISION}",
         q.series_opts_key(),
         spec.key(),
-        crate::animated_gif::MOTION_PRESET,
     );
-    if complete && let Some(cached) = state.raster_cache.get(&key).await {
-        return Ok((cached, false));
-    }
 
     let cfg = ChartConfig {
         repo: repo_full,
@@ -1530,23 +1701,43 @@ async fn ensure_chart_gif(
     let mut opts = q.opts();
     opts.animate = false;
     let theme = *theme;
-    let encoded = tokio::task::spawn_blocking(move || {
-        crate::animated_gif::encode_draw(&series, &cfg, &theme, &opts)
+    let seed = crate::animated_gif::fnv1a(&cfg.repo);
+    // Single-flight over the raster cache: concurrent misses for the same
+    // key coalesce onto ONE encode, and the encode itself runs under a
+    // raster permit — a wave GIF rasterizes 14 frames, the most expensive
+    // render in the process, so it must queue at the same choke point as
+    // every other raster path instead of fanning out on the blocking pool.
+    single_flight_gif(&state.raster_cache, key, async move {
+        let encoded = with_raster_permit(move || {
+            if motion == crate::animated_gif::MOTION_DRAW {
+                crate::animated_gif::encode_draw(&series, &cfg, &theme, &opts)
+            } else {
+                crate::animated_gif::encode_wave(&series, &cfg, &theme, &opts, seed)
+            }
+        })
+        .await?
+        .map_err(ApiError::from)?;
+        debug_assert_eq!(
+            encoded.frame_count,
+            if motion == crate::animated_gif::MOTION_DRAW {
+                crate::animated_gif::FRAME_COUNT
+            } else {
+                crate::animated_gif::WAVE_FRAME_COUNT
+            },
+            "encoder contract"
+        );
+        debug_assert!(encoded.width > 0 && encoded.height > 0);
+        let bytes = std::sync::Arc::new(encoded.bytes);
+        if complete {
+            Ok(bytes)
+        } else {
+            // Incomplete cached stargazers: serve the frame short-TTL and
+            // never pin it in the 24h raster cache (self-heals once the
+            // star queue lands).
+            Err(GifMiss::Pending(bytes))
+        }
     })
     .await
-    .map_err(|e| ApiError::from(anyhow::anyhow!("GIF render task failed: {e}")))?
-    .map_err(ApiError::from)?;
-    debug_assert_eq!(
-        encoded.frame_count,
-        crate::animated_gif::FRAME_COUNT,
-        "encoder contract"
-    );
-    debug_assert!(encoded.width > 0 && encoded.height > 0);
-    let bytes = std::sync::Arc::new(encoded.bytes);
-    if complete {
-        state.raster_cache.insert(key, bytes.clone()).await;
-    }
-    Ok((bytes, !complete))
 }
 
 /// Render-or-fetch the single-repo star-history SVG. Memoized in
@@ -1666,20 +1857,23 @@ const MAX_OVERLAY_REPOS: usize = 12;
 async fn multi_chart(
     State(state): State<ApiState>,
     Query(q): Query<ChartQuery>,
+    request_headers: HeaderMap,
 ) -> Result<impl IntoResponse, ApiError> {
     let theme = theme_for(q.theme.as_deref());
     let card = ensure_multi_svg(&state, theme, &q).await?;
-    Ok(card_svg_response(card))
+    Ok(card_svg_response(&request_headers, card))
 }
 
 async fn multi_chart_png(
     State(state): State<ApiState>,
     Query(q): Query<ChartQuery>,
+    request_headers: HeaderMap,
 ) -> Result<impl IntoResponse, ApiError> {
     let theme = theme_for(q.theme.as_deref());
     let (bytes, short_ttl) =
         ensure_multi_raster(&state, theme, &q, crate::raster::RasterFormat::Png).await?;
     Ok(card_raster_response(
+        &request_headers,
         crate::raster::RasterFormat::Png,
         bytes,
         short_ttl,
@@ -1689,11 +1883,13 @@ async fn multi_chart_png(
 async fn multi_chart_webp(
     State(state): State<ApiState>,
     Query(q): Query<ChartQuery>,
+    request_headers: HeaderMap,
 ) -> Result<impl IntoResponse, ApiError> {
     let theme = theme_for(q.theme.as_deref());
     let (bytes, short_ttl) =
         ensure_multi_raster(&state, theme, &q, crate::raster::RasterFormat::Webp).await?;
     Ok(card_raster_response(
+        &request_headers,
         crate::raster::RasterFormat::Webp,
         bytes,
         short_ttl,
@@ -1758,6 +1954,13 @@ fn overlay_key(
     )
 }
 
+/// Render-or-fetch the multi-repo overlay SVG. The render is pending
+/// (short-TTL, never memoized) whenever ANY requested repo contributes an
+/// empty series while its history is not confirmed complete — a mixed
+/// warm+cold overlay would otherwise cache (moka + 4h edge) a chart that
+/// silently omits the cold repo's line. A complete repo whose series is
+/// empty only because the requested range excludes every point stays a
+/// complete render: there is nothing for a short TTL to self-heal.
 async fn ensure_multi_svg(
     state: &ApiState,
     theme: &crate::theme::Theme,
@@ -1772,21 +1975,33 @@ async fn ensure_multi_svg(
         // internally parallel, and overlay traffic is low-volume vs. the
         // single-repo embed path.
         let mut series_per_repo: Vec<(String, Vec<Point>)> = Vec::with_capacity(pairs.len());
+        let mut pending = false;
         for (owner, repo) in &pairs {
             let series = star_series(owner, repo, &state.analyzer)
                 .await
                 .map_err(ApiError::from)?;
             let series = export::filter_points(&series, &spec);
+            if series.is_empty() {
+                // Same completeness gate as `ensure_site_og_raster`: the
+                // summary's history-complete flag covers both the exact
+                // GitHub snapshot and GH Archive-sourced repos. A cold /
+                // just-enqueued repo (all-cold included) keeps the whole
+                // overlay on the short-TTL pending policy.
+                let summary = state
+                    .analyzer
+                    .cache
+                    .get_repo_summary(&format!("{owner}/{repo}"))
+                    .await
+                    .map_err(ApiError::from)?;
+                pending |= !summary.is_some_and(|s| s.stargazers_complete);
+            }
             series_per_repo.push((format!("{owner}/{repo}"), series));
         }
-        // All repos cold (no cached history yet): short-TTL placeholder,
-        // never pinned in the 24h cache.
-        let empty = series_per_repo.iter().all(|(_, s)| s.is_empty());
         let svg = crate::texture::decorate(
             render_multi_svg(&series_per_repo, &ChartConfig::default(), theme, &q.opts()),
             theme,
         );
-        if empty {
+        if pending {
             return Err(RenderMiss::Pending(svg));
         }
         Ok(svg)
@@ -1872,7 +2087,7 @@ impl UsageQuery {
             TimeAxis::Timeline => "timeline",
         };
         let log = if self.opts().log_y { "log" } else { "lin" };
-        format!("{axis}:{log}")
+        format!("{axis}:{log}|{RENDER_REVISION}")
     }
     fn overrides(&self) -> UsageOverrides {
         UsageOverrides {
@@ -2103,10 +2318,11 @@ async fn usage_svg(
     State(state): State<ApiState>,
     Path((owner, repo)): Path<(String, String)>,
     Query(q): Query<UsageQuery>,
+    request_headers: HeaderMap,
 ) -> Result<impl IntoResponse, ApiError> {
     let theme = theme_for(q.theme.as_deref());
     let card = ensure_usage_svg(&state, &owner, &repo, theme, &q).await?;
-    Ok(card_svg_response(card))
+    Ok(card_svg_response(&request_headers, card))
 }
 
 async fn ensure_usage_raster(
@@ -2146,6 +2362,7 @@ async fn usage_png(
     State(state): State<ApiState>,
     Path((owner, repo)): Path<(String, String)>,
     Query(q): Query<UsageQuery>,
+    request_headers: HeaderMap,
 ) -> Result<impl IntoResponse, ApiError> {
     let theme = theme_for(q.theme.as_deref());
     let (bytes, short_ttl) = ensure_usage_raster(
@@ -2158,6 +2375,7 @@ async fn usage_png(
     )
     .await?;
     Ok(card_raster_response(
+        &request_headers,
         crate::raster::RasterFormat::Png,
         bytes,
         short_ttl,
@@ -2168,6 +2386,7 @@ async fn usage_webp(
     State(state): State<ApiState>,
     Path((owner, repo)): Path<(String, String)>,
     Query(q): Query<UsageQuery>,
+    request_headers: HeaderMap,
 ) -> Result<impl IntoResponse, ApiError> {
     let theme = theme_for(q.theme.as_deref());
     let (bytes, short_ttl) = ensure_usage_raster(
@@ -2180,6 +2399,7 @@ async fn usage_webp(
     )
     .await?;
     Ok(card_raster_response(
+        &request_headers,
         crate::raster::RasterFormat::Webp,
         bytes,
         short_ttl,
@@ -2423,7 +2643,7 @@ impl BadgeQuery {
         let source = self.source.as_deref().unwrap_or("auto");
         let signal = self.signal.as_deref().unwrap_or("-");
         format!(
-            "{theme_key}|m:{metrics}|s:{style}|a:{}|signal:{signal}|src:{source}|{}|{}|{}|{}",
+            "{theme_key}|m:{metrics}|s:{style}|a:{}|signal:{signal}|src:{source}|{}|{}|{}|{}|{RENDER_REVISION}",
             self.animate(),
             self.npm.as_deref().unwrap_or("-"),
             self.crate_.as_deref().unwrap_or("-"),
@@ -2438,6 +2658,13 @@ impl BadgeQuery {
 fn needs_downloads(metrics: &[Metric]) -> bool {
     metrics.contains(&Metric::Downloads)
 }
+
+/// Render-revision constant baked into every media cache key (badges,
+/// cards, OG images, GIFs, charts). Bump it whenever renderer output
+/// changes for identical data so stale in-process/CDN entries can never
+/// serve the previous look under the same key. `r14` = the dithered
+/// dark-first redesign.
+pub(crate) const RENDER_REVISION: &str = "r14";
 
 struct RepoRenderReadiness {
     stars: bool,
@@ -2615,10 +2842,11 @@ async fn badge_svg(
     State(state): State<ApiState>,
     Path((owner, repo)): Path<(String, String)>,
     Query(q): Query<BadgeQuery>,
+    request_headers: HeaderMap,
 ) -> Result<impl IntoResponse, ApiError> {
     let theme = theme_for(q.theme.as_deref());
     let card = build_badge_svg(&state, &owner, &repo, theme, &q).await?;
-    Ok(card_svg_response(card))
+    Ok(card_svg_response(&request_headers, card))
 }
 
 async fn ensure_badge_raster(
@@ -2656,6 +2884,7 @@ async fn badge_png(
     State(state): State<ApiState>,
     Path((owner, repo)): Path<(String, String)>,
     Query(q): Query<BadgeQuery>,
+    request_headers: HeaderMap,
 ) -> Result<impl IntoResponse, ApiError> {
     let theme = theme_for(q.theme.as_deref());
     let (bytes, short_ttl) = ensure_badge_raster(
@@ -2668,6 +2897,7 @@ async fn badge_png(
     )
     .await?;
     Ok(card_raster_response(
+        &request_headers,
         crate::raster::RasterFormat::Png,
         bytes,
         short_ttl,
@@ -2678,6 +2908,7 @@ async fn badge_webp(
     State(state): State<ApiState>,
     Path((owner, repo)): Path<(String, String)>,
     Query(q): Query<BadgeQuery>,
+    request_headers: HeaderMap,
 ) -> Result<impl IntoResponse, ApiError> {
     let theme = theme_for(q.theme.as_deref());
     let (bytes, short_ttl) = ensure_badge_raster(
@@ -2690,6 +2921,7 @@ async fn badge_webp(
     )
     .await?;
     Ok(card_raster_response(
+        &request_headers,
         crate::raster::RasterFormat::Webp,
         bytes,
         short_ttl,
@@ -2830,7 +3062,10 @@ async fn ensure_repo_og_raster(
     let stable = readiness.stars && readiness.metadata && readiness.analysis;
     let theme_key = if theme.dark { "dark" } else { "light" };
     let fmt_key = raster_fmt_key(format);
-    let key = format!("og:{slug}|{theme_key}|{fmt_key}|{}", readiness.revision,);
+    let key = format!(
+        "og:{slug}|{theme_key}|{fmt_key}|{}|{RENDER_REVISION}",
+        readiness.revision,
+    );
     if stable && let Some(cached) = state.raster_cache.get(&key).await {
         return Ok((cached, false));
     }
@@ -2851,6 +3086,7 @@ async fn repo_og_png(
     State(state): State<ApiState>,
     Path((owner, repo)): Path<(String, String)>,
     Query(q): Query<OgQuery>,
+    request_headers: HeaderMap,
 ) -> Result<impl IntoResponse, ApiError> {
     let theme = og_theme(q.theme.as_deref());
     let (bytes, short_ttl) = ensure_repo_og_raster(
@@ -2862,6 +3098,7 @@ async fn repo_og_png(
     )
     .await?;
     Ok(og_response(
+        &request_headers,
         crate::raster::RasterFormat::Png,
         bytes,
         short_ttl,
@@ -2872,6 +3109,7 @@ async fn repo_og_webp(
     State(state): State<ApiState>,
     Path((owner, repo)): Path<(String, String)>,
     Query(q): Query<OgQuery>,
+    request_headers: HeaderMap,
 ) -> Result<impl IntoResponse, ApiError> {
     let theme = og_theme(q.theme.as_deref());
     let (bytes, short_ttl) = ensure_repo_og_raster(
@@ -2883,6 +3121,89 @@ async fn repo_og_webp(
     )
     .await?;
     Ok(og_response(
+        &request_headers,
+        crate::raster::RasterFormat::Webp,
+        bytes,
+        short_ttl,
+    ))
+}
+
+/// User-profile OG card. Mirrors the repo OG structure: the same
+/// Postgres-only [`load_user_card_data`] source as the user card, the same
+/// completeness gates (no data → short-TTL placeholder that self-heals;
+/// analysis pending → short-TTL, never pinned in the 24h cache), and the
+/// same cache-key + revision discipline (content digest + render revision).
+async fn ensure_user_og_raster(
+    state: &ApiState,
+    login: &str,
+    theme: &crate::theme::Theme,
+    format: crate::raster::RasterFormat,
+) -> Result<(std::sync::Arc<Vec<u8>>, bool), ApiError> {
+    if !cards::is_valid_login(login) {
+        return Err(ApiError::bad_request("invalid login"));
+    }
+    let login = login.to_ascii_lowercase();
+    let data = load_user_card_data(state.analyzer.cache.db(), &login).await?;
+    if !data.has_data() {
+        // Nothing tracked yet — placeholder at short TTL, never cached,
+        // and never an enqueue (cards/OGs don't drive ingestion).
+        let svg = og::render_user_empty_og(&login, theme);
+        return Ok((
+            std::sync::Arc::new(rasterize_limited(svg, format, OG_RASTER_SCALE).await?),
+            true,
+        ));
+    }
+    let stable = !data.analysis_pending();
+    let svg = og::render_user_og(&data, theme);
+    let theme_key = if theme.dark { "dark" } else { "light" };
+    let fmt_key = raster_fmt_key(format);
+    let key = format!(
+        "og-user:{login}|{theme_key}|{fmt_key}|{}|{RENDER_REVISION}",
+        svg_digest(&svg),
+    );
+    if !stable {
+        return Ok((
+            std::sync::Arc::new(rasterize_limited(svg, format, OG_RASTER_SCALE).await?),
+            true,
+        ));
+    }
+    if let Some(cached) = state.raster_cache.get(&key).await {
+        return Ok((cached, false));
+    }
+    Ok((
+        rasterize_cached_scaled(state, &key, svg, format, OG_RASTER_SCALE).await?,
+        false,
+    ))
+}
+
+async fn user_og_png(
+    State(state): State<ApiState>,
+    Path(login): Path<String>,
+    Query(q): Query<OgQuery>,
+    request_headers: HeaderMap,
+) -> Result<impl IntoResponse, ApiError> {
+    let theme = og_theme(q.theme.as_deref());
+    let (bytes, short_ttl) =
+        ensure_user_og_raster(&state, &login, theme, crate::raster::RasterFormat::Png).await?;
+    Ok(og_response(
+        &request_headers,
+        crate::raster::RasterFormat::Png,
+        bytes,
+        short_ttl,
+    ))
+}
+
+async fn user_og_webp(
+    State(state): State<ApiState>,
+    Path(login): Path<String>,
+    Query(q): Query<OgQuery>,
+    request_headers: HeaderMap,
+) -> Result<impl IntoResponse, ApiError> {
+    let theme = og_theme(q.theme.as_deref());
+    let (bytes, short_ttl) =
+        ensure_user_og_raster(&state, &login, theme, crate::raster::RasterFormat::Webp).await?;
+    Ok(og_response(
+        &request_headers,
         crate::raster::RasterFormat::Webp,
         bytes,
         short_ttl,
@@ -2975,7 +3296,7 @@ async fn ensure_site_og_raster(
             },
             None => ("site".to_string(), true, "static".to_string()),
         };
-    let key = format!("og-site:{repos_key}|{theme_key}|{fmt_key}|{revision}");
+    let key = format!("og-site:{repos_key}|{theme_key}|{fmt_key}|{revision}|{RENDER_REVISION}");
     if stable && let Some(cached) = state.raster_cache.get(&key).await {
         return Ok((cached, false));
     }
@@ -2995,11 +3316,13 @@ async fn ensure_site_og_raster(
 async fn site_og_png(
     State(state): State<ApiState>,
     Query(q): Query<OgQuery>,
+    request_headers: HeaderMap,
 ) -> Result<impl IntoResponse, ApiError> {
     let theme = og_theme(q.theme.as_deref());
     let (bytes, short_ttl) =
         ensure_site_og_raster(&state, theme, &q, crate::raster::RasterFormat::Png).await?;
     Ok(og_response(
+        &request_headers,
         crate::raster::RasterFormat::Png,
         bytes,
         short_ttl,
@@ -3009,11 +3332,13 @@ async fn site_og_png(
 async fn site_og_webp(
     State(state): State<ApiState>,
     Query(q): Query<OgQuery>,
+    request_headers: HeaderMap,
 ) -> Result<impl IntoResponse, ApiError> {
     let theme = og_theme(q.theme.as_deref());
     let (bytes, short_ttl) =
         ensure_site_og_raster(&state, theme, &q, crate::raster::RasterFormat::Webp).await?;
     Ok(og_response(
+        &request_headers,
         crate::raster::RasterFormat::Webp,
         bytes,
         short_ttl,
@@ -3034,17 +3359,18 @@ fn og_theme(name: Option<&str>) -> &'static crate::theme::Theme {
 /// here because the dimensions + content-type are the contract social
 /// platforms validate against.
 fn og_response(
+    request_headers: &HeaderMap,
     format: crate::raster::RasterFormat,
     bytes: std::sync::Arc<Vec<u8>>,
     short_ttl: bool,
-) -> impl IntoResponse {
+) -> axum::response::Response {
     let mut headers = HeaderMap::new();
     headers.insert(
         header::CONTENT_TYPE,
         HeaderValue::from_static(format.content_type()),
     );
     headers.insert(header::CACHE_CONTROL, card_cache_control(short_ttl));
-    (headers, (*bytes).clone())
+    conditional_media_response(request_headers, headers, (*bytes).clone())
 }
 
 // Profile and repository cards
@@ -3146,6 +3472,8 @@ impl CardQuery {
         kv(&mut k, "si", self.show_icons.as_deref());
         kv(&mut k, "nf", self.number_format.as_deref());
         kv(&mut k, "a", self.animate.as_deref());
+        k.push('|');
+        k.push_str(RENDER_REVISION);
         k
     }
 }
@@ -3221,36 +3549,147 @@ async fn single_flight_card(
     }
 }
 
-fn card_cache_control(short_ttl: bool) -> HeaderValue {
-    if short_ttl {
-        HeaderValue::from_static("public, s-maxage=300, max-age=60")
-    } else {
-        HeaderValue::from_static("public, s-maxage=86400, max-age=3600")
+/// Miss outcome for the single-flight GIF encode: [`RenderMiss`]'s policy
+/// applied to raster bytes. `Pending` (incomplete cached stargazers) rides
+/// the `Err` arm so moka never memoizes it into the 24h raster cache — the
+/// frame is served short-TTL and re-encoded on the next request once the
+/// star queue catches up. `Failed` carries a real error.
+enum GifMiss {
+    Pending(std::sync::Arc<Vec<u8>>),
+    Failed(ApiError),
+}
+
+impl From<ApiError> for GifMiss {
+    fn from(e: ApiError) -> Self {
+        GifMiss::Failed(e)
     }
 }
 
-fn card_svg_response(card: RenderedCard) -> (HeaderMap, String) {
+/// Single-flight GIF memo over the raster cache. Coalesces concurrent
+/// misses for the same key onto ONE `init` future (moka `try_get_with`) —
+/// a GIF encode rasterizes up to 14 frames, so a same-key stampede must
+/// run it once, not once per request. Complete encodes are memoized for
+/// 24h and served `(bytes, short_ttl = false)`; pending encodes are served
+/// `(bytes, true)` and never cached. Errors are never memoized.
+async fn single_flight_gif(
+    cache: &MokaCache<String, std::sync::Arc<Vec<u8>>>,
+    key: String,
+    init: impl std::future::Future<Output = Result<std::sync::Arc<Vec<u8>>, GifMiss>>,
+) -> Result<(std::sync::Arc<Vec<u8>>, bool), ApiError> {
+    match cache.try_get_with(key, init).await {
+        Ok(bytes) => Ok((bytes, false)),
+        Err(arc) => match &*arc {
+            GifMiss::Pending(bytes) => Ok((bytes.clone(), true)),
+            GifMiss::Failed(e) => Err(e.clone_shared()),
+        },
+    }
+}
+
+/// Cache policy for COMPLETE media renders: browsers hold the bytes for an
+/// hour, Cloudflare's edge for four (`s-maxage=14400`), and the edge may
+/// serve a stale copy for a day while it revalidates in the background —
+/// so a viral README or a 2k-visitor spike hits the origin once per asset
+/// per ~4h instead of per request. Renderers are deterministic, so a
+/// revalidation is almost always a cheap 304.
+const MEDIA_CACHE_CONTROL: &str =
+    "public, max-age=3600, s-maxage=14400, stale-while-revalidate=86400";
+/// Cache policy for pending/cold renders: short enough that a placeholder
+/// self-heals within minutes once the queues catch up. A pending frame
+/// must NEVER ride the 4h edge policy.
+const PENDING_CACHE_CONTROL: &str = "public, s-maxage=300, max-age=60";
+
+fn card_cache_control(short_ttl: bool) -> HeaderValue {
+    if short_ttl {
+        HeaderValue::from_static(PENDING_CACHE_CONTROL)
+    } else {
+        HeaderValue::from_static(MEDIA_CACHE_CONTROL)
+    }
+}
+
+/// Strong ETag for a deterministic media body: `hex(sha256(body))`
+/// truncated to 32 hex chars (128 bits — collision-free for cache
+/// revalidation), double-quoted per RFC 9110. Renderers are
+/// bytes-deterministic, so identical inputs always revalidate.
+pub(crate) fn media_etag(body: &[u8]) -> HeaderValue {
+    use std::fmt::Write;
+    let digest = Sha256::digest(body);
+    let mut tag = String::with_capacity(34);
+    tag.push('"');
+    for byte in &digest[..16] {
+        let _ = write!(tag, "{byte:02x}");
+    }
+    tag.push('"');
+    // Quoted hex is always a valid header value.
+    HeaderValue::from_str(&tag).expect("hex etag is a valid header value")
+}
+
+/// RFC 9110 §13.1.2 `If-None-Match` evaluation against a strong ETag:
+/// `*` matches any current representation; otherwise the field is a
+/// comma-separated entity-tag list compared with the *weak* comparison
+/// (a `W/` prefix on a candidate is ignored; entity-tags cannot contain
+/// commas, so the split is lossless).
+pub(crate) fn if_none_match_matches(request_headers: &HeaderMap, etag: &HeaderValue) -> bool {
+    let Ok(target) = etag.to_str() else {
+        return false;
+    };
+    request_headers
+        .get_all(header::IF_NONE_MATCH)
+        .iter()
+        .filter_map(|value| value.to_str().ok())
+        .flat_map(|value| value.split(','))
+        .map(str::trim)
+        .any(|candidate| {
+            candidate == "*" || candidate.strip_prefix("W/").unwrap_or(candidate) == target
+        })
+}
+
+/// Shared conditional-media responder: every media body (SVG/PNG/WebP/GIF/
+/// OG) flows through here exactly once. Attaches the strong ETag; when the
+/// request's `If-None-Match` matches, answers `304 Not Modified` with the
+/// SAME `Cache-Control` + `ETag` (per RFC 9110 §15.4.5) and an empty body,
+/// so CDN revalidations cost headers instead of image bytes.
+pub(crate) fn conditional_media_response(
+    request_headers: &HeaderMap,
+    mut headers: HeaderMap,
+    body: Vec<u8>,
+) -> axum::response::Response {
+    let etag = media_etag(&body);
+    if if_none_match_matches(request_headers, &etag) {
+        let mut not_modified = HeaderMap::new();
+        if let Some(cache_control) = headers.remove(header::CACHE_CONTROL) {
+            not_modified.insert(header::CACHE_CONTROL, cache_control);
+        }
+        not_modified.insert(header::ETAG, etag);
+        return (StatusCode::NOT_MODIFIED, not_modified).into_response();
+    }
+    headers.insert(header::ETAG, etag);
+    (headers, body).into_response()
+}
+
+fn card_svg_response(request_headers: &HeaderMap, card: RenderedCard) -> axum::response::Response {
     let mut headers = HeaderMap::new();
     headers.insert(
         header::CONTENT_TYPE,
         HeaderValue::from_static("image/svg+xml; charset=utf-8"),
     );
     headers.insert(header::CACHE_CONTROL, card_cache_control(card.short_ttl));
-    (headers, crate::brand::with_site_link(card.svg))
+    let body = crate::brand::with_site_link(card.svg);
+    conditional_media_response(request_headers, headers, body.into_bytes())
 }
 
 fn card_raster_response(
+    request_headers: &HeaderMap,
     format: crate::raster::RasterFormat,
     bytes: std::sync::Arc<Vec<u8>>,
     short_ttl: bool,
-) -> impl IntoResponse {
+) -> axum::response::Response {
     let mut headers = HeaderMap::new();
     headers.insert(
         header::CONTENT_TYPE,
         HeaderValue::from_static(format.content_type()),
     );
     headers.insert(header::CACHE_CONTROL, card_cache_control(short_ttl));
-    (headers, (*bytes).clone())
+    conditional_media_response(request_headers, headers, (*bytes).clone())
 }
 
 /// Rasterize without memoizing — for short-TTL pending/empty cards whose
@@ -3683,22 +4122,25 @@ async fn user_card_svg(
     State(state): State<ApiState>,
     Path(login): Path<String>,
     Query(q): Query<CardQuery>,
+    request_headers: HeaderMap,
 ) -> Result<impl IntoResponse, ApiError> {
     let theme = theme_for(q.theme.as_deref());
     let card = ensure_user_card_svg(&state, &login, theme, &q).await?;
-    Ok(card_svg_response(card))
+    Ok(card_svg_response(&request_headers, card))
 }
 
 async fn user_card_png(
     State(state): State<ApiState>,
     Path(login): Path<String>,
     Query(q): Query<CardQuery>,
+    request_headers: HeaderMap,
 ) -> Result<impl IntoResponse, ApiError> {
     let theme = theme_for(q.theme.as_deref());
     let (bytes, short_ttl) =
         ensure_user_card_raster(&state, &login, theme, &q, crate::raster::RasterFormat::Png)
             .await?;
     Ok(card_raster_response(
+        &request_headers,
         crate::raster::RasterFormat::Png,
         bytes,
         short_ttl,
@@ -3709,12 +4151,14 @@ async fn user_card_webp(
     State(state): State<ApiState>,
     Path(login): Path<String>,
     Query(q): Query<CardQuery>,
+    request_headers: HeaderMap,
 ) -> Result<impl IntoResponse, ApiError> {
     let theme = theme_for(q.theme.as_deref());
     let (bytes, short_ttl) =
         ensure_user_card_raster(&state, &login, theme, &q, crate::raster::RasterFormat::Webp)
             .await?;
     Ok(card_raster_response(
+        &request_headers,
         crate::raster::RasterFormat::Webp,
         bytes,
         short_ttl,
@@ -3725,16 +4169,18 @@ async fn repo_card_svg(
     State(state): State<ApiState>,
     Path((owner, repo)): Path<(String, String)>,
     Query(q): Query<CardQuery>,
+    request_headers: HeaderMap,
 ) -> Result<impl IntoResponse, ApiError> {
     let theme = theme_for(q.theme.as_deref());
     let card = ensure_repo_card_svg(&state, &owner, &repo, theme, &q).await?;
-    Ok(card_svg_response(card))
+    Ok(card_svg_response(&request_headers, card))
 }
 
 async fn repo_card_png(
     State(state): State<ApiState>,
     Path((owner, repo)): Path<(String, String)>,
     Query(q): Query<CardQuery>,
+    request_headers: HeaderMap,
 ) -> Result<impl IntoResponse, ApiError> {
     let theme = theme_for(q.theme.as_deref());
     let (bytes, short_ttl) = ensure_repo_card_raster(
@@ -3747,6 +4193,7 @@ async fn repo_card_png(
     )
     .await?;
     Ok(card_raster_response(
+        &request_headers,
         crate::raster::RasterFormat::Png,
         bytes,
         short_ttl,
@@ -3757,6 +4204,7 @@ async fn repo_card_webp(
     State(state): State<ApiState>,
     Path((owner, repo)): Path<(String, String)>,
     Query(q): Query<CardQuery>,
+    request_headers: HeaderMap,
 ) -> Result<impl IntoResponse, ApiError> {
     let theme = theme_for(q.theme.as_deref());
     let (bytes, short_ttl) = ensure_repo_card_raster(
@@ -3769,6 +4217,7 @@ async fn repo_card_webp(
     )
     .await?;
     Ok(card_raster_response(
+        &request_headers,
         crate::raster::RasterFormat::Webp,
         bytes,
         short_ttl,
@@ -4136,6 +4585,25 @@ const RASTER_CONCURRENCY: usize = 4;
 pub(crate) static RASTER_PERMITS: tokio::sync::Semaphore =
     tokio::sync::Semaphore::const_new(RASTER_CONCURRENCY);
 
+/// Run one CPU-bound render/encode on the blocking pool under a
+/// [`RASTER_PERMITS`] permit. Every raster-class workload — resvg
+/// rasterization AND the GIF frame encoder (which rasterizes up to 14
+/// frames per request) — must go through here so a burst of misses queues
+/// briefly on the semaphore instead of saturating every core.
+pub(crate) async fn with_raster_permit<T, F>(work: F) -> Result<T, ApiError>
+where
+    T: Send + 'static,
+    F: FnOnce() -> T + Send + 'static,
+{
+    let _permit = RASTER_PERMITS
+        .acquire()
+        .await
+        .expect("raster semaphore is never closed");
+    tokio::task::spawn_blocking(work)
+        .await
+        .map_err(|e| ApiError::from(anyhow::anyhow!("raster task: {e}")))
+}
+
 /// The single choke point every raster path (charts, cards, OG, stat
 /// SVGs) must go through: semaphore-capped `spawn_blocking` around
 /// [`crate::raster::rasterize`].
@@ -4144,13 +4612,8 @@ pub(crate) async fn rasterize_limited(
     format: crate::raster::RasterFormat,
     scale: f32,
 ) -> Result<Vec<u8>, ApiError> {
-    let _permit = RASTER_PERMITS
-        .acquire()
-        .await
-        .expect("raster semaphore is never closed");
-    tokio::task::spawn_blocking(move || crate::raster::rasterize(&svg, format, scale))
-        .await
-        .map_err(|e| ApiError::from(anyhow::anyhow!("raster task: {e}")))?
+    with_raster_permit(move || crate::raster::rasterize(&svg, format, scale))
+        .await?
         .map_err(ApiError::from)
 }
 
@@ -4308,8 +4771,8 @@ fn peer_is_trusted(peer: IpAddr) -> bool {
 struct CloudflareIpKeyExtractor;
 
 /// Resolve a client IP with exactly the same trusted-proxy policy as the
-/// request governors. Long-lived handlers use this to apply concurrency
-/// limits that cannot be represented by a token-bucket admission layer.
+/// admission limiter. Long-lived handlers use this to apply concurrency
+/// limits that cannot be represented by a windowed admission layer.
 pub(crate) fn request_client_ip(
     headers: &HeaderMap,
     connect_info: Option<ConnectInfo<SocketAddr>>,
@@ -4319,13 +4782,11 @@ pub(crate) fn request_client_ip(
     if let Some(connect_info) = connect_info {
         request.extensions_mut().insert(connect_info);
     }
-    CloudflareIpKeyExtractor.extract(&request).ok()
+    CloudflareIpKeyExtractor.extract(&request)
 }
 
-impl KeyExtractor for CloudflareIpKeyExtractor {
-    type Key = IpAddr;
-
-    fn extract<T>(&self, req: &axum::http::Request<T>) -> Result<Self::Key, GovernorError> {
+impl CloudflareIpKeyExtractor {
+    fn extract<T>(&self, req: &axum::http::Request<T>) -> Option<IpAddr> {
         // The socket peer IP (registered by
         // `into_make_service_with_connect_info::<SocketAddr>` in main.rs).
         let peer = req
@@ -4340,20 +4801,73 @@ impl KeyExtractor for CloudflareIpKeyExtractor {
                     && let Ok(s) = v.to_str()
                     && let Ok(ip) = s.parse::<IpAddr>()
                 {
-                    return Ok(ip);
+                    return Some(ip);
                 }
                 // Trusted proxy but no cf-connecting-ip → fall back to the
-                // XFF / Forwarded chain via SmartIpKeyExtractor.
-                return SmartIpKeyExtractor.extract(req);
+                // XFF / X-Real-IP / Forwarded chain, then the peer itself.
+                return smart_header_ip(req.headers()).or(Some(peer_ip));
             }
             // Untrusted direct peer: key on the peer IP, ignore headers.
-            return Ok(peer_ip);
+            return Some(peer_ip);
         }
 
         // No ConnectInfo (shouldn't happen with the wiring in main.rs) —
-        // fall back to the header-based extractor.
-        SmartIpKeyExtractor.extract(req)
+        // fall back to the header-based extraction.
+        smart_header_ip(req.headers())
     }
+}
+
+/// Header-based client-IP resolution matching tower_governor's
+/// `SmartIpKeyExtractor` order: `x-forwarded-for` (first parseable entry),
+/// then `x-real-ip`, then RFC 7239 `forwarded`. Callers gate this behind
+/// the trusted-proxy check.
+fn smart_header_ip(headers: &HeaderMap) -> Option<IpAddr> {
+    headers
+        .get("x-forwarded-for")
+        .and_then(|value| value.to_str().ok())
+        .and_then(|list| {
+            list.split(',')
+                .find_map(|entry| entry.trim().parse::<IpAddr>().ok())
+        })
+        .or_else(|| {
+            headers
+                .get("x-real-ip")
+                .and_then(|value| value.to_str().ok())
+                .and_then(|s| s.trim().parse::<IpAddr>().ok())
+        })
+        .or_else(|| {
+            headers
+                .get_all(header::FORWARDED)
+                .iter()
+                .find_map(|value| value.to_str().ok().and_then(forwarded_header_ip))
+        })
+}
+
+/// Extract the first `for=` identifier from an RFC 7239 `Forwarded` header
+/// value. Accepts `for=1.2.3.4`, `for="1.2.3.4:56"`, `for="[2001:db8::1]"`,
+/// and `for="[2001:db8::1]:56"`; obfuscated (`_hidden`) and `unknown`
+/// identifiers are skipped.
+fn forwarded_header_ip(value: &str) -> Option<IpAddr> {
+    value
+        .split(',')
+        .flat_map(|element| element.split(';'))
+        .find_map(|pair| {
+            let (name, raw) = pair.split_once('=')?;
+            if !name.trim().eq_ignore_ascii_case("for") {
+                return None;
+            }
+            let node = raw.trim().trim_matches('"');
+            if let Ok(addr) = node.parse::<SocketAddr>() {
+                return Some(addr.ip());
+            }
+            if let Ok(ip) = node.parse::<IpAddr>() {
+                return Some(ip);
+            }
+            // Bracketed IPv6 without a port: `[2001:db8::1]`.
+            node.strip_prefix('[')
+                .and_then(|rest| rest.strip_suffix(']'))
+                .and_then(|inner| inner.parse::<IpAddr>().ok())
+        })
 }
 
 /// Debug is derived for test ergonomics (`Result<_, ApiError>::unwrap`);
@@ -4469,8 +4983,9 @@ mod tests {
     }
 
     /// The two TTL classes are distinct: pending/empty renders get the
-    /// short (5-min) envelope, full renders the 24h one. Cold charts must
-    /// ride the short class so a first view can't pin "no data" for a day.
+    /// short (5-min) envelope, full renders the 4h edge policy (plus
+    /// stale-while-revalidate). Cold charts must ride the short class so
+    /// a first view can't pin "no data" at the edge for hours.
     #[test]
     fn card_cache_control_short_vs_long() {
         assert_eq!(
@@ -4479,8 +4994,165 @@ mod tests {
         );
         assert_eq!(
             card_cache_control(false).to_str().unwrap(),
-            "public, s-maxage=86400, max-age=3600"
+            "public, max-age=3600, s-maxage=14400, stale-while-revalidate=86400"
         );
+    }
+
+    /// Strong ETag contract: quoted, 32 hex chars (truncated sha256),
+    /// deterministic for identical bytes, distinct for different bytes.
+    #[test]
+    fn media_etag_is_truncated_quoted_sha256() {
+        let tag = media_etag(b"hello");
+        // sha256("hello") = 2cf24dba5fb0a30e26e83b2ac5b9e29e1b16...
+        assert_eq!(
+            tag.to_str().unwrap(),
+            "\"2cf24dba5fb0a30e26e83b2ac5b9e29e\""
+        );
+        assert_eq!(media_etag(b"hello"), tag);
+        assert_ne!(media_etag(b"other"), tag);
+    }
+
+    /// RFC 9110 `If-None-Match`: `*` matches anything, comma lists are
+    /// split, weak candidates (`W/`) compare by opaque tag, and absent /
+    /// non-matching headers never match.
+    #[test]
+    fn if_none_match_star_lists_and_weak_tags() {
+        let etag = media_etag(b"body");
+        let mut headers = HeaderMap::new();
+        assert!(!if_none_match_matches(&headers, &etag));
+
+        headers.insert(header::IF_NONE_MATCH, HeaderValue::from_static("*"));
+        assert!(if_none_match_matches(&headers, &etag));
+
+        let list = format!("\"nope\", W/{} , \"other\"", etag.to_str().unwrap());
+        headers.insert(header::IF_NONE_MATCH, HeaderValue::from_str(&list).unwrap());
+        assert!(if_none_match_matches(&headers, &etag));
+
+        headers.insert(
+            header::IF_NONE_MATCH,
+            HeaderValue::from_static("\"aaaa\", \"bbbb\""),
+        );
+        assert!(!if_none_match_matches(&headers, &etag));
+    }
+
+    /// Full SVG render: first response is a 200 carrying an ETag + the 4h
+    /// edge policy; replaying the ETag via `If-None-Match` yields a 304
+    /// with the SAME Cache-Control + ETag and an empty body; a stale ETag
+    /// yields a fresh 200.
+    #[tokio::test]
+    async fn svg_response_etag_match_is_304_and_mismatch_200() {
+        let full = |svg: &str| RenderedCard {
+            svg: svg.to_string(),
+            short_ttl: false,
+        };
+        let none = HeaderMap::new();
+        let first = card_svg_response(&none, full("<svg>chart</svg>"));
+        assert_eq!(first.status(), StatusCode::OK);
+        assert_eq!(
+            first.headers().get(header::CACHE_CONTROL).unwrap(),
+            &card_cache_control(false)
+        );
+        let etag = first.headers().get(header::ETAG).unwrap().clone();
+
+        let mut revalidate = HeaderMap::new();
+        revalidate.insert(header::IF_NONE_MATCH, etag.clone());
+        let not_modified = card_svg_response(&revalidate, full("<svg>chart</svg>"));
+        assert_eq!(not_modified.status(), StatusCode::NOT_MODIFIED);
+        assert_eq!(not_modified.headers().get(header::ETAG).unwrap(), &etag);
+        assert_eq!(
+            not_modified.headers().get(header::CACHE_CONTROL).unwrap(),
+            &card_cache_control(false)
+        );
+        let body = axum::body::to_bytes(not_modified.into_body(), usize::MAX)
+            .await
+            .unwrap();
+        assert!(body.is_empty(), "304 must carry no body");
+
+        let mut mismatched = HeaderMap::new();
+        mismatched.insert(
+            header::IF_NONE_MATCH,
+            HeaderValue::from_static("\"deadbeefdeadbeefdeadbeefdeadbeef\""),
+        );
+        let fresh = card_svg_response(&mismatched, full("<svg>chart</svg>"));
+        assert_eq!(fresh.status(), StatusCode::OK);
+        let body = axum::body::to_bytes(fresh.into_body(), usize::MAX)
+            .await
+            .unwrap();
+        assert!(!body.is_empty());
+    }
+
+    /// Raster responses: complete renders ride the 4h edge policy, pending
+    /// renders the short one, and the conditional-request path answers 304
+    /// for a matching ETag on both classes.
+    #[tokio::test]
+    async fn raster_response_pending_vs_complete_and_304() {
+        let bytes = std::sync::Arc::new(vec![1u8, 2, 3, 4]);
+        let none = HeaderMap::new();
+
+        let complete = card_raster_response(
+            &none,
+            crate::raster::RasterFormat::Png,
+            bytes.clone(),
+            false,
+        );
+        assert_eq!(complete.status(), StatusCode::OK);
+        assert_eq!(
+            complete.headers().get(header::CACHE_CONTROL).unwrap(),
+            &HeaderValue::from_static(MEDIA_CACHE_CONTROL)
+        );
+        assert_eq!(
+            complete.headers().get(header::CONTENT_TYPE).unwrap(),
+            "image/png"
+        );
+        let etag = complete.headers().get(header::ETAG).unwrap().clone();
+
+        let pending =
+            card_raster_response(&none, crate::raster::RasterFormat::Png, bytes.clone(), true);
+        assert_eq!(
+            pending.headers().get(header::CACHE_CONTROL).unwrap(),
+            &HeaderValue::from_static(PENDING_CACHE_CONTROL)
+        );
+
+        let mut revalidate = HeaderMap::new();
+        revalidate.insert(header::IF_NONE_MATCH, etag);
+        let not_modified =
+            card_raster_response(&revalidate, crate::raster::RasterFormat::Png, bytes, false);
+        assert_eq!(not_modified.status(), StatusCode::NOT_MODIFIED);
+    }
+
+    #[test]
+    fn byte_weight_clamps_to_nonzero_u32() {
+        assert_eq!(byte_weight(0), 1);
+        assert_eq!(byte_weight(10), 10);
+        assert_eq!(byte_weight(usize::MAX), u32::MAX);
+    }
+
+    /// The byte-weighed caches enforce their RAM budget: inserting more
+    /// bytes than `max_capacity` evicts (or refuses) entries so the
+    /// weighted size never exceeds the budget.
+    #[tokio::test]
+    async fn weighted_caches_evict_to_byte_budget() {
+        let cache = weighted_string_cache(1024, Duration::from_secs(60));
+        for i in 0..4 {
+            cache.insert(format!("k{i}"), "x".repeat(512)).await;
+        }
+        cache.run_pending_tasks().await;
+        assert!(
+            cache.weighted_size() <= 1024,
+            "weighted size {} exceeds budget",
+            cache.weighted_size()
+        );
+        assert!(cache.entry_count() <= 2);
+
+        let raster = weighted_bytes_cache(1024, Duration::from_secs(60));
+        for i in 0..4 {
+            raster
+                .insert(format!("k{i}"), std::sync::Arc::new(vec![0u8; 512]))
+                .await;
+        }
+        raster.run_pending_tasks().await;
+        assert!(raster.weighted_size() <= 1024);
+        assert!(raster.entry_count() <= 2);
     }
 
     #[test]
@@ -4547,6 +5219,90 @@ mod tests {
         assert!(cache.get("k").await.is_none());
     }
 
+    /// The GIF single-flight mirrors the card policy on raster bytes:
+    /// complete encodes memoize into the raster cache, pending encodes are
+    /// served short-TTL and never cached, real failures propagate uncached
+    /// with their status preserved.
+    #[tokio::test]
+    async fn single_flight_gif_complete_caches_pending_and_failure_do_not() {
+        let cache = weighted_bytes_cache(1024 * 1024, Duration::from_secs(60));
+
+        let (bytes, short_ttl) = single_flight_gif(&cache, "k".into(), async {
+            Ok(std::sync::Arc::new(vec![1u8, 2]))
+        })
+        .await
+        .unwrap();
+        assert!(!short_ttl, "complete encode rides the full cache policy");
+        assert_eq!(*bytes, vec![1, 2]);
+        assert!(cache.get("k").await.is_some(), "complete encode memoizes");
+
+        let (bytes, short_ttl) = single_flight_gif(&cache, "p".into(), async {
+            Err(GifMiss::Pending(std::sync::Arc::new(vec![9u8])))
+        })
+        .await
+        .unwrap();
+        assert!(short_ttl, "pending encode must be short-TTL");
+        assert_eq!(*bytes, vec![9]);
+        assert!(
+            cache.get("p").await.is_none(),
+            "pending encode never cached"
+        );
+
+        let err = single_flight_gif(&cache, "e".into(), async {
+            Err(GifMiss::Failed(ApiError::not_found("gone")))
+        })
+        .await
+        .unwrap_err();
+        assert_eq!(err.status, StatusCode::NOT_FOUND);
+        assert!(cache.get("e").await.is_none());
+    }
+
+    /// Concurrent same-key GIF misses coalesce onto ONE encode. Regression
+    /// guard for the stampede: distinct keys are bounded by RASTER_PERMITS,
+    /// but a same-key burst must not re-encode at all.
+    #[tokio::test]
+    async fn single_flight_gif_coalesces_concurrent_misses() {
+        use std::sync::atomic::{AtomicUsize, Ordering};
+        let cache = weighted_bytes_cache(1024 * 1024, Duration::from_secs(60));
+        let runs = std::sync::Arc::new(AtomicUsize::new(0));
+        let init = |runs: std::sync::Arc<AtomicUsize>| async move {
+            runs.fetch_add(1, Ordering::SeqCst);
+            tokio::time::sleep(Duration::from_millis(20)).await;
+            Ok(std::sync::Arc::new(vec![7u8]))
+        };
+        let (a, b) = tokio::join!(
+            single_flight_gif(&cache, "k".into(), init(runs.clone())),
+            single_flight_gif(&cache, "k".into(), init(runs.clone())),
+        );
+        assert_eq!(*a.unwrap().0, vec![7]);
+        assert_eq!(*b.unwrap().0, vec![7]);
+        assert_eq!(
+            runs.load(Ordering::SeqCst),
+            1,
+            "concurrent same-key misses must share one encode"
+        );
+    }
+
+    /// The blocking-encode helper must queue on `RASTER_PERMITS`: with
+    /// every permit held even a trivial closure cannot run, and releasing
+    /// the permits lets it complete. Regression guard for the GIF path
+    /// that used a bare `spawn_blocking`, bypassing the raster choke point.
+    #[tokio::test]
+    async fn raster_permit_helper_waits_for_capacity() {
+        let held = RASTER_PERMITS
+            .acquire_many(RASTER_CONCURRENCY as u32)
+            .await
+            .expect("raster semaphore is never closed");
+        let task = tokio::spawn(with_raster_permit(|| 42u8));
+        tokio::time::sleep(Duration::from_millis(100)).await;
+        assert!(
+            !task.is_finished(),
+            "encode must wait for a raster permit, not bypass the semaphore"
+        );
+        drop(held);
+        assert_eq!(task.await.unwrap().unwrap(), 42);
+    }
+
     /// `single_flight` coalesces + caches the Ok body; a real error is not
     /// memoized and reconstructs with its status preserved.
     #[tokio::test]
@@ -4565,6 +5321,156 @@ mod tests {
         .unwrap_err();
         assert_eq!(err.status, StatusCode::NOT_FOUND);
         assert!(cache.get("e").await.is_none());
+    }
+
+    /// Full `ApiState` over the test database, or `None` (test no-ops)
+    /// when `GITDEBT_TEST_DATABASE_URL` is unset — the same gating
+    /// convention as the integration suites.
+    async fn test_db_state() -> Option<ApiState> {
+        let db = crate::test_db::shared().await?;
+        let rate = std::sync::Arc::new(
+            crate::rate_limit::RateLimitTracker::load(db.clone())
+                .await
+                .expect("load rate tracker"),
+        );
+        let github = std::sync::Arc::new(
+            crate::github::GithubClient::new(None, rate).expect("github client"),
+        );
+        let analyzer = AnalyzerCtx {
+            github,
+            cache: crate::cache::Cache::new(db),
+        };
+        Some(
+            ApiState::new(
+                analyzer,
+                None,
+                std::sync::Arc::new(crate::repo_history::RepoStorage::from_env()),
+                None,
+            )
+            .expect("api state"),
+        )
+    }
+
+    async fn cleanup_overlay_rows(state: &ApiState, prefix: &str) {
+        let like = format!("{prefix}%");
+        for statement in [
+            "DELETE FROM star_fetch_queue WHERE repo LIKE $1",
+            "DELETE FROM repo_stargazers WHERE repo LIKE $1",
+            "DELETE FROM repos WHERE repo LIKE $1",
+        ] {
+            sqlx::query(statement)
+                .bind(&like)
+                .execute(&state.analyzer.cache.db().pool)
+                .await
+                .expect("cleanup");
+        }
+    }
+
+    /// Cache policy for the multi-repo overlay: a mixed warm+cold request
+    /// (one complete repo, one with no confirmed history) must ride the
+    /// short-TTL pending policy and stay OUT of the 24h svg/raster memos —
+    /// otherwise the first view pins an overlay that silently omits the
+    /// cold repo's line at the edge for hours. Once every repo is
+    /// complete, the same request flips to the complete policy; an
+    /// all-cold request stays pending as before.
+    #[tokio::test]
+    async fn multi_overlay_mixed_warm_cold_is_pending_until_all_complete() {
+        let Some(state) = test_db_state().await else {
+            eprintln!("skipping: set GITDEBT_TEST_DATABASE_URL to run");
+            return;
+        };
+        use chrono::TimeZone;
+        let prefix = format!("gitdebt-test-overlay-{}", std::process::id());
+        // Sweep the whole family, not just this process' prefix: a run killed
+        // mid-test leaves queue rows behind, and a stale row's expired lease
+        // is claimable by every other suite sharing the database.
+        cleanup_overlay_rows(&state, "gitdebt-test-overlay-").await;
+        let warm = format!("{prefix}/warm");
+        let cold = format!("{prefix}/cold");
+        let events: Vec<crate::cache::StargazerEvent> = (0..5)
+            .map(|i| {
+                (
+                    i + 1,
+                    chrono::Utc
+                        .timestamp_opt(1_600_000_000 + i * 86_400, 0)
+                        .unwrap(),
+                )
+            })
+            .collect();
+        // Warm repo: complete stargazers via the cache's atomic writer.
+        state
+            .analyzer
+            .cache
+            .put_repo_stargazers(&warm, &events)
+            .await
+            .expect("seed warm repo");
+
+        let theme = &crate::theme::DARK;
+        let q = ChartQuery {
+            repos: Some(format!("{warm},{cold}")),
+            ..ChartQuery::default()
+        };
+
+        // Mixed warm+cold: pending, and neither memo layer keeps it.
+        let card = ensure_multi_svg(&state, theme, &q)
+            .await
+            .expect("mixed overlay renders");
+        assert!(
+            card.short_ttl,
+            "warm+cold overlay must be pending/short-TTL, not the 4h policy"
+        );
+        state.svg_cache.run_pending_tasks().await;
+        assert_eq!(
+            state.svg_cache.entry_count(),
+            0,
+            "pending overlay must not enter the 24h svg cache"
+        );
+        let (bytes, short_ttl) =
+            ensure_multi_raster(&state, theme, &q, crate::raster::RasterFormat::Png)
+                .await
+                .expect("mixed overlay rasterizes");
+        assert!(short_ttl, "raster path shares the pending policy");
+        assert!(!bytes.is_empty());
+        state.raster_cache.run_pending_tasks().await;
+        assert_eq!(
+            state.raster_cache.entry_count(),
+            0,
+            "pending overlay raster must not be memoized"
+        );
+
+        // All-cold stays pending (unchanged behavior).
+        let q_cold = ChartQuery {
+            repos: Some(format!("{prefix}/cold-a,{prefix}/cold-b")),
+            ..ChartQuery::default()
+        };
+        let card = ensure_multi_svg(&state, theme, &q_cold)
+            .await
+            .expect("all-cold overlay renders");
+        assert!(card.short_ttl, "all-cold overlay stays pending");
+
+        // Completing the cold repo flips the SAME request to the complete
+        // policy and memoizes it.
+        state
+            .analyzer
+            .cache
+            .put_repo_stargazers(&cold, &events)
+            .await
+            .expect("complete cold repo");
+        let card = ensure_multi_svg(&state, theme, &q)
+            .await
+            .expect("all-warm overlay renders");
+        assert!(
+            !card.short_ttl,
+            "overlay with every repo complete rides the full cache policy"
+        );
+        state.svg_cache.run_pending_tasks().await;
+        assert_eq!(
+            state.svg_cache.entry_count(),
+            1,
+            "complete overlay memoizes in the svg cache"
+        );
+
+        cleanup_overlay_rows(&state, &prefix).await;
     }
 
     #[test]
@@ -4707,7 +5613,18 @@ mod tests {
         );
         assert_eq!(static_query.gif_motion().unwrap(), "draw");
         assert_eq!(animated_query.gif_motion().unwrap(), "draw");
-        assert!(ChartQuery::default().gif_motion().is_err());
+        // Absent → the looping wave default; unknown values stay a 400.
+        assert_eq!(ChartQuery::default().gif_motion().unwrap(), "wave");
+        let wave = ChartQuery {
+            motion: Some("WAVE".into()),
+            ..ChartQuery::default()
+        };
+        assert_eq!(wave.gif_motion().unwrap(), "wave");
+        let unknown = ChartQuery {
+            motion: Some("sparkle".into()),
+            ..ChartQuery::default()
+        };
+        assert!(unknown.gif_motion().is_err());
     }
 
     #[test]
@@ -4728,8 +5645,8 @@ mod tests {
         assert!(q.range_spec().unwrap().rebase);
         assert_eq!(q.gif_motion().unwrap(), "draw");
         assert!(
-            !theme_for(ChartQuery::default().theme.as_deref()).dark,
-            "GIF/SVG default theme is light"
+            theme_for(ChartQuery::default().theme.as_deref()).dark,
+            "GIF/SVG default theme is dark"
         );
     }
 
@@ -4957,6 +5874,138 @@ mod tests {
             // v4-mapped loopback normalizes to v4 and matches.
             assert!(peer_is_trusted("::ffff:127.0.0.1".parse().unwrap()));
         }
+    }
+
+    fn request_with(peer: Option<&str>, headers: &[(&str, &str)]) -> axum::http::Request<()> {
+        let mut request = axum::http::Request::new(());
+        for (name, value) in headers {
+            request.headers_mut().insert(
+                axum::http::HeaderName::from_bytes(name.as_bytes()).unwrap(),
+                HeaderValue::from_str(value).unwrap(),
+            );
+        }
+        if let Some(peer) = peer {
+            let addr: SocketAddr = peer.parse().unwrap();
+            request.extensions_mut().insert(ConnectInfo(addr));
+        }
+        request
+    }
+
+    /// The admission key policy: forwarding headers are honored ONLY from a
+    /// trusted proxy peer; a direct client cannot spoof a fresh bucket.
+    #[test]
+    fn key_extraction_gates_forwarding_headers_on_trusted_peer() {
+        if std::env::var("TRUSTED_PROXIES").is_ok() {
+            return; // policy depends on the process-wide default set
+        }
+        // Trusted (loopback) peer: cf-connecting-ip wins.
+        let req = request_with(
+            Some("127.0.0.1:9999"),
+            &[("cf-connecting-ip", "203.0.113.7")],
+        );
+        assert_eq!(
+            CloudflareIpKeyExtractor.extract(&req),
+            Some("203.0.113.7".parse().unwrap())
+        );
+        // Trusted peer without cf-connecting-ip: XFF chain applies.
+        let req = request_with(
+            Some("10.0.0.2:9999"),
+            &[("x-forwarded-for", "198.51.100.4, 10.0.0.2")],
+        );
+        assert_eq!(
+            CloudflareIpKeyExtractor.extract(&req),
+            Some("198.51.100.4".parse().unwrap())
+        );
+        // Trusted peer, no headers at all: the peer itself keys the bucket.
+        let req = request_with(Some("192.168.1.9:1234"), &[]);
+        assert_eq!(
+            CloudflareIpKeyExtractor.extract(&req),
+            Some("192.168.1.9".parse().unwrap())
+        );
+        // UNTRUSTED public peer: every forwarding header is ignored.
+        let req = request_with(
+            Some("203.0.113.50:443"),
+            &[
+                ("cf-connecting-ip", "1.2.3.4"),
+                ("x-forwarded-for", "5.6.7.8"),
+            ],
+        );
+        assert_eq!(
+            CloudflareIpKeyExtractor.extract(&req),
+            Some("203.0.113.50".parse().unwrap())
+        );
+    }
+
+    #[test]
+    fn smart_header_ip_prefers_xff_then_real_ip_then_forwarded() {
+        let mut headers = HeaderMap::new();
+        headers.insert(
+            "x-forwarded-for",
+            HeaderValue::from_static("garbage, 198.51.100.1"),
+        );
+        headers.insert("x-real-ip", HeaderValue::from_static("198.51.100.2"));
+        headers.insert(
+            header::FORWARDED,
+            HeaderValue::from_static("for=198.51.100.3"),
+        );
+        // First parseable XFF entry wins even after junk.
+        assert_eq!(
+            smart_header_ip(&headers),
+            Some("198.51.100.1".parse().unwrap())
+        );
+        headers.remove("x-forwarded-for");
+        assert_eq!(
+            smart_header_ip(&headers),
+            Some("198.51.100.2".parse().unwrap())
+        );
+        headers.remove("x-real-ip");
+        assert_eq!(
+            smart_header_ip(&headers),
+            Some("198.51.100.3".parse().unwrap())
+        );
+        headers.remove(header::FORWARDED);
+        assert_eq!(smart_header_ip(&headers), None);
+    }
+
+    #[test]
+    fn forwarded_header_parses_rfc7239_identifiers() {
+        assert_eq!(
+            forwarded_header_ip("for=192.0.2.60;proto=http;by=203.0.113.43"),
+            Some("192.0.2.60".parse().unwrap())
+        );
+        assert_eq!(
+            forwarded_header_ip("for=\"192.0.2.60:4711\""),
+            Some("192.0.2.60".parse().unwrap())
+        );
+        assert_eq!(
+            forwarded_header_ip("For=\"[2001:db8:cafe::17]:4711\""),
+            Some("2001:db8:cafe::17".parse().unwrap())
+        );
+        assert_eq!(
+            forwarded_header_ip("for=\"[2001:db8:cafe::17]\""),
+            Some("2001:db8:cafe::17".parse().unwrap())
+        );
+        // Obfuscated and unknown identifiers are skipped, later ones used.
+        assert_eq!(
+            forwarded_header_ip("for=_hidden, for=192.0.2.61"),
+            Some("192.0.2.61".parse().unwrap())
+        );
+        assert_eq!(forwarded_header_ip("for=unknown"), None);
+        assert_eq!(forwarded_header_ip("proto=https"), None);
+    }
+
+    #[test]
+    fn too_many_requests_preserves_governor_envelope() {
+        let response = too_many_requests(7);
+        assert_eq!(response.status(), StatusCode::TOO_MANY_REQUESTS);
+        assert_eq!(
+            response.headers().get(header::RETRY_AFTER).unwrap(),
+            &HeaderValue::from_static("7")
+        );
+        assert_eq!(
+            response.headers().get("x-ratelimit-after").unwrap(),
+            &HeaderValue::from_static("7")
+        );
     }
 
     #[test]

@@ -73,7 +73,7 @@ export function EarnedBadges({
         {[0, 1, 2].map((key) => (
           <div
             key={key}
-            className="h-24 rounded-xl border border-border bg-muted/30 motion-safe:animate-pulse"
+            className="dither-panel h-24 rounded-xl motion-safe:animate-pulse"
             aria-hidden="true"
           />
         ))}
@@ -84,7 +84,7 @@ export function EarnedBadges({
   if (failed) {
     return (
       <p className="border-y border-border py-4 text-sm text-muted-foreground">
-        Badge evidence is temporarily unavailable.
+        Badges are temporarily unavailable.
       </p>
     );
   }
@@ -94,8 +94,8 @@ export function EarnedBadges({
     return (
       <p className="border-y border-border py-4 text-sm leading-relaxed text-muted-foreground">
         {pending
-          ? "Badge evidence is still being calculated. This section updates when the report finishes."
-          : "No badge is awarded yet. Badges require measured maintenance, distributed ownership, or recent star momentum—never a paid placement."}
+          ? "Badges are computed when analysis finishes. This section updates automatically."
+          : "No badge earned yet. Badges require measured maintenance, distributed ownership, or recent star momentum."}
       </p>
     );
   }

@@ -283,9 +283,7 @@ export function RepoHero({ owner, repo, apiBase, initialData }: Props) {
     return (
       <section className="space-y-6">
         <div className="space-y-2 border-y border-border py-8">
-          <p className="font-mono text-xs tracking-wide text-muted-foreground uppercase">
-            Repository visibility
-          </p>
+          <p className="mono-label">Repository visibility</p>
           <h1 className="text-3xl font-semibold tracking-tight text-balance sm:text-4xl">
             Repository not public or not found
           </h1>
@@ -299,7 +297,7 @@ export function RepoHero({ owner, repo, apiBase, initialData }: Props) {
           href={`https://github.com/${owner}/${repo}`}
           target="_blank"
           rel="noreferrer"
-          className="inline-flex min-h-11 items-center gap-2 rounded-md border border-border px-3 py-2 text-sm text-muted-foreground hover:bg-accent hover:text-foreground focus-visible:outline-2 focus-visible:outline-offset-2 focus-visible:outline-ring"
+          className="dither-control inline-flex min-h-11 items-center gap-2 rounded-md border px-3 py-2 text-sm text-muted-foreground hover:text-foreground focus-visible:outline-2 focus-visible:outline-offset-2 focus-visible:outline-ring"
         >
           Check on GitHub
           <ExternalLink
@@ -340,9 +338,7 @@ export function RepoHero({ owner, repo, apiBase, initialData }: Props) {
     <section className="space-y-6">
       <header className="flex flex-col gap-4 sm:flex-row sm:items-end sm:justify-between">
         <div className="space-y-2">
-          <p className="font-mono text-xs tracking-wide text-muted-foreground uppercase">
-            Repository intelligence
-          </p>
+          <p className="mono-label">Repository report</p>
           <h1 className="text-3xl font-semibold tracking-tight text-balance sm:text-4xl">
             {slug}
           </h1>
@@ -355,7 +351,7 @@ export function RepoHero({ owner, repo, apiBase, initialData }: Props) {
           href={`https://github.com/${owner}/${repo}`}
           target="_blank"
           rel="noreferrer"
-          className="inline-flex min-h-11 shrink-0 items-center gap-2 self-start rounded-md border border-border px-3 py-2 text-sm text-muted-foreground hover:bg-accent hover:text-foreground focus-visible:outline-2 focus-visible:outline-offset-2 focus-visible:outline-ring sm:self-auto"
+          className="dither-control inline-flex min-h-11 shrink-0 items-center gap-2 self-start rounded-md border px-3 py-2 text-sm text-muted-foreground hover:text-foreground focus-visible:outline-2 focus-visible:outline-offset-2 focus-visible:outline-ring sm:self-auto"
         >
           Open on GitHub
           <ExternalLink
@@ -374,9 +370,7 @@ export function RepoHero({ owner, repo, apiBase, initialData }: Props) {
               index > 0 ? "border-t border-border sm:border-t-0" : ""
             } ${index > 1 ? "sm:border-t sm:border-border lg:border-t-0" : ""}`}
           >
-            <dt className="font-mono text-xs tracking-wide text-muted-foreground uppercase">
-              {stat.label}
-            </dt>
+            <dt className="mono-label">{stat.label}</dt>
             <dd className="mt-1.5 text-xl font-semibold tabular-nums">
               {index === 0 && data ? (
                 <AnimatedNumber
@@ -402,12 +396,12 @@ export function RepoHero({ owner, repo, apiBase, initialData }: Props) {
           <div className="flex flex-wrap items-center justify-between gap-2">
             <p className="inline-flex items-center gap-2 text-sm font-medium">
               <Loader2
-                className="size-4 shrink-0 motion-safe:animate-spin text-signal"
+                className="size-4 shrink-0 motion-safe:animate-spin text-(--dither-wave-2)"
                 aria-hidden="true"
               />
               Building this report
             </p>
-            <p className="font-mono text-xs text-muted-foreground">
+            <p className="mono-label">
               {liveProgress ? "live updates" : "checking progress"}
             </p>
           </div>
@@ -442,7 +436,7 @@ export function RepoHero({ owner, repo, apiBase, initialData }: Props) {
       {data?.backfilling && (
         <div className="flex items-start gap-3 border-y border-border py-4 text-base text-pretty text-muted-foreground sm:text-sm">
           <Loader2
-            className="mt-0.5 size-3.5 shrink-0 motion-safe:animate-spin text-signal"
+            className="mt-0.5 size-3.5 shrink-0 motion-safe:animate-spin text-(--dither-wave-2)"
             aria-hidden="true"
           />
           <p>
@@ -550,7 +544,7 @@ function ProgressStep({ label, work }: { label: string; work: ProgressWork }) {
   const percent = work.percent;
 
   return (
-    <div className="min-w-0 rounded-lg border border-border p-3">
+    <div className="dither-panel min-w-0 rounded-lg p-3">
       <div className="flex items-center gap-3">
         <span
           className={`grid size-6 shrink-0 place-items-center rounded-full border text-xs ${
@@ -558,7 +552,7 @@ function ProgressStep({ label, work }: { label: string; work: ProgressWork }) {
               ? "border-signal bg-signal text-signal-foreground"
               : stopped
                 ? "border-border text-muted-foreground"
-                : "border-signal/40 bg-signal/10 text-signal"
+                : "border-(--dither-wave-2)/40 bg-(--dither-wave-2)/10 text-(--dither-wave-2)"
           }`}
           aria-hidden="true"
         >
@@ -568,7 +562,7 @@ function ProgressStep({ label, work }: { label: string; work: ProgressWork }) {
           <p className="flex flex-wrap items-center gap-2 text-sm font-medium">
             {label}
             {work.priority === "interactive" && (
-              <span className="rounded-full bg-primary px-2 py-0.5 font-mono text-[10px] tracking-wide text-primary-foreground uppercase">
+              <span className="rounded-full border border-(--dither-wave-1)/40 bg-(--dither-wave-1)/10 px-2 py-0.5 font-mono text-[10px] tracking-wide text-(--dither-wave-1) uppercase">
                 priority
               </span>
             )}
@@ -595,7 +589,7 @@ function ProgressStep({ label, work }: { label: string; work: ProgressWork }) {
                 ? { duration: 0.12 }
                 : { type: "spring", bounce: 0, duration: 0.4 }
             }
-            className="h-full origin-left rounded-full bg-signal"
+            className="signal-dither-fill h-full origin-left rounded-full"
           />
         </div>
       )}

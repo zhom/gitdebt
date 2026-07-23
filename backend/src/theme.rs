@@ -18,8 +18,9 @@
 //! </picture>
 //! ```
 //!
-//! Default is `light` (matches star-history) so a bare URL is always
-//! readable on the white background of a fresh tab.
+//! Default is `dark`: the product surface is dark-first, so a bare URL
+//! matches the site and the near-black canvas stays readable everywhere.
+//! Embedders that need a light asset opt in with `?theme=light`.
 
 use serde::Deserialize;
 
@@ -92,9 +93,9 @@ pub static DARK: Theme = Theme {
 
 pub fn theme_for(name: Option<&str>) -> &'static Theme {
     match name {
-        Some(s) if s.eq_ignore_ascii_case("dark") => &DARK,
-        // Anything else (including unset, "light", garbage) → light.
-        _ => &LIGHT,
+        Some(s) if s.eq_ignore_ascii_case("light") => &LIGHT,
+        // Anything else (including unset, "dark", garbage) → dark.
+        _ => &DARK,
     }
 }
 
@@ -142,14 +143,15 @@ mod tests {
     }
 
     #[test]
-    fn theme_for_defaults_to_light() {
-        assert!(std::ptr::eq(theme_for(None), &LIGHT));
-        assert!(std::ptr::eq(theme_for(Some("garbage")), &LIGHT));
+    fn theme_for_defaults_to_dark() {
+        assert!(std::ptr::eq(theme_for(None), &DARK));
+        assert!(std::ptr::eq(theme_for(Some("garbage")), &DARK));
+        assert!(std::ptr::eq(theme_for(Some("dark")), &DARK));
     }
 
     #[test]
-    fn theme_for_dark_case_insensitive() {
-        assert!(std::ptr::eq(theme_for(Some("dark")), &DARK));
-        assert!(std::ptr::eq(theme_for(Some("DARK")), &DARK));
+    fn theme_for_light_case_insensitive() {
+        assert!(std::ptr::eq(theme_for(Some("light")), &LIGHT));
+        assert!(std::ptr::eq(theme_for(Some("LIGHT")), &LIGHT));
     }
 }

@@ -31,6 +31,7 @@ use async_trait::async_trait;
 use tokio::time::sleep;
 
 use crate::cache::{Cache, StargazerEvent};
+use crate::db::Db;
 use crate::github::{GithubClient, GithubError};
 use crate::queue;
 
@@ -63,6 +64,90 @@ impl WorkerCtx {
             max_pages,
         }
     }
+}
+
+/// Max repos one metadata-backfill sweep pass may enqueue. Bounds both the
+/// per-pass GitHub metadata spend (one metadata call per repo when the
+/// claim path processes it) and the queue growth from a single sweep.
+const METADATA_BACKFILL_BATCH: i64 = 200;
+
+/// Sweep cadence: one pass at startup, then hourly.
+const METADATA_BACKFILL_INTERVAL: Duration = Duration::from_secs(60 * 60);
+
+/// Mirror of the analyze-path global pending-queue ceiling
+/// (`analyzer::max_pending_fetches`): past this many `pending` rows the
+/// sweep enqueues nothing and waits for its next pass.
+fn max_pending_fetches() -> i64 {
+    std::env::var("MAX_PENDING_FETCHES")
+        .ok()
+        .and_then(|s| s.parse::<i64>().ok())
+        .filter(|n| *n > 0)
+        .unwrap_or(5_000)
+}
+
+/// One pass of the profile-stats metadata backfill sweep.
+///
+/// Rows ingested before the public-metadata read gate existed have complete
+/// history but `metadata_fetched_at IS NULL`, which makes them invisible to
+/// every reader (user cards, aggregates, exports) with nothing on the read
+/// path allowed to heal them. This sweep re-enqueues them into the durable
+/// `star_fetch_queue`; the claim path (archive coordinator or the debug
+/// GitHub fallback) writes metadata via `put_repo_metadata` before touching
+/// any history, so healing costs one metadata call per repo and never
+/// re-paginates stargazers.
+///
+/// Bounded per pass ([`METADATA_BACKFILL_BATCH`]), respects the global
+/// pending ceiling, ordinary popularity-first priority, and skips repos that
+/// already hold any queue row (pending/in-progress are already being
+/// handled; dead/restricted parks are terminal and must not be revived
+/// here). Returns the repos actually enqueued.
+pub async fn sweep_missing_metadata(db: &Db) -> Result<Vec<String>> {
+    let pending = queue::pending_only_count(db).await?;
+    let headroom = max_pending_fetches().saturating_sub(pending);
+    if headroom <= 0 {
+        return Ok(Vec::new());
+    }
+    let limit = headroom.min(METADATA_BACKFILL_BATCH);
+    let candidates: Vec<(String, i64)> = sqlx::query_as(
+        "SELECT repo, view_count FROM repos \
+         WHERE missing = FALSE \
+           AND metadata_fetched_at IS NULL \
+           AND (history_complete OR stargazers_complete OR star_count IS NOT NULL) \
+           AND NOT EXISTS ( \
+               SELECT 1 FROM star_fetch_queue queued WHERE queued.repo = repos.repo \
+           ) \
+         ORDER BY view_count DESC, repo \
+         LIMIT $1",
+    )
+    .bind(limit)
+    .fetch_all(&db.pool)
+    .await?;
+    let mut enqueued = Vec::with_capacity(candidates.len());
+    for (repo, view_count) in candidates {
+        queue::enqueue(db, &repo, view_count).await?;
+        enqueued.push(repo);
+    }
+    Ok(enqueued)
+}
+
+/// Spawn the periodic metadata backfill sweep (startup + hourly). Runs in
+/// every worker replica: the enqueue is idempotent and the candidate query
+/// excludes repos that already hold a queue row, so overlapping passes are
+/// harmless.
+pub fn spawn_metadata_backfill(db: Db) {
+    tokio::spawn(async move {
+        loop {
+            match sweep_missing_metadata(&db).await {
+                Ok(enqueued) if enqueued.is_empty() => {}
+                Ok(enqueued) => tracing::info!(
+                    enqueued = enqueued.len(),
+                    "metadata backfill: re-enqueued legacy repos missing public metadata"
+                ),
+                Err(error) => tracing::warn!(%error, "metadata backfill sweep failed"),
+            }
+            sleep(METADATA_BACKFILL_INTERVAL).await;
+        }
+    });
 }
 
 /// Spawn `count` background workers (min 1). Each loops claiming and

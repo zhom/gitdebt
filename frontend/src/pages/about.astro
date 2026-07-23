@@ -18,7 +18,7 @@ const ogImage = `${apiBase}/api/og.png`;
 const stats = [
   {
     term: "Star history",
-    desc: "We page through a repo's stargazers and keep only the timestamp of each star, then plot the cumulative count over time. You can view it against calendar dates or aligned to days-since-first-star to compare growth shapes. Several repos can be overlaid on shared axes, and the chart embeds in a README.",
+    desc: "We keep only the timestamp of each public star and plot the cumulative count over time. You can view it against calendar dates or aligned to days-since-first-star to compare growth shapes. Several repos can be overlaid on shared axes, and the chart embeds in a README.",
   },
   {
     term: "Bug-magnet files",
@@ -79,16 +79,16 @@ const jsonLd = {
         </nav>
 
         <header class="space-y-3">
-          <p class="font-mono text-xs tracking-wide text-muted-foreground uppercase">
+          <p class="mono-label">
             About
           </p>
           <h1 class="text-3xl font-semibold tracking-tight text-balance sm:text-4xl">
             How gitdebt works
           </h1>
           <p class="max-w-[60ch] text-lg text-pretty text-muted-foreground">
-            gitdebt is a faster, sharper alternative to star-history.com — it
-            charts any repo's star growth and adds repo-debt analytics read
-            from the codebase itself, not just the star count.
+            gitdebt charts the star history of any public GitHub repository
+            and pairs it with health signals read from the git history itself:
+            churn, bug magnets, contributors, and TODO drift.
           </p>
         </header>
 

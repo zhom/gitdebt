@@ -31,6 +31,36 @@ pub fn themed_logo_mark(x: f32, y: f32, size: f32, theme: &Theme) -> String {
     logo_mark(x, y, size, theme.fg, theme.bg)
 }
 
+/// Small-size brand mark: a Bayer-ordered dithered square chip.
+///
+/// The 512px robot silhouette turns to mush below ~24px, so compact
+/// surfaces (badges, footers at chip scale) use this 4×4 ordered-dither
+/// tile instead: one ink, alpha-only modulation (lit cells full strength,
+/// off cells at 0.4×), which reads as the product's pixel-grain signature
+/// at any size ≥ 8px. Deterministic geometry, no gradients.
+pub fn chip_mark(x: f32, y: f32, size: f32, ink: &str) -> String {
+    const LIT_THRESHOLD: u8 = 10;
+    let cell = size / 4.0;
+    let mut cells = String::new();
+    for (row, values) in crate::texture::BAYER_4.iter().enumerate() {
+        for (col, value) in values.iter().enumerate() {
+            let opacity = if *value < LIT_THRESHOLD {
+                "0.92"
+            } else {
+                "0.36"
+            };
+            cells.push_str(&format!(
+                "<rect x=\"{:.2}\" y=\"{:.2}\" width=\"{cell:.2}\" height=\"{cell:.2}\" opacity=\"{opacity}\" />",
+                col as f32 * cell,
+                row as f32 * cell,
+            ));
+        }
+    }
+    format!(
+        "  <g data-gitdebt-logo=\"true\" aria-label=\"gitdebt\" transform=\"translate({x:.1} {y:.1})\" fill=\"{ink}\" shape-rendering=\"crispEdges\">{cells}</g>\n"
+    )
+}
+
 /// Compact bottom-right logo + wordmark used by chart footers.
 ///
 /// The supplied coordinates are the right edge and text baseline, matching
@@ -102,6 +132,22 @@ mod tests {
         assert!(!dark.contains("<rect"));
         assert!(!light.contains("<image"));
         assert!(!dark.contains("<image"));
+    }
+
+    #[test]
+    fn chip_mark_is_a_one_ink_alpha_only_dither_tile() {
+        let chip = chip_mark(100.0, 8.0, 12.0, "#9b7bff");
+        assert_eq!(chip, chip_mark(100.0, 8.0, 12.0, "#9b7bff"));
+        assert!(chip.contains("data-gitdebt-logo=\"true\""));
+        // 4×4 grid → 16 cells, all carried by ONE ink on the group.
+        assert_eq!(chip.matches("<rect").count(), 16);
+        assert_eq!(chip.matches("fill=").count(), 1);
+        assert!(chip.contains("fill=\"#9b7bff\""));
+        // Alpha-only modulation: lit and dim tiers both present.
+        assert!(chip.contains("opacity=\"0.92\""));
+        assert!(chip.contains("opacity=\"0.36\""));
+        // Never the unreadable-at-small-size robot path data.
+        assert!(!chip.contains("M320.5 110.5"));
     }
 
     #[test]

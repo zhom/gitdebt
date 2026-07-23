@@ -12,8 +12,10 @@ use std::time::Duration;
 use anyhow::{Context, Result};
 use chrono::{Datelike, Days, Months, NaiveDate, Utc};
 use futures::StreamExt;
+use tokio::sync::watch;
 
 use crate::cache::{ArchiveBackfillState, ArchiveStarEvent, Cache};
+use crate::db::Db;
 use crate::gh_archive::{
     GhArchiveError, GhArchiveEventSource, GhArchiveFetch, GhArchiveStarEvent, RepositorySpec,
 };
@@ -24,6 +26,22 @@ const ARCHIVE_START: NaiveDate =
     NaiveDate::from_ymd_opt(2011, 2, 12).expect("GH Archive start date is valid");
 const DEFAULT_BATCH_SIZE: usize = 5_000;
 const MAX_BATCH_SIZE: usize = 5_000;
+
+/// Session advisory lock electing the single BigQuery coordinator across
+/// worker replicas. Same `gitdebt` house family as the schema lock (`…7401`)
+/// and the hourly commit lock (`…7402`); distinct from both.
+pub const COORDINATOR_LEADER_LOCK: i64 = 0x6769_7464_6562_7403;
+
+/// The queue's stale-lease steal window is 15 minutes; refreshing the whole
+/// claimed batch every 5 keeps a legitimately long BigQuery cohort (a month
+/// window can exceed 15 minutes) from being stolen mid-scan by a peer.
+const BATCH_LEASE_REFRESH: Duration = Duration::from_secs(5 * 60);
+
+/// Fixed worker id for the coordinator's queue claims. Leader election
+/// guarantees at most one live coordinator, so the id can stay constant —
+/// the heartbeat guard (`worker_id = $2 AND status = 'in_progress'`) is what
+/// keeps a refresh from touching rows another path already released.
+const COORDINATOR_WORKER_ID: &str = "gh-archive";
 
 #[derive(Clone)]
 pub struct ArchiveWorkerCtx {
@@ -63,29 +81,46 @@ struct Prepared {
     state: ArchiveBackfillState,
 }
 
-/// Spawn the sole historical coordinator. The persistent queue is the durable
-/// work list; an empty queue simply idles.
-pub fn spawn(ctx: ArchiveWorkerCtx) {
-    tokio::spawn(async move {
-        run(ctx).await;
-    });
+/// Contend for the historical-coordinator leadership. Exactly one worker
+/// replica runs the BigQuery batching loop at a time; the others retry the
+/// session advisory lock about once a minute and take over on leadership
+/// loss. The persistent queue is the durable work list; an empty queue
+/// simply idles.
+pub fn spawn(ctx: ArchiveWorkerCtx, database_url: String) {
+    crate::bootstrap::spawn_leader(
+        database_url,
+        COORDINATOR_LEADER_LOCK,
+        "gh-archive-coordinator",
+        move || {
+            let ctx = ctx.clone();
+            async move {
+                run(ctx).await;
+            }
+        },
+    );
 }
 
 async fn run(ctx: ArchiveWorkerCtx) {
     let mut consecutive_provider_failures = 0_u32;
     loop {
-        let jobs = match queue::claim_many(ctx.cache.db(), "gh-archive", ctx.batch_size).await {
-            Ok(jobs) => jobs,
-            Err(error) => {
-                tracing::error!(%error, "gh-archive: failed to claim batch");
-                tokio::time::sleep(Duration::from_secs(5)).await;
-                continue;
-            }
-        };
+        let jobs =
+            match queue::claim_many(ctx.cache.db(), COORDINATOR_WORKER_ID, ctx.batch_size).await {
+                Ok(jobs) => jobs,
+                Err(error) => {
+                    tracing::error!(%error, "gh-archive: failed to claim batch");
+                    tokio::time::sleep(Duration::from_secs(5)).await;
+                    continue;
+                }
+            };
         if jobs.is_empty() {
             tokio::time::sleep(Duration::from_secs(2)).await;
             continue;
         }
+
+        // Keep the whole claimed batch's lease fresh while the (possibly
+        // >15-minute) metadata + BigQuery pass runs.
+        let claimed = jobs.iter().map(|job| job.repo.clone()).collect::<Vec<_>>();
+        let heartbeat_stop = spawn_batch_lease_heartbeat(ctx.cache.db().clone(), claimed);
 
         let queue_cache = ctx.cache.clone();
         let prepared = futures::stream::iter(jobs)
@@ -112,7 +147,11 @@ async fn run(ctx: ArchiveWorkerCtx) {
             .await;
 
         let provider_delay = provider_backoff_seconds(consecutive_provider_failures + 1);
-        match process_prepared(&ctx, prepared, provider_delay).await {
+        let outcome = process_prepared(&ctx, prepared, provider_delay).await;
+        // The batch is finished (committed, requeued, or released); its
+        // rows no longer carry this coordinator's live lease.
+        let _ = heartbeat_stop.send(true);
+        match outcome {
             Ok(()) => consecutive_provider_failures = 0,
             Err(error) => {
                 consecutive_provider_failures = consecutive_provider_failures.saturating_add(1);
@@ -129,6 +168,44 @@ async fn run(ctx: ArchiveWorkerCtx) {
     }
 }
 
+/// Periodically refresh `claimed_at` for the coordinator's claimed batch so
+/// a legitimately long pass cannot cross the queue's 15-minute stale-lease
+/// steal window. Guarded by worker id + status: rows that were completed
+/// (deleted), released, requeued, or failed in the meantime are untouched.
+/// Stops on signal, or when the sender drops (coordinator aborted on
+/// leadership loss).
+fn spawn_batch_lease_heartbeat(db: Db, repos: Vec<String>) -> watch::Sender<bool> {
+    let (stop, mut stopped) = watch::channel(false);
+    tokio::spawn(async move {
+        loop {
+            tokio::select! {
+                _ = tokio::time::sleep(BATCH_LEASE_REFRESH) => {
+                    if *stopped.borrow() {
+                        break;
+                    }
+                    if let Err(error) = sqlx::query(
+                        "UPDATE star_fetch_queue SET claimed_at = NOW() \
+                         WHERE repo = ANY($1) AND status = 'in_progress' AND worker_id = $2",
+                    )
+                    .bind(&repos)
+                    .bind(COORDINATOR_WORKER_ID)
+                    .execute(&db.pool)
+                    .await
+                    {
+                        tracing::warn!(%error, "gh-archive: batch lease heartbeat failed");
+                    }
+                }
+                changed = stopped.changed() => {
+                    if changed.is_err() || *stopped.borrow() {
+                        break;
+                    }
+                }
+            }
+        }
+    });
+    stop
+}
+
 async fn prepare_job(
     ctx: &ArchiveWorkerCtx,
     job: queue::Job,
@@ -136,18 +213,13 @@ async fn prepare_job(
     let repo = job.repo;
     let operation = async {
         let mut state = ctx.cache.get_archive_backfill_state(&repo).await?;
-        if state
-            .as_ref()
-            .is_some_and(|value| value.exact_history_complete)
-        {
-            queue::complete(ctx.cache.db(), &repo).await?;
-            return Ok(None);
-        }
-
-        if state
-            .as_ref()
-            .is_none_or(|value| value.github_id.is_none() || value.authoritative_total.is_none())
-        {
+        // Metadata comes FIRST, even for repos whose exact history is
+        // already complete: every public read surface gates on
+        // `metadata_fetched_at`, so completing a legacy job without
+        // healing its metadata would leave a fully-ingested repo
+        // permanently invisible. One metadata call, never a stargazer
+        // page.
+        if needs_metadata(state.as_ref()) {
             let (owner, name) = split_slug(&repo)?;
             match ctx.github.repo_metadata(owner, name).await? {
                 Some(metadata) => {
@@ -171,6 +243,10 @@ async fn prepare_job(
         }
 
         let state = state.context("repository metadata row was not persisted")?;
+        if state.exact_history_complete {
+            queue::complete(ctx.cache.db(), &repo).await?;
+            return Ok(None);
+        }
         Ok(Some(Prepared {
             repo: repo.clone(),
             state,
@@ -178,6 +254,17 @@ async fn prepare_job(
     }
     .await;
     operation.map_err(|error| (repo, error))
+}
+
+/// Whether the coordinator must fetch GitHub repo metadata before acting on
+/// a claimed job. True for unknown repos, for repos still missing the
+/// numeric id / authoritative total a backfill needs, and for legacy rows
+/// whose `metadata_fetched_at` was never stamped — the public-visibility
+/// gate every reader checks. Pure so the heal condition is unit-testable.
+fn needs_metadata(state: Option<&ArchiveBackfillState>) -> bool {
+    state.is_none_or(|value| {
+        value.github_id.is_none() || value.authoritative_total.is_none() || value.metadata_missing
+    })
 }
 
 async fn process_prepared(
@@ -475,6 +562,57 @@ mod tests {
     #[test]
     fn archive_start_is_documented_boundary() {
         assert_eq!(ARCHIVE_START.to_string(), "2011-02-12");
+    }
+
+    fn state(
+        github_id: Option<i64>,
+        authoritative_total: Option<i64>,
+        exact_history_complete: bool,
+        metadata_missing: bool,
+    ) -> ArchiveBackfillState {
+        ArchiveBackfillState {
+            github_id,
+            cursor: None,
+            complete: false,
+            authoritative_total,
+            exact_history_complete,
+            metadata_missing,
+        }
+    }
+
+    #[test]
+    fn metadata_is_fetched_before_settling_legacy_complete_jobs() {
+        // A legacy row: exact history complete, but ingested before the
+        // public-metadata gate existed (`metadata_fetched_at` NULL). The
+        // coordinator must fetch metadata rather than short-circuiting the
+        // job, or the repo stays invisible to every reader forever.
+        assert!(needs_metadata(Some(&state(Some(1), Some(10), true, true))));
+        // Same for an archive-history row missing only the stamp.
+        assert!(needs_metadata(Some(&state(Some(1), Some(10), false, true))));
+        // Unknown repo → metadata required.
+        assert!(needs_metadata(None));
+        // Missing numeric id or authoritative total → metadata required.
+        assert!(needs_metadata(Some(&state(None, Some(10), false, false))));
+        assert!(needs_metadata(Some(&state(Some(1), None, false, false))));
+    }
+
+    #[test]
+    fn healed_repos_skip_the_metadata_call() {
+        // Fully-stamped rows spend no GitHub budget in prepare: complete
+        // repos settle immediately, incomplete ones go straight to the
+        // BigQuery batch.
+        assert!(!needs_metadata(Some(&state(
+            Some(1),
+            Some(10),
+            true,
+            false
+        ))));
+        assert!(!needs_metadata(Some(&state(
+            Some(1),
+            Some(10),
+            false,
+            false
+        ))));
     }
 
     #[test]

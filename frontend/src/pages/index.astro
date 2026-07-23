@@ -33,7 +33,7 @@ import { staticApiBase } from "@/lib/static-api-base";
 const apiBase = staticApiBase();
 const site = (Astro.site ?? new URL("https://gitdebt.com")).href.replace(/\/$/, "");
 
-const title = "Cool GitHub repo stats: star history & code health | gitdebt";
+const title = "GitHub star history & repository health charts | gitdebt";
 const description =
   "Get GitHub repository stats in one live report: star history, growth, churn, contributors, bus factor, bug magnets, package usage, and README-ready charts.";
 const ogImage = `${apiBase}/api/og.png`;
@@ -148,10 +148,10 @@ const landingWarmRepos = Array.from(
               <div class="min-w-0">
                 <div class="evidence-band inline-flex items-center gap-2 border-y border-border px-3 py-2 font-mono text-xs tracking-[0.12em] text-muted-foreground uppercase">
                   <span class="size-1.5 bg-foreground" aria-hidden="true"></span>
-                  Claims backed by repository data
+                  Built from public GitHub data
                 </div>
-                <h1 class="mt-5 max-w-[14ch] text-4xl font-semibold tracking-[-0.045em] text-balance sm:text-6xl lg:text-7xl">
-                  Cool stats for your GitHub repo.
+                <h1 class="mt-5 max-w-[18ch] text-4xl font-semibold tracking-[-0.045em] text-balance sm:text-6xl lg:text-7xl">
+                  Star history and repo health for any GitHub repo.
                 </h1>
                 <p class="mt-6 max-w-[54ch] text-lg/8 text-pretty text-muted-foreground">
                   Star history, growth, churn, contributors, bus factor, and
@@ -187,7 +187,7 @@ const landingWarmRepos = Array.from(
         <section id="live" class="scroll-mt-20 border-b border-border">
           <div class="mx-auto max-w-6xl px-6 py-20 sm:py-28">
             <header class="grid gap-6 lg:grid-cols-[0.75fr_1.25fr] lg:items-end">
-              <p class="font-mono text-xs tracking-[0.12em] text-muted-foreground uppercase">
+              <p class="mono-label">
                 Live on gitdebt
               </p>
               <div>
@@ -209,8 +209,8 @@ const landingWarmRepos = Array.from(
         <section id="how-it-works" class="scroll-mt-20 border-b border-border">
           <div class="mx-auto max-w-6xl px-6 py-20 sm:py-28">
             <header class="grid gap-6 lg:grid-cols-[0.75fr_1.25fr] lg:items-end">
-              <p class="font-mono text-xs tracking-[0.12em] text-muted-foreground uppercase">
-                One repo, three answers
+              <p class="mono-label">
+                What a report covers
               </p>
               <div>
                 <h2 class="max-w-[24ch] text-3xl font-semibold tracking-[-0.035em] text-balance sm:text-5xl">
@@ -256,7 +256,7 @@ const landingWarmRepos = Array.from(
             <div class="grid gap-12 lg:grid-cols-[0.82fr_1.18fr] lg:items-start">
               <header class="lg:sticky lg:top-24">
                 <GitCompareArrows className="size-7 text-foreground" strokeWidth={1.5} aria-hidden="true" />
-                <p class="mt-6 font-mono text-xs tracking-[0.12em] text-muted-foreground uppercase">
+                <p class="mt-6 mono-label">
                   Compare repositories
                 </p>
                 <h2 class="mt-4 max-w-[18ch] text-3xl font-semibold tracking-[-0.035em] text-balance sm:text-5xl">
@@ -348,8 +348,8 @@ const landingWarmRepos = Array.from(
 
               <div>
                 <Code2 className="size-7 text-foreground" strokeWidth={1.5} aria-hidden="true" />
-                <p class="mt-6 font-mono text-xs tracking-[0.12em] text-muted-foreground uppercase">
-                  Share the evidence
+                <p class="mt-6 mono-label">
+                  README embeds
                 </p>
                 <h2 class="mt-4 max-w-[18ch] text-3xl font-semibold tracking-[-0.035em] text-balance sm:text-5xl">
                   README stats, ready to paste.
@@ -408,20 +408,20 @@ const landingWarmRepos = Array.from(
           </div>
         </section>
 
-        <section class="bg-primary text-primary-foreground dark:border-y dark:border-border dark:bg-background dark:text-foreground">
+        <section class="evidence-band border-y border-border">
           <div class="mx-auto grid max-w-6xl gap-8 px-6 py-16 sm:py-20 md:grid-cols-[1fr_auto] md:items-end">
             <div>
-              <ChartNoAxesCombined className="size-7 text-current" strokeWidth={1.5} aria-hidden="true" />
+              <ChartNoAxesCombined className="size-7 text-foreground" strokeWidth={1.5} aria-hidden="true" />
               <h2 class="mt-6 max-w-[18ch] text-3xl font-semibold tracking-[-0.035em] text-balance sm:text-5xl">
-                Pick a repo. See the whole story.
+                Look up any public repository.
               </h2>
-              <p class="mt-4 max-w-[52ch] text-base/7 opacity-65">
+              <p class="mt-4 max-w-[52ch] text-base/7 text-muted-foreground">
                 Free, public, open source, and ready to embed.
               </p>
             </div>
             <a
               href="#lookup"
-              class="dither-control group inline-flex min-h-12 items-center justify-center gap-2 border-current px-5 text-sm font-medium outline-none focus-visible:outline-2 focus-visible:outline-offset-4 focus-visible:outline-primary-foreground dark:focus-visible:outline-ring"
+              class="dither-control group inline-flex min-h-12 items-center justify-center gap-2 px-5 text-sm font-medium outline-none focus-visible:outline-2 focus-visible:outline-offset-4 focus-visible:outline-ring"
             >
               Analyze a repository
               <ArrowRight

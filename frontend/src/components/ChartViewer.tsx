@@ -113,28 +113,25 @@ export function ChartViewer({
   const tabClass = (active: boolean) =>
     `dither-control min-h-11 rounded-md px-3 py-2 font-mono text-base tracking-wide uppercase sm:min-h-0 sm:px-2.5 sm:py-1 sm:text-xs ${
       active
-        ? "bg-accent text-accent-foreground"
-        : "text-muted-foreground hover:bg-accent/60 hover:text-accent-foreground"
+        ? "text-accent-foreground"
+        : "text-muted-foreground hover:text-accent-foreground"
     }`;
 
   const dateInputClass =
-    "dither-control min-h-11 w-full rounded-md border border-input bg-background px-2 py-2 font-mono text-base text-foreground outline-none scheme-light dark:scheme-dark focus-visible:outline-2 focus-visible:-outline-offset-1 focus-visible:outline-ring sm:min-h-0 sm:w-[8.5rem] sm:py-1 sm:text-xs";
+    "dither-control min-h-11 w-full rounded-md border px-2 py-2 font-mono text-base text-foreground outline-none scheme-dark focus-visible:outline-2 focus-visible:-outline-offset-1 focus-visible:outline-ring sm:min-h-0 sm:w-[8.5rem] sm:py-1 sm:text-xs";
 
   const figure = (
     <figure className="signal-panel relative">
       <figcaption className="flex flex-wrap items-center justify-between gap-3 border-b border-border bg-muted/40 px-5 py-3">
         {caption && (
-          <div className="inline-flex items-center gap-2 font-mono text-xs tracking-wide text-muted-foreground uppercase">
-            <span className="size-1.5 shrink-0 rounded-full bg-signal" aria-hidden="true" />
+          <div className="mono-label inline-flex items-center gap-2">
+            <span className="size-1.5 shrink-0 rounded-full bg-(--dither-wave-2)" aria-hidden="true" />
             {caption}
           </div>
         )}
         <div className="flex w-full flex-wrap items-center gap-3 sm:w-auto">
           <div className="grid w-full grid-cols-[auto_1fr] items-center gap-2 sm:flex sm:w-auto sm:gap-1.5">
-            <label
-              htmlFor={`${id}-from`}
-              className="font-mono text-xs tracking-wide text-muted-foreground uppercase"
-            >
+            <label htmlFor={`${id}-from`} className="mono-label">
               From
               <span className="sr-only"> date (YYYY-MM-DD)</span>
             </label>
@@ -149,10 +146,7 @@ export function ChartViewer({
               }}
               className={dateInputClass}
             />
-            <label
-              htmlFor={`${id}-to`}
-              className="font-mono text-xs tracking-wide text-muted-foreground uppercase"
-            >
+            <label htmlFor={`${id}-to`} className="mono-label">
               To
               <span className="sr-only"> date (YYYY-MM-DD)</span>
             </label>

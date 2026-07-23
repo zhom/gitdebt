@@ -95,7 +95,7 @@ export function CopyButton({
           >
             {copied ? (
               <Check
-                className="size-3.5 shrink-0 text-signal"
+                className="size-3.5 shrink-0 text-(--dither-wave-2)"
                 strokeWidth={2}
                 aria-hidden="true"
               />

@@ -613,6 +613,7 @@ async fn stat_dispatcher(
     State(state): State<ApiState>,
     Path((owner, repo, filename)): Path<(String, String, String)>,
     Query(q): Query<StatQuery>,
+    request_headers: HeaderMap,
 ) -> Result<Response, ApiError> {
     if !is_valid_slug(&owner) || !is_valid_slug(&repo) {
         return Err(ApiError::bad_request("invalid owner/repo"));
@@ -632,16 +633,25 @@ async fn stat_dispatcher(
             svg = brand::without_embed_footer(svg);
         }
         let Some(raster_format) = format.raster() else {
-            return Ok(svg_response_with_policy(svg, true, !q.in_app()).into_response());
+            return Ok(svg_response_with_policy(
+                &request_headers,
+                svg,
+                true,
+                !q.in_app(),
+            ));
         };
         let bytes = crate::api::rasterize_limited(svg, raster_format, RASTER_SCALE).await?;
-        return Ok(
-            raster_response_with_policy(raster_format, Arc::new(bytes), true).into_response(),
-        );
+        return Ok(raster_response_with_policy(
+            &request_headers,
+            raster_format,
+            Arc::new(bytes),
+            true,
+        ));
     };
     let theme_key = format!(
-        "{}|rev:{revision}",
-        if theme.dark { "dark" } else { "light" }
+        "{}|rev:{revision}|{}",
+        if theme.dark { "dark" } else { "light" },
+        crate::api::RENDER_REVISION,
     );
 
     // Build (or fetch from cache) the SVG. The cache key is chart-
@@ -664,7 +674,12 @@ async fn stat_dispatcher(
     }
 
     let Some(raster_format) = format.raster() else {
-        return Ok(svg_response_with_policy(svg, false, !q.in_app()).into_response());
+        return Ok(svg_response_with_policy(
+            &request_headers,
+            svg,
+            false,
+            !q.in_app(),
+        ));
     };
 
     // Raster path. Key off the SVG's cache key + format suffix so
@@ -675,7 +690,7 @@ async fn stat_dispatcher(
         if q.in_app() { "app" } else { "embed" }
     );
     if let Some(cached) = state.raster_cache.get(&raster_key).await {
-        return Ok(raster_response(raster_format, cached).into_response());
+        return Ok(raster_response(&request_headers, raster_format, cached));
     }
     // Shared semaphore-capped raster path (see api.rs::rasterize_limited)
     // so stat-chart encodes count against the same process-wide CPU cap
@@ -683,7 +698,7 @@ async fn stat_dispatcher(
     let bytes = crate::api::rasterize_limited(svg, raster_format, RASTER_SCALE).await?;
     let arc = Arc::new(bytes);
     state.raster_cache.insert(raster_key, arc.clone()).await;
-    Ok(raster_response(raster_format, arc).into_response())
+    Ok(raster_response(&request_headers, raster_format, arc))
 }
 
 fn stat_svg_motion(svg: String, animate: bool) -> String {
@@ -699,7 +714,17 @@ fn stat_svg_motion(svg: String, animate: bool) -> String {
 async fn stat_revision(
     state: &ApiState,
     repo: &str,
-    _kind: StatKind,
+    kind: StatKind,
+) -> Result<Option<String>, ApiError> {
+    stat_revision_in(&state.analyzer.cache.db().pool, repo, kind).await
+}
+
+/// Split from `stat_revision` so the DB-backed cache-key test can drive
+/// it with a bare pool.
+async fn stat_revision_in(
+    pool: &sqlx::PgPool,
+    repo: &str,
+    kind: StatKind,
 ) -> Result<Option<String>, ApiError> {
     let revision: Option<(String, i32, i64)> = sqlx::query_as(
         "SELECT history.last_analyzed_sha, history.analysis_revision, \
@@ -711,13 +736,35 @@ async fn stat_revision(
            AND public_repo.metadata_fetched_at IS NOT NULL",
     )
     .bind(repo)
-    .fetch_optional(&state.analyzer.cache.db().pool)
+    .fetch_optional(pool)
     .await?;
     // Writers replace the aggregate tables and cursor in one transaction.
     // While a refresh is queued/running, the previous revision is therefore a
     // complete cache and should stay visible instead of regressing to a
     // misleading pending card.
-    Ok(revision.map(|(sha, schema, scope)| format!("{sha}:r{schema}:n{scope}")))
+    let Some((sha, schema, scope)) = revision else {
+        return Ok(None);
+    };
+    let mut revision = format!("{sha}:r{schema}:n{scope}");
+    // Author enrichment (github_login/avatar backfill) rewrites
+    // repo_author_stats WITHOUT touching repo_history, so the two
+    // author-derived charts must fold the enrichment cursor into their
+    // revision — otherwise enriched avatars/logins stay invisible for
+    // the full moka (24h) + CDN (4h) TTL. `repo` leads the
+    // repo_author_stats PK, so MAX over one repo is a cheap index scan,
+    // acceptable on this per-request path. The other six kinds keep the
+    // bare revision to avoid needless cache churn.
+    if matches!(kind, StatKind::Contributors | StatKind::BusFactor) {
+        let enriched_epoch: i64 = sqlx::query_scalar(
+            "SELECT COALESCE(EXTRACT(EPOCH FROM MAX(enrich_attempted_at)), 0)::BIGINT \
+             FROM repo_author_stats WHERE repo = $1",
+        )
+        .bind(repo)
+        .fetch_one(pool)
+        .await?;
+        revision.push_str(&format!(":e{enriched_epoch}"));
+    }
+    Ok(Some(revision))
 }
 
 fn render_analysis_pending(repo: &str, theme: &crate::theme::Theme) -> String {
@@ -1088,46 +1135,61 @@ fn parse_since(s: &str) -> Option<u32> {
     }
 }
 
-fn svg_response_with_policy(svg: String, pending: bool, branded: bool) -> impl IntoResponse {
+fn svg_response_with_policy(
+    request_headers: &HeaderMap,
+    svg: String,
+    pending: bool,
+    branded: bool,
+) -> Response {
     let mut headers = HeaderMap::new();
     headers.insert(
         header::CONTENT_TYPE,
         HeaderValue::from_static("image/svg+xml; charset=utf-8"),
     );
     headers.insert(header::CACHE_CONTROL, stat_cache_control(pending));
-    (
-        headers,
-        if branded {
-            brand::with_site_link(svg)
-        } else {
-            svg
-        },
-    )
+    let body = if branded {
+        brand::with_site_link(svg)
+    } else {
+        svg
+    };
+    crate::api::conditional_media_response(request_headers, headers, body.into_bytes())
 }
 
-fn raster_response(format: RasterFormat, bytes: Arc<Vec<u8>>) -> impl IntoResponse {
-    raster_response_with_policy(format, bytes, false)
+fn raster_response(
+    request_headers: &HeaderMap,
+    format: RasterFormat,
+    bytes: Arc<Vec<u8>>,
+) -> Response {
+    raster_response_with_policy(request_headers, format, bytes, false)
 }
 
 fn raster_response_with_policy(
+    request_headers: &HeaderMap,
     format: RasterFormat,
     bytes: Arc<Vec<u8>>,
     pending: bool,
-) -> impl IntoResponse {
+) -> Response {
     let mut headers = HeaderMap::new();
     headers.insert(
         header::CONTENT_TYPE,
         HeaderValue::from_static(format.content_type()),
     );
     headers.insert(header::CACHE_CONTROL, stat_cache_control(pending));
-    (headers, (*bytes).clone())
+    crate::api::conditional_media_response(request_headers, headers, (*bytes).clone())
 }
 
+/// Cache policy split for the stat charts. Ready charts ride the same 4h
+/// edge policy as the other media (`api::MEDIA_CACHE_CONTROL` semantics);
+/// a repo whose analysis hasn't landed yet renders a "pending" frame that
+/// must NEVER be cached anywhere (`no-store`) — the moment analysis
+/// completes, the next request must show real data.
 fn stat_cache_control(pending: bool) -> HeaderValue {
     if pending {
         HeaderValue::from_static("no-store")
     } else {
-        HeaderValue::from_static("public, s-maxage=86400, max-age=3600")
+        HeaderValue::from_static(
+            "public, max-age=3600, s-maxage=14400, stale-while-revalidate=86400",
+        )
     }
 }
 
@@ -1228,6 +1290,60 @@ mod tests {
         assert!(svg.contains(">gitdebt</text>"));
     }
 
+    /// Ready stat charts ride the shared 4h edge policy; the pending frame
+    /// stays `no-store` so a finished analysis shows up on the next view.
+    #[test]
+    fn ready_stats_get_the_edge_cache_policy() {
+        assert_eq!(
+            stat_cache_control(false).to_str().unwrap(),
+            "public, max-age=3600, s-maxage=14400, stale-while-revalidate=86400"
+        );
+    }
+
+    /// The stat SVG/raster helpers speak conditional requests: a 200
+    /// carries an ETag, replaying it via `If-None-Match` yields a 304 with
+    /// the same Cache-Control, and a stale tag re-serves the bytes.
+    #[tokio::test]
+    async fn stat_responses_support_etag_revalidation() {
+        let none = HeaderMap::new();
+        let first = svg_response_with_policy(&none, "<svg>ready</svg>".into(), false, false);
+        assert_eq!(first.status(), StatusCode::OK);
+        assert_eq!(
+            first.headers().get(header::CACHE_CONTROL).unwrap(),
+            &stat_cache_control(false)
+        );
+        let etag = first.headers().get(header::ETAG).unwrap().clone();
+
+        let mut revalidate = HeaderMap::new();
+        revalidate.insert(header::IF_NONE_MATCH, etag.clone());
+        let not_modified =
+            svg_response_with_policy(&revalidate, "<svg>ready</svg>".into(), false, false);
+        assert_eq!(not_modified.status(), StatusCode::NOT_MODIFIED);
+        assert_eq!(not_modified.headers().get(header::ETAG).unwrap(), &etag);
+        assert_eq!(
+            not_modified.headers().get(header::CACHE_CONTROL).unwrap(),
+            &stat_cache_control(false)
+        );
+        let body = axum::body::to_bytes(not_modified.into_body(), usize::MAX)
+            .await
+            .unwrap();
+        assert!(body.is_empty(), "304 must carry no body");
+
+        let mut mismatched = HeaderMap::new();
+        mismatched.insert(
+            header::IF_NONE_MATCH,
+            HeaderValue::from_static("\"deadbeefdeadbeefdeadbeefdeadbeef\""),
+        );
+        let raster = raster_response_with_policy(
+            &mismatched,
+            RasterFormat::Png,
+            Arc::new(vec![1u8, 2, 3]),
+            false,
+        );
+        assert_eq!(raster.status(), StatusCode::OK);
+        assert!(raster.headers().get(header::ETAG).is_some());
+    }
+
     #[test]
     fn in_app_media_context_is_explicit() {
         assert!(!StatQuery::default().in_app());
@@ -1238,6 +1354,130 @@ mod tests {
             }
             .in_app()
         );
+    }
+
+    /// Author enrichment rewrites `repo_author_stats` without touching
+    /// `repo_history`, so the contributors and bus-factor cache
+    /// revisions must advance with `enrich_attempted_at` — otherwise
+    /// backfilled logins/avatars stay invisible for the full moka+CDN
+    /// TTL. Every other chart kind must keep the bare revision so an
+    /// enrichment pass can't churn their caches.
+    #[tokio::test]
+    async fn author_enrichment_advances_only_author_chart_revisions() {
+        let Some(db) = crate::test_db::shared().await else {
+            eprintln!("skipping: set GITDEBT_TEST_DATABASE_URL to run");
+            return;
+        };
+        let repo = format!("gitdebt-test-stat-revision/{}", std::process::id());
+        let cleanup = |pool: sqlx::PgPool, repo: String| async move {
+            for statement in [
+                "DELETE FROM repo_author_stats WHERE repo = $1",
+                "DELETE FROM repo_history WHERE repo = $1",
+                "DELETE FROM repos WHERE repo = $1",
+            ] {
+                sqlx::query(statement)
+                    .bind(&repo)
+                    .execute(&pool)
+                    .await
+                    .unwrap();
+            }
+        };
+        cleanup(db.pool.clone(), repo.clone()).await;
+
+        sqlx::query("INSERT INTO repos (repo, metadata_fetched_at) VALUES ($1, NOW())")
+            .bind(&repo)
+            .execute(&db.pool)
+            .await
+            .unwrap();
+        sqlx::query(
+            "INSERT INTO repo_history \
+                (repo, last_analyzed_sha, last_analyzed_at, \
+                 analysis_revision, analysis_scope_commits) \
+             VALUES ($1, 'abc', NOW(), 3, 42)",
+        )
+        .bind(&repo)
+        .execute(&db.pool)
+        .await
+        .unwrap();
+
+        let revision = |kind: StatKind| {
+            let pool = db.pool.clone();
+            let repo = repo.clone();
+            async move {
+                stat_revision_in(&pool, &repo, kind)
+                    .await
+                    .unwrap()
+                    .expect("analyzed repo must have a revision")
+            }
+        };
+        let contributors = revision(StatKind::Contributors).await;
+        let bus_factor = revision(StatKind::BusFactor).await;
+        let heatmap = revision(StatKind::Heatmap).await;
+        assert!(
+            contributors.starts_with("abc:r3:n42"),
+            "analysis fields still lead the revision: {contributors}"
+        );
+
+        // A brand-new author row with no enrichment attempt keeps the
+        // same revision as having no author rows at all (both epoch 0).
+        sqlx::query(
+            "INSERT INTO repo_author_stats (repo, author_email, commits) \
+             VALUES ($1, 'a@example.com', 1)",
+        )
+        .bind(&repo)
+        .execute(&db.pool)
+        .await
+        .unwrap();
+        assert_eq!(
+            revision(StatKind::Contributors).await,
+            contributors,
+            "unattempted enrichment must not move the revision"
+        );
+
+        // Stamping the enrichment attempt must move both author charts
+        // and nothing else.
+        sqlx::query(
+            "UPDATE repo_author_stats \
+             SET enrich_attempted_at = TIMESTAMPTZ '2026-01-01 00:00:00+00' \
+             WHERE repo = $1",
+        )
+        .bind(&repo)
+        .execute(&db.pool)
+        .await
+        .unwrap();
+        let enriched = revision(StatKind::Contributors).await;
+        assert_ne!(
+            enriched, contributors,
+            "enrichment must bust the contributors cache key"
+        );
+        assert_ne!(
+            revision(StatKind::BusFactor).await,
+            bus_factor,
+            "enrichment must bust the bus-factor cache key"
+        );
+        assert_eq!(
+            revision(StatKind::Heatmap).await,
+            heatmap,
+            "non-author charts must not churn on enrichment"
+        );
+
+        // A later attempt (avatar/login backfill retry) moves it again.
+        sqlx::query(
+            "UPDATE repo_author_stats \
+             SET enrich_attempted_at = TIMESTAMPTZ '2026-01-01 00:00:01+00' \
+             WHERE repo = $1",
+        )
+        .bind(&repo)
+        .execute(&db.pool)
+        .await
+        .unwrap();
+        assert_ne!(
+            revision(StatKind::Contributors).await,
+            enriched,
+            "advancing enrich_attempted_at must advance the revision"
+        );
+
+        cleanup(db.pool.clone(), repo.clone()).await;
     }
 
     #[test]

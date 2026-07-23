@@ -6,14 +6,16 @@
 //! re-running this aggregator over the same range double-counts —
 //! responsibility for "don't replay history" sits in `repo_history`.
 
-use std::collections::HashMap;
+use std::collections::{HashMap, HashSet};
+use std::path::{Path, PathBuf};
+use std::time::{Duration, SystemTime};
 
 use anyhow::{Context, Result};
 use chrono::{DateTime, NaiveDate, Utc};
 use md5::{Digest, Md5};
 
 use crate::db::Db;
-use crate::repo_history::{CommitInfo, RepoStorage, evict_clone};
+use crate::repo_history::{CommitInfo, RepoStorage, clone_size_bytes, evict_clone};
 
 /// Avatar URL heuristic from a git author email.
 /// 1. GitHub noreply emails (`<id+username>@users.noreply.github.com`)
@@ -524,20 +526,16 @@ pub async fn record_analysis_details(
 /// Eviction pass. Sorts repos by `score = bytes / max(1, days_idle)` and
 /// removes biggest+stalest clones until we're under the high-watermark.
 /// Run after every analysis (cheap when nothing's near full).
+///
+/// Replica safety: `repo_history` rows are global but clones live on ONE
+/// replica's local volume, so both the quota accounting and the candidate
+/// set consider only clones whose path exists on THIS replica's disk.
+/// "Evicting" a path that is absent locally would trivially succeed and
+/// then null out a row whose bytes still occupy another replica's volume,
+/// orphaning them; and counting foreign rows against the local quota would
+/// effectively divide the quota by the replica count.
 pub async fn evict_to_quota(db: &Db, storage: &RepoStorage) -> Result<u64> {
     let target = storage.quota_bytes * (storage.high_watermark_pct as u64) / 100;
-    // PostgreSQL promotes SUM(bigint) to NUMERIC. Cast the bounded aggregate
-    // back to BIGINT so sqlx does not try to decode NUMERIC into i64 during
-    // the periodic production eviction pass.
-    let used: i64 =
-        sqlx::query_scalar("SELECT COALESCE(SUM(clone_size_bytes), 0)::BIGINT FROM repo_history")
-            .fetch_one(&db.pool)
-            .await?;
-    let mut used = used as u64;
-    if used <= target {
-        return Ok(0);
-    }
-
     let rows = sqlx::query_as::<
         _,
         (
@@ -555,6 +553,23 @@ pub async fn evict_to_quota(db: &Db, storage: &RepoStorage) -> Result<u64> {
     .fetch_all(&db.pool)
     .await?;
 
+    // Only clones present on this replica's filesystem participate.
+    let local: Vec<(String, std::path::PathBuf, u64, Option<DateTime<Utc>>)> = rows
+        .into_iter()
+        .filter_map(|(repo, path, bytes, last_visited)| {
+            let path = path.map(std::path::PathBuf::from)?;
+            let bytes = bytes? as u64;
+            if !path.exists() {
+                return None;
+            }
+            Some((repo, path, bytes, last_visited))
+        })
+        .collect();
+    let mut used: u64 = local.iter().map(|(_, _, bytes, _)| *bytes).sum();
+    if used <= target {
+        return Ok(0);
+    }
+
     // Score each candidate. Repos visited within MIN_AGE_HOURS are
     // protected — without that guard, a popular hot repo gets evicted,
     // re-cloned by the next request, evicts another similar-sized repo,
@@ -563,20 +578,17 @@ pub async fn evict_to_quota(db: &Db, storage: &RepoStorage) -> Result<u64> {
     // we expect for the analysis worker.
     const MIN_AGE_HOURS: i64 = 24;
     let now = Utc::now();
-    let mut scored: Vec<(f64, String, std::path::PathBuf, u64)> = rows
+    let mut scored: Vec<(f64, String, std::path::PathBuf, u64)> = local
         .into_iter()
         .filter_map(|(repo, path, bytes, last_visited)| {
-            let path = path.map(std::path::PathBuf::from)?;
-            let bytes = bytes? as u64;
-            let parsed_visited = last_visited;
             // Skip repos visited too recently — the eviction will simply
             // pick the next-stalest candidate instead.
-            if let Some(visited) = parsed_visited
+            if let Some(visited) = last_visited
                 && (now - visited).num_hours() < MIN_AGE_HOURS
             {
                 return None;
             }
-            let idle_days = parsed_visited
+            let idle_days = last_visited
                 .map(|dt| (now - dt).num_days().max(1) as f64)
                 .unwrap_or(1.0);
             let score = bytes as f64 * idle_days;
@@ -600,6 +612,171 @@ pub async fn evict_to_quota(db: &Db, storage: &RepoStorage) -> Result<u64> {
         tracing::info!(repo, bytes, "evicted bare clone");
     }
     Ok(freed)
+}
+
+/// Minimum time since a candidate directory's last modification before the
+/// orphan sweep may delete it. `git clone` creates the target directory at
+/// start but `record_clone` writes the referencing row only after the fetch
+/// completes, so a fresh unreferenced directory is most likely an in-flight
+/// clone rather than garbage.
+const ORPHAN_MIN_AGE: Duration = Duration::from_secs(24 * 60 * 60);
+
+/// Cadence of the background orphan sweep after the startup pass. Orphans
+/// accumulate at cross-replica-eviction speed (slow), so hours are plenty.
+const ORPHAN_SWEEP_INTERVAL: Duration = Duration::from_secs(6 * 60 * 60);
+
+/// Collect candidate bare-clone directories under `root`, matching the
+/// storage layout `<root>/<owner>/<repo>.git` (plus `<root>/<x>.git` for
+/// defense in depth). Symlinks are never followed: a link planted inside
+/// the repos dir must not let the sweep reach — or count — anything else.
+fn collect_bare_clone_dirs(root: &Path) -> Vec<PathBuf> {
+    fn scan(dir: &Path, out: &mut Vec<PathBuf>, recurse: bool) {
+        let Ok(entries) = std::fs::read_dir(dir) else {
+            return;
+        };
+        for entry in entries.flatten() {
+            // `DirEntry::file_type` does NOT follow symlinks, so a
+            // symlinked "clone" is skipped entirely rather than resolved.
+            let Ok(file_type) = entry.file_type() else {
+                continue;
+            };
+            if !file_type.is_dir() {
+                continue;
+            }
+            let path = entry.path();
+            let is_bare = path
+                .file_name()
+                .and_then(|name| name.to_str())
+                .is_some_and(|name| name.ends_with(".git"));
+            if is_bare {
+                out.push(path);
+            } else if recurse {
+                // An owner directory: bare clones sit one level below.
+                scan(&path, out, false);
+            }
+        }
+    }
+    let mut out = Vec::new();
+    scan(root, &mut out, true);
+    out
+}
+
+/// Orphaned-clone sweep: delete bare-clone directories on THIS replica's
+/// disk that no `repo_history.clone_path` row references.
+///
+/// Why orphans exist at all: `RepoStorage::path_for` derives the clone path
+/// purely from the slug, so with N worker replicas on separate volumes every
+/// replica stores repo X at the SAME path string while `repo_history` holds
+/// a single global row. When replica B evicts X it deletes its local copy
+/// and NULLs that shared row — replica A's physical copy of X is then
+/// referenced by nothing: [`evict_to_quota`] neither counts it toward the
+/// quota nor ranks it for eviction, so A's disk fills unboundedly. This
+/// sweep is the disk-driven complement to that row-driven eviction.
+///
+/// Safety rails:
+///   * only `*.git` directories at the storage-layout depths are candidates,
+///     and symlinks are never followed or deleted;
+///   * every candidate is canonicalized and prefix-checked against the
+///     canonicalized root, so the sweep cannot touch paths outside
+///     `REPOS_DIR`;
+///   * directories modified within [`ORPHAN_MIN_AGE`] are skipped — an
+///     in-flight clone has a fresh directory but no DB row yet.
+///
+/// Returns the total bytes freed (per the [`clone_size_bytes`] estimate).
+pub async fn sweep_orphaned_clones(db: &Db, storage: &RepoStorage) -> Result<u64> {
+    let root = match tokio::fs::canonicalize(&storage.root).await {
+        Ok(root) => root,
+        // No repos dir yet (fresh replica) ⇒ nothing to sweep.
+        Err(_) => return Ok(0),
+    };
+
+    let referenced_paths: Vec<String> =
+        sqlx::query_scalar("SELECT clone_path FROM repo_history WHERE clone_path IS NOT NULL")
+            .fetch_all(&db.pool)
+            .await
+            .context("load referenced clone paths")?;
+    let mut referenced: HashSet<PathBuf> = HashSet::new();
+    for raw in referenced_paths {
+        let path = PathBuf::from(raw);
+        // Keep the canonical form when the path resolves locally (mounted
+        // volumes and tempdirs often reach one directory through symlinked
+        // prefixes) and the raw form always, so rows written under either
+        // spelling of REPOS_DIR still count as references.
+        if let Ok(canonical) = tokio::fs::canonicalize(&path).await {
+            referenced.insert(canonical);
+        }
+        referenced.insert(path);
+    }
+
+    let now = SystemTime::now();
+    let mut freed = 0u64;
+    for candidate in collect_bare_clone_dirs(&root) {
+        // Canonicalize + prefix-check: the sweep must never delete a path
+        // that resolves outside REPOS_DIR, whatever the tree looks like.
+        let Ok(canonical) = tokio::fs::canonicalize(&candidate).await else {
+            continue; // vanished mid-sweep
+        };
+        if canonical == root || !canonical.starts_with(&root) {
+            tracing::warn!(
+                path = %candidate.display(),
+                "orphan sweep: candidate resolves outside REPOS_DIR; skipping"
+            );
+            continue;
+        }
+        if referenced.contains(&canonical) || referenced.contains(&candidate) {
+            continue;
+        }
+        // In-flight-clone guard: a clone directory appears on disk before
+        // its repo_history row does. Anything modified within the window
+        // is presumed in progress and left for a later pass. A missing or
+        // unreadable mtime counts as fresh (never delete on uncertainty).
+        let Ok(meta) = tokio::fs::metadata(&canonical).await else {
+            continue;
+        };
+        let age = meta
+            .modified()
+            .ok()
+            .and_then(|modified| now.duration_since(modified).ok())
+            .unwrap_or(Duration::ZERO);
+        if age < ORPHAN_MIN_AGE {
+            continue;
+        }
+        let bytes = clone_size_bytes(&canonical);
+        if let Err(error) = evict_clone(&canonical).await {
+            tracing::warn!(
+                path = %canonical.display(),
+                %error,
+                "orphan sweep: delete failed; skipping"
+            );
+            continue;
+        }
+        freed = freed.saturating_add(bytes);
+        tracing::info!(
+            path = %canonical.display(),
+            bytes,
+            "orphan sweep: removed unreferenced bare clone"
+        );
+    }
+    Ok(freed)
+}
+
+/// Spawn the recurring orphan sweep: one pass at startup, then every
+/// [`ORPHAN_SWEEP_INTERVAL`]. Failures log and retry on the next tick; the
+/// task holds no state beyond its handles, so any replica count is safe —
+/// each replica only ever inspects and deletes its own local disk.
+pub fn spawn_orphan_clone_sweep(db: Db, storage: std::sync::Arc<RepoStorage>) {
+    tokio::spawn(async move {
+        loop {
+            match sweep_orphaned_clones(&db, &storage).await {
+                Ok(0) => {}
+                Ok(freed) => {
+                    tracing::info!(freed_bytes = freed, "orphan clone sweep freed disk");
+                }
+                Err(error) => tracing::warn!(%error, "orphan clone sweep failed"),
+            }
+            tokio::time::sleep(ORPHAN_SWEEP_INTERVAL).await;
+        }
+    });
 }
 
 #[cfg(test)]
@@ -835,5 +1012,39 @@ mod tests {
         assert!(agg.files.is_empty());
         assert!(agg.commit_days.is_empty());
         assert!(agg.todo_days.is_empty());
+    }
+
+    #[test]
+    fn collect_bare_clone_dirs_matches_layout_and_skips_symlinks() {
+        let tmp = tempfile::tempdir().unwrap();
+        let root = tmp.path();
+        // Layout depth 2: <root>/<owner>/<repo>.git — a candidate.
+        std::fs::create_dir_all(root.join("owner/repo.git")).unwrap();
+        // Defense-in-depth depth 1: <root>/<x>.git — also a candidate.
+        std::fs::create_dir_all(root.join("stray.git")).unwrap();
+        // Non-.git dirs and plain files are never candidates.
+        std::fs::create_dir_all(root.join("owner/not-a-clone")).unwrap();
+        std::fs::write(root.join("owner/file.git"), b"not a dir").unwrap();
+        // Anything below depth 2 is out of layout and ignored.
+        std::fs::create_dir_all(root.join("owner/not-a-clone/deep.git")).unwrap();
+        // A symlinked ".git" dir must be skipped, not followed.
+        #[cfg(unix)]
+        {
+            let outside = tempfile::tempdir().unwrap();
+            std::fs::create_dir_all(outside.path().join("victim.git")).unwrap();
+            std::os::unix::fs::symlink(
+                outside.path().join("victim.git"),
+                root.join("owner/escape.git"),
+            )
+            .unwrap();
+        }
+
+        let mut found = collect_bare_clone_dirs(root);
+        found.sort();
+        assert_eq!(
+            found,
+            vec![root.join("owner/repo.git"), root.join("stray.git")],
+            "exactly the layout-shaped real directories are candidates"
+        );
     }
 }

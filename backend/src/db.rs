@@ -624,6 +624,27 @@ impl Db {
             .ok()
             .and_then(|s| s.parse().ok())
             .unwrap_or(60);
+        Self::connect_with_pool_size(database_url, max_connections).await
+    }
+
+    /// Open a pool against an already-migrated database, applying no schema.
+    ///
+    /// Test binaries run many `#[tokio::test]` cases in parallel, each on its
+    /// own runtime, so each needs its own pool (sqlx ties pool background
+    /// tasks to the creating runtime). Re-running the idempotent schema DDL
+    /// per test deadlocks against the queries of tests already in flight, so
+    /// only the first test applies the schema and the rest connect with this.
+    pub async fn connect_pool_only(database_url: &str, max_connections: u32) -> Result<Self> {
+        let pool = PgPoolOptions::new()
+            .max_connections(max_connections)
+            .connect(database_url)
+            .await
+            .context("connect postgres")?;
+        Ok(Self { pool })
+    }
+
+    /// `connect` with an explicit pool ceiling.
+    pub async fn connect_with_pool_size(database_url: &str, max_connections: u32) -> Result<Self> {
         let pool = PgPoolOptions::new()
             .max_connections(max_connections)
             .connect(database_url)

@@ -8,6 +8,18 @@ import SiteHeader from "@/components/SiteHeader.astro";
 import SiteFooter from "@/components/SiteFooter.astro";
 import { ChartViewer } from "@/components/ChartViewer";
 import { WarmRepos } from "@/components/WarmRepos";
+import {
+  BODY,
+  CAPTION,
+  EYEBROW,
+  HEADING,
+  PANEL_PADDED,
+  ROW,
+  ROW_BADGE,
+  SECTION_ACTION,
+  SECTION_HEADER,
+  TITLE,
+} from "@/components/style-tokens";
 import { getCategory, relatedCategories } from "@/data/categories";
 import {
   firstStarYear,
@@ -204,8 +216,8 @@ if (faqs.length > 0 && hasCurrentRanking) {
 }
 
 const thClass =
-  "py-3 pr-4 font-mono text-xs font-medium tracking-wide text-muted-foreground uppercase whitespace-nowrap";
-const rowClass = "border-b border-border";
+  "py-3 pr-4 font-mono text-[10px] font-medium tracking-[0.14em] text-muted-foreground/70 uppercase whitespace-nowrap";
+const rowClass = "border-b border-border/40 last:border-0";
 ---
 
 <!doctype html>
@@ -226,51 +238,54 @@ const rowClass = "border-b border-border";
     <div class="isolate flex min-h-dvh flex-col">
       <SiteHeader />
 
-      <main id="main-content" class="mx-auto flex w-full max-w-5xl flex-1 flex-col gap-10 px-6 py-12">
-        <nav aria-label="Breadcrumb" class="font-mono text-xs text-muted-foreground">
-          <a href="/" class="hover:text-foreground">gitdebt</a>
+      <main id="main-content" class="mx-auto w-full max-w-5xl flex-1 px-6 py-12">
+        <nav aria-label="Breadcrumb" class="font-mono text-[11px] text-muted-foreground">
+          <a
+            href="/"
+            class="rounded outline-none transition-colors duration-150 hover:text-foreground focus-visible:ring-2 focus-visible:ring-accent/30"
+            >gitdebt</a
+          >
           <span class="px-1.5 text-border" aria-hidden="true">/</span>
-          <a href="/compare" class="hover:text-foreground">compare</a>
+          <a
+            href="/compare"
+            class="rounded outline-none transition-colors duration-150 hover:text-foreground focus-visible:ring-2 focus-visible:ring-accent/30"
+            >compare</a
+          >
           <span class="px-1.5 text-border" aria-hidden="true">/</span>
           <span class="text-foreground">{category.slug}</span>
         </nav>
 
-        <header class="space-y-3">
-          <p class="mono-label">
-            Category comparison
-          </p>
-          <h1 class="text-3xl font-semibold tracking-tight text-balance sm:text-4xl">
-            {category.name}: star history compared
-          </h1>
-          <p class="max-w-[70ch] text-lg text-pretty text-muted-foreground">
+        <header class="mt-8">
+          <h1 class={TITLE}>{category.name}: star history compared</h1>
+          <p class:list={["mt-3 max-w-[70ch] text-[15px]", BODY]}>
             {category.intro}
           </p>
-          <p class="font-mono text-xs text-muted-foreground">
+          <p class:list={["mt-3 font-mono", CAPTION]}>
             Ranked by current GitHub stars · growth = stars gained in the trailing 90
             days{updatedLabel ? ` · data updated ${updatedLabel}` : ""}
           </p>
         </header>
 
         {loadedEnough && (
-          <ChartViewer
-            client:load
-            apiBase={apiBase}
-            path={overlayPath}
-            alt={`Star history overlay of ${category.repos.join(", ")}`}
-            caption={`${category.name} — star history`}
-            embedLink={canonical}
-            label={category.name}
-          />
+          <div class="mt-12">
+            <ChartViewer
+              client:load
+              apiBase={apiBase}
+              path={overlayPath}
+              alt={`Star history overlay of ${category.repos.join(", ")}`}
+              caption={`${category.name} — star history`}
+              embedLink={canonical}
+              label={category.name}
+            />
+          </div>
         )}
 
         {members.length > 0 ? (
           <>
             {!loadedEnough && (
-              <section class="border-y border-border py-6">
-                <p class="mono-label">
-                  Current ranking ready
-                </p>
-                <p class="mt-2 max-w-[72ch] text-base/7 text-pretty text-muted-foreground sm:text-sm/6">
+              <section class:list={["mt-12", PANEL_PADDED]}>
+                <p class={EYEBROW}>Current ranking ready</p>
+                <p class:list={["mt-2 max-w-[72ch]", BODY]}>
                   Current GitHub star totals and repository-health links are
                   usable now. Historical curves and 90-day growth will appear
                   only for repositories whose stargazer timestamps are
@@ -279,9 +294,12 @@ const rowClass = "border-b border-border";
               </section>
             )}
 
-            <section class="space-y-4">
-              <h2 class="text-xl font-semibold tracking-tight">Ranking</h2>
-              <div class="-mx-6 -my-2 overflow-x-auto">
+            <section class="mt-16 scroll-mt-24 border-t border-border/60 pt-12">
+              <div class={SECTION_HEADER}>
+                <h2 class={HEADING}>Ranking</h2>
+                <p class={CAPTION}>{members.length} repositories</p>
+              </div>
+              <div class="-mx-6 mt-6 overflow-x-auto">
                 <div class="inline-block min-w-full px-6 py-2 align-middle">
                   <table class="w-full text-left text-base sm:text-sm">
                     <thead>
@@ -297,16 +315,19 @@ const rowClass = "border-b border-border";
                     <tbody class="tabular-nums">
                       {members.map((m, i) => (
                         <tr class={rowClass}>
-                          <td class="py-3 pr-4 font-mono text-xs text-muted-foreground">{i + 1}</td>
+                          <td class="py-3 pr-4 font-mono text-[11px] text-muted-foreground">{i + 1}</td>
                           <td class="py-3 pr-4">
-                            <a href={`/${m.slug}`} class="font-medium hover:text-signal">
+                            <a
+                              href={`/${m.slug}`}
+                              class="rounded outline-none transition-colors duration-150 hover:text-foreground focus-visible:ring-2 focus-visible:ring-accent/30"
+                            >
                               {m.slug}
                             </a>
                           </td>
-                          <td class="py-3 pr-4 text-right font-medium">
+                          <td class="py-3 pr-4 text-right">
                             {m.stars.toLocaleString()}
                           </td>
-                          <td class="py-3 pr-4 text-right text-signal">
+                          <td class="py-3 pr-4 text-right">
                             {m.gained90 !== null ? `~${formatCompact(m.gained90)}` : "—"}
                           </td>
                           <td class="py-3 pr-4 text-right text-muted-foreground">
@@ -315,7 +336,7 @@ const rowClass = "border-b border-border";
                           <td class="py-3">
                             <a
                               href={`/${m.slug}#stats`}
-                              class="font-mono text-xs text-muted-foreground underline decoration-border underline-offset-4 hover:text-foreground hover:decoration-signal"
+                              class="rounded font-mono text-[11px] text-muted-foreground underline decoration-border underline-offset-4 outline-none transition-colors duration-150 hover:text-foreground hover:decoration-foreground/60 focus-visible:ring-2 focus-visible:ring-accent/30"
                             >
                               debt charts
                             </a>
@@ -329,40 +350,47 @@ const rowClass = "border-b border-border";
             </section>
 
             {pairs.length > 0 && (
-              <section class="space-y-4">
-                <h2 class="text-xl font-semibold tracking-tight">Head to head</h2>
-                <div class="flex flex-wrap items-center gap-2">
+              <section class="mt-16 scroll-mt-24 border-t border-border/60 pt-12">
+                <div class={SECTION_HEADER}>
+                  <h2 class={HEADING}>Head to head</h2>
+                  <a
+                    href={`/compare?repos=${encodeURIComponent(reposParam)}`}
+                    class={SECTION_ACTION}
+                  >
+                    open in the builder
+                    <span
+                      aria-hidden="true"
+                      class="transition-transform duration-150 group-hover:translate-x-0.5 motion-reduce:transition-none"
+                      >→</span
+                    >
+                  </a>
+                </div>
+                <div class="mt-5 flex flex-wrap items-center gap-2">
                   {pairs.map(([a, b]) => (
                     <a
                       href={`/vs/${a}/${b}`}
                       data-warm-repos={`${a},${b}`}
-                      class="dither-control inline-flex items-center gap-1.5 rounded-md border px-3 py-1.5 font-mono text-sm text-muted-foreground hover:text-foreground"
+                      class="dither-chip rounded-md outline-none focus-visible:ring-2 focus-visible:ring-accent/30"
                     >
                       {a.split("/")[1]} vs {b.split("/")[1]}
                     </a>
                   ))}
-                  <a
-                    href={`/compare?repos=${encodeURIComponent(reposParam)}`}
-                    class="dither-control inline-flex items-center gap-1.5 rounded-md border px-3 py-1.5 font-mono text-sm text-foreground"
-                  >
-                    Open in the compare builder
-                  </a>
                 </div>
               </section>
             )}
 
             {faqs.length > 0 && (
-              <section class="space-y-4">
-                <h2 class="text-xl font-semibold tracking-tight">Frequently asked</h2>
-                <div class="divide-y divide-border border-y border-border">
+              <section class="mt-16 scroll-mt-24 border-t border-border/60 pt-12">
+                <div class={SECTION_HEADER}>
+                  <h2 class={HEADING}>Frequently asked</h2>
+                </div>
+                <div class="mt-4">
                   {faqs.map((f) => (
-                    <details class="group py-5">
-                      <summary class="cursor-pointer list-none font-medium [&::-webkit-details-marker]:hidden">
+                    <details class="group border-b border-border/40 py-4 last:border-0">
+                      <summary class="cursor-pointer list-none rounded-md py-1 text-[13px] outline-none transition-colors duration-150 hover:text-foreground focus-visible:ring-2 focus-visible:ring-accent/30 [&::-webkit-details-marker]:hidden">
                         {f.q}
                       </summary>
-                      <p class="mt-3 max-w-[72ch] text-base/7 text-pretty text-muted-foreground sm:text-sm/6">
-                        {f.a}
-                      </p>
+                      <p class:list={["mt-2 max-w-[72ch]", BODY]}>{f.a}</p>
                     </details>
                   ))}
                 </div>
@@ -370,21 +398,19 @@ const rowClass = "border-b border-border";
             )}
           </>
         ) : (
-          <section class="border-y border-border py-6">
-            <p class="mono-label">
-              Warming up
-            </p>
-            <p class="mt-2 max-w-[70ch] text-base/7 text-pretty text-muted-foreground sm:text-sm/6">
+          <section class:list={["mt-12", PANEL_PADDED]}>
+            <p class={EYEBROW}>Warming up</p>
+            <p class:list={["mt-2 max-w-[70ch]", BODY]}>
               Repository metadata has not loaded for this field yet. The repos
               below are being initialized automatically; open any one to watch
               its analysis progress:
             </p>
-            <div class="mt-3 flex flex-wrap gap-2">
+            <div class="mt-4 flex flex-wrap gap-2">
               {category.repos.map((slug) => (
                 <a
                   href={`/${slug}`}
                   data-warm-repos={slug}
-                  class="dither-control inline-flex items-center rounded-md border px-3 py-1.5 font-mono text-sm text-muted-foreground hover:text-foreground"
+                  class="dither-chip rounded-md outline-none focus-visible:ring-2 focus-visible:ring-accent/30"
                 >
                   {slug}
                 </a>
@@ -394,37 +420,44 @@ const rowClass = "border-b border-border";
         )}
 
         {related.length > 0 && (
-          <section class="space-y-4">
-            <h2 class="text-xl font-semibold tracking-tight">Related categories</h2>
-            <ul role="list" class="grid border-y border-border sm:grid-cols-2 sm:divide-x sm:divide-border">
-              {related.map((relatedCategory, index) => (
-                <li
-                  class:list={[
-                    "border-b border-border sm:[&:nth-last-child(-n+2)]:border-b-0",
-                    index === related.length - 1 && "border-b-0",
-                  ]}
+          <section class="mt-16 scroll-mt-24 border-t border-border/60 pt-12">
+            <div class={SECTION_HEADER}>
+              <h2 class={HEADING}>Related categories</h2>
+              <a href="/compare#categories" class={SECTION_ACTION}>
+                all categories
+                <span
+                  aria-hidden="true"
+                  class="transition-transform duration-150 group-hover:translate-x-0.5 motion-reduce:transition-none"
+                  >→</span
                 >
+              </a>
+            </div>
+            <ul role="list" class="mt-6 grid gap-x-10 sm:grid-cols-2">
+              {related.map((relatedCategory) => (
+                <li>
                   <a
                     href={`/compare/${relatedCategory.slug}`}
                     data-warm-repos={relatedCategory.repos.join(",")}
-                    class="block min-h-20 px-4 py-4"
+                    class={ROW}
                   >
-                    <div class="text-base font-medium sm:text-sm">{relatedCategory.name}</div>
-                    <div class="mt-1 text-muted-foreground">
-                      {relatedCategory.short}
-                    </div>
+                    <span class="min-w-0 flex-1 py-2">
+                      <span class="block truncate">{relatedCategory.name}</span>
+                      <span class="mt-0.5 block truncate text-[11px] text-muted-foreground/80 group-hover:text-muted-foreground">
+                        {relatedCategory.short}
+                      </span>
+                    </span>
+                    <span class={ROW_BADGE}>{relatedCategory.repos.length}</span>
                   </a>
                 </li>
               ))}
             </ul>
-            <p class="text-base text-muted-foreground sm:text-sm">
+            <p class:list={["mt-6", BODY]}>
               <a
                 href="/leaderboard"
-                class="underline decoration-signal/60 underline-offset-4 hover:decoration-signal"
+                class="rounded underline decoration-border underline-offset-4 outline-none transition-colors duration-150 hover:text-foreground hover:decoration-foreground/60 focus-visible:ring-2 focus-visible:ring-accent/30"
               >
                 Fastest-growing repos across all of gitdebt
-              </a>{" "}
-              · <a href="/compare#categories" class="underline decoration-signal/60 underline-offset-4 hover:decoration-signal">all categories</a>
+              </a>
             </p>
           </section>
         )}

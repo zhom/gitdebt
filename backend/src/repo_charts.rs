@@ -276,14 +276,6 @@ fn render_heatmap_inner(
     let width = plot_w + pad_left + 32;
     let height = plot_h + pad_top + pad_bottom;
 
-    let heat_levels = [
-        theme.heat_0,
-        theme.heat_1,
-        theme.heat_2,
-        theme.heat_3,
-        theme.heat_4,
-    ];
-
     let mut cells = String::new();
     let mut total = 0i64;
     let mut max_seen = 0i64;
@@ -318,16 +310,17 @@ fn render_heatmap_inner(
         );
         cells.push_str(&format!(
             r##"<a class="day-link" href="{href}" target="_blank" rel="noopener" aria-label="Open commits from {day}">
-  <rect class="cell" x="{x}" y="{y}" width="{cell}" height="{cell}" rx="2" fill="{fill}">
+  <rect class="cell" x="{x}" y="{y}" width="{cell}" height="{cell}" rx="2" fill="{track}">
     <title>{day} · {count} commit{plural} · open on GitHub</title>
-  </rect>
+  </rect>{ink}
 </a>
 "##,
             href = href,
             x = x,
             y = y,
             cell = cell,
-            fill = heat_levels[level],
+            track = theme.track,
+            ink = heat_ink(x as f32, y as f32, cell as f32, level),
             day = day_iter,
             count = count,
             plural = if count == 1 { "" } else { "s" },
@@ -341,13 +334,14 @@ fn render_heatmap_inner(
     let legend_y = (height - 30) as f32;
     let legend_x = pad_left as f32;
     let mut legend_cells = String::new();
-    for (i, fill) in heat_levels.iter().enumerate() {
+    for level in 0..HEAT_TIERS.len() {
+        let x = legend_x + 60.0 + (level as f32) * (cell as f32 + 2.0);
         legend_cells.push_str(&format!(
-            r##"<rect class="cell" x="{x:.1}" y="{legend_y:.1}" width="{cell}" height="{cell}" rx="2" fill="{fill}" />"##,
-            x = legend_x + 60.0 + (i as f32) * (cell as f32 + 2.0),
+            r##"<rect class="cell" x="{x:.1}" y="{legend_y:.1}" width="{cell}" height="{cell}" rx="2" fill="{track}" />{ink}"##,
             legend_y = legend_y,
             cell = cell,
-            fill = fill,
+            track = theme.track,
+            ink = heat_ink(x, legend_y, cell as f32, level),
         ));
     }
 
@@ -372,6 +366,7 @@ fn render_heatmap_inner(
 
     format!(
         r##"<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 {width} {height}" role="img" aria-label="Commit activity for {repo}">
+  <defs data-gitdebt-heat-defs="true">{heat_defs}</defs>
   <style><![CDATA[
     .title {{ fill: {fg}; font: 600 18px ui-sans-serif, system-ui, sans-serif; }}
     .subtitle {{ fill: {muted}; font: 13px ui-sans-serif, system-ui, sans-serif; }}
@@ -404,6 +399,7 @@ fn render_heatmap_inner(
         fg = theme.fg,
         muted = theme.muted,
         border = theme.border,
+        heat_defs = heat_defs(theme),
         pad_left = pad_left,
         total = total,
         peak_text = escape_xml(&peak_text),
@@ -414,6 +410,48 @@ fn render_heatmap_inner(
         legend_cells = legend_cells,
         legend_more_x = legend_x + 60.0 + 5.0 * (cell as f32 + 2.0) + 4.0,
         footer = brand::footer_lockup((width as f32) - 16.0, (height - 10) as f32, theme,),
+    )
+}
+
+// Commit-activity heat levels
+//
+// The heatmap is one series, so it gets one ink and modulates ALPHA, the
+// same contract as every other dithered surface here. Each intensity
+// level is a Bayer density tier: level 0 leaves the empty track showing,
+// levels 1–4 stack a denser lit-cell pattern on top. Nothing is shaded —
+// a flat five-step gray ramp is what made this chart the odd one out.
+
+/// Bayer density tier per heat level (`0` = no commits, `4` = top
+/// quartile). The top tier stops at 13/16 so even the busiest day still
+/// shows grain instead of flattening back into a solid swatch.
+const HEAT_TIERS: [usize; 5] = [0, 2, 6, 10, 13];
+/// Lit-cell alpha per heat level, following `0.3 + 0.7 · density`.
+const HEAT_ALPHA: [&str; 5] = ["0", "0.48", "0.65", "0.83", "1"];
+/// Id namespace for the heat tier ladder.
+const HEAT_NS: &str = "gd-heat";
+
+/// The tier ladder the heatmap actually references, in the theme's ink.
+fn heat_defs(theme: &Theme) -> String {
+    let mut out = String::new();
+    for tier in HEAT_TIERS.iter().skip(1) {
+        out.push_str(&crate::texture::tier_pattern_ns(
+            HEAT_NS, theme.fg, 2.0, *tier,
+        ));
+    }
+    out
+}
+
+/// Dithered ink overlay for one heat cell. Level 0 renders nothing so the
+/// empty track shows through untouched.
+fn heat_ink(x: f32, y: f32, cell: f32, level: usize) -> String {
+    let level = level.min(HEAT_TIERS.len() - 1);
+    if level == 0 {
+        return String::new();
+    }
+    format!(
+        r##"<rect class="heat-ink" x="{x:.0}" y="{y:.0}" width="{cell:.0}" height="{cell:.0}" rx="2" fill="{fill}" fill-opacity="{alpha}" shape-rendering="crispEdges" pointer-events="none" />"##,
+        fill = crate::texture::tier_fill_ns(HEAT_NS, HEAT_TIERS[level]),
+        alpha = HEAT_ALPHA[level],
     )
 }
 
@@ -581,14 +619,29 @@ fn render_languages_inner(repo: &str, rows: &[LanguageBar], theme: &Theme) -> St
     let total_files: i64 = rows.iter().map(|r| r.files).sum();
 
     let mut bars = String::new();
+    let mut lang_defs = String::new();
     for (i, row) in rows.iter().enumerate() {
         let total = totals[i];
         let y = header_h as f32 + (i as f32) * row_h as f32 + (row_h - bar_h) as f32 / 2.0;
         let bar_w = (total as f32 / max_total as f32) * bar_max_w;
-        let color = linguist_color(&row.language);
+        let color = language_color(&row.language, theme);
+        // One ordered-dither ladder per row, inked in that language's own
+        // color. The bar then varies ALPHA (unlit tier under lit tier),
+        // never shade, so the grain matches every other gitdebt surface.
+        let ns = format!("gd-lang{i}");
+        lang_defs.push_str(&crate::texture::tier_pattern_ns(
+            &ns,
+            &color,
+            2.0,
+            LANGUAGE_TIER,
+        ));
         let count_text = humanize(total);
+        // Contrast is judged against what the bar actually LOOKS like —
+        // the dither's average coverage over the track — not against the
+        // raw ink, or a count printed inside a light bar goes invisible.
+        let bar_tone = dithered_tone(&color, theme.track);
         let (count_x, count_anchor, count_color) =
-            count_placement(label_w, bar_w, &count_text, color, theme.muted);
+            count_placement(label_w, bar_w, &count_text, &bar_tone, theme.muted);
         let meta_text = if file_census {
             format!(
                 "{} file{}",
@@ -617,8 +670,9 @@ fn render_languages_inner(repo: &str, rows: &[LanguageBar], theme: &Theme) -> St
   <circle cx="6" cy="{dot_y:.1}" r="6" fill="{color}" />
   <text class="bar-label" x="20" y="{label_y:.1}">{language}</text>
   <rect class="bar-track" x="{label_w}" y="0" width="{bar_max_w:.1}" height="{bar_h}" rx="3" />
-  <rect x="{label_w}" y="0" width="{bar_w:.1}" height="{bar_h}" rx="3" fill="{color}" opacity="0.28" />
-  <rect x="{label_w}" y="0" width="{bar_w:.1}" height="{bar_h}" rx="3" fill="url(#gd-pixel-fill)" stroke="{color}" stroke-width="1" />
+  <rect x="{label_w}" y="0" width="{bar_w:.1}" height="{bar_h}" rx="3" fill="{color}" fill-opacity="{off_alpha}" />
+  <rect x="{label_w}" y="0" width="{bar_w:.1}" height="{bar_h}" rx="3" fill="{lang_fill}" fill-opacity="{lit_alpha}" shape-rendering="crispEdges" />
+  <rect x="{label_w}" y="0" width="{bar_w:.1}" height="{bar_h}" rx="3" fill="none" stroke="{color}" stroke-width="1" />
   <text class="bar-count" x="{count_x:.1}" y="{label_y:.1}" text-anchor="{count_anchor}" fill="{count_color}">
     <title>{title}</title>
     {count_text}
@@ -633,6 +687,9 @@ fn render_languages_inner(repo: &str, rows: &[LanguageBar], theme: &Theme) -> St
             begin = reveal_begin(i),
             dot_y = bar_h as f32 / 2.0,
             color = color,
+            lang_fill = crate::texture::tier_fill_ns(&ns, LANGUAGE_TIER),
+            off_alpha = LANGUAGE_OFF_ALPHA,
+            lit_alpha = LANGUAGE_LIT_ALPHA,
             language = escape_xml(&row.language),
             label_w = label_w,
             label_y = bar_h as f32 / 2.0 + 5.0,
@@ -675,6 +732,7 @@ fn render_languages_inner(repo: &str, rows: &[LanguageBar], theme: &Theme) -> St
     };
     format!(
         r##"<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 {width} {height}" role="img" aria-label="{aria}">
+  <defs data-gitdebt-language-defs="true">{lang_defs}</defs>
   <style><![CDATA[
     .title {{ fill: {fg}; font: 600 18px ui-sans-serif, system-ui, sans-serif; }}
     .subtitle {{ fill: {muted}; font: 13px ui-sans-serif, system-ui, sans-serif; }}
@@ -701,10 +759,23 @@ fn render_languages_inner(repo: &str, rows: &[LanguageBar], theme: &Theme) -> St
         track = theme.track,
         padding = padding,
         bars = bars,
+        lang_defs = lang_defs,
         subtitle = escape_xml(&subtitle),
         footer = brand::footer_lockup(right_edge_x, footer_y, theme),
     )
 }
+
+/// Density tier used by the language bars: 12/16 cells lit, which reads
+/// as a solid-but-grainy fill at the 2px cell size.
+const LANGUAGE_TIER: usize = 11;
+/// Average ink coverage of a [`LANGUAGE_TIER`] bar: lit cells at
+/// [`LANGUAGE_LIT_ALPHA`] plus unlit cells at [`LANGUAGE_OFF_ALPHA`].
+const LANGUAGE_COVERAGE: f32 = 0.74;
+/// Alpha of the unlit cells (the ordered-dither "off" tier) and of the
+/// lit pattern above it. Alpha-only modulation: both layers carry the
+/// same ink, so the bar reads correctly on either theme's canvas.
+const LANGUAGE_OFF_ALPHA: &str = "0.2";
+const LANGUAGE_LIT_ALPHA: &str = "0.92";
 
 fn humanize(n: i64) -> String {
     if n >= 1_000_000 {
@@ -716,22 +787,33 @@ fn humanize(n: i64) -> String {
     }
 }
 
-/// GitHub Linguist colors for every language emitted by `code_count`.
-/// Synthetic aliases use their parent language's color, while formats
-/// without an official color fall back to an achromatic gray.
+// Per-language ink
+
+/// Achromatic gray for buckets that are not one language: the synthetic
+/// `Config` rollup and anything the census could not name. Documented
+/// meaning: "no single language".
 const NEUTRAL_LANGUAGE_COLOR: &str = "#8b8b8b";
 
-fn linguist_color(name: &str) -> &'static str {
-    match name {
+/// The conventional color for a language, as readers already expect it
+/// (Go cyan, Rust rust, TypeScript blue, …). Synthetic aliases inherit
+/// their parent language's color. `None` → no conventional color exists,
+/// so the caller derives a stable hue from the name instead.
+///
+/// This map is the *source* hue only; [`language_color`] is what renders,
+/// because these values were picked against a white page and several of
+/// them (`#292929`, `#012456`, `#f1e05a`) are unreadable on one of our
+/// two themes untouched.
+fn conventional_language_color(name: &str) -> Option<&'static str> {
+    Some(match name {
         "Rust" => "#dea584",
         "TypeScript" | "TSX" => "#3178c6",
         "JavaScript" | "JSX" => "#f1e05a",
-        "Python" => "#3572A5",
-        "Go" => "#00ADD8",
+        "Python" => "#3572a5",
+        "Go" => "#00add8",
         "Ruby" => "#701516",
         "Java" => "#b07219",
-        "Kotlin" => "#A97BFF",
-        "Swift" => "#F05138",
+        "Kotlin" => "#a97bff",
+        "Swift" => "#f05138",
         "Objective-C" => "#438eff",
         "C" => "#555555",
         "C++" => "#f34b7d",
@@ -754,28 +836,130 @@ fn linguist_color(name: &str) -> &'static str {
         "Dockerfile" => "#384d54",
         "Lua" => "#000080",
         "Perl" => "#0298c3",
-        "PHP" => "#4F5D95",
+        "PHP" => "#4f5d95",
         "Scala" => "#c22d40",
         "Groovy" => "#4298b8",
         "Haskell" => "#5e5086",
         "Elixir" => "#6e4a7e",
-        "Erlang" => "#B83998",
+        "Erlang" => "#b83998",
         "OCaml" => "#3be133",
-        "Dart" => "#00B4AB",
+        "Dart" => "#00b4ab",
         "Zig" => "#ec915c",
-        "R" => "#198CE7",
+        "R" => "#198ce7",
         "Julia" => "#a270ba",
         "Nix" => "#7e7eff",
         "Makefile" => "#427819",
-        "CMake" => "#DA3434",
+        "CMake" => "#da3434",
         "SQL" => "#e38c00",
         "GraphQL" => "#e10098",
         "Verilog" => "#b2b7f8",
-        "Terraform" | "HCL" => "#844FBA",
-        "TeX" => "#3D6117",
+        "Terraform" | "HCL" => "#844fba",
+        "TeX" => "#3d6117",
         "Config" => NEUTRAL_LANGUAGE_COLOR,
-        _ => NEUTRAL_LANGUAGE_COLOR,
+        _ => return None,
+    })
+}
+
+/// Stable per-language ink, legibility-corrected for `theme`.
+///
+/// Two rules, in order:
+///   1. hue is the language's conventional color when one exists, and a
+///      deterministic name-derived hue otherwise — so two languages never
+///      share a bar color just because they are adjacent in the list;
+///   2. the result is pushed into the theme's readable luminance band by
+///      blending toward white (dark theme) or black (light theme). Hue
+///      survives; only lightness moves. Same input → same bytes.
+pub fn language_color(name: &str, theme: &Theme) -> String {
+    let rgb = conventional_language_color(name)
+        .and_then(parse_hex)
+        .unwrap_or_else(|| hashed_language_rgb(name));
+    let (min, max) = if theme.dark {
+        (0.30_f32, 0.94_f32)
+    } else {
+        (0.06_f32, 0.55_f32)
+    };
+    format_hex(clamp_luma(rgb, min, max))
+}
+
+/// The apparent color of a dithered bar: `ink` composited over `track` at
+/// the tier's average coverage. Contrast decisions must use this, not the
+/// raw ink, because only a fraction of the bar's cells are actually lit.
+fn dithered_tone(ink: &str, track: &str) -> String {
+    let (Some(ink), Some(track)) = (parse_hex(ink), parse_hex(track)) else {
+        return ink.to_string();
+    };
+    let mut out = [0.0_f32; 3];
+    for i in 0..3 {
+        out[i] = ink[i] * LANGUAGE_COVERAGE + track[i] * (1.0 - LANGUAGE_COVERAGE);
     }
+    format_hex(out)
+}
+
+/// Relative luminance of an sRGB triple, in `0.0..=1.0`. Deliberately the
+/// cheap non-linearized form: this only has to rank colors consistently.
+fn luma([r, g, b]: [f32; 3]) -> f32 {
+    (0.2126 * r + 0.7152 * g + 0.0722 * b) / 255.0
+}
+
+/// Blend toward white or black until the luminance lands inside
+/// `[min, max]`. Both blends are affine in each channel, so the resulting
+/// luminance is exactly the requested bound.
+fn clamp_luma(rgb: [f32; 3], min: f32, max: f32) -> [f32; 3] {
+    let l = luma(rgb);
+    if l < min {
+        let t = (min - l) / (1.0 - l).max(f32::EPSILON);
+        rgb.map(|c| c + (255.0 - c) * t)
+    } else if l > max {
+        let t = (l - max) / l.max(f32::EPSILON);
+        rgb.map(|c| c * (1.0 - t))
+    } else {
+        rgb
+    }
+}
+
+fn parse_hex(hex: &str) -> Option<[f32; 3]> {
+    let raw = hex.strip_prefix('#')?;
+    if raw.len() != 6 {
+        return None;
+    }
+    let byte = |i: usize| u8::from_str_radix(&raw[i..i + 2], 16).ok().map(f32::from);
+    Some([byte(0)?, byte(2)?, byte(4)?])
+}
+
+fn format_hex(rgb: [f32; 3]) -> String {
+    let ch = |v: f32| v.round().clamp(0.0, 255.0) as u8;
+    format!("#{:02x}{:02x}{:02x}", ch(rgb[0]), ch(rgb[1]), ch(rgb[2]))
+}
+
+/// Deterministic fallback hue for languages with no conventional color.
+/// FNV-1a over the name picks a hue; saturation and lightness are fixed
+/// so every derived color starts inside a sane band before the theme
+/// clamp runs.
+fn hashed_language_rgb(name: &str) -> [f32; 3] {
+    let mut hash: u32 = 0x811c_9dc5;
+    for byte in name.as_bytes() {
+        hash ^= u32::from(*byte);
+        hash = hash.wrapping_mul(0x0100_0193);
+    }
+    // 24 evenly spaced hues, offset so the first bucket is not pure red.
+    let hue = ((hash % 24) as f32) * 15.0 + 7.0;
+    hsl_to_rgb(hue, 0.62, 0.58)
+}
+
+fn hsl_to_rgb(h: f32, s: f32, l: f32) -> [f32; 3] {
+    let c = (1.0 - (2.0 * l - 1.0).abs()) * s;
+    let hp = (h % 360.0) / 60.0;
+    let x = c * (1.0 - (hp % 2.0 - 1.0).abs());
+    let (r, g, b) = match hp as u32 {
+        0 => (c, x, 0.0),
+        1 => (x, c, 0.0),
+        2 => (0.0, c, x),
+        3 => (0.0, x, c),
+        4 => (x, 0.0, c),
+        _ => (c, 0.0, x),
+    };
+    let m = l - c / 2.0;
+    [(r + m) * 255.0, (g + m) * 255.0, (b + m) * 255.0]
 }
 
 // TODO/FIXME trend
@@ -1280,14 +1464,12 @@ fn empty_chart(width: u32, height: u32, message: &str, theme: &Theme) -> String 
   <style><![CDATA[
     .footer-link {{ fill: {muted}; font: 600 11px ui-sans-serif, system-ui, sans-serif; text-decoration: none; letter-spacing: 0.02em; }}
   ]]></style>
-  <rect width="{width}" height="{height}" fill="{bg}" />
   <text x="50%" y="50%" text-anchor="middle" fill="{muted}"
         font-family="ui-sans-serif, system-ui, sans-serif" font-size="14">{message}</text>
 {footer}
 </svg>"##,
         width = width,
         height = height,
-        bg = theme.bg,
         muted = theme.muted,
         message = escape_xml(message),
         footer = brand::footer_lockup(width as f32 - 24.0, height as f32 - 12.0, theme),
@@ -1443,6 +1625,176 @@ mod tests {
         assert!(svg.contains("data-gitdebt-logo=\"true\""));
         assert!(svg.contains(">gitdebt</text>"));
         assert!(svg.contains("text-anchor=\"end\""));
+    }
+
+    /// The commit-activity heatmap used to be the one repo-stat chart with
+    /// no dither at all — a flat five-step gray ramp. It must now carry the
+    /// same ordered-dither contract as everything else: one ink, density
+    /// tiers, alpha-only.
+    #[test]
+    fn commit_activity_heatmap_is_dithered_one_ink_alpha_only() {
+        let mut days = Vec::new();
+        for (i, commits) in [1i64, 3, 9, 40, 0, 7, 22].into_iter().enumerate() {
+            days.push(DayCount {
+                day: NaiveDate::from_ymd_opt(2026, 3, 1).unwrap()
+                    + chrono::Duration::days(i as i64),
+                commits,
+            });
+        }
+        let start = NaiveDate::from_ymd_opt(2026, 3, 1).unwrap();
+        let end = NaiveDate::from_ymd_opt(2026, 3, 7).unwrap();
+        for theme in [&theme::LIGHT, &theme::DARK] {
+            let svg = render_heatmap("foo/bar", "Commit activity", start, end, &days, theme);
+            assert!(svg.contains("data-gitdebt-heat-defs=\"true\""));
+            assert!(svg.contains("class=\"heat-ink\""));
+            assert!(svg.contains("shape-rendering=\"crispEdges\""));
+            // Every referenced tier must have a matching def, and every def
+            // must be inked with the SAME single color.
+            for tier in HEAT_TIERS.iter().skip(1) {
+                assert!(
+                    svg.contains(&format!("id=\"gd-heat-t{tier}\"")),
+                    "missing tier {tier} def"
+                );
+            }
+            assert!(svg.contains("fill=\"url(#gd-heat-t13)\""));
+            assert!(!svg.contains(theme.heat_2), "flat gray ramp must be gone");
+            // Alpha-only modulation across the levels.
+            for alpha in HEAT_ALPHA.iter().skip(1) {
+                assert!(
+                    svg.contains(&format!("fill-opacity=\"{alpha}\"")),
+                    "missing level alpha {alpha}"
+                );
+            }
+            assert_eq!(
+                svg,
+                render_heatmap("foo/bar", "Commit activity", start, end, &days, theme)
+            );
+        }
+    }
+
+    #[test]
+    fn heat_ink_is_empty_for_dormant_days() {
+        assert_eq!(heat_ink(0.0, 0.0, 14.0, 0), "");
+        assert!(heat_ink(0.0, 0.0, 14.0, 1).contains("gd-heat-t2"));
+        // Out-of-range levels clamp to the top tier instead of panicking.
+        assert!(heat_ink(0.0, 0.0, 14.0, 99).contains("gd-heat-t13"));
+        assert!(heat_ink(0.0, 0.0, 14.0, 4).contains("pointer-events=\"none\""));
+    }
+
+    #[test]
+    fn every_repo_chart_carries_dither_markup() {
+        let start = NaiveDate::from_ymd_opt(2026, 1, 1).unwrap();
+        let end = NaiveDate::from_ymd_opt(2026, 1, 7).unwrap();
+        let days = vec![DayCount {
+            day: NaiveDate::from_ymd_opt(2026, 1, 3).unwrap(),
+            commits: 5,
+        }];
+        let files = vec![FileRow {
+            path: "src/lib.rs".into(),
+            count: 12,
+        }];
+        let charts: [(&str, String); 8] = [
+            (
+                "bug magnets",
+                render_bug_magnets("o/r", &files, &theme::DARK),
+            ),
+            (
+                "top changed",
+                render_top_changed("o/r", &files, &theme::DARK),
+            ),
+            (
+                "commit activity",
+                render_heatmap("o/r", "Commit activity", start, end, &days, &theme::DARK),
+            ),
+            (
+                "contributors",
+                render_contributors(
+                    "o/r",
+                    &[ContributorRow {
+                        login: Some("a".into()),
+                        name: "a".into(),
+                        avatar_url: None,
+                        commits: 3,
+                    }],
+                    &theme::DARK,
+                ),
+            ),
+            (
+                "languages",
+                render_languages(
+                    "o/r",
+                    &[LanguageBar {
+                        language: "Rust".into(),
+                        files: 2,
+                        lines_code: 30,
+                        lines_blank: 3,
+                        lines_comment: 1,
+                    }],
+                    &theme::DARK,
+                ),
+            ),
+            (
+                "todo trend",
+                render_todo_trend(
+                    "o/r",
+                    &[
+                        TodoPoint {
+                            day: start,
+                            running_total: 1,
+                        },
+                        TodoPoint {
+                            day: end,
+                            running_total: 4,
+                        },
+                    ],
+                    &theme::DARK,
+                ),
+            ),
+            (
+                "bus factor",
+                render_bus_factor(
+                    "o/r",
+                    &[AuthorShare {
+                        label: "a".into(),
+                        login: None,
+                        avatar_url: None,
+                        commits: 5,
+                    }],
+                    5,
+                    &theme::DARK,
+                ),
+            ),
+            (
+                "commit trend",
+                render_commit_trend("o/r", &days, &theme::DARK),
+            ),
+        ];
+        for (name, svg) in charts {
+            let dithered = svg.contains("url(#gd-pixel-fill)")
+                || svg.contains("url(#gd-heat-t")
+                || svg.contains("url(#gd-lang");
+            assert!(dithered, "{name} renders its data without dither");
+            // The shared pixel-grain field is on every surface.
+            assert!(
+                svg.contains("data-gitdebt-texture=\"true\""),
+                "{name} is missing the shared texture field"
+            );
+        }
+    }
+
+    #[test]
+    fn empty_charts_keep_the_shared_texture_field() {
+        // The empty state used to paint an opaque background rect on top of
+        // the texture field, so "no data" looked like a different product.
+        let svg = render_commit_trend("o/r", &[], &theme::DARK);
+        assert!(svg.contains("no commit data yet"));
+        assert!(svg.contains("data-gitdebt-texture=\"true\""));
+        let texture = svg.find("data-gitdebt-texture").expect("texture");
+        assert!(texture < svg.find("<text x=\"50%\"").expect("message"));
+        assert!(!svg.contains(&format!(
+            "<rect width=\"1200\" height=\"360\" fill=\"{}\" />",
+            theme::DARK.bg
+        )));
     }
 
     #[test]
@@ -1806,20 +2158,132 @@ mod tests {
         assert!(svg.contains(" code · "));
         // Per-row meta has files + code.
         assert!(svg.contains("88 files · "));
-        // Language marks use GitHub Linguist colors while labels stay themed.
-        assert!(svg.contains(r##"<circle cx="6" cy="9.0" r="6" fill="#dea584" />"##));
-        assert!(svg.contains(r##"height="18" rx="3" fill="#3178c6" opacity="0.28""##));
-        assert!(svg.contains(r##"fill="url(#gd-pixel-fill)" stroke="#3178c6""##));
+        // Each language gets its OWN ink, on the dot, the dither ladder,
+        // and the value contour. Labels stay themed.
+        let rust = language_color("Rust", &theme::LIGHT);
+        let ts = language_color("TypeScript", &theme::LIGHT);
+        assert_ne!(rust, ts);
+        assert!(svg.contains(&format!(
+            r##"<circle cx="6" cy="9.0" r="6" fill="{rust}" />"##
+        )));
+        assert!(svg.contains(r##"id="gd-lang0-t11""##));
+        assert!(svg.contains(r##"id="gd-lang1-t11""##));
+        assert!(svg.contains(&format!(
+            "<rect x=\"1\" y=\"1\" width=\"1\" height=\"1\" fill=\"{rust}\" />"
+        )));
+        assert!(svg.contains(&format!(
+            "<rect x=\"1\" y=\"1\" width=\"1\" height=\"1\" fill=\"{ts}\" />"
+        )));
+        assert!(svg.contains(r##"fill="url(#gd-lang1-t11)""##));
+        assert!(svg.contains(&format!(r##"fill="none" stroke="{ts}""##)));
         assert!(svg.contains(".bar-label { fill: #0a0a0a;"));
+        // Alpha-only: the two tiers differ in opacity, never in shade.
+        assert!(svg.contains(r##"fill-opacity="0.2""##));
+        assert!(svg.contains(r##"fill-opacity="0.92""##));
     }
 
     #[test]
-    fn languages_use_known_colors_and_neutral_fallback() {
-        assert_eq!(linguist_color("Rust"), "#dea584");
-        assert_eq!(linguist_color("TypeScript"), "#3178c6");
-        assert_eq!(linguist_color("Astro"), "#ff5a03");
-        assert_eq!(linguist_color("Config"), NEUTRAL_LANGUAGE_COLOR);
-        assert_eq!(linguist_color("Unknown language"), NEUTRAL_LANGUAGE_COLOR);
+    fn language_colors_are_deterministic_stable_and_distinct() {
+        // Same input → same bytes, in both themes.
+        for theme in [&theme::LIGHT, &theme::DARK] {
+            assert_eq!(language_color("Rust", theme), language_color("Rust", theme));
+            assert_eq!(
+                language_color("Made-up lang", theme),
+                language_color("Made-up lang", theme)
+            );
+        }
+        // The conventional hue survives; only lightness is corrected.
+        assert_eq!(conventional_language_color("Rust"), Some("#dea584"));
+        assert_eq!(conventional_language_color("Go"), Some("#00add8"));
+        assert_eq!(conventional_language_color("Config"), Some("#8b8b8b"));
+        assert_eq!(conventional_language_color("Unknown language"), None);
+
+        // Every common language resolves to its own color, per theme.
+        let langs = [
+            "Rust",
+            "TypeScript",
+            "JavaScript",
+            "Python",
+            "Go",
+            "C",
+            "C++",
+            "C#",
+            "Java",
+            "Kotlin",
+            "Swift",
+            "Ruby",
+            "PHP",
+            "Shell",
+            "HTML",
+            "CSS",
+            "Vue",
+            "Svelte",
+            "Dart",
+            "Scala",
+            "Elixir",
+            "Haskell",
+            "Lua",
+            "Zig",
+            "Nix",
+            "Markdown",
+            "JSON",
+            "YAML",
+            "TOML",
+            "SQL",
+            "Dockerfile",
+        ];
+        for theme in [&theme::LIGHT, &theme::DARK] {
+            let mut seen: std::collections::BTreeMap<String, &str> = Default::default();
+            for name in langs {
+                let color = language_color(name, theme);
+                assert_eq!(color.len(), 7, "{name} must render as #rrggbb");
+                if let Some(other) = seen.insert(color.clone(), name) {
+                    panic!(
+                        "{name} collides with {other} at {color} (dark={})",
+                        theme.dark
+                    );
+                }
+            }
+        }
+    }
+
+    #[test]
+    fn language_colors_stay_legible_on_both_canvases() {
+        // Near-black dark canvas: nothing may sink below the readable
+        // floor (Lua's #000080 and JSON's #292929 are the worst cases).
+        for name in ["Lua", "JSON", "PowerShell", "Ruby", "C", "Less", "Made-up"] {
+            let dark = parse_hex(&language_color(name, &theme::DARK)).expect("hex");
+            assert!(
+                luma(dark) >= 0.29,
+                "{name} is too dark on the dark canvas: {:?}",
+                dark
+            );
+            // Light theme: nothing may wash out (JavaScript, OCaml, Shell).
+            let light = parse_hex(&language_color(name, &theme::LIGHT)).expect("hex");
+            assert!(
+                luma(light) <= 0.56,
+                "{name} is too light on the light canvas: {:?}",
+                light
+            );
+        }
+        for name in ["JavaScript", "OCaml", "Shell", "SVG"] {
+            let light = parse_hex(&language_color(name, &theme::LIGHT)).expect("hex");
+            assert!(luma(light) <= 0.56, "{name} washes out on white");
+        }
+    }
+
+    #[test]
+    fn unnamed_languages_get_stable_hashed_hues() {
+        let a = language_color("Whatsit", &theme::DARK);
+        let b = language_color("Thingamajig", &theme::DARK);
+        assert_ne!(a, b, "distinct unknown languages must not share a hue");
+        assert_eq!(a, language_color("Whatsit", &theme::DARK));
+        // `Config` is the documented "no single language" bucket and keeps
+        // the achromatic gray rather than picking up a hue.
+        assert_eq!(
+            conventional_language_color("Config"),
+            Some(NEUTRAL_LANGUAGE_COLOR)
+        );
 
         let rows = vec![LanguageBar {
             language: "Unknown language".into(),
@@ -1829,7 +2293,7 @@ mod tests {
             lines_comment: 2,
         }];
         let svg = render_languages("foo/bar", &rows, &theme::DARK);
-        assert!(svg.contains(r##"fill="#8b8b8b""##));
+        assert!(svg.contains(&language_color("Unknown language", &theme::DARK)));
         assert!(svg.contains(".bar-label { fill: #fafafa;"));
     }
 

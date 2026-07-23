@@ -27,7 +27,7 @@ const DEFAULT_MAX_PENDING_ANALYSES: i64 = 500;
 const DEFAULT_ANALYSIS_FRESH_HOURS: i64 = 24;
 const ENQUEUE_LOCK_ID: i64 = 6_794_738_132_977;
 pub const INTERACTIVE_PRIORITY: i64 = 1_000_000_000_000;
-pub(crate) const CURRENT_ANALYSIS_REVISION: i32 = 3;
+pub const CURRENT_ANALYSIS_REVISION: i32 = 3;
 
 #[derive(Clone)]
 pub struct AnalysisCtx {
@@ -68,8 +68,71 @@ fn analysis_freshness() -> chrono::Duration {
     chrono::Duration::hours(hours)
 }
 
+/// **The** definition of "this repository's analysis is done and current",
+/// as one reusable predicate. `$1` repo · `$2` freshness cutoff · `$3`
+/// required analysis revision.
+///
+/// Three conditions, all of them about the *analysis*:
+///   * `last_analyzed_at >= cutoff` — the walk ran recently enough;
+///   * `analysis_revision >= $3` — it ran under the current algorithm;
+///   * `last_analyzed_sha = head_sha` — it reached the head it observed
+///     (`repo_stats::write_commits_at_head` writes both columns in the same
+///     statement, so any other pairing means the run did not finish).
+///
+/// Deliberately absent: author login/avatar enrichment. That is
+/// presentation-only metadata resolved best-effort against the GitHub API,
+/// and some authors' commit emails can never resolve to a login. Gating
+/// readiness on it made every such repository permanently "not analyzed":
+/// the profile poll re-enqueued it every few seconds, each run applied zero
+/// commits and completed, and the queue never drained. Enrichment now
+/// converges on its own in [`sweep_author_enrichment`] and can neither
+/// re-open an analysis nor hold one open.
+const ANALYSIS_IS_CURRENT_SQL: &str = "SELECT EXISTS( \
+     SELECT 1 FROM repo_history history \
+     WHERE history.repo = $1 \
+       AND history.last_analyzed_at >= $2 \
+       AND history.analysis_revision >= $3 \
+       AND history.last_analyzed_sha IS NOT NULL \
+       AND history.head_sha = history.last_analyzed_sha \
+ )";
+
 pub async fn enqueue(db: &Db, repo: &str) -> Result<EnqueueOutcome> {
     enqueue_prioritized(db, repo, 0, None).await
+}
+
+/// Raise an existing queue row's priority and requester without disturbing
+/// a claimed job's lease or a pending job's place in line.
+async fn bump_active_job(
+    tx: &mut sqlx::Transaction<'_, sqlx::Postgres>,
+    repo: &str,
+    priority: i64,
+    requested_by_user_id: Option<i64>,
+) -> Result<()> {
+    sqlx::query(
+        "UPDATE repo_analysis_queue SET \
+            priority = GREATEST(priority, $2), \
+            requested_by_user_id = COALESCE($3, requested_by_user_id), \
+            next_attempt_at = CASE WHEN status = 'pending' THEN NOW() ELSE next_attempt_at END, \
+            updated_at = NOW() \
+         WHERE repo = $1",
+    )
+    .bind(repo)
+    .bind(priority.max(0))
+    .bind(requested_by_user_id)
+    .execute(&mut **tx)
+    .await?;
+    Ok(())
+}
+
+/// Read-only form of [`ANALYSIS_IS_CURRENT_SQL`] for callers that need the
+/// same answer outside an enqueue transaction (tests, readiness surfaces).
+pub async fn analysis_is_current(db: &Db, repo: &str) -> Result<bool> {
+    Ok(sqlx::query_scalar(ANALYSIS_IS_CURRENT_SQL)
+        .bind(repo)
+        .bind(Utc::now() - analysis_freshness())
+        .bind(CURRENT_ANALYSIS_REVISION)
+        .fetch_one(&db.pool)
+        .await?)
 }
 
 /// Queue repository health work with a durable priority. An authenticated
@@ -95,44 +158,28 @@ pub async fn enqueue_prioritized(
             .bind(repo)
             .fetch_optional(&mut *tx)
             .await?;
-    if let Some("pending" | "in_progress") = status.as_deref() {
-        sqlx::query(
-            "UPDATE repo_analysis_queue SET \
-                priority = GREATEST(priority, $2), \
-                requested_by_user_id = COALESCE($3, requested_by_user_id), \
-                next_attempt_at = CASE WHEN status = 'pending' THEN NOW() ELSE next_attempt_at END, \
-                updated_at = NOW() \
-             WHERE repo = $1",
-        )
-        .bind(repo)
-        .bind(priority.max(0))
-        .bind(requested_by_user_id)
-        .execute(&mut *tx)
-        .await?;
+    // A worker holds the lease on an in-progress job; never touch its row
+    // beyond the priority bump, and never judge its freshness — the run it
+    // is doing right now is what makes the row current.
+    let in_progress = status.as_deref() == Some("in_progress");
+    if in_progress {
+        bump_active_job(&mut tx, repo, priority, requested_by_user_id).await?;
         tx.commit().await?;
         return Ok(EnqueueOutcome::AlreadyActive);
     }
 
-    let fresh: bool = sqlx::query_scalar(
-        "SELECT EXISTS( \
-            SELECT 1 FROM repo_history history \
-            WHERE history.repo = $1 \
-              AND history.last_analyzed_at >= $2 \
-              AND history.analysis_revision >= $3 \
-              AND NOT EXISTS ( \
-                  SELECT 1 FROM repo_author_stats author \
-                  WHERE author.repo = history.repo \
-                    AND (author.github_login IS NULL \
-                         OR author.avatar_url LIKE 'https://www.gravatar.com/%') \
-                    AND author.enrich_attempted_at IS NULL \
-              ) \
-         )",
-    )
-    .bind(repo)
-    .bind(now - analysis_freshness())
-    .bind(CURRENT_ANALYSIS_REVISION)
-    .fetch_one(&mut *tx)
-    .await?;
+    // Freshness is checked *before* honoring an existing `pending` row, not
+    // after. A queued job for a repository whose analysis is already done
+    // and current is a no-op run: the worker would clone, find HEAD
+    // unchanged, apply zero commits and delete the row. Recognizing it here
+    // drains that row immediately instead, which is what stops a polling
+    // profile page from re-arming the same no-op every few seconds.
+    let fresh: bool = sqlx::query_scalar(ANALYSIS_IS_CURRENT_SQL)
+        .bind(repo)
+        .bind(now - analysis_freshness())
+        .bind(CURRENT_ANALYSIS_REVISION)
+        .fetch_one(&mut *tx)
+        .await?;
     if fresh {
         sqlx::query("DELETE FROM repo_analysis_queue WHERE repo = $1")
             .bind(repo)
@@ -140,6 +187,12 @@ pub async fn enqueue_prioritized(
             .await?;
         tx.commit().await?;
         return Ok(EnqueueOutcome::Fresh);
+    }
+
+    if status.as_deref() == Some("pending") {
+        bump_active_job(&mut tx, repo, priority, requested_by_user_id).await?;
+        tx.commit().await?;
+        return Ok(EnqueueOutcome::AlreadyActive);
     }
 
     let active: i64 = sqlx::query_scalar(
@@ -243,6 +296,11 @@ pub async fn revive_retryable_on_startup(db: &Db) -> Result<u64> {
 }
 
 pub fn spawn_pool(ctx: AnalysisCtx, count: usize) {
+    // Author enrichment rides along with the analysis pool but never on its
+    // critical path: presentation-only metadata converges here, on its own
+    // bounded schedule, so it can neither gate analysis readiness nor keep a
+    // job in the queue.
+    spawn_author_enrichment_sweep(ctx.clone());
     let pool_id = format!("{}-{}", std::process::id(), Utc::now().timestamp_millis());
     for i in 0..count {
         let ctx = ctx.clone();
@@ -491,13 +549,12 @@ async fn process(job: &AnalysisJob, ctx: &AnalysisCtx) -> Result<usize> {
     if Some(handle.head_sha.as_str()) == last_sha.as_deref()
         && analysis_revision >= CURRENT_ANALYSIS_REVISION
     {
-        // Commit aggregates and line counts are unchanged, but author
-        // enrichment is deliberately retried. It is TTL/negative-cache
-        // guarded, and a transient GitHub failure (or a deployment that
-        // predates enrichment) must not strand every `github_login` as NULL
-        // until the repository happens to receive another commit.
-        let github = user_scoped_github(job, ctx).await;
-        run_author_enrichment(&ctx.db, &handle, repo, &github).await;
+        // Nothing to walk: commit aggregates and line counts are already at
+        // this head under the current revision. Return immediately so the
+        // caller dequeues the job. Author enrichment is explicitly NOT run
+        // here — it is presentation-only metadata owned by
+        // [`sweep_author_enrichment`], and doing GitHub work on this path is
+        // what let a repeatedly re-enqueued no-op job burn budget forever.
         return Ok(0);
     }
 
@@ -598,7 +655,7 @@ async fn process(job: &AnalysisJob, ctx: &AnalysisCtx) -> Result<usize> {
     // behavior).
     update_work_progress(&ctx.db, repo, "finishing", Some(n), n).await?;
     let github = user_scoped_github(job, ctx).await;
-    let enrich = run_author_enrichment(&ctx.db, &handle, repo, &github);
+    let enrich = run_author_enrichment(&ctx.db, Some(handle.path.as_path()), repo, &github);
     let line_counts = async {
         if let Err(e) = run_line_counts(&ctx.db, &handle, repo).await {
             tracing::warn!(repo, error = %e, "line counts failed");
@@ -711,53 +768,75 @@ const AUTHOR_ENRICH_TTL: chrono::Duration = chrono::Duration::days(30);
 const AUTHOR_ENRICH_MAX_PER_RUN: i64 = 24;
 const AUTHOR_ENRICH_TIMEOUT: Duration = Duration::from_secs(15);
 
+/// Deferral stamp for rows a pass *selected* but could not genuinely
+/// attempt — its wall-clock budget lapsed, the shared GitHub budget was
+/// empty, or the bare clone needed to sample a commit is not on this
+/// replica's disk.
+///
+/// Such rows are still stamped, because the stamp is the only thing that
+/// makes a pass terminate: an unstamped row is re-selected by the very next
+/// pass, which is precisely the tight loop this design replaces. They are
+/// stamped [`AUTHOR_ENRICH_DEFER`] *before* the TTL edge instead of at
+/// `now`, so a genuinely transient failure retries in hours rather than a
+/// month while still being skipped for long enough to be economical.
+const AUTHOR_ENRICH_DEFER: chrono::Duration = chrono::Duration::hours(6);
+
+/// Parallelism for one enrichment pass. Each author costs 1× `git log`
+/// (local, cheap) + exactly 1× GitHub API call (`commit_author`, which
+/// already returns login+avatar). The GitHub side is rate-limit-bucket
+/// bound; concurrency here only reclaims TCP RTT. 6 is a sweet spot —
+/// small enough that a chromium-class repo (~3000 unresolved authors)
+/// doesn't pile up acquire wakeups, large enough that wall-clock drops
+/// ~6× versus serial.
+const AUTHOR_ENRICH_CONCURRENCY: usize = 6;
+
 /// Author identity is presentation-only metadata. A depleted shared GitHub
-/// budget must never keep a durable repository-analysis worker occupied until
-/// the hourly reset, so every best-effort enrichment pass gets a small fixed
-/// wall-clock budget. The unresolved rows remain eligible for a later run.
+/// budget must never keep a durable repository-analysis worker occupied
+/// until the hourly reset, so every best-effort pass gets a small fixed
+/// wall-clock budget. Never returns an error: analysis completion does not
+/// depend on this.
 async fn run_author_enrichment(
     db: &Db,
-    handle: &RepoHandle,
+    repo_path: Option<&std::path::Path>,
     repo: &str,
     github: &Arc<GithubClient>,
 ) {
-    match tokio::time::timeout(
-        AUTHOR_ENRICH_TIMEOUT,
-        enrich_author_logins(db, handle, repo, github),
-    )
-    .await
-    {
-        Ok(Ok(())) => {}
-        Ok(Err(error)) => {
-            tracing::warn!(repo, %error, "author-login enrichment failed");
-        }
-        Err(_) => {
-            tracing::info!(
-                repo,
-                timeout_seconds = AUTHOR_ENRICH_TIMEOUT.as_secs(),
-                "author-login enrichment deferred after reaching its time budget"
-            );
-        }
+    let deadline = Instant::now() + AUTHOR_ENRICH_TIMEOUT;
+    if let Err(error) = enrich_author_batch(db, repo_path, repo, github, deadline).await {
+        tracing::warn!(repo, %error, "author-login enrichment failed");
     }
 }
 
-/// For every author row whose `github_login` is null (or whose avatar is
-/// still a gravatar fallback) AND that hasn't been attempted within
-/// [`AUTHOR_ENRICH_TTL`], pick one of their commits and ask GitHub who the
-/// human behind the email is. Updates `repo_author_stats` in place.
-/// Failures are logged and skipped — we never block analysis on this.
-async fn enrich_author_logins(
+/// One bounded author-enrichment pass over a single repository.
+///
+/// Selects up to [`AUTHOR_ENRICH_MAX_PER_RUN`] rows whose `github_login` is
+/// null (or whose avatar is still a gravatar fallback) and whose last
+/// attempt has lapsed, then resolves each against the GitHub API using a
+/// commit sampled from the local bare clone.
+///
+/// **Convergence contract:** every row this pass selects leaves it with a
+/// non-null, in-TTL `enrich_attempted_at`. Resolved rows and durable misses
+/// are stamped `now` by [`resolve_one_author`]; everything else — deadline
+/// lapsed, GitHub budget empty, clone unavailable, transient API error — is
+/// swept up by the closing statement at the [`AUTHOR_ENRICH_DEFER`] stamp.
+/// That statement is unconditional and outside any cancellation, so a pass
+/// can never leave the same row eligible for the very next pass.
+///
+/// Returns the number of rows attempted.
+async fn enrich_author_batch(
     db: &Db,
-    handle: &RepoHandle,
+    repo_path: Option<&std::path::Path>,
     repo: &str,
     github: &Arc<GithubClient>,
-) -> Result<()> {
+    deadline: Instant,
+) -> Result<usize> {
     // Negative-cache cutoff: only consider rows not attempted recently.
     // (This also subsumes the "only enrich the new batch" optimization —
     // an already-attempted author from a prior batch is skipped until its
     // TTL lapses, so steady-state runs only touch genuinely-new authors.)
-    let cutoff = Utc::now() - AUTHOR_ENRICH_TTL;
-    let unresolved: Vec<String> = sqlx::query_scalar(
+    let now = Utc::now();
+    let cutoff = now - AUTHOR_ENRICH_TTL;
+    let selected: Vec<String> = sqlx::query_scalar(
         "SELECT author_email FROM repo_author_stats \
          WHERE repo = $1 \
            AND (github_login IS NULL OR avatar_url LIKE 'https://www.gravatar.com/%') \
@@ -771,43 +850,161 @@ async fn enrich_author_logins(
     .fetch_all(&db.pool)
     .await?;
 
-    if unresolved.is_empty() {
-        return Ok(());
+    if selected.is_empty() {
+        return Ok(0);
     }
-    let parts: Vec<&str> = repo.splitn(2, '/').collect();
-    let owner = parts[0].to_string();
-    let name = parts.get(1).copied().unwrap_or("").to_string();
 
-    // Parallelize at AUTHOR_ENRICH_CONCURRENCY. Each author requires
-    // 1× `git log` (local, cheap) + exactly 1× GitHub API call
-    // (`commit_author`, which already returns login+avatar — the old
-    // redundant `/users/{login}` follow-up is gone). The GitHub side is
-    // rate-limit-bucket-bound; concurrency here only reclaims TCP RTT. 6 is
-    // a sweet spot — small enough that a chromium-class repo (~3000
-    // unresolved authors) doesn't pile up acquire wakeups; large enough
-    // that wall-clock drops by ~6x vs serial.
-    use futures::stream::{self, StreamExt};
-    const AUTHOR_ENRICH_CONCURRENCY: usize = 6;
-
-    stream::iter(unresolved)
-        .for_each_concurrent(AUTHOR_ENRICH_CONCURRENCY, |email| {
-            let owner = owner.clone();
-            let name = name.clone();
-            let repo = repo.to_string();
-            let db = db.clone();
-            let github = github.clone();
-            let handle_path = handle.path.clone();
-            async move {
-                if let Err(e) =
-                    resolve_one_author(&db, &handle_path, &repo, &owner, &name, &email, &github)
-                        .await
-                {
-                    tracing::warn!(email, error = %e, "author enrichment failed");
+    // A clone this replica does not hold cannot yield a commit to sample.
+    // Skip straight to the deferral stamp rather than cloning a repository
+    // for presentation metadata.
+    let usable_clone = repo_path.filter(|path| path.is_dir());
+    if let Some(path) = usable_clone {
+        let (owner, name) = match repo.split_once('/') {
+            Some((owner, name)) => (owner.to_string(), name.to_string()),
+            None => (repo.to_string(), String::new()),
+        };
+        use futures::stream::{self, StreamExt};
+        stream::iter(selected.clone())
+            .for_each_concurrent(AUTHOR_ENRICH_CONCURRENCY, |email| {
+                let owner = owner.clone();
+                let name = name.clone();
+                let repo = repo.to_string();
+                let db = db.clone();
+                let github = github.clone();
+                let path = path.to_path_buf();
+                async move {
+                    let remaining = deadline.saturating_duration_since(Instant::now());
+                    if remaining.is_zero() || !github.has_budget().await {
+                        return;
+                    }
+                    // Per-author timeout as well as the pass deadline: a
+                    // single rate-limit `acquire` can otherwise sleep past
+                    // the budget and starve every remaining row.
+                    match tokio::time::timeout(
+                        remaining,
+                        resolve_one_author(&db, &path, &repo, &owner, &name, &email, &github),
+                    )
+                    .await
+                    {
+                        Ok(Ok(())) => {}
+                        Ok(Err(error)) => {
+                            tracing::warn!(email, %error, "author enrichment failed")
+                        }
+                        Err(_) => {}
+                    }
                 }
+            })
+            .await;
+    }
+
+    // Terminating stamp. Only touches rows this pass left un-stamped: a
+    // resolved row (or a durable miss) already carries `now`, which is
+    // neither NULL nor older than the cutoff.
+    let deferred = now - AUTHOR_ENRICH_TTL + AUTHOR_ENRICH_DEFER;
+    sqlx::query(
+        "UPDATE repo_author_stats SET enrich_attempted_at = $1 \
+         WHERE repo = $2 AND author_email = ANY($3) \
+           AND (enrich_attempted_at IS NULL OR enrich_attempted_at < $4)",
+    )
+    .bind(deferred)
+    .bind(repo)
+    .bind(&selected)
+    .bind(cutoff)
+    .execute(&db.pool)
+    .await?;
+    Ok(selected.len())
+}
+
+/// Cadence for the background author-enrichment sweep: one pass at startup,
+/// then every [`AUTHOR_ENRICH_SWEEP_INTERVAL`].
+const AUTHOR_ENRICH_SWEEP_INTERVAL: Duration = Duration::from_secs(15 * 60);
+/// Wall-clock budget for one sweep pass across all of its repositories.
+const AUTHOR_ENRICH_SWEEP_BUDGET: Duration = Duration::from_secs(90);
+/// Repositories one sweep pass may touch.
+const AUTHOR_ENRICH_SWEEP_REPOS: i64 = 8;
+
+/// What one [`sweep_author_enrichment`] pass did.
+#[derive(Debug, Default, Clone, Copy, PartialEq, Eq)]
+pub struct AuthorEnrichmentSweep {
+    pub repos: usize,
+    pub rows_attempted: usize,
+}
+
+/// One bounded pass of the background author-enrichment sweep.
+///
+/// Author identity is presentation-only metadata that must converge on its
+/// own schedule: it can neither gate analysis readiness nor cause a
+/// repository to be re-analyzed. This sweep is the only thing that retries
+/// it, and it is bounded three ways — repositories per pass, rows per
+/// repository, and a shared wall-clock deadline. Every row it selects is
+/// stamped (see [`enrich_author_batch`]), so successive passes strictly
+/// shrink the backlog instead of re-picking the same unresolvable authors.
+pub async fn sweep_author_enrichment(ctx: &AnalysisCtx) -> Result<AuthorEnrichmentSweep> {
+    sweep_author_enrichment_until(ctx, Instant::now() + AUTHOR_ENRICH_SWEEP_BUDGET).await
+}
+
+/// [`sweep_author_enrichment`] with an explicit deadline (tests).
+pub async fn sweep_author_enrichment_until(
+    ctx: &AnalysisCtx,
+    deadline: Instant,
+) -> Result<AuthorEnrichmentSweep> {
+    let cutoff = Utc::now() - AUTHOR_ENRICH_TTL;
+    let candidates: Vec<(String, Option<String>)> = sqlx::query_as(
+        "SELECT history.repo, history.clone_path FROM repo_history history \
+         WHERE EXISTS ( \
+             SELECT 1 FROM repo_author_stats author \
+             WHERE author.repo = history.repo \
+               AND (author.github_login IS NULL \
+                    OR author.avatar_url LIKE 'https://www.gravatar.com/%') \
+               AND (author.enrich_attempted_at IS NULL \
+                    OR author.enrich_attempted_at < $1) \
+         ) \
+         ORDER BY history.last_analyzed_at DESC NULLS LAST, history.repo \
+         LIMIT $2",
+    )
+    .bind(cutoff)
+    .bind(AUTHOR_ENRICH_SWEEP_REPOS)
+    .fetch_all(&ctx.db.pool)
+    .await?;
+
+    let mut sweep = AuthorEnrichmentSweep::default();
+    for (repo, clone_path) in candidates {
+        let path = clone_path.map(std::path::PathBuf::from);
+        // Note the deadline is NOT checked before the call: a lapsed
+        // deadline still runs the batch, which skips every API call and
+        // takes the deferral stamp. Bailing out early instead would leave
+        // the rows unstamped and re-selected by the next pass.
+        match enrich_author_batch(&ctx.db, path.as_deref(), &repo, &ctx.github, deadline).await {
+            Ok(0) => {}
+            Ok(rows) => {
+                sweep.repos += 1;
+                sweep.rows_attempted += rows;
             }
-        })
-        .await;
-    Ok(())
+            Err(error) => tracing::warn!(%repo, %error, "author enrichment sweep pass failed"),
+        }
+    }
+    Ok(sweep)
+}
+
+/// Spawn the periodic author-enrichment sweep (startup + every
+/// [`AUTHOR_ENRICH_SWEEP_INTERVAL`]). Safe in every replica: passes are
+/// idempotent and each stamps the rows it selected, so overlapping sweeps
+/// converge rather than fight.
+pub fn spawn_author_enrichment_sweep(ctx: AnalysisCtx) {
+    tokio::spawn(async move {
+        loop {
+            match sweep_author_enrichment(&ctx).await {
+                Ok(sweep) if sweep.rows_attempted == 0 => {}
+                Ok(sweep) => tracing::info!(
+                    repos = sweep.repos,
+                    rows = sweep.rows_attempted,
+                    "author-enrichment sweep pass complete"
+                ),
+                Err(error) => tracing::warn!(%error, "author-enrichment sweep failed"),
+            }
+            sleep(AUTHOR_ENRICH_SWEEP_INTERVAL).await;
+        }
+    });
 }
 
 async fn resolve_one_author(
@@ -820,8 +1017,9 @@ async fn resolve_one_author(
     github: &Arc<GithubClient>,
 ) -> Result<()> {
     let Some(sha) = sample_commit_for_email_at(handle_path, email).await? else {
-        // No sampleable commit (shouldn't happen for a row that exists) —
-        // don't stamp; let a future run retry once a commit is reachable.
+        // No sampleable commit (shouldn't happen for a row that exists).
+        // Leave it to the caller's deferral stamp so a later pass retries
+        // once a commit is reachable, without re-picking it immediately.
         return Ok(());
     };
     match github.commit_author(owner, name, &sha).await {
@@ -867,8 +1065,11 @@ async fn resolve_one_author(
             stamp_enrich_attempt(db, repo, email).await?;
         }
         Err(e) => {
-            // A transient API error (rate limit, 5xx) — do NOT stamp, so the
-            // next run retries. Only durable "no login" outcomes are cached.
+            // A transient API error (rate limit, 5xx). Don't stamp `now` —
+            // the caller's terminating statement gives this row the shorter
+            // [`AUTHOR_ENRICH_DEFER`] stamp instead, so it retries in hours
+            // rather than being negative-cached for the full TTL, and still
+            // cannot be re-picked by the immediately following pass.
             tracing::warn!(email, error = %e, "commit_author API failed");
         }
     }

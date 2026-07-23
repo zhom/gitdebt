@@ -1,6 +1,5 @@
 ---
 import "@/styles/globals.css";
-import { ArrowRight } from "lucide-react";
 
 import BaseHead from "@/components/BaseHead.astro";
 import Seo from "@/components/Seo.astro";
@@ -8,6 +7,16 @@ import SiteHeader from "@/components/SiteHeader.astro";
 import SiteFooter from "@/components/SiteFooter.astro";
 import { CompareBuilder } from "@/components/CompareBuilder";
 import { WarmRepos } from "@/components/WarmRepos";
+import {
+  BODY,
+  EYEBROW,
+  HEADING,
+  ROW,
+  ROW_BADGE,
+  SECTION_ACTION,
+  SECTION_HEADER,
+  TITLE,
+} from "@/components/style-tokens";
 import { CATEGORIES, CATEGORY_GROUPS } from "@/data/categories";
 import { staticApiBase } from "@/lib/static-api-base";
 
@@ -97,104 +106,100 @@ const suggestionRepos = Array.from(
     <div class="isolate flex min-h-dvh flex-col">
       <SiteHeader />
 
-      <main id="main-content" class="mx-auto flex w-full max-w-6xl flex-1 flex-col gap-14 px-6 py-12 sm:gap-16">
-        <nav aria-label="Breadcrumb" class="font-mono text-xs text-muted-foreground">
-          <a href="/" class="hover:text-foreground">gitdebt</a>
+      <main id="main-content" class="mx-auto w-full max-w-6xl flex-1 px-6 py-12">
+        <nav aria-label="Breadcrumb" class="font-mono text-[11px] text-muted-foreground">
+          <a
+            href="/"
+            class="rounded outline-none transition-colors duration-150 hover:text-foreground focus-visible:ring-2 focus-visible:ring-accent/30"
+            >gitdebt</a
+          >
           <span class="px-1.5 text-border" aria-hidden="true">/</span>
           <span class="text-foreground">compare</span>
         </nav>
 
-        <header>
-          <p class="font-mono text-xs tracking-wide text-signal uppercase">
-            GitHub star history overlay
-          </p>
-          <h1 class="mt-3 max-w-[24ch] text-3xl font-semibold tracking-tight text-balance sm:text-4xl">
-            Compare star history across repositories.
-          </h1>
-          <p class="mt-4 max-w-[65ch] text-lg/8 text-pretty text-muted-foreground">
+        <header class="mt-8">
+          <h1 class={TITLE}>Compare star history across repositories</h1>
+          <p class:list={["mt-3 max-w-[68ch] text-[15px]", BODY]}>
             Compare up to eight repos by calendar date or days since their
             first star. Use the builder for any combination, or open a curated
             field with rankings and project-health reports.
           </p>
         </header>
 
-        <CompareBuilder client:load apiBase={apiBase} initialRepos={repos} />
+        <div class="mt-12">
+          <CompareBuilder client:load apiBase={apiBase} initialRepos={repos} />
+        </div>
 
-        <section>
-          <header>
-            <p class="mono-label">
-              Popular head to head
-            </p>
-            <h2 class="mt-2 text-2xl font-semibold tracking-tight">
-              Frequently compared pairs
-            </h2>
-          </header>
-          <ul role="list" class="mt-6 grid border-y border-border sm:grid-cols-2 sm:divide-x sm:divide-border">
-            {POPULAR_PAIRS.map((pair, index) => (
-              <li
-                class:list={[
-                  "border-b border-border sm:[&:nth-last-child(-n+2)]:border-b-0",
-                  index === POPULAR_PAIRS.length - 1 && "border-b-0",
-                ]}
+        <section class="mt-16 scroll-mt-24 border-t border-border/60 pt-12">
+          <div class={SECTION_HEADER}>
+            <h2 class={HEADING}>Frequently compared pairs</h2>
+            <a href="/leaderboard" class={SECTION_ACTION}>
+              leaderboard
+              <span
+                aria-hidden="true"
+                class="transition-transform duration-150 group-hover:translate-x-0.5 motion-reduce:transition-none"
+                >→</span
               >
+            </a>
+          </div>
+          <ul role="list" class="mt-6 grid gap-x-10 sm:grid-cols-2">
+            {POPULAR_PAIRS.map((pair) => (
+              <li>
                 <a
                   href={`/vs/${pair.repos[0]}/${pair.repos[1]}`}
                   data-warm-repos={pair.repos.join(",")}
-                  class="group flex min-h-16 items-center justify-between gap-4 px-4 py-3 font-mono text-sm"
+                  class={ROW}
                 >
-                  <span>{pair.label}</span>
-                  <ArrowRight
-                    className="size-4 shrink-0 text-muted-foreground group-hover:text-signal"
-                    strokeWidth={1.75}
-                    aria-hidden="true"
-                  />
+                  <span class="min-w-0 flex-1 truncate">{pair.label}</span>
                 </a>
               </li>
             ))}
           </ul>
         </section>
 
-        <section id="categories" class="scroll-mt-20">
-          <header>
-            <p class="mono-label">
-              Curated fields
-            </p>
-            <h2 class="mt-2 max-w-[30ch] text-2xl font-semibold tracking-tight text-balance sm:text-3xl">
-              Curated categories of comparable tools.
-            </h2>
-            <p class="mt-3 max-w-[68ch] text-base/7 text-pretty text-muted-foreground sm:text-sm/6">
-              Each page has an editorial introduction, a shared star-history
-              chart, recent growth, current ranking, and direct access to the
-              maintenance signals behind every repository.
-            </p>
-          </header>
+        <section
+          id="categories"
+          class="mt-16 scroll-mt-24 border-t border-border/60 pt-12"
+        >
+          <div class={SECTION_HEADER}>
+            <h2 class={HEADING}>Curated categories of comparable tools</h2>
+            <a href="/leaderboard" class={SECTION_ACTION}>
+              fastest growing
+              <span
+                aria-hidden="true"
+                class="transition-transform duration-150 group-hover:translate-x-0.5 motion-reduce:transition-none"
+                >→</span
+              >
+            </a>
+          </div>
+          <p class:list={["mt-2 max-w-[68ch]", BODY]}>
+            Each page has an editorial introduction, a shared star-history
+            chart, recent growth, current ranking, and direct access to the
+            maintenance signals behind every repository.
+          </p>
 
-          <div class="mt-10 grid gap-10 lg:grid-cols-3">
+          <div class="mt-10 grid gap-x-12 gap-y-12 lg:grid-cols-3">
             {CATEGORY_GROUPS.map((group) => (
               <section>
-                <h3 class="text-lg font-medium">{group.name}</h3>
-                <p class="mt-1 text-base/7 text-pretty text-muted-foreground sm:text-sm/6">
+                <h3 class={EYEBROW}>{group.name}</h3>
+                <p class:list={["mt-2 max-w-[42ch]", BODY]}>
                   {group.description}
                 </p>
-                <ul role="list" class="mt-5 divide-y divide-border border-y border-border">
+                <ul role="list" class="mt-4">
                   {group.categories.map((category) => (
                     <li>
                       <a
                         href={`/compare/${category.slug}`}
                         data-warm-repos={category.repos.join(",")}
-                        class="group flex min-h-16 items-center justify-between gap-4 py-3"
+                        class={ROW}
                       >
-                        <div class="text-base sm:text-sm">
-                          <span class="font-medium">{category.name}</span>
-                          <div class="mt-0.5 text-muted-foreground">
+                        <span class="min-w-0 flex-1 py-2">
+                          <span class="block truncate">{category.name}</span>
+                          <span class="mt-0.5 block truncate text-[11px] text-muted-foreground/80 group-hover:text-muted-foreground">
                             {category.short}
-                          </div>
-                        </div>
-                        <ArrowRight
-                          className="size-4 shrink-0 text-muted-foreground group-hover:text-signal"
-                          strokeWidth={1.75}
-                          aria-hidden="true"
-                        />
+                          </span>
+                        </span>
+                        <span class={ROW_BADGE}>{category.repos.length}</span>
                       </a>
                     </li>
                   ))}
@@ -202,17 +207,6 @@ const suggestionRepos = Array.from(
               </section>
             ))}
           </div>
-
-          <p class="mt-8 text-base text-muted-foreground sm:text-sm">
-            Prefer one live ranking? See the{" "}
-            <a
-              href="/leaderboard"
-              class="underline decoration-signal/60 underline-offset-4 hover:decoration-signal"
-            >
-              fastest-growing repositories
-            </a>{" "}
-            across the tracked catalog.
-          </p>
         </section>
 
         <WarmRepos client:load apiBase={apiBase} repos={suggestionRepos} />

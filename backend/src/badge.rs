@@ -17,7 +17,7 @@
 //! counts happen **before** XML escaping. After the width clamp, label and
 //! detail are truncated with a real ellipsis and every x position is
 //! recomputed from the final text widths, so content can never underlap
-//! the trailing brand chip.
+//! the trailing brand mark.
 //!
 //! ## Animation + GitHub's SMIL sanitizer
 //!
@@ -171,10 +171,11 @@ pub fn humanize(n: u64) -> String {
 /// Uniform badge height across the whole family (metric styles + signal +
 /// empty) so side-by-side README embeds align.
 pub const HEIGHT: f32 = 28.0;
-/// Reserved trailing zone for the brand chip: 5px gap + 12px chip + 5px
+/// Reserved trailing zone for the brand mark: 5px gap + 14px mark + 5px
 /// right margin.
-const BRAND_W: f32 = 22.0;
-const MARK_SIZE: f32 = 12.0;
+const BRAND_W: f32 = 24.0;
+/// Equal to `brand::MARK_GRID` so every mark cell is a whole device pixel.
+const MARK_SIZE: f32 = 14.0;
 /// Horizontal padding inside each segment.
 const SEG_PAD_X: f32 = 9.0;
 /// Width reserved for a metric glyph (icon).
@@ -326,9 +327,13 @@ fn wash_rect(x: f32, y: f32, w: f32, h: f32, rx: f32, tier: usize, opacity: &str
     )
 }
 
-/// Trailing brand chip, right-aligned inside the reserved [`BRAND_W`] zone.
-fn brand_chip(total: f32, ink: &str) -> String {
-    brand::chip_mark(
+/// Trailing brand mark — the gitdebt robot, right-aligned inside the
+/// reserved [`BRAND_W`] zone. [`MARK_SIZE`] is deliberately equal to the
+/// mark's pixel-grid resolution so every cell lands on a whole device
+/// pixel. The ink is the badge's foreground, never an accent: the logo
+/// must read as the logo, not as a colored chip.
+fn brand_mark(total: f32, ink: &str) -> String {
+    brand::pixel_mark(
         total - BRAND_W + 5.0,
         (HEIGHT - MARK_SIZE) / 2.0,
         MARK_SIZE,
@@ -479,7 +484,7 @@ fn render_flat(placed: &[Placed], width: f32, theme: &Theme, animate: bool) -> S
             i,
         ));
     }
-    body.push_str(&brand_chip(total, wave));
+    body.push_str(&brand_mark(total, theme.fg));
     format!(
         "{header}{css}{body}</svg>",
         header = svg_header(total, &label, &wash_defs(theme, 2)),
@@ -534,7 +539,7 @@ fn render_modern(placed: &[Placed], width: f32, theme: &Theme, animate: bool) ->
             i,
         ));
     }
-    body.push_str(&brand_chip(total, wave));
+    body.push_str(&brand_mark(total, theme.fg));
     format!(
         "{header}{css}{body}</svg>",
         header = svg_header(total, &label, &defs),
@@ -599,7 +604,7 @@ fn render_glass(placed: &[Placed], width: f32, theme: &Theme, animate: bool) -> 
             distance = total + 12.0,
         ));
     }
-    body.push_str(&brand_chip(total, wave));
+    body.push_str(&brand_mark(total, theme.fg));
     format!(
         "{header}{css}{body}</svg>",
         header = svg_header(total, &label, &wash_defs(theme, 3)),
@@ -662,7 +667,7 @@ fn render_terminal(placed: &[Placed], width: f32, theme: &Theme, animate: bool) 
             y = HEIGHT / 2.0 - 6.0,
         ));
     }
-    body.push_str(&brand_chip(total, fg));
+    body.push_str(&brand_mark(total, fg));
     format!(
         "{header}{css}{body}</svg>",
         header = svg_header(total, &label, &defs),
@@ -671,9 +676,9 @@ fn render_terminal(placed: &[Placed], width: f32, theme: &Theme, animate: bool) 
 }
 
 fn empty_badge(style: BadgeStyle, theme: &Theme) -> String {
-    let (bg, fg, chip_ink) = match style {
+    let (bg, fg, mark_ink) = match style {
         BadgeStyle::Terminal => ("#0a0a0a", "#fafafa", "#fafafa"),
-        _ => (panel_tone(theme), theme.muted, texture::wave_ink(theme)),
+        _ => (panel_tone(theme), theme.muted, theme.fg),
     };
     let text = "no metrics";
     let advance = text.chars().count() as f32 * SIGNAL_CHAR_W;
@@ -684,13 +689,13 @@ fn empty_badge(style: BadgeStyle, theme: &Theme) -> String {
   <style><![CDATA[ text {{ font: 600 11px {FONT_MONO}; }} ]]></style>
   <rect x="0.5" y="0.5" width="{rw:.1}" height="{rh:.1}" rx="6" fill="{bg}" stroke="{border}" stroke-width="1" />
   {text_el}
-{chip}</svg>"##,
+{mark}</svg>"##,
         h = HEIGHT,
         rw = total - 1.0,
         rh = HEIGHT - 1.0,
         border = theme.border,
         text_el = pinned_text(SEG_PAD_X, HEIGHT / 2.0 + 4.0, fg, "", text, advance),
-        chip = brand_chip(total, chip_ink),
+        mark = brand_mark(total, mark_ink),
     )
 }
 
@@ -828,7 +833,7 @@ pub fn render_signal_badge(
 {check}  {label_text}
   <circle cx="{sep_x:.1}" cy="{sep_y:.1}" r="1.3" fill="{muted}" opacity="0.7" />
   {detail_text}
-{chip}</svg>"##,
+{mark}</svg>"##,
         width = l.width,
         h = HEIGHT,
         tier = texture::tier_pattern(theme.fg, 2.0, 2),
@@ -849,7 +854,7 @@ pub fn render_signal_badge(
             &l.detail,
             l.detail_w
         ),
-        chip = brand::chip_mark(l.mark_x, (HEIGHT - MARK_SIZE) / 2.0, MARK_SIZE, signal),
+        mark = brand::pixel_mark(l.mark_x, (HEIGHT - MARK_SIZE) / 2.0, MARK_SIZE, theme.fg),
     )
 }
 
@@ -1045,25 +1050,99 @@ mod tests {
     }
 
     #[test]
-    fn metric_badges_never_render_the_robot_at_chip_scale() {
+    fn every_badge_carries_the_pixel_logo_in_the_foreground_ink() {
         for style in [
             BadgeStyle::Flat,
             BadgeStyle::Modern,
             BadgeStyle::Glass,
             BadgeStyle::Terminal,
         ] {
-            let svg = render_badge(&full_input(style, false), &LIGHT);
-            assert!(svg.contains("data-gitdebt-logo=\"true\""));
-            // The 512px robot path data must not appear at badge scale.
-            assert!(
-                !svg.contains("scale(0.0"),
-                "{style:?} scales the robot down"
-            );
-            assert!(
-                !svg.contains("gitdebt-dither"),
-                "{style:?} leaks the logo pattern"
-            );
+            for theme in [&LIGHT, &DARK] {
+                let svg = render_badge(&full_input(style, false), theme);
+                assert!(svg.contains("data-gitdebt-logo=\"true\""));
+                // The 512px robot path data must not appear at badge scale.
+                assert!(
+                    !svg.contains("scale(0.0"),
+                    "{style:?} scales the robot down"
+                );
+                assert!(
+                    !svg.contains("gitdebt-dither"),
+                    "{style:?} leaks the logo pattern"
+                );
+                // Terminal is theme-independent; every other style inks the
+                // mark with the theme foreground, never an accent chip.
+                let ink = if style == BadgeStyle::Terminal {
+                    "#fafafa"
+                } else {
+                    theme.fg
+                };
+                assert!(
+                    svg.contains(
+                        "data-gitdebt-logo=\"true\" aria-label=\"gitdebt\" transform=\"translate("
+                    ) && svg.contains(&format!("fill=\"{ink}\" shape-rendering=\"crispEdges\"")),
+                    "{style:?}/{}: mark must be inked with {ink}",
+                    theme.dark,
+                );
+            }
         }
+        // Empty + signal badges use the same mark.
+        let empty = render_badge(
+            &BadgeInput {
+                stars: None,
+                forks: None,
+                downloads: None,
+                metrics: vec![Metric::Stars],
+                style: BadgeStyle::Flat,
+                animate: false,
+            },
+            &DARK,
+        );
+        assert!(empty.contains("data-gitdebt-logo=\"true\""));
+        assert!(empty.contains(&format!("fill=\"{}\" shape-rendering", DARK.fg)));
+        let signal = render_signal_badge("star momentum", "+9 / 30d", true, &DARK, false);
+        assert!(signal.contains(&format!("fill=\"{}\" shape-rendering", DARK.fg)));
+    }
+
+    /// The regression this guards: the brand zone previously rendered a
+    /// flat dithered chip, i.e. a near-uniform block of ink. Rasterize a
+    /// badge and read the mark's cell grid back out — it must reproduce
+    /// the authored robot bitmap, with holes.
+    #[test]
+    fn rasterized_brand_mark_is_the_robot_glyph_not_a_block() {
+        const SCALE: f32 = 6.0;
+        let svg = render_badge(&full_input(BadgeStyle::Flat, false), &DARK);
+        let (rgba, w, _h) = crate::raster::rasterize_rgba(&svg, SCALE).expect("raster");
+        let (total_w, _placed) = layout(&full_input(BadgeStyle::Flat, false).segments());
+        let total = total_w + BRAND_W;
+        let origin_x = (total - BRAND_W + 5.0) * SCALE;
+        let origin_y = ((HEIGHT - MARK_SIZE) / 2.0) * SCALE;
+        let cell = (MARK_SIZE / brand::MARK_GRID as f32) * SCALE;
+
+        let mut lit = 0usize;
+        for row in 0..brand::MARK_GRID {
+            for col in 0..brand::MARK_GRID {
+                let px = (origin_x + (col as f32 + 0.5) * cell) as usize;
+                let py = (origin_y + (row as f32 + 0.5) * cell) as usize;
+                let i = (py * w as usize + px) * 4;
+                // Dark theme: the mark is near-white on a near-black panel.
+                let bright = rgba[i] > 128 && rgba[i + 1] > 128 && rgba[i + 2] > 128;
+                let expected = brand::MARK_BITMAP[row].as_bytes()[col] == b'#';
+                assert_eq!(
+                    bright,
+                    expected,
+                    "cell ({col},{row}) mismatch: rgba={:?}",
+                    &rgba[i..i + 4]
+                );
+                if bright {
+                    lit += 1;
+                }
+            }
+        }
+        let cells = brand::MARK_GRID * brand::MARK_GRID;
+        assert!(
+            (cells / 6..cells / 2).contains(&lit),
+            "mark ink coverage must read as a glyph, got {lit}/{cells}"
+        );
     }
 
     #[test]

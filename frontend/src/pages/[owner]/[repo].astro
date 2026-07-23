@@ -15,6 +15,13 @@ import { EarnedBadges } from "@/components/EarnedBadges";
 import { InteractiveRepoSignals } from "@/components/InteractiveRepoSignals";
 import { UsageSection, type UsageResponse } from "@/components/UsageSection";
 import { WarmRepos } from "@/components/WarmRepos";
+import {
+  BODY,
+  CAPTION,
+  HEADING,
+  SECTION_ACTION,
+  SECTION_HEADER,
+} from "@/components/style-tokens";
 import { buttonVariants } from "@/components/ui/button";
 import { categoriesForRepo, relatedRepos } from "@/data/categories";
 import {
@@ -360,141 +367,174 @@ const vsLinks = (categoryRelated.length > 0 ? categoryRelated : FALLBACK_SUGGEST
     <div class="isolate flex min-h-dvh flex-col">
       <SiteHeader />
 
-      <main id="main-content" class="mx-auto flex w-full max-w-7xl flex-1 flex-col gap-12 px-6 py-12">
-        <nav aria-label="Breadcrumb" class="font-mono text-xs text-muted-foreground">
-          <a href="/" class="hover:text-foreground">gitdebt</a>
+      <main id="main-content" class="mx-auto w-full max-w-6xl flex-1 px-6 py-12">
+        <nav aria-label="Breadcrumb" class="font-mono text-[11px] text-muted-foreground">
+          <a
+            href="/"
+            class="rounded outline-none transition-colors duration-150 hover:text-foreground focus-visible:ring-2 focus-visible:ring-accent/30"
+            >gitdebt</a
+          >
           <span class="px-1.5 text-border" aria-hidden="true">/</span>
-          <a href={`/u/${owner}`} class="hover:text-foreground">{owner}</a>
+          <a
+            href={`/u/${owner}`}
+            class="rounded outline-none transition-colors duration-150 hover:text-foreground focus-visible:ring-2 focus-visible:ring-accent/30"
+            >{owner}</a
+          >
           <span class="px-1.5 text-border" aria-hidden="true">/</span>
           <span class="text-foreground">{repo}</span>
         </nav>
 
-        <RepoHero
-          client:load
-          owner={owner}
-          repo={repo}
-          apiBase={apiBase}
-          initialData={data}
-        />
-
-        <section class="space-y-4">
-          <header class="flex flex-wrap items-end justify-between gap-3">
-            <div>
-              <p class="mono-label">Earned badges</p>
-              <h2 class="mt-1 text-xl font-semibold tracking-tight">Computed from commit and star history</h2>
-            </div>
-            <p class="max-w-md text-sm text-muted-foreground">Embeddable maintenance, ownership, and star-momentum signals.</p>
-          </header>
-          <EarnedBadges client:visible owner={owner} repo={repo} apiBase={apiBase} embedLink={canonical} />
-        </section>
-
-        <ChartViewer
-          client:load
-          apiBase={apiBase}
-          path={`/api/repos/${owner}/${repo}/chart.svg`}
-          alt={`${archiveHistory ? "Approximate public star activity" : "Star history"} for ${repoSlug}`}
-          caption={archiveHistory ? "Approximate public star activity" : "Cumulative star history"}
-          priority={true}
-          liveRepo={repoSlug}
-          embedLink={canonical}
-          label={repoSlug}
-          points={history}
-        />
-
-        {faqs.length > 0 && (
-          <section class="space-y-4">
-            <header class="flex flex-wrap items-baseline justify-between gap-2">
-              <h2 class="text-xl font-semibold tracking-tight">
-                {repoSlug} at a glance
-              </h2>
-              {updatedLabel && (
-                <p class="font-mono text-xs text-muted-foreground">
-                  {archiveHistory ? "Archive coverage through" : "Latest recorded star"}{" "}
-                  {updatedLabel}
-                </p>
-              )}
-            </header>
-            <div class="grid gap-x-8 gap-y-6 sm:grid-cols-2">
-              {faqs.map((f) => (
-                <article class="space-y-1.5 border-t border-border pt-5">
-                  <h3 class="text-base font-medium sm:text-sm">{f.q}</h3>
-                  <p class="text-base text-pretty text-muted-foreground sm:text-sm">{f.a}</p>
-                </article>
-              ))}
-            </div>
-            {milestones.length > 0 && (
-              <p class="text-base text-muted-foreground sm:text-sm">
-                <strong class="font-mono tracking-wide uppercase">
-                  {archiveHistory ? "Observed activity milestones:" : "Star milestones:"}
-                </strong>{" "}
-                {milestones.map((m, i) => (
-                  <>
-                    {i > 0 && <span aria-hidden="true"> · </span>}
-                    <span class="whitespace-nowrap">
-                      {formatCompact(m.threshold)} around {formatMonthYear(m.date)}
-                    </span>
-                  </>
-                ))}
-              </p>
-            )}
-          </section>
-        )}
-
-        <section id="stats" class="scroll-mt-24 space-y-6">
-          <header class="max-w-2xl space-y-2">
-            <p class="mono-label">
-              Maintenance signals
-            </p>
-            <h2 class="text-2xl font-semibold tracking-tight text-balance sm:text-3xl">
-              Where fixes and churn concentrate
-            </h2>
-            <p class="text-base leading-relaxed text-pretty text-muted-foreground">
-              Fix concentration, file churn, ownership risk, and maintenance
-              cadence for {repoSlug}, each computed from its commit history.
-            </p>
-          </header>
-          <InteractiveRepoSignals
+        <div class="mt-8">
+          <RepoHero
             client:load
-            apiBase={apiBase}
-            slug={repoSlug}
-            embedLink={canonical}
-          />
-        </section>
-
-        <section class="space-y-6">
-          <header class="max-w-2xl space-y-2">
-            <p class="mono-label">
-              Adoption
-            </p>
-            <h2 class="text-2xl font-semibold tracking-tight text-balance sm:text-3xl">
-              Stars versus package downloads
-            </h2>
-          </header>
-          <UsageSection
-            client:visible
             owner={owner}
             repo={repo}
             apiBase={apiBase}
-            initialData={usage}
-            showEmbed={false}
+            initialData={data}
           />
+        </div>
+
+        <section class="mt-16 scroll-mt-24 border-t border-border/60 pt-12">
+          <div class={SECTION_HEADER}>
+            <h2 class={HEADING}>
+              {archiveHistory ? "Public star activity" : "Star history"}
+            </h2>
+            {updatedLabel && (
+              <p class={CAPTION}>
+                {archiveHistory ? "coverage through" : "latest star"}{" "}
+                {updatedLabel}
+              </p>
+            )}
+          </div>
+          <div class="mt-6">
+            <ChartViewer
+              client:load
+              apiBase={apiBase}
+              path={`/api/repos/${owner}/${repo}/chart.svg`}
+              alt={`${archiveHistory ? "Approximate public star activity" : "Star history"} for ${repoSlug}`}
+              caption={archiveHistory ? "Approximate public star activity" : "Cumulative star history"}
+              priority={true}
+              liveRepo={repoSlug}
+              embedLink={canonical}
+              label={repoSlug}
+              points={history}
+            />
+          </div>
+          {milestones.length > 0 && (
+            <p class:list={["mt-4", CAPTION]}>
+              {archiveHistory ? "Observed activity milestones" : "Star milestones"}:{" "}
+              {milestones.map((m, i) => (
+                <>
+                  {i > 0 && <span aria-hidden="true"> · </span>}
+                  <span class="whitespace-nowrap tabular-nums">
+                    {formatCompact(m.threshold)} around {formatMonthYear(m.date)}
+                  </span>
+                </>
+              ))}
+            </p>
+          )}
         </section>
 
-        <section class="space-y-4 border-y border-border py-6">
-          <header class="space-y-1">
-            <p class="mono-label">
-              Context
-            </p>
-            <h2 class="text-xl font-semibold tracking-tight">
-              Compare {repoSlug} with similar projects
-            </h2>
-          </header>
-          <div class="flex flex-wrap items-center gap-2">
+        <section class="mt-16 scroll-mt-24 border-t border-border/60 pt-12">
+          <div class={SECTION_HEADER}>
+            <h2 class={HEADING}>Earned badges</h2>
+            <a href="/badges" class={SECTION_ACTION}>
+              badge studio
+              <span
+                aria-hidden="true"
+                class="transition-transform duration-150 group-hover:translate-x-0.5 motion-reduce:transition-none"
+                >→</span
+              >
+            </a>
+          </div>
+          <p class:list={["mt-2 max-w-[64ch]", BODY]}>
+            Embeddable maintenance, ownership, and star-momentum signals,
+            computed from commit and star history.
+          </p>
+          <div class="mt-6">
+            <EarnedBadges client:visible owner={owner} repo={repo} apiBase={apiBase} embedLink={canonical} />
+          </div>
+        </section>
+
+        <section id="stats" class="mt-16 scroll-mt-24 border-t border-border/60 pt-12">
+          <div class={SECTION_HEADER}>
+            <h2 class={HEADING}>Where fixes and churn concentrate</h2>
+            <a href="/about" class={SECTION_ACTION}>
+              methodology
+              <span
+                aria-hidden="true"
+                class="transition-transform duration-150 group-hover:translate-x-0.5 motion-reduce:transition-none"
+                >→</span
+              >
+            </a>
+          </div>
+          <p class:list={["mt-2 max-w-[68ch]", BODY]}>
+            Fix concentration, file churn, ownership risk, and maintenance
+            cadence for {repoSlug}, each computed from its commit history.
+          </p>
+          <div class="mt-6">
+            <InteractiveRepoSignals
+              client:load
+              apiBase={apiBase}
+              slug={repoSlug}
+              embedLink={canonical}
+            />
+          </div>
+        </section>
+
+        <section class="mt-16 scroll-mt-24 border-t border-border/60 pt-12">
+          <div class={SECTION_HEADER}>
+            <h2 class={HEADING}>Stars versus package downloads</h2>
+          </div>
+          <div class="mt-6">
+            <UsageSection
+              client:visible
+              owner={owner}
+              repo={repo}
+              apiBase={apiBase}
+              initialData={usage}
+              showEmbed={false}
+            />
+          </div>
+        </section>
+
+        {faqs.length > 0 && (
+          <section class="mt-16 scroll-mt-24 border-t border-border/60 pt-12">
+            <div class={SECTION_HEADER}>
+              <h2 class={HEADING}>{repoSlug} at a glance</h2>
+            </div>
+            <div class="mt-6 grid gap-x-12 gap-y-8 sm:grid-cols-2">
+              {faqs.map((f) => (
+                <article>
+                  <h3 class="text-[13px] text-foreground/90">{f.q}</h3>
+                  <p class:list={["mt-1.5", BODY]}>{f.a}</p>
+                </article>
+              ))}
+            </div>
+          </section>
+        )}
+
+        <section class="mt-16 scroll-mt-24 border-t border-border/60 pt-12">
+          <div class={SECTION_HEADER}>
+            <h2 class={HEADING}>Compare {repoSlug} with similar projects</h2>
+            <a
+              href={`/compare?repos=${encodeURIComponent(repoSlug)}`}
+              class={SECTION_ACTION}
+            >
+              comparison builder
+              <span
+                aria-hidden="true"
+                class="transition-transform duration-150 group-hover:translate-x-0.5 motion-reduce:transition-none"
+                >→</span
+              >
+            </a>
+          </div>
+          <div class="mt-5 flex flex-wrap items-center gap-2">
             {vsLinks.map((other) => (
               <a
                 href={`/vs/${repoSlug}/${other}`}
                 data-warm-repos={`${repoSlug},${other}`}
-                class="dither-control inline-flex min-h-11 items-center gap-1.5 rounded-md border px-3 py-2 font-mono text-base text-muted-foreground hover:text-foreground sm:min-h-0 sm:py-1.5 sm:text-sm"
+                class="dither-chip rounded-md outline-none focus-visible:ring-2 focus-visible:ring-accent/30"
               >
                 vs {other}
               </a>
@@ -507,14 +547,14 @@ const vsLinks = (categoryRelated.length > 0 ? categoryRelated : FALLBACK_SUGGEST
             </a>
           </div>
           {repoCategories.length > 0 && (
-            <p class="text-base text-muted-foreground sm:text-sm">
+            <p class:list={["mt-5", BODY]}>
               {repoSlug} is featured in{" "}
               {repoCategories.map((c, i) => (
                 <>
                   {i > 0 && ", "}
                   <a
                     href={`/compare/${c.slug}`}
-                    class="underline decoration-signal/60 underline-offset-4 hover:decoration-signal"
+                    class="rounded underline decoration-border underline-offset-4 outline-none transition-colors duration-150 hover:text-foreground hover:decoration-foreground/60 focus-visible:ring-2 focus-visible:ring-accent/30"
                   >
                     {c.name} compared
                   </a>

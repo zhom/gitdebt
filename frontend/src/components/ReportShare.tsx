@@ -1,6 +1,8 @@
 import { ChevronDown, Share2 } from "lucide-react";
 
 import { CopyButton } from "@/components/CopyButton";
+import { CAPTION, HEADING, PANEL } from "@/components/style-tokens";
+import { cn } from "@/lib/utils";
 
 type Props = {
   apiBase: string;
@@ -34,31 +36,25 @@ export function ReportShare({
 
   return (
     <section id="share" className="scroll-mt-24" aria-labelledby="share-title">
-      <details className="dither-panel group rounded-xl p-2">
-        <summary className="dither-primary flex min-h-16 cursor-pointer list-none items-center justify-between gap-4 rounded-lg px-4 py-3 focus-visible:outline-2 focus-visible:outline-offset-2 focus-visible:outline-ring [&::-webkit-details-marker]:hidden sm:px-5">
-          <div className="flex min-w-0 items-center gap-3">
-            <span className="grid size-9 shrink-0 place-items-center rounded-full border border-primary-foreground/20 bg-primary-foreground/10">
-              <Share2 className="size-4" strokeWidth={1.9} aria-hidden="true" />
+      <details className="group">
+        <summary className="flex min-h-10 cursor-pointer list-none items-center justify-between gap-4 rounded-md px-2.5 outline-none transition-colors duration-150 hover:bg-card/60 focus-visible:ring-2 focus-visible:ring-accent/30 [&::-webkit-details-marker]:hidden">
+          <span className="flex min-w-0 items-center gap-2.5">
+            <Share2
+              className="size-4 shrink-0 text-muted-foreground"
+              strokeWidth={1.9}
+              aria-hidden="true"
+            />
+            <span id="share-title" className={HEADING}>
+              Share &amp; embed
             </span>
-            <span className="min-w-0 text-left">
-              <span
-                id="share-title"
-                className="block text-sm font-semibold sm:text-base"
-              >
-                Share &amp; embed
-              </span>
-              <span className="block truncate text-xs text-primary-foreground/70 sm:text-sm">
-                Copy the report, chart, or badge for your README.
-              </span>
-            </span>
-          </div>
+          </span>
           <ChevronDown
-            className="size-4 shrink-0 transition-transform duration-150 group-open:rotate-180 motion-reduce:transition-none"
+            className="size-4 shrink-0 text-muted-foreground transition-transform duration-200 group-open:rotate-180 motion-reduce:transition-none"
             strokeWidth={2}
             aria-hidden="true"
           />
         </summary>
-        <div className="grid gap-3 px-1 pt-3 pb-1 sm:grid-cols-3">
+        <div className="grid gap-3 pt-5 sm:grid-cols-3">
           <ShareOption
             title="Report link"
             description="Send the full interactive analysis."
@@ -98,20 +94,18 @@ function ShareOption({
   primary?: boolean;
 }) {
   return (
-    <div className="dither-panel flex flex-col items-start gap-3 rounded-lg p-4">
+    <div className={cn(PANEL, "flex flex-col items-start gap-3 p-3.5")}>
       <div className="space-y-1">
-        <p className="text-sm font-medium">{title}</p>
-        <p className="text-sm leading-relaxed text-muted-foreground">
-          {description}
-        </p>
+        <p className="text-[13px]">{title}</p>
+        <p className={CAPTION}>{description}</p>
       </div>
       <CopyButton
         value={value}
         idleLabel={label}
         ariaLabel={`${label}: ${title}`}
-        className={`mt-auto inline-flex min-h-11 items-center rounded-md px-3 py-2 text-sm font-medium focus-visible:outline-2 focus-visible:outline-offset-2 focus-visible:outline-ring ${
-          primary ? "dither-primary" : "dither-control border"
-        }`}
+        variant={primary ? "primary" : "outline"}
+        size="sm"
+        className="mt-auto"
       />
     </div>
   );

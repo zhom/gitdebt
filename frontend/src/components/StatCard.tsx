@@ -2,6 +2,7 @@ import { useEffect, useRef, useState } from "react";
 import { AnimatePresence, motion, useReducedMotion } from "motion/react";
 
 import { EmbedSnippet } from "@/components/EmbedSnippet";
+import { EYEBROW, PANEL } from "@/components/style-tokens";
 import { MEDIA_RENDER_REVISION } from "@/lib/media";
 import {
   DURATION,
@@ -9,6 +10,7 @@ import {
   REDUCED_MOTION_DURATION,
 } from "@/lib/motion";
 import { useRenderedTheme } from "@/lib/rendered-theme";
+import { cn } from "@/lib/utils";
 
 type Props = {
   src: string;
@@ -109,13 +111,10 @@ export function StatCard({
   const chartPath = apiBase && src.startsWith(apiBase) ? src.slice(apiBase.length) : src;
 
   return (
-    <figure className="signal-panel relative">
+    <figure className={cn(PANEL, "relative overflow-hidden")}>
       {caption && (
-        <figcaption className="flex items-center justify-between gap-3 border-b border-border bg-muted/40 px-5 py-3">
-          <div className="mono-label inline-flex items-center gap-2">
-            <span className="size-1.5 shrink-0 rounded-full bg-(--dither-wave-2)" aria-hidden="true" />
-            {caption}
-          </div>
+        <figcaption className="flex items-center justify-between gap-3 border-b border-border/40 px-3.5 py-3">
+          <div className={EYEBROW}>{caption}</div>
           {embedLink && apiBase && (
             <EmbedSnippet
               apiBase={apiBase}
@@ -179,12 +178,13 @@ export function StatCard({
               aria-live="polite"
             >
               <div
-                className={`dither-panel h-32 w-full rounded-md ${
-                  phase === "gathering" ? "motion-safe:animate-pulse" : ""
-                }`}
+                className={cn(
+                  "h-32 w-full rounded-md border border-border/40 bg-background/40",
+                  phase === "gathering" ? "motion-safe:animate-pulse" : "",
+                )}
                 aria-hidden="true"
               />
-              <p className="text-center font-mono text-base tracking-wide text-muted-foreground sm:text-xs">
+              <p className="text-center font-mono text-[11px] text-muted-foreground">
                 {phase === "gathering"
                   ? "Analyzing repository history…"
                   : "Analysis is still running. This chart appears when it finishes."}

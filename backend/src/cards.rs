@@ -35,7 +35,7 @@
 
 use crate::badge::humanize;
 use crate::brand;
-use crate::chart::{Point, palette};
+use crate::chart::Point;
 use crate::theme::Theme;
 
 // Shared option plumbing
@@ -686,6 +686,17 @@ pub fn render_user_empty_card(login: &str, theme: &Theme) -> String {
     )
 }
 
+/// Placeholder for a profile chart whose owned repos are tracked but not
+/// yet analyzed. Distinct from [`render_user_empty_card`]: there IS data
+/// coming, so the message must not read as "nothing here".
+pub fn render_user_pending_card(login: &str, theme: &Theme) -> String {
+    notice_card(
+        &format!("@{login}"),
+        "code analysis is still running — refresh shortly",
+        theme,
+    )
+}
+
 // Repo stats card
 
 /// Repo-card metric keys. Defaults: stars, forks, contributors, commits,
@@ -1027,27 +1038,30 @@ fn spark_svg(points: &[SparkPoint], x: f32, y: f32, w: f32, h: f32, color: &str)
 }
 
 /// Full-width 8px stacked language bar + up to 3 `name pct%` chips.
+///
+/// Segment and chip colors come from the shared per-language map, not from
+/// the card palette by index: the same language must be the same color on
+/// every surface, and two adjacent languages must never collide.
 fn lang_strip(shares: &[(String, f64)], x: f32, y: f32, w: f32, theme: &Theme) -> String {
-    let pal = palette(theme);
     let mut out = String::from("  <g class=\"langs\">");
     let mut sx = x;
-    for (i, (_, share)) in shares.iter().enumerate() {
+    for (name, share) in shares.iter() {
         let seg_w = (*share as f32) * w;
         out.push_str(&format!(
             "<rect x=\"{sx:.1}\" y=\"{y:.1}\" width=\"{seg_w:.1}\" height=\"8\" rx=\"2\" fill=\"{color}\" />",
-            color = pal[i % pal.len()],
+            color = crate::repo_charts::language_color(name, theme),
         ));
         sx += seg_w;
     }
     let legend_y = y + 21.0;
     let mut lx = x;
-    for (i, (name, share)) in shares.iter().take(3).enumerate() {
+    for (name, share) in shares.iter().take(3) {
         let text = format!("{name} {:.1}%", share * 100.0);
         out.push_str(&format!(
             "<circle cx=\"{cx:.1}\" cy=\"{cy:.1}\" r=\"3.5\" fill=\"{color}\" /><text class=\"m\" x=\"{tx:.1}\" y=\"{ty:.1}\" fill=\"{muted}\">{text}</text>",
             cx = lx + 3.5,
             cy = legend_y - 3.5,
-            color = pal[i % pal.len()],
+            color = crate::repo_charts::language_color(name, theme),
             tx = lx + 11.0,
             ty = legend_y,
             muted = theme.muted,

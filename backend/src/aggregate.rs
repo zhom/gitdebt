@@ -477,15 +477,25 @@ async fn build_from_repos(
     let repos_analyzed = if analysis_candidates.is_empty() {
         0
     } else {
+        // Same definition of "analyzed" as the profile card
+        // (`api.rs::load_user_card_data`) and the enqueue-freshness
+        // predicate (`repo_analysis::ANALYSIS_IS_CURRENT_SQL`): the walk
+        // ran, under the current revision, and reached the head it
+        // observed. Author enrichment is not part of it — see
+        // `repo_analysis::sweep_author_enrichment`.
         sqlx::query_scalar::<_, i64>(
             "SELECT COUNT(*)::BIGINT FROM repo_history history \
              WHERE history.repo = ANY($1) \
                AND history.last_analyzed_at IS NOT NULL \
+               AND history.analysis_revision >= $2 \
+               AND history.last_analyzed_sha IS NOT NULL \
+               AND history.head_sha = history.last_analyzed_sha \
                AND NOT EXISTS (SELECT 1 FROM repo_analysis_queue active \
                                WHERE active.repo = history.repo \
                                  AND active.status IN ('pending', 'in_progress'))",
         )
         .bind(&analysis_candidates)
+        .bind(repo_analysis::CURRENT_ANALYSIS_REVISION)
         .fetch_one(&db.pool)
         .await
         .map_err(anyhow::Error::from)?

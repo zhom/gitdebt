@@ -1,6 +1,12 @@
 import { useEffect, useRef, useState } from "react";
 import { ChevronDown, LogOut, UserRound } from "lucide-react";
 
+import { ButtonLink } from "@/components/ButtonLink";
+import { CAPTION, ROW } from "@/components/style-tokens";
+import { buttonVariants } from "@/components/ui/button";
+import { POPOVER } from "@/components/ui/dither-surface";
+import { cn } from "@/lib/utils";
+
 type User = {
   id: number;
   login: string;
@@ -82,21 +88,26 @@ export function AuthControl({ apiBase, returnTo = "/" }: Props) {
 
   if (!user) {
     return (
-      <a
+      <ButtonLink
         href={loginHref}
         aria-label="Login with GitHub"
         aria-busy={loading}
-        className="dither-primary inline-flex min-h-12 items-center justify-center gap-2 rounded-md px-3.5 py-2 text-sm font-medium focus-visible:outline-2 focus-visible:outline-offset-2 focus-visible:outline-ring"
+        variant="primary"
       >
         <span>Login</span>
         <GitHubMark className="size-4" />
-      </a>
+      </ButtonLink>
     );
   }
 
   return (
     <details ref={detailsRef} className="relative">
-      <summary className="dither-control flex min-h-11 cursor-pointer list-none items-center gap-2 rounded-md border px-3 py-2 text-sm font-medium focus-visible:outline-2 focus-visible:outline-offset-2 focus-visible:outline-ring [&::-webkit-details-marker]:hidden">
+      <summary
+        className={cn(
+          buttonVariants({ variant: "outline" }),
+          "cursor-pointer list-none [&::-webkit-details-marker]:hidden",
+        )}
+      >
         {user.avatar_url ? (
           <img
             src={user.avatar_url}
@@ -117,27 +128,29 @@ export function AuthControl({ apiBase, returnTo = "/" }: Props) {
         <span className="sr-only">{`Open account menu for ${user.login}`}</span>
       </summary>
 
-      <div className="dither-menu absolute right-0 z-50 mt-2 w-72 rounded-lg p-3 text-popover-foreground">
-        <div className="px-2 py-2">
-          <p className="truncate text-sm font-medium">
-            {user.name || user.login}
-          </p>
-          <p className="truncate font-mono text-xs text-muted-foreground">
-            @{user.login}
-          </p>
+      <div
+        className={cn(
+          POPOVER,
+          "absolute right-0 z-50 mt-2 w-72 p-2 text-popover-foreground",
+        )}
+      >
+        <div className="px-2.5 py-2">
+          <p className="truncate text-[13px]">{user.name || user.login}</p>
+          <p className={cn(CAPTION, "truncate font-mono")}>@{user.login}</p>
         </div>
-        <div className="my-2 h-px bg-border" aria-hidden="true" />
+        <div className="my-1.5 h-px bg-border/40" aria-hidden="true" />
         <a
           href={`/profile?login=${encodeURIComponent(user.login.toLowerCase())}`}
-          className="flex min-h-11 items-center gap-2 rounded-md px-2.5 py-2 text-sm hover:bg-accent focus-visible:outline-2 focus-visible:-outline-offset-2 focus-visible:outline-ring"
+          className={cn(ROW, "w-full")}
         >
           <UserRound className="size-4" strokeWidth={1.8} aria-hidden="true" />
           Your profile report
         </a>
         <button
           type="button"
+          data-press="off"
           onClick={signOut}
-          className="flex min-h-11 w-full items-center gap-2 rounded-md px-2.5 py-2 text-left text-sm text-muted-foreground hover:bg-accent hover:text-foreground focus-visible:outline-2 focus-visible:-outline-offset-2 focus-visible:outline-ring"
+          className={cn(ROW, "w-full text-left")}
         >
           <LogOut className="size-4" strokeWidth={1.8} aria-hidden="true" />
           Sign out

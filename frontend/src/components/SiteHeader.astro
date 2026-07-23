@@ -12,25 +12,29 @@ const navLinks = [
 
 const apiBase = staticApiBase();
 const returnTo = `${Astro.url.pathname}${Astro.url.search}`;
+const currentPath = Astro.url.pathname.replace(/\/+$/, "") || "/";
+
+function isCurrent(href: string): boolean {
+  const path = href.split("#")[0].replace(/\/+$/, "") || "/";
+  return path !== "/" && currentPath === path;
+}
 ---
 
 <a
   href="#main-content"
-  class="fixed top-3 left-3 z-999 inline-flex min-h-12 -translate-y-20 items-center rounded-md bg-primary px-4 text-sm font-medium text-primary-foreground focus:translate-y-0 focus-visible:outline-2 focus-visible:outline-offset-2 focus-visible:outline-ring"
+  class="fixed top-3 left-3 z-999 inline-flex min-h-10 -translate-y-20 items-center rounded-md bg-foreground px-4 font-mono text-xs text-background focus:translate-y-0 focus-visible:ring-2 focus-visible:ring-accent/30"
 >
   Skip to content
 </a>
 
-<header
-  class="site-header sticky top-0 z-50 border-b border-border bg-background/90 backdrop-blur-xl"
->
+<header class="site-header chrome sticky top-0 z-50">
   <div
     class="mx-auto flex h-16 max-w-6xl items-center justify-between gap-3 px-4 sm:px-6 lg:grid lg:grid-cols-[1fr_auto_1fr]"
   >
     <a
       href="/"
       aria-label="gitdebt homepage"
-      class="inline-flex min-h-12 min-w-0 shrink-0 items-center rounded-md focus-visible:outline-2 focus-visible:outline-offset-4 focus-visible:outline-ring"
+      class="inline-flex min-h-10 min-w-0 shrink-0 items-center rounded-md outline-none focus-visible:ring-2 focus-visible:ring-accent/30 focus-visible:ring-offset-4 focus-visible:ring-offset-background"
     >
       <Brand />
     </a>
@@ -40,7 +44,8 @@ const returnTo = `${Astro.url.pathname}${Astro.url.search}`;
         navLinks.map((link) => (
           <a
             href={link.href}
-            class="inline-flex min-h-11 items-center rounded-md px-3 font-mono text-[0.6875rem] font-medium tracking-[0.14em] uppercase text-muted-foreground transition-colors duration-150 hover:bg-accent hover:text-accent-foreground focus-visible:outline-2 focus-visible:outline-offset-2 focus-visible:outline-ring active:text-foreground"
+            aria-current={isCurrent(link.href) ? "page" : undefined}
+            class="group relative inline-flex min-h-10 items-center gap-2.5 rounded-md px-2.5 font-mono text-[12px] text-muted-foreground outline-none transition-colors duration-150 hover:bg-card/60 hover:text-foreground focus-visible:ring-2 focus-visible:ring-accent/30 aria-[current=page]:bg-card aria-[current=page]:text-foreground"
           >
             {link.label}
           </a>
@@ -54,24 +59,24 @@ const returnTo = `${Astro.url.pathname}${Astro.url.search}`;
       </div>
       <details class="relative lg:hidden" data-mobile-menu data-state="closed">
         <summary
-          class="grid size-12 cursor-pointer list-none place-items-center rounded-md text-foreground transition-colors duration-150 hover:bg-accent focus-visible:outline-2 focus-visible:outline-offset-2 focus-visible:outline-ring [&::-webkit-details-marker]:hidden"
+          class="grid size-10 cursor-pointer list-none place-items-center rounded-md text-foreground outline-none transition-colors duration-150 hover:bg-card/60 focus-visible:ring-2 focus-visible:ring-accent/30 [&::-webkit-details-marker]:hidden"
           aria-label="Open navigation"
           aria-controls="mobile-navigation"
           aria-expanded="false"
         >
           <Menu
-            className="mobile-nav-icon mobile-nav-icon-menu size-6"
+            className="mobile-nav-icon mobile-nav-icon-menu size-5"
             strokeWidth={1.75}
             aria-hidden="true"
           />
           <X
-            className="mobile-nav-icon mobile-nav-icon-close size-6"
+            className="mobile-nav-icon mobile-nav-icon-close size-5"
             strokeWidth={1.75}
             aria-hidden="true"
           />
         </summary>
         <div
-          class="mobile-nav-panel dither-menu absolute right-0 mt-2 w-[min(18rem,calc(100vw-2rem))] origin-top-right rounded-lg p-2 text-popover-foreground"
+          class="mobile-nav-panel absolute right-0 mt-2 w-[min(18rem,calc(100vw-2rem))] origin-top-right rounded-lg border border-border/80 bg-card p-2 text-popover-foreground shadow-[0_8px_24px_rgba(0,0,0,0.32)]"
           data-mobile-menu-panel
           aria-hidden="true"
           inert
@@ -81,7 +86,8 @@ const returnTo = `${Astro.url.pathname}${Astro.url.search}`;
               navLinks.map((link) => (
                 <a
                   href={link.href}
-                  class="flex min-h-12 items-center rounded-md px-3 font-mono text-sm tracking-[0.12em] uppercase text-muted-foreground transition-colors duration-150 hover:bg-accent hover:text-accent-foreground focus-visible:outline-2 focus-visible:-outline-offset-2 focus-visible:outline-ring active:text-foreground"
+                  aria-current={isCurrent(link.href) ? "page" : undefined}
+                  class="relative flex min-h-10 items-center gap-2.5 rounded-md px-2.5 font-mono text-[12px] text-muted-foreground outline-none transition-colors duration-150 hover:bg-card/60 hover:text-foreground focus-visible:ring-2 focus-visible:ring-accent/30 aria-[current=page]:bg-card aria-[current=page]:text-foreground"
                 >
                   {link.label}
                 </a>

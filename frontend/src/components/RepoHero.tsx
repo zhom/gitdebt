@@ -8,8 +8,14 @@ import {
 } from "motion/react";
 import { ExternalLink, Loader2 } from "lucide-react";
 
+import { ButtonLink } from "@/components/ButtonLink";
+import { DitherMeter } from "@/components/DitherMeter";
+import { StatStrip } from "@/components/StatStrip";
+import { BODY, CAPTION, EYEBROW, HEADING, PANEL, TITLE } from "@/components/style-tokens";
+import { BRAND } from "@/lib/dither";
 import { DURATION, EASE_OUT } from "@/lib/motion";
 import { formatCountdown, useLiveCountdown } from "@/lib/live-eta";
+import { cn } from "@/lib/utils";
 
 export type StarPoint = { date: string; stars: number };
 export type HistoryKind =
@@ -282,22 +288,19 @@ export function RepoHero({ owner, repo, apiBase, initialData }: Props) {
   if (data?.not_found || data?.history_status === "not_public") {
     return (
       <section className="space-y-6">
-        <div className="space-y-2 border-y border-border py-8">
-          <p className="mono-label">Repository visibility</p>
-          <h1 className="text-3xl font-semibold tracking-tight text-balance sm:text-4xl">
-            Repository not public or not found
-          </h1>
-          <p className="max-w-[62ch] text-base text-pretty text-muted-foreground">
+        <div className="space-y-2">
+          <h1 className={TITLE}>Repository not public or not found</h1>
+          <p className={cn(BODY, "max-w-[62ch]")}>
             GitHub did not expose {slug} as a public repository. Check the owner
             and repository name, or open it on GitHub if you have private
             access. gitdebt does not ingest private repository data.
           </p>
         </div>
-        <a
+        <ButtonLink
           href={`https://github.com/${owner}/${repo}`}
           target="_blank"
           rel="noreferrer"
-          className="dither-control inline-flex min-h-11 items-center gap-2 rounded-md border px-3 py-2 text-sm text-muted-foreground hover:text-foreground focus-visible:outline-2 focus-visible:outline-offset-2 focus-visible:outline-ring"
+          variant="outline"
         >
           Check on GitHub
           <ExternalLink
@@ -305,7 +308,7 @@ export function RepoHero({ owner, repo, apiBase, initialData }: Props) {
             strokeWidth={1.8}
             aria-hidden="true"
           />
-        </a>
+        </ButtonLink>
       </section>
     );
   }
@@ -323,35 +326,41 @@ export function RepoHero({ owner, repo, apiBase, initialData }: Props) {
       label: archiveHistory ? "Latest activity" : "Latest star",
       value: formatDate(latest),
     },
-    {
-      label: "Code analysis",
-      value: analysisLabel(progress?.analysis),
-    },
   ];
+  const starsWork: ProgressWork = progress?.stars ?? {
+    phase: starPhaseFromAnalyze(data),
+    complete: data?.history_complete ?? false,
+    next_page: null,
+  };
+  const analysisWork: ProgressWork = progress?.analysis ?? {
+    phase: "pending",
+    complete: false,
+  };
+  // The strip is a working indicator, not a checklist: once both halves have
+  // settled there is nothing to report, so it disappears instead of showing
+  // rows of ticks.
   const showProgress =
-    !data ||
-    loading ||
-    (progress !== null && !progress.terminal) ||
+    (!data && loading) ||
+    !isSettled(starsWork) ||
+    !isSettled(analysisWork) ||
     (data !== null && needsPolling(data));
 
   return (
     <section className="space-y-6">
       <header className="flex flex-col gap-4 sm:flex-row sm:items-end sm:justify-between">
         <div className="space-y-2">
-          <p className="mono-label">Repository report</p>
-          <h1 className="text-3xl font-semibold tracking-tight text-balance sm:text-4xl">
-            {slug}
-          </h1>
-          <p className="max-w-[62ch] text-base leading-relaxed text-pretty text-muted-foreground">
+          <h1 className={TITLE}>{slug}</h1>
+          <p className={cn(BODY, "max-w-[62ch]")}>
             Star momentum, maintenance concentration, contributor health, and
             codebase change — one report built from public repository data.
           </p>
         </div>
-        <a
+        <ButtonLink
           href={`https://github.com/${owner}/${repo}`}
           target="_blank"
           rel="noreferrer"
-          className="dither-control inline-flex min-h-11 shrink-0 items-center gap-2 self-start rounded-md border px-3 py-2 text-sm text-muted-foreground hover:text-foreground focus-visible:outline-2 focus-visible:outline-offset-2 focus-visible:outline-ring sm:self-auto"
+          variant="outline"
+          className="shrink-0 self-start sm:self-auto"
         >
           Open on GitHub
           <ExternalLink
@@ -359,84 +368,39 @@ export function RepoHero({ owner, repo, apiBase, initialData }: Props) {
             strokeWidth={1.8}
             aria-hidden="true"
           />
-        </a>
+        </ButtonLink>
       </header>
 
-      <dl className="grid border-y border-border sm:grid-cols-2 lg:grid-cols-4 lg:divide-x lg:divide-border">
-        {stats.map((stat, index) => (
-          <div
-            key={stat.label}
-            className={`py-4 lg:px-5 lg:first:pl-0 ${
-              index > 0 ? "border-t border-border sm:border-t-0" : ""
-            } ${index > 1 ? "sm:border-t sm:border-border lg:border-t-0" : ""}`}
-          >
-            <dt className="mono-label">{stat.label}</dt>
-            <dd className="mt-1.5 text-xl font-semibold tabular-nums">
-              {index === 0 && data ? (
-                <AnimatedNumber
-                  value={data.total_stars}
-                  format={(n) => Math.round(n).toLocaleString()}
-                />
-              ) : (
-                stat.value
-              )}
-            </dd>
-          </div>
-        ))}
-      </dl>
+      <StatStrip
+        columns={4}
+        items={stats.map((stat, index) => ({
+          label: stat.label,
+          value:
+            index === 0 && data ? (
+              <AnimatedNumber
+                value={data.total_stars}
+                format={(n) => Math.round(n).toLocaleString()}
+              />
+            ) : (
+              stat.value
+            ),
+        }))}
+      />
 
       {data && archiveHistory && <HistoryProvenance data={data} slug={slug} />}
 
       {showProgress && (
-        <div
-          className="border-y border-border py-5"
-          role="status"
-          aria-live="polite"
-        >
-          <div className="flex flex-wrap items-center justify-between gap-2">
-            <p className="inline-flex items-center gap-2 text-sm font-medium">
-              <Loader2
-                className="size-4 shrink-0 motion-safe:animate-spin text-(--dither-wave-2)"
-                aria-hidden="true"
-              />
-              Building this report
-            </p>
-            <p className="mono-label">
-              {liveProgress ? "live updates" : "checking progress"}
-            </p>
-          </div>
-          <div className="mt-4 grid gap-3 sm:grid-cols-2">
-            <ProgressStep
-              label="Star history"
-              work={
-                progress?.stars ?? {
-                  phase: starPhaseFromAnalyze(data),
-                  complete: data?.history_complete ?? false,
-                  next_page: null,
-                }
-              }
-            />
-            <ProgressStep
-              label="Repository health"
-              work={
-                progress?.analysis ?? {
-                  phase: "pending",
-                  complete: false,
-                }
-              }
-            />
-          </div>
-          <p className="mt-3 text-sm leading-relaxed text-muted-foreground">
-            You can stay on this page. Finished sections appear as soon as the
-            backend commits them; no manual refresh is needed.
-          </p>
-        </div>
+        <ReportProgress
+          stars={starsWork}
+          analysis={analysisWork}
+          live={liveProgress}
+        />
       )}
 
       {data?.backfilling && (
-        <div className="flex items-start gap-3 border-y border-border py-4 text-base text-pretty text-muted-foreground sm:text-sm">
+        <div className={cn(PANEL, "flex items-start gap-3 p-3.5", BODY)}>
           <Loader2
-            className="mt-0.5 size-3.5 shrink-0 motion-safe:animate-spin text-(--dither-wave-2)"
+            className="mt-0.5 size-3.5 shrink-0 motion-safe:animate-spin"
             aria-hidden="true"
           />
           <p>
@@ -466,32 +430,32 @@ function HistoryProvenance({
 
   return (
     <aside
-      className="grid gap-4 border-y border-border py-4 lg:grid-cols-[minmax(0,1fr)_auto] lg:items-start"
+      className={cn(
+        PANEL,
+        "grid gap-4 p-3.5 lg:grid-cols-[minmax(0,1fr)_auto] lg:items-start",
+      )}
       aria-labelledby="star-history-provenance"
     >
       <div className="max-w-[68ch] space-y-1.5">
-        <h2
-          id="star-history-provenance"
-          className="text-base font-medium sm:text-sm"
-        >
+        <h2 id="star-history-provenance" className={HEADING}>
           Approximate public star activity
         </h2>
-        <p className="text-base text-pretty text-muted-foreground sm:text-sm">
+        <p className={BODY}>
           This curve uses public GitHub WatchEvents, which record star actions
           but not unstars. The current GitHub star total for {slug} remains the
           headline figure above.
         </p>
       </div>
-      <dl className="grid grid-cols-2 gap-x-6 gap-y-3 text-base sm:text-sm">
-        <div className="space-y-0.5">
-          <dt className="font-medium text-foreground">Observed actions</dt>
-          <dd className="text-muted-foreground tabular-nums">
+      <dl className="grid grid-cols-2 gap-x-6 gap-y-3">
+        <div className="space-y-1">
+          <dt className={EYEBROW}>Observed actions</dt>
+          <dd className="text-[13px] tabular-nums">
             {data.history_event_count.toLocaleString()}
           </dd>
         </div>
-        <div className="space-y-0.5">
-          <dt className="font-medium text-foreground">Coverage</dt>
-          <dd className="text-muted-foreground">
+        <div className="space-y-1">
+          <dt className={EYEBROW}>Coverage</dt>
+          <dd className="text-[13px]">
             {formatDate(coverageStart)} {"–"} {formatDate(coverageEnd)}
           </dd>
         </div>
@@ -510,90 +474,64 @@ function starPhaseFromAnalyze(data: AnalyzeResponse | null): ProgressPhase {
   return data.pending ? "fetching" : "pending";
 }
 
-function analysisLabel(work: ProgressWork | undefined): string {
-  if (work?.complete) return "Ready";
-  switch (work?.phase) {
-    case "complete":
-      return "Ready";
-    case "analyzing":
-    case "fetching":
-    case "backfilling":
-      return "In progress";
-    case "retrying":
-    case "failed":
-      return "Retrying";
-    case "not_found":
-      return "Not found";
-    case "restricted":
-      return "Retrying";
-    default:
-      return "Checking";
-  }
-}
-
-function ProgressStep({ label, work }: { label: string; work: ProgressWork }) {
-  const phase = work.phase;
-  const complete = work.complete || phase === "complete";
-  const stopped = phase === "not_found";
-  const reduceMotion = useReducedMotion();
+/**
+ * Working indicator for a report that is still being built.
+ *
+ * One dithered rail carrying the overall fraction plus the phase actually
+ * running right now — the point is "what is happening and how far along",
+ * not a checklist of finished parts.
+ */
+function ReportProgress({
+  stars,
+  analysis,
+  live,
+}: {
+  stars: ProgressWork;
+  analysis: ProgressWork;
+  live: boolean;
+}) {
+  const active = !isSettled(stars) ? stars : analysis;
+  const label = !isSettled(stars)
+    ? "Collecting star history"
+    : "Reading repository history";
   const remaining = useLiveCountdown(
-    work.eta_seconds,
-    `${work.phase}:${work.processed_units ?? ""}:${work.queue_position ?? ""}`,
+    active.eta_seconds,
+    `${active.phase}:${active.processed_units ?? ""}:${active.queue_position ?? ""}`,
   );
-  const detail = progressDetail(work, remaining);
-  const percent = work.percent;
+  const detail = progressDetail(active, remaining);
+  const done = [stars, analysis].filter(isSettled).length;
+  const partial = active.percent !== undefined ? active.percent / 100 : 0;
+  const ratio = Math.max(0.02, (done + partial) / 2);
 
   return (
-    <div className="dither-panel min-w-0 rounded-lg p-3">
-      <div className="flex items-center gap-3">
-        <span
-          className={`grid size-6 shrink-0 place-items-center rounded-full border text-xs ${
-            complete
-              ? "border-signal bg-signal text-signal-foreground"
-              : stopped
-                ? "border-border text-muted-foreground"
-                : "border-(--dither-wave-2)/40 bg-(--dither-wave-2)/10 text-(--dither-wave-2)"
-          }`}
-          aria-hidden="true"
-        >
-          {complete ? "✓" : "·"}
-        </span>
-        <div>
-          <p className="flex flex-wrap items-center gap-2 text-sm font-medium">
-            {label}
-            {work.priority === "interactive" && (
-              <span className="rounded-full border border-(--dither-wave-1)/40 bg-(--dither-wave-1)/10 px-2 py-0.5 font-mono text-[10px] tracking-wide text-(--dither-wave-1) uppercase">
-                priority
-              </span>
-            )}
-          </p>
-          <p className="mt-0.5 text-xs leading-relaxed text-muted-foreground">
-            {detail}
-          </p>
-        </div>
+    <div className={cn(PANEL, "p-3.5")} role="status" aria-live="polite">
+      <div className="flex flex-wrap items-baseline justify-between gap-x-4 gap-y-1">
+        <p className="text-[13px]">{label}</p>
+        <p className={cn(CAPTION, "tabular-nums")}>
+          {detail}
+          {active.priority === "interactive" ? " · priority" : ""}
+        </p>
       </div>
-      {percent !== undefined && !complete && !stopped && (
-        <div
-          className="mt-3 h-1.5 overflow-hidden rounded-full bg-muted"
-          role="progressbar"
-          aria-label={`${label} progress`}
-          aria-valuemin={0}
-          aria-valuemax={100}
-          aria-valuenow={percent}
-        >
-          <motion.div
-            initial={false}
-            animate={{ scaleX: Math.max(0.015, Math.min(1, percent / 100)) }}
-            transition={
-              reduceMotion
-                ? { duration: 0.12 }
-                : { type: "spring", bounce: 0, duration: 0.4 }
-            }
-            className="signal-dither-fill h-full origin-left rounded-full"
-          />
-        </div>
-      )}
+      <DitherMeter
+        className="mt-3"
+        ratio={ratio}
+        percent={Math.round(ratio * 100)}
+        fill={BRAND}
+        label="Report progress"
+      />
+      <p className={cn(CAPTION, "mt-2")}>
+        {live
+          ? "Streaming from the backend — sections appear as they land."
+          : "Checking progress…"}
+      </p>
     </div>
+  );
+}
+
+/** Settled = nothing more will happen for this half of the report. */
+function isSettled(work: ProgressWork): boolean {
+  return (
+    work.complete || work.phase === "complete" || work.phase === "not_found"
   );
 }
 
@@ -699,10 +637,7 @@ function AnimatedNumber({
   }, [value, mv, reduceMotion]);
 
   return (
-    <motion.span
-      ref={ref}
-      className="inline-block text-xl font-semibold tracking-tight tabular-nums"
-    >
+    <motion.span ref={ref} className="inline-block">
       {display}
     </motion.span>
   );

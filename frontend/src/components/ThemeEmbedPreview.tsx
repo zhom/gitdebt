@@ -1,11 +1,23 @@
 import { useState } from "react";
 import { AnimatePresence, motion, useReducedMotion } from "motion/react";
 
+import { DitherCellPattern } from "@/components/DitherCellPattern";
+import { CAPTION, PANEL } from "@/components/style-tokens";
+import { DitherSegmented } from "@/components/ui/dither-segmented";
+import { SWATCH } from "@/lib/dither";
 import {
   DURATION,
   EASE_OUT,
   REDUCED_MOTION_DURATION,
 } from "@/lib/motion";
+import { cn } from "@/lib/utils";
+
+const SERIES = `rgb(${SWATCH.blue.join(", ")})`;
+
+const THEMES = [
+  { value: "light" as const, label: "Light README" },
+  { value: "dark" as const, label: "Dark README" },
+];
 
 type Theme = "light" | "dark";
 
@@ -16,45 +28,26 @@ export function ThemeEmbedPreview() {
 
   return (
     <figure
-      className="border-y border-foreground bg-card text-card-foreground"
+      className={cn(PANEL, "overflow-hidden")}
       aria-labelledby="theme-preview-caption"
     >
-      <div className="flex flex-col justify-between gap-4 border-b border-border px-4 py-4 sm:flex-row sm:items-center sm:px-5">
+      <div className="flex flex-col justify-between gap-3 border-b border-border/40 p-3.5 sm:flex-row sm:items-center">
         <figcaption id="theme-preview-caption">
-          <p className="font-medium">One snippet, both README themes</p>
-          <p className="mt-1 text-sm text-muted-foreground">
+          <p className="text-[13px]">One snippet, both README themes</p>
+          <p className={cn(CAPTION, "mt-1")}>
             The matching asset is selected by GitHub
           </p>
         </figcaption>
-        <div className="flex gap-1" aria-label="README theme preview">
-          {(["light", "dark"] as const).map((option) => (
-            <button
-              key={option}
-              type="button"
-              onClick={() => setTheme(option)}
-              aria-pressed={theme === option}
-              className="dither-control relative min-h-11 px-3 font-mono text-xs text-muted-foreground outline-none hover:text-foreground focus-visible:outline-2 focus-visible:outline-offset-2 focus-visible:outline-ring aria-pressed:text-foreground sm:min-h-9"
-            >
-              {option === "light" ? "Light README" : "Dark README"}
-              {theme === option && (
-                <motion.span
-                  layoutId="theme-preview-underline"
-                  transition={{
-                    duration: reduceMotion
-                      ? REDUCED_MOTION_DURATION
-                      : DURATION.move,
-                    ease: EASE_OUT,
-                  }}
-                  className="absolute inset-x-0 -bottom-px h-px bg-foreground"
-                  aria-hidden="true"
-                />
-              )}
-            </button>
-          ))}
-        </div>
+        <DitherSegmented
+          role="radiogroup"
+          aria-label="README theme preview"
+          value={theme}
+          options={THEMES}
+          onValueChange={setTheme}
+        />
       </div>
 
-      <div className="p-4 sm:p-5">
+      <div className="p-3.5">
         <AnimatePresence mode="wait" initial={false}>
           <motion.div
             key={theme}
@@ -70,7 +63,7 @@ export function ThemeEmbedPreview() {
                 : DURATION.enter,
               ease: EASE_OUT,
             }}
-            className={`min-h-52 border p-5 ${
+            className={`min-h-52 rounded-lg border p-5 ${
               dark
                 ? "border-zinc-800 bg-black text-white"
                 : "border-zinc-200 bg-white text-black"
@@ -93,26 +86,22 @@ export function ThemeEmbedPreview() {
                 role="img"
               >
                 <defs>
-                  <linearGradient id={`readme-wave-${theme}`} x1="0" x2="1">
-                    <stop offset="0" stopColor="var(--dither-wave-1)" />
-                    <stop offset=".55" stopColor="var(--dither-wave-2)" />
-                    <stop offset="1" stopColor="var(--dither-wave-3)" />
-                  </linearGradient>
-                  <pattern id={`readme-dots-${theme}`} width="4" height="4" patternUnits="userSpaceOnUse">
-                    <rect width="1.4" height="1.4" fill={`url(#readme-wave-${theme})`} />
-                    <rect x="2" y="2" width=".8" height=".8" fill={`url(#readme-wave-${theme})`} opacity=".65" />
-                  </pattern>
+                  <DitherCellPattern
+                    id={`readme-cells-${theme}`}
+                    fill={SERIES}
+                    density={0.55}
+                  />
                 </defs>
                 <motion.path
                   d="M2 55 C48 54 74 43 104 41 C157 37 181 24 221 19 C248 15 265 10 278 4 V64 H2Z"
-                  fill={`url(#readme-dots-${theme})`}
+                  fill={`url(#readme-cells-${theme})`}
                   animate={reduceMotion ? undefined : { y: [0, -1.5, 0] }}
                   transition={{ duration: 4.5, repeat: Infinity, ease: "easeInOut" }}
                 />
                 <path
                   d="M2 55 C48 54 74 43 104 41 C157 37 181 24 221 19 C248 15 265 10 278 4"
                   fill="none"
-                  stroke={`url(#readme-wave-${theme})`}
+                  stroke={SERIES}
                   strokeLinecap="round"
                   strokeWidth="2"
                 />

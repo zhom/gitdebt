@@ -156,6 +156,46 @@ impl ApiState {
         storage: std::sync::Arc<crate::repo_history::RepoStorage>,
         redis: Option<std::sync::Arc<RedisHandle>>,
     ) -> anyhow::Result<Self> {
+        let frontend_origin_raw = match std::env::var("PUBLIC_FRONTEND_ORIGIN") {
+            Ok(value) if !value.trim().is_empty() => value,
+            _ if cfg!(debug_assertions) => "http://localhost:14321".to_string(),
+            _ => anyhow::bail!("PUBLIC_FRONTEND_ORIGIN must be set in release deployments"),
+        };
+        let frontend_origin = normalize_frontend_origin(&frontend_origin_raw)?;
+        let metrics_token = match std::env::var("METRICS_TOKEN")
+            .ok()
+            .filter(|token| !token.trim().is_empty())
+        {
+            Some(token) => Some(token),
+            None if cfg!(debug_assertions) => {
+                tracing::warn!("METRICS_TOKEN unset; /metrics is public in debug builds");
+                None
+            }
+            None => anyhow::bail!("METRICS_TOKEN must be set in release deployments"),
+        };
+        Self::with_settings(
+            analyzer,
+            gh_app,
+            storage,
+            redis,
+            frontend_origin,
+            metrics_token,
+        )
+    }
+
+    /// `new` with the deployment settings supplied directly instead of read
+    /// from the environment. Tests use this so they exercise the same state
+    /// in debug and release builds, where `new` demands real deployment
+    /// values.
+    #[allow(clippy::too_many_arguments)]
+    pub fn with_settings(
+        analyzer: AnalyzerCtx,
+        gh_app: Option<GithubAppConfig>,
+        storage: std::sync::Arc<crate::repo_history::RepoStorage>,
+        redis: Option<std::sync::Arc<RedisHandle>>,
+        frontend_origin: String,
+        metrics_token: Option<String>,
+    ) -> anyhow::Result<Self> {
         let day = Duration::from_secs(24 * 60 * 60);
         let svg_cache = weighted_string_cache(SVG_CACHE_MAX_BYTES, day);
         let analyze_cache = MokaCache::builder()
@@ -182,23 +222,6 @@ impl ApiState {
             .max_capacity(1_000)
             .time_to_live(Duration::from_secs(5 * 60))
             .build();
-        let frontend_origin_raw = match std::env::var("PUBLIC_FRONTEND_ORIGIN") {
-            Ok(value) if !value.trim().is_empty() => value,
-            _ if cfg!(debug_assertions) => "http://localhost:14321".to_string(),
-            _ => anyhow::bail!("PUBLIC_FRONTEND_ORIGIN must be set in release deployments"),
-        };
-        let frontend_origin = normalize_frontend_origin(&frontend_origin_raw)?;
-        let metrics_token = match std::env::var("METRICS_TOKEN")
-            .ok()
-            .filter(|token| !token.trim().is_empty())
-        {
-            Some(token) => Some(token),
-            None if cfg!(debug_assertions) => {
-                tracing::warn!("METRICS_TOKEN unset; /metrics is public in debug builds");
-                None
-            }
-            None => anyhow::bail!("METRICS_TOKEN must be set in release deployments"),
-        };
         Ok(Self {
             analyzer,
             svg_cache,
@@ -318,6 +341,14 @@ pub fn router(state: ApiState) -> Router {
         .route("/api/repos/{owner}/{repo}/badge.svg", get(badge_svg))
         .route("/api/repos/{owner}/{repo}/badge.png", get(badge_png))
         .route("/api/repos/{owner}/{repo}/badge.webp", get(badge_webp))
+        // Profile signals sit with the media budget, not the analyze
+        // budget: they read Postgres and enqueue nothing, exactly like the
+        // per-repo `stats.json` in `repo_endpoints::public_router`.
+        .route("/api/users/{login}/stats.json", get(user_stats_json))
+        .route(
+            "/api/users/{login}/stats/{filename}",
+            get(user_stat_dispatcher),
+        )
         .route("/api/users/{login}/card.svg", get(user_card_svg))
         .route("/api/users/{login}/card.png", get(user_card_png))
         .route("/api/users/{login}/card.webp", get(user_card_webp))
@@ -1140,10 +1171,13 @@ async fn warm_user_profile(
         .map_err(map_aggregate_err)?;
 
     state.user_agg_cache.invalidate(&login).await;
-    state
-        .analyze_cache
-        .invalidate(&format!("user:{login}"))
-        .await;
+    // The profile report memo shares `analyze_cache` under a distinct key
+    // prefix; a warm-up refreshes the owned-repo set, so it must drop too
+    // or the report keeps serving the pre-warm totals for its whole TTL.
+    let analyze_keys = vec![format!("user:{login}"), format!("user-stats:{login}")];
+    for key in &analyze_keys {
+        state.analyze_cache.invalidate(key).await;
+    }
     // Other replicas hold their own moka caches; publish the evicted keys
     // on the invalidation bus so they drop the same entries. Fire-and-forget
     // — a lost message degrades to TTL staleness, never blocks the response.
@@ -1152,7 +1186,7 @@ async fn warm_user_profile(
             redis,
             crate::redis::Invalidation {
                 user_agg: vec![login.clone()],
-                analyze: vec![format!("user:{login}")],
+                analyze: analyze_keys,
             },
         );
     }
@@ -1162,6 +1196,697 @@ async fn warm_user_profile(
         HeaderValue::from_static("private, no-store"),
     );
     Ok((headers, Json(aggregate.to_json())))
+}
+
+// Profile-level code signals (Postgres only)
+
+/// Known automation accounts that don't carry `[bot]` in the commit
+/// author. Kept alongside the SQL fragment below so the profile-level
+/// maintenance signal excludes the same population as the per-repo bus
+/// factor without reaching across module boundaries.
+const PROFILE_BOT_LOGINS: &[&str] = &[
+    "dependabot",
+    "dependabot-preview",
+    "renovate",
+    "renovate-bot",
+    "mergify",
+    "imgbot",
+    "allcontributors",
+    "pre-commit-ci",
+    "github-actions",
+    "claude",
+    "claude-code",
+    "anthropic",
+    "cursor",
+    "copilot",
+    "gitkraken",
+    "snyk-bot",
+    "stale",
+    "deepsource-autofix",
+    "codacy-badger",
+    "scout-bot",
+    "lgtm-com",
+];
+
+/// `repo_author_stats` bot exclusion for the profile aggregate. `$2` is
+/// bound to [`PROFILE_BOT_LOGINS`].
+const PROFILE_NON_BOT_AUTHOR: &str = "author.author_name NOT LIKE '%[bot]%' \
+       AND author.author_email NOT LIKE '%[bot]@%' \
+       AND (author.github_login IS NULL OR author.github_login NOT LIKE '%[bot]%') \
+       AND COALESCE(author.github_login, '') <> ALL($2::text[])";
+
+/// Rolling window for the "recent commit volume" ranking, in days.
+const PROFILE_ACTIVE_WINDOW_DAYS: i64 = 90;
+/// Rolling window for the aggregated commit heatmap: 52 weeks back from
+/// the Monday of the current week, matching the per-repo heatmap.
+const PROFILE_HEATMAP_WEEKS: i64 = 52;
+
+#[derive(Debug, Clone, Serialize)]
+struct UserLanguage {
+    language: String,
+    files: i64,
+    code: i64,
+    blank: i64,
+    comment: i64,
+}
+
+#[derive(Debug, Clone, Serialize)]
+struct UserRepoRow {
+    repo: String,
+    stars: i64,
+    forks: i64,
+    /// Analyzed commits over the repo's whole history; `0` until the
+    /// clone analysis has completed a pass.
+    commits: i64,
+    /// Commits landed inside [`PROFILE_ACTIVE_WINDOW_DAYS`].
+    commits_recent: i64,
+    /// Cumulative monthly star totals. Empty unless the repo's star
+    /// history is complete — readers never plot partial history.
+    spark: Vec<i64>,
+}
+
+#[derive(Debug, Clone, Serialize)]
+struct UserDay {
+    date: chrono::NaiveDate,
+    value: i64,
+}
+
+/// Everything the profile report renders, derived exclusively from
+/// Postgres: `repos`, `repo_history`, `repo_author_stats`,
+/// `repo_commit_days` and `repo_lines`. No GitHub call is on this path.
+#[derive(Debug, Clone, Serialize)]
+struct UserStats {
+    login: String,
+    /// At least one owned repo has a completed analysis pass. Readers
+    /// gate every code-derived number on this.
+    ready: bool,
+    repos_tracked: i64,
+    repos_analyzed: i64,
+    total_stars: i64,
+    total_forks: i64,
+    /// Commits authored by this login across every tracked repo.
+    authored_commits: i64,
+    /// Distinct tracked repos this login authored commits in.
+    contributed_repos: i64,
+    /// Commits analyzed across the login's owned repos.
+    analyzed_commits: i64,
+    since_year: Option<i32>,
+    /// Owned analyzed repos where one person carries more than half of
+    /// the non-bot authorship, and the complement.
+    solo_maintained: i64,
+    shared_maintained: i64,
+    languages: Vec<UserLanguage>,
+    top_repos: Vec<UserRepoRow>,
+    active_repos: Vec<UserRepoRow>,
+    commit_days: Vec<UserDay>,
+}
+
+/// Aggregate the profile report from Postgres. `login` must already be
+/// [`cards::is_valid_login`]-validated: it is interpolated into a `LIKE`
+/// prefix bind, and that validation guarantees no LIKE metacharacter can
+/// widen the owner match.
+async fn load_user_stats(db: &crate::db::Db, login: &str) -> Result<UserStats, ApiError> {
+    let pool = &db.pool;
+
+    let owned = sqlx::query(
+        "SELECT COUNT(*) AS repos_tracked, \
+                COALESCE(SUM(GREATEST(repos.star_count, 0)), 0)::BIGINT AS stars, \
+                COALESCE(SUM(GREATEST(repos.forks_count, 0)), 0)::BIGINT AS forks, \
+                COUNT(history.repo) FILTER \
+                    (WHERE history.last_analyzed_at IS NOT NULL) AS repos_analyzed, \
+                COALESCE(SUM(history.total_commits) FILTER \
+                    (WHERE history.last_analyzed_at IS NOT NULL), 0)::BIGINT AS analyzed_commits \
+         FROM repos \
+         LEFT JOIN repo_history history ON history.repo = repos.repo \
+         WHERE repos.repo LIKE $1 || '/%' \
+           AND NOT repos.missing \
+           AND repos.metadata_fetched_at IS NOT NULL",
+    )
+    .bind(login)
+    .fetch_one(pool)
+    .await?;
+    let repos_tracked: i64 = owned.try_get("repos_tracked")?;
+    let total_stars: i64 = owned.try_get("stars")?;
+    let total_forks: i64 = owned.try_get("forks")?;
+    let repos_analyzed: i64 = owned.try_get("repos_analyzed")?;
+    let analyzed_commits: i64 = owned.try_get("analyzed_commits")?;
+
+    let authored = sqlx::query(
+        "SELECT COALESCE(SUM(author.commits), 0)::BIGINT AS commits, \
+                COUNT(DISTINCT author.repo) AS contribs, \
+                MIN(author.first_commit_at) AS first_at \
+         FROM repo_author_stats author \
+         JOIN repos public_repo ON public_repo.repo = author.repo \
+         WHERE LOWER(author.github_login) = $1 \
+           AND public_repo.missing = FALSE \
+           AND public_repo.metadata_fetched_at IS NOT NULL",
+    )
+    .bind(login)
+    .fetch_one(pool)
+    .await?;
+    let authored_commits: i64 = authored.try_get("commits")?;
+    let contributed_repos: i64 = authored.try_get("contribs")?;
+    let first_at: Option<DateTime<Utc>> = authored.try_get("first_at")?;
+
+    let languages = load_user_language_bars(pool, login).await?;
+
+    let top_rows = sqlx::query(
+        "SELECT repos.repo AS repo, \
+                COALESCE(GREATEST(repos.star_count, 0), 0)::BIGINT AS stars, \
+                COALESCE(GREATEST(repos.forks_count, 0), 0)::BIGINT AS forks, \
+                COALESCE(history.total_commits, 0)::BIGINT AS commits, \
+                repos.history_complete AS history_complete \
+         FROM repos \
+         LEFT JOIN repo_history history ON history.repo = repos.repo \
+         WHERE repos.repo LIKE $1 || '/%' \
+           AND NOT repos.missing \
+           AND repos.metadata_fetched_at IS NOT NULL \
+         ORDER BY stars DESC, repos.repo ASC LIMIT 8",
+    )
+    .bind(login)
+    .fetch_all(pool)
+    .await?;
+    let mut top_repos: Vec<UserRepoRow> = Vec::with_capacity(top_rows.len());
+    // Only repos whose star history is confirmed complete may contribute a
+    // sparkline; a partial series would draw a shape that isn't real.
+    let mut sparkable: Vec<String> = Vec::new();
+    for row in top_rows {
+        let repo: String = row.try_get("repo")?;
+        if row.try_get::<bool, _>("history_complete")? {
+            sparkable.push(repo.clone());
+        }
+        top_repos.push(UserRepoRow {
+            repo,
+            stars: row.try_get("stars")?,
+            forks: row.try_get("forks")?,
+            commits: row.try_get("commits")?,
+            commits_recent: 0,
+            spark: Vec::new(),
+        });
+    }
+    let sparks = load_repo_sparklines(pool, &sparkable).await?;
+    for entry in top_repos.iter_mut() {
+        if let Some(spark) = sparks.get(&entry.repo) {
+            entry.spark = spark.clone();
+        }
+    }
+
+    let active_rows = sqlx::query(
+        "SELECT days.repo AS repo, SUM(days.commits)::BIGINT AS commits_recent \
+         FROM repo_commit_days days \
+         JOIN repos public_repo ON public_repo.repo = days.repo \
+         WHERE days.repo LIKE $1 || '/%' \
+           AND public_repo.missing = FALSE \
+           AND public_repo.metadata_fetched_at IS NOT NULL \
+           AND days.day >= CURRENT_DATE - $2::INT \
+         GROUP BY days.repo \
+         HAVING SUM(days.commits) > 0 \
+         ORDER BY commits_recent DESC, days.repo ASC LIMIT 8",
+    )
+    .bind(login)
+    .bind(PROFILE_ACTIVE_WINDOW_DAYS as i32)
+    .fetch_all(pool)
+    .await?;
+    let active_repos: Vec<UserRepoRow> = active_rows
+        .into_iter()
+        .map(|row| {
+            Ok(UserRepoRow {
+                repo: row.try_get("repo")?,
+                stars: 0,
+                forks: 0,
+                commits: 0,
+                commits_recent: row.try_get("commits_recent")?,
+                spark: Vec::new(),
+            })
+        })
+        .collect::<Result<_, sqlx::Error>>()?;
+
+    let (from, to) = profile_heatmap_window();
+    let commit_days = load_user_commit_days(pool, login, from, to)
+        .await?
+        .into_iter()
+        .map(|day| UserDay {
+            date: day.day,
+            value: day.commits,
+        })
+        .collect();
+
+    // Per owned analyzed repo: how many top non-bot authors it takes to
+    // pass half of the authorship. Mirrors `repo_charts::compute_bus_factor`
+    // (strictly more than 50%) as a window function so the whole profile
+    // costs one query instead of one per repo.
+    let bus_sql = format!(
+        "WITH owned AS ( \
+                 SELECT repos.repo FROM repos \
+                 JOIN repo_history history ON history.repo = repos.repo \
+                 WHERE repos.repo LIKE $1 || '/%' \
+                   AND NOT repos.missing \
+                   AND repos.metadata_fetched_at IS NOT NULL \
+                   AND history.last_analyzed_at IS NOT NULL \
+             ), ranked AS ( \
+                 SELECT author.repo AS repo, \
+                        SUM(author.commits) OVER (PARTITION BY author.repo)::BIGINT AS total, \
+                        SUM(author.commits) OVER ( \
+                            PARTITION BY author.repo \
+                            ORDER BY author.commits DESC, author.author_email ASC \
+                            ROWS BETWEEN UNBOUNDED PRECEDING AND CURRENT ROW)::BIGINT AS running, \
+                        ROW_NUMBER() OVER ( \
+                            PARTITION BY author.repo \
+                            ORDER BY author.commits DESC, author.author_email ASC) AS rn \
+                 FROM repo_author_stats author \
+                 JOIN owned ON owned.repo = author.repo \
+                 WHERE author.commits > 0 AND {PROFILE_NON_BOT_AUTHOR} \
+             ), bus AS ( \
+                 SELECT repo, MIN(rn) AS bus_factor FROM ranked \
+                 WHERE running * 2 > total GROUP BY repo \
+             ) \
+             SELECT COUNT(*) FILTER (WHERE bus_factor <= 1) AS solo, \
+                    COUNT(*) AS scored FROM bus"
+    );
+    let bus = sqlx::query(sqlx::AssertSqlSafe(bus_sql))
+        .bind(login)
+        .bind(PROFILE_BOT_LOGINS)
+        .fetch_one(pool)
+        .await?;
+    let solo_maintained: i64 = bus.try_get("solo")?;
+    let scored: i64 = bus.try_get("scored")?;
+
+    Ok(UserStats {
+        login: login.to_string(),
+        ready: repos_analyzed > 0,
+        repos_tracked,
+        repos_analyzed,
+        total_stars,
+        total_forks,
+        authored_commits,
+        contributed_repos,
+        analyzed_commits,
+        since_year: first_at.map(|t| t.year()),
+        solo_maintained,
+        shared_maintained: (scored - solo_maintained).max(0),
+        languages,
+        top_repos,
+        active_repos,
+        commit_days,
+    })
+}
+
+/// 52 weeks ending today, starting on a Monday — the same window the
+/// per-repo commit heatmap uses, so the two read identically.
+fn profile_heatmap_window() -> (chrono::NaiveDate, chrono::NaiveDate) {
+    let today = Utc::now().date_naive();
+    let this_monday = today - chrono::Duration::days(today.weekday().num_days_from_monday() as i64);
+    (
+        this_monday - chrono::Duration::days((PROFILE_HEATMAP_WEEKS - 1) * 7),
+        today,
+    )
+}
+
+/// Cumulative monthly star totals per repo, for the profile's top-repo
+/// sparklines. ONE grouped query over the star-history view for the whole
+/// set (repo-leading index scan) instead of a per-repo day-delta load —
+/// the profile lists up to eight repos and must not turn into eight full
+/// history reads. Callers pass only repos with confirmed-complete
+/// history, so a plotted line is never a partial series.
+async fn load_repo_sparklines(
+    pool: &sqlx::PgPool,
+    repos: &[String],
+) -> Result<std::collections::HashMap<String, Vec<i64>>, ApiError> {
+    if repos.is_empty() {
+        return Ok(std::collections::HashMap::new());
+    }
+    let rows = sqlx::query(
+        "SELECT repo, \
+                date_trunc('month', starred_at AT TIME ZONE 'UTC')::date AS month, \
+                COUNT(*)::BIGINT AS delta \
+         FROM active_repo_star_history \
+         WHERE repo = ANY($1::text[]) \
+         GROUP BY 1, 2 ORDER BY 1, 2",
+    )
+    .bind(repos)
+    .fetch_all(pool)
+    .await?;
+    let mut out: std::collections::HashMap<String, Vec<i64>> = std::collections::HashMap::new();
+    for row in rows {
+        let repo: String = row.try_get("repo")?;
+        let delta: i64 = row.try_get("delta")?;
+        let series = out.entry(repo).or_default();
+        let running = series.last().copied().unwrap_or(0) + delta;
+        series.push(running);
+    }
+    // Keep the tail: a sparkline is about the shape of recent growth.
+    for series in out.values_mut() {
+        if series.len() > 60 {
+            series.drain(..series.len() - 60);
+        }
+    }
+    Ok(out)
+}
+
+/// Owner-scoped language totals, ordered by total lines (falling back to
+/// the file census for language sets tokei reported without line counts).
+/// The `language` tie-break keeps rendered bytes deterministic.
+async fn load_user_language_bars(
+    pool: &sqlx::PgPool,
+    login: &str,
+) -> Result<Vec<UserLanguage>, ApiError> {
+    let rows = sqlx::query(
+        "SELECT lines.language AS language, \
+                SUM(lines.files)::BIGINT AS files, \
+                SUM(lines.lines_code)::BIGINT AS code, \
+                SUM(lines.lines_blank)::BIGINT AS blank, \
+                SUM(lines.lines_comment)::BIGINT AS comment \
+         FROM repo_lines lines \
+         JOIN repos public_repo ON public_repo.repo = lines.repo \
+         WHERE lines.repo LIKE $1 || '/%' \
+           AND public_repo.missing = FALSE \
+           AND public_repo.metadata_fetched_at IS NOT NULL \
+         GROUP BY lines.language \
+         HAVING SUM(lines.lines_code + lines.lines_blank + lines.lines_comment) > 0 \
+             OR SUM(lines.files) > 0 \
+         ORDER BY CASE WHEN SUM(lines.lines_code + lines.lines_blank + lines.lines_comment) > 0 \
+                  THEN SUM(lines.lines_code + lines.lines_blank + lines.lines_comment) \
+                  ELSE SUM(lines.files) END DESC, lines.language ASC \
+         LIMIT 12",
+    )
+    .bind(login)
+    .fetch_all(pool)
+    .await?;
+    let mut out = Vec::with_capacity(rows.len());
+    for row in rows {
+        out.push(UserLanguage {
+            language: row.try_get("language")?,
+            files: row.try_get("files")?,
+            code: row.try_get("code")?,
+            blank: row.try_get("blank")?,
+            comment: row.try_get("comment")?,
+        });
+    }
+    Ok(out)
+}
+
+/// Commit days summed across the login's owned tracked repos.
+async fn load_user_commit_days(
+    pool: &sqlx::PgPool,
+    login: &str,
+    from: chrono::NaiveDate,
+    to: chrono::NaiveDate,
+) -> Result<Vec<crate::repo_charts::DayCount>, ApiError> {
+    let rows = sqlx::query(
+        "SELECT days.day AS day, SUM(days.commits)::BIGINT AS commits \
+         FROM repo_commit_days days \
+         JOIN repos public_repo ON public_repo.repo = days.repo \
+         WHERE days.repo LIKE $1 || '/%' \
+           AND public_repo.missing = FALSE \
+           AND public_repo.metadata_fetched_at IS NOT NULL \
+           AND days.day BETWEEN $2 AND $3 \
+         GROUP BY days.day ORDER BY days.day ASC",
+    )
+    .bind(login)
+    .bind(from)
+    .bind(to)
+    .fetch_all(pool)
+    .await?;
+    let mut out = Vec::with_capacity(rows.len());
+    for row in rows {
+        out.push(crate::repo_charts::DayCount {
+            day: row.try_get("day")?,
+            commits: row.try_get("commits")?,
+        });
+    }
+    Ok(out)
+}
+
+/// Cache/render revision for the profile charts: the number of analyzed
+/// owned repos, the newest analysis timestamp, and the analyzed commit
+/// total. Any completed analysis pass moves at least one of the three, so
+/// a stale chart can never outlive the data it was rendered from.
+/// `None` means nothing has been analyzed yet → pending placeholder.
+async fn user_stat_revision(pool: &sqlx::PgPool, login: &str) -> Result<Option<String>, ApiError> {
+    let row = sqlx::query(
+        "SELECT COUNT(*) AS analyzed, \
+                COALESCE(EXTRACT(EPOCH FROM MAX(history.last_analyzed_at)), 0)::BIGINT AS at, \
+                COALESCE(SUM(history.total_commits), 0)::BIGINT AS commits \
+         FROM repos \
+         JOIN repo_history history ON history.repo = repos.repo \
+         WHERE repos.repo LIKE $1 || '/%' \
+           AND NOT repos.missing \
+           AND repos.metadata_fetched_at IS NOT NULL \
+           AND history.last_analyzed_at IS NOT NULL",
+    )
+    .bind(login)
+    .fetch_one(pool)
+    .await?;
+    let analyzed: i64 = row.try_get("analyzed")?;
+    if analyzed <= 0 {
+        return Ok(None);
+    }
+    let at: i64 = row.try_get("at")?;
+    let commits: i64 = row.try_get("commits")?;
+    Ok(Some(format!("n{analyzed}:t{at}:c{commits}")))
+}
+
+/// `GET /api/users/:login/stats.json` — the profile report's data source.
+/// Postgres only; the shape mirrors the per-repo `stats.json` contract
+/// (an explicit `ready` flag rather than partial data dressed as final).
+async fn user_stats_json(
+    State(state): State<ApiState>,
+    Path(login): Path<String>,
+) -> Result<impl IntoResponse, ApiError> {
+    if !cards::is_valid_login(&login) {
+        return Err(ApiError::bad_request("invalid login"));
+    }
+    let login = login.to_ascii_lowercase();
+    let key = format!("user-stats:{login}");
+    let json = if let Some(json) = state.analyze_cache.get(&key).await {
+        json
+    } else {
+        let stats = load_user_stats(state.analyzer.cache.db(), &login).await?;
+        let json = serde_json::to_string(&stats)?;
+        // Never pin a not-yet-analyzed profile: the durable analysis queue
+        // fills it in and the report must self-heal within the TTL.
+        if stats.ready {
+            state.analyze_cache.insert(key, json.clone()).await;
+        }
+        json
+    };
+    let mut headers = HeaderMap::new();
+    headers.insert(
+        header::CONTENT_TYPE,
+        HeaderValue::from_static("application/json"),
+    );
+    headers.insert(
+        header::CACHE_CONTROL,
+        HeaderValue::from_static("public, s-maxage=300, max-age=60"),
+    );
+    Ok((headers, json))
+}
+
+/// Embeddable profile charts. Deliberately a small, fixed set: each one
+/// reuses a per-repo renderer over the owner-scoped aggregate, so a
+/// profile asset and a repo asset are the same visual language.
+#[derive(Clone, Copy, PartialEq, Eq)]
+enum UserStatKind {
+    /// Aggregated commit heatmap across owned repos.
+    CommitActivity,
+    /// Monthly commit volume across owned repos.
+    CommitTrend,
+    /// Language footprint across owned repos.
+    Languages,
+}
+
+impl UserStatKind {
+    fn parse(name: &str) -> Option<Self> {
+        match name {
+            "commit-activity" => Some(Self::CommitActivity),
+            "commit-trend" => Some(Self::CommitTrend),
+            "languages" => Some(Self::Languages),
+            _ => None,
+        }
+    }
+
+    fn key(self) -> &'static str {
+        match self {
+            Self::CommitActivity => "commit-activity",
+            Self::CommitTrend => "commit-trend",
+            Self::Languages => "languages",
+        }
+    }
+}
+
+/// `{name}.{svg|png|webp}` — the profile mirror of the per-repo stat
+/// dispatcher. Rasters share the process-wide encode cap.
+fn parse_user_stat_filename(
+    s: &str,
+) -> Option<(UserStatKind, Option<crate::raster::RasterFormat>)> {
+    let (name, ext) = s.rsplit_once('.')?;
+    let format = match ext {
+        "svg" => None,
+        "png" => Some(crate::raster::RasterFormat::Png),
+        "webp" => Some(crate::raster::RasterFormat::Webp),
+        _ => return None,
+    };
+    Some((UserStatKind::parse(name)?, format))
+}
+
+async fn render_user_stat_svg(
+    state: &ApiState,
+    login: &str,
+    kind: UserStatKind,
+    theme: &crate::theme::Theme,
+) -> Result<String, ApiError> {
+    let pool = &state.analyzer.cache.db().pool;
+    let label = format!("@{login}");
+    Ok(match kind {
+        UserStatKind::CommitActivity => {
+            let (from, to) = profile_heatmap_window();
+            let days = load_user_commit_days(pool, login, from, to).await?;
+            crate::repo_charts::render_heatmap(
+                &label,
+                "Commits across tracked repos · last 52 weeks",
+                from,
+                to,
+                &days,
+                theme,
+            )
+        }
+        UserStatKind::CommitTrend => {
+            let days = load_user_commit_days(
+                pool,
+                login,
+                chrono::NaiveDate::from_ymd_opt(2005, 1, 1).expect("2005-01-01 is a valid date"),
+                Utc::now().date_naive(),
+            )
+            .await?;
+            crate::repo_charts::render_commit_trend(&label, &days, theme)
+        }
+        UserStatKind::Languages => {
+            let bars: Vec<crate::repo_charts::LanguageBar> = load_user_language_bars(pool, login)
+                .await?
+                .into_iter()
+                .map(|row| crate::repo_charts::LanguageBar {
+                    language: row.language,
+                    files: row.files,
+                    lines_code: row.code,
+                    lines_blank: row.blank,
+                    lines_comment: row.comment,
+                })
+                .collect();
+            crate::repo_charts::render_languages(&label, &bars, theme)
+        }
+    })
+}
+
+async fn user_stat_dispatcher(
+    State(state): State<ApiState>,
+    Path((login, filename)): Path<(String, String)>,
+    Query(q): Query<UserStatQuery>,
+    request_headers: HeaderMap,
+) -> Result<axum::response::Response, ApiError> {
+    if !cards::is_valid_login(&login) {
+        return Err(ApiError::bad_request("invalid login"));
+    }
+    let Some((kind, raster)) = parse_user_stat_filename(&filename) else {
+        return Err(ApiError::bad_request("unknown chart or format"));
+    };
+    let login = login.to_ascii_lowercase();
+    let theme = theme_for(q.theme.as_deref());
+    let theme_key = if theme.dark { "dark" } else { "light" };
+
+    let Some(revision) = user_stat_revision(&state.analyzer.cache.db().pool, &login).await? else {
+        // Nothing analyzed yet — short TTL, never memoized, so the embed
+        // heals as soon as the durable queue lands the first pass.
+        let mut svg = cards::render_user_pending_card(&login, theme);
+        if q.in_app() {
+            svg = crate::brand::without_embed_footer(svg);
+        }
+        return Ok(match raster {
+            None => user_stat_svg_response(&request_headers, svg, true, !q.in_app()),
+            Some(format) => {
+                let bytes = rasterize_limited(svg, format, RASTER_SCALE).await?;
+                card_raster_response(&request_headers, format, std::sync::Arc::new(bytes), true)
+            }
+        });
+    };
+
+    let key = format!(
+        "user-stat:{}:{login}|{theme_key}|rev:{revision}|{RENDER_REVISION}",
+        kind.key(),
+    );
+    let svg = single_flight(&state.stat_svg_cache, key.clone(), async {
+        render_user_stat_svg(&state, &login, kind, theme).await
+    })
+    .await?;
+    // README assets are static by default; SMIL only on an explicit opt-in.
+    let mut svg = if q.animate == Some(1) {
+        svg
+    } else {
+        crate::raster::freeze_svg_animations(&svg)
+    };
+    if q.in_app() {
+        svg = crate::brand::without_embed_footer(svg);
+    }
+
+    let Some(format) = raster else {
+        return Ok(user_stat_svg_response(
+            &request_headers,
+            svg,
+            false,
+            !q.in_app(),
+        ));
+    };
+    let raster_key = format!(
+        "{key}|{}|{}",
+        raster_fmt_key(format),
+        if q.in_app() { "app" } else { "embed" }
+    );
+    if let Some(cached) = state.raster_cache.get(&raster_key).await {
+        return Ok(card_raster_response(
+            &request_headers,
+            format,
+            cached,
+            false,
+        ));
+    }
+    let bytes = std::sync::Arc::new(rasterize_limited(svg, format, RASTER_SCALE).await?);
+    state.raster_cache.insert(raster_key, bytes.clone()).await;
+    Ok(card_raster_response(&request_headers, format, bytes, false))
+}
+
+#[derive(Debug, Deserialize)]
+struct UserStatQuery {
+    theme: Option<String>,
+    animate: Option<u8>,
+    /// `context=app` — rendered inside gitdebt's own UI, where the embed
+    /// attribution footer is redundant chrome. Same explicit opt-in as
+    /// the per-repo stat charts; README embeds keep the footer.
+    context: Option<String>,
+}
+
+impl UserStatQuery {
+    fn in_app(&self) -> bool {
+        self.context.as_deref() == Some("app")
+    }
+}
+
+fn user_stat_svg_response(
+    request_headers: &HeaderMap,
+    svg: String,
+    short_ttl: bool,
+    branded: bool,
+) -> axum::response::Response {
+    let mut headers = HeaderMap::new();
+    headers.insert(
+        header::CONTENT_TYPE,
+        HeaderValue::from_static("image/svg+xml; charset=utf-8"),
+    );
+    headers.insert(header::CACHE_CONTROL, card_cache_control(short_ttl));
+    let body = if branded {
+        crate::brand::with_site_link(svg)
+    } else {
+        svg
+    };
+    conditional_media_response(request_headers, headers, body.into_bytes())
 }
 
 /// Render-or-fetch the aggregate star chart for a login: the summed series
@@ -2662,9 +3387,10 @@ fn needs_downloads(metrics: &[Metric]) -> bool {
 /// Render-revision constant baked into every media cache key (badges,
 /// cards, OG images, GIFs, charts). Bump it whenever renderer output
 /// changes for identical data so stale in-process/CDN entries can never
-/// serve the previous look under the same key. `r14` = the dithered
-/// dark-first redesign.
-pub(crate) const RENDER_REVISION: &str = "r14";
+/// serve the previous look under the same key. `r15` = the pixel-grid
+/// brand mark on badges, the dithered commit-activity heatmap, and
+/// per-language chart inks.
+pub(crate) const RENDER_REVISION: &str = "r15";
 
 struct RepoRenderReadiness {
     stars: bool,
@@ -3710,6 +4436,21 @@ async fn rasterize_uncached(
 /// bound value contains no LIKE metacharacters and can never widen the
 /// prefix match). SUMs over BIGINT columns are cast back to BIGINT
 /// (Postgres would otherwise return NUMERIC).
+///
+/// Every aggregate column is table-qualified. Both statements join `repos`
+/// to a second relation that also has a `repo` column, so an unqualified
+/// `repo`/`commits`/`first_commit_at` is a planner-level ambiguity error —
+/// a 500 on every profile card, not a wrong number. `card_sql_*` in the
+/// tests below execute these exact statements against Postgres for that
+/// reason.
+///
+/// `repos_analyzed` counts repos whose *analysis* is done and current — the
+/// same three conditions as [`crate::repo_analysis::analysis_is_current`]
+/// minus the enqueue-only freshness window, plus "no live queue row".
+/// Author login/avatar enrichment is deliberately not part of it: it is
+/// presentation-only metadata resolved best-effort against the GitHub API,
+/// and gating this count on it pinned profiles at "Analyzing N
+/// repositories" forever for any repo with unresolvable author emails.
 async fn load_user_card_data(
     db: &crate::db::Db,
     login: &str,
@@ -3720,14 +4461,10 @@ async fn load_user_card_data(
                 COALESCE(SUM(GREATEST(forks_count, 0)), 0)::BIGINT AS forks, \
                 COUNT(history.repo) FILTER \
                     (WHERE history.last_analyzed_at IS NOT NULL \
-                       AND active.repo IS NULL \
-                       AND NOT EXISTS ( \
-                           SELECT 1 FROM repo_author_stats author \
-                           WHERE author.repo = repos.repo \
-                             AND (author.github_login IS NULL \
-                                  OR author.avatar_url LIKE 'https://www.gravatar.com/%') \
-                             AND author.enrich_attempted_at IS NULL \
-                       )) AS repos_analyzed \
+                       AND history.analysis_revision >= $2 \
+                       AND history.last_analyzed_sha IS NOT NULL \
+                       AND history.head_sha = history.last_analyzed_sha \
+                       AND active.repo IS NULL) AS repos_analyzed \
          FROM repos \
          LEFT JOIN repo_history history ON history.repo = repos.repo \
          LEFT JOIN repo_analysis_queue active \
@@ -3738,6 +4475,7 @@ async fn load_user_card_data(
            AND repos.metadata_fetched_at IS NOT NULL",
     )
     .bind(login)
+    .bind(crate::repo_analysis::CURRENT_ANALYSIS_REVISION)
     .fetch_one(&db.pool)
     .await?;
     let repos_tracked: i64 = owned.try_get("repos_tracked")?;
@@ -3746,9 +4484,9 @@ async fn load_user_card_data(
     let repos_analyzed: i64 = owned.try_get("repos_analyzed")?;
 
     let authored = sqlx::query(
-        "SELECT COALESCE(SUM(commits), 0)::BIGINT AS commits, \
-                COUNT(DISTINCT repo) AS contribs, \
-                MIN(first_commit_at) AS first_at \
+        "SELECT COALESCE(SUM(author.commits), 0)::BIGINT AS commits, \
+                COUNT(DISTINCT author.repo) AS contribs, \
+                MIN(author.first_commit_at) AS first_at \
          FROM repo_author_stats author \
          JOIN repos public_repo ON public_repo.repo = author.repo \
          WHERE LOWER(author.github_login) = $1 \
@@ -5341,10 +6079,12 @@ mod tests {
             cache: crate::cache::Cache::new(db),
         };
         Some(
-            ApiState::new(
+            ApiState::with_settings(
                 analyzer,
                 None,
                 std::sync::Arc::new(crate::repo_history::RepoStorage::from_env()),
+                None,
+                "http://localhost:14321".to_string(),
                 None,
             )
             .expect("api state"),
@@ -5364,6 +6104,251 @@ mod tests {
                 .await
                 .expect("cleanup");
         }
+    }
+
+    async fn cleanup_card_rows(state: &ApiState, prefix: &str) {
+        let like = format!("{prefix}%");
+        for statement in [
+            "DELETE FROM repo_analysis_queue WHERE repo LIKE $1",
+            "DELETE FROM repo_author_stats WHERE repo LIKE $1",
+            "DELETE FROM repo_lines WHERE repo LIKE $1",
+            "DELETE FROM repo_history WHERE repo LIKE $1",
+            "DELETE FROM repos WHERE repo LIKE $1",
+        ] {
+            sqlx::query(statement)
+                .bind(&like)
+                .execute(&state.analyzer.cache.db().pool)
+                .await
+                .expect("cleanup");
+        }
+    }
+
+    /// Seed one owned repository: a publicly-proven `repos` row plus an
+    /// optional analysis state.
+    async fn seed_card_repo(
+        state: &ApiState,
+        repo: &str,
+        stars: i64,
+        forks: i64,
+        analysis: Option<(&str, &str, i32)>,
+    ) {
+        let db = state.analyzer.cache.db();
+        sqlx::query(
+            "INSERT INTO repos (repo, star_count, forks_count, metadata_fetched_at, missing) \
+             VALUES ($1, $2, $3, NOW(), FALSE) \
+             ON CONFLICT (repo) DO UPDATE SET star_count = EXCLUDED.star_count, \
+                 forks_count = EXCLUDED.forks_count, \
+                 metadata_fetched_at = EXCLUDED.metadata_fetched_at, missing = FALSE",
+        )
+        .bind(repo)
+        .bind(stars)
+        .bind(forks)
+        .execute(&db.pool)
+        .await
+        .expect("seed repos row");
+        if let Some((analyzed_sha, head_sha, revision)) = analysis {
+            sqlx::query(
+                "INSERT INTO repo_history \
+                    (repo, last_analyzed_sha, head_sha, last_analyzed_at, analysis_revision) \
+                 VALUES ($1, $2, $3, NOW(), $4) \
+                 ON CONFLICT (repo) DO UPDATE SET \
+                     last_analyzed_sha = EXCLUDED.last_analyzed_sha, \
+                     head_sha = EXCLUDED.head_sha, \
+                     last_analyzed_at = EXCLUDED.last_analyzed_at, \
+                     analysis_revision = EXCLUDED.analysis_revision",
+            )
+            .bind(repo)
+            .bind(analyzed_sha)
+            .bind(head_sha)
+            .bind(revision)
+            .execute(&db.pool)
+            .await
+            .expect("seed repo_history row");
+        }
+    }
+
+    async fn seed_card_author(
+        state: &ApiState,
+        repo: &str,
+        email: &str,
+        login: Option<&str>,
+        commits: i64,
+        first_commit_at: chrono::DateTime<chrono::Utc>,
+    ) {
+        sqlx::query(
+            "INSERT INTO repo_author_stats \
+                (repo, author_email, github_login, avatar_url, commits, \
+                 first_commit_at, last_commit_at, enrich_attempted_at) \
+             VALUES ($1, $2, $3, \
+                     CASE WHEN $3::TEXT IS NULL \
+                          THEN 'https://www.gravatar.com/avatar/deadbeef' ELSE NULL END, \
+                     $4, $5, $5, NULL)",
+        )
+        .bind(repo)
+        .bind(email)
+        .bind(login)
+        .bind(commits)
+        .bind(first_commit_at)
+        .execute(&state.analyzer.cache.db().pool)
+        .await
+        .expect("seed repo_author_stats row");
+    }
+
+    /// Executes the exact profile-card statements against Postgres.
+    ///
+    /// Both statements join a second relation that also carries `repo`,
+    /// `commits` and `first_commit_at` columns, so an unqualified aggregate
+    /// is not a wrong number — it is `column reference "repo" is ambiguous`
+    /// at plan time, i.e. HTTP 500 on `/api/users/{login}/card.svg` for
+    /// every login. A previous fix to this function shipped without a test
+    /// that ran the SQL, which is exactly how that reached production. This
+    /// test covers the owned-repos query, the authored-commits query and
+    /// both `load_top_langs` scopes.
+    ///
+    /// It also pins the readiness contract: a repository whose analysis is
+    /// current still counts as analyzed while its author rows are
+    /// unenriched. Author identity is presentation-only metadata swept by
+    /// `repo_analysis::sweep_author_enrichment`; gating this count on it is
+    /// what pinned profiles at "Analyzing N repositories" indefinitely.
+    #[tokio::test]
+    async fn user_card_sql_aggregates_without_ambiguous_columns() {
+        let Some(state) = test_db_state().await else {
+            eprintln!("skipping: set GITDEBT_TEST_DATABASE_URL to run");
+            return;
+        };
+        use chrono::TimeZone;
+        let db = state.analyzer.cache.db().clone();
+        let login = "gitdebt-test-card-owner";
+        let prefix = format!("{login}/");
+        cleanup_card_rows(&state, &prefix).await;
+        // A foreign repository this login only contributed to.
+        let foreign_prefix = "gitdebt-test-card-foreign/";
+        cleanup_card_rows(&state, foreign_prefix).await;
+
+        let analyzed = format!("{prefix}analyzed");
+        let unenriched = format!("{prefix}unenriched");
+        let mid_analysis = format!("{prefix}mid-analysis");
+        let queued = format!("{prefix}queued");
+        let foreign = format!("{foreign_prefix}library");
+        let revision = crate::repo_analysis::CURRENT_ANALYSIS_REVISION;
+
+        seed_card_repo(&state, &analyzed, 10, 2, Some(("a1", "a1", revision))).await;
+        seed_card_repo(&state, &unenriched, 20, 3, Some(("b1", "b1", revision))).await;
+        // Analysis stopped short of the head it observed → still working.
+        seed_card_repo(&state, &mid_analysis, 5, 0, Some(("c1", "c2", revision))).await;
+        // Analysis is current but a live queue row says work is in flight.
+        seed_card_repo(&state, &queued, 1, 0, Some(("d1", "d1", revision))).await;
+        seed_card_repo(&state, &foreign, 900, 90, Some(("f1", "f1", revision))).await;
+        sqlx::query(
+            "INSERT INTO repo_analysis_queue (repo, status, enqueued_at) \
+             VALUES ($1, 'pending', NOW())",
+        )
+        .bind(&queued)
+        .execute(&db.pool)
+        .await
+        .expect("seed queue row");
+
+        let first = chrono::Utc.timestamp_opt(1_600_000_000, 0).unwrap(); // 2020
+        let later = chrono::Utc.timestamp_opt(1_700_000_000, 0).unwrap(); // 2023
+        // Mixed case on purpose: the authored query folds with LOWER().
+        seed_card_author(
+            &state,
+            &analyzed,
+            "me@example.com",
+            Some("GitDebt-Test-Card-Owner"),
+            7,
+            later,
+        )
+        .await;
+        seed_card_author(
+            &state,
+            &foreign,
+            "me@work.example",
+            Some("gitdebt-test-card-owner"),
+            5,
+            first,
+        )
+        .await;
+        // Someone else's commits in one of the owned repos.
+        seed_card_author(
+            &state,
+            &analyzed,
+            "other@example.com",
+            Some("someone-else"),
+            4,
+            first,
+        )
+        .await;
+        // Unresolved author: no login, gravatar avatar, never attempted.
+        seed_card_author(&state, &unenriched, "ghost@example.com", None, 3, first).await;
+
+        for (repo, language, lines) in [
+            (&analyzed, "Rust", 900_i64),
+            (&analyzed, "TypeScript", 400),
+            (&unenriched, "Rust", 100),
+            (&foreign, "Go", 5_000),
+        ] {
+            sqlx::query(
+                "INSERT INTO repo_lines (repo, language, files, lines_code) \
+                 VALUES ($1, $2, 1, $3)",
+            )
+            .bind(repo)
+            .bind(language)
+            .bind(lines)
+            .execute(&db.pool)
+            .await
+            .expect("seed repo_lines row");
+        }
+
+        let data = load_user_card_data(&db, login)
+            .await
+            .expect("profile-card SQL must execute, not 500");
+
+        assert_eq!(data.login, login);
+        assert_eq!(data.repos_tracked, 4, "four publicly-proven owned repos");
+        assert_eq!(
+            data.repos_analyzed, 2,
+            "analyzed + unenriched count; the mid-analysis and queued repos do not"
+        );
+        assert_eq!(
+            data.stars, 36,
+            "owned repos only — the foreign repo is excluded"
+        );
+        assert_eq!(data.forks, 5);
+        assert_eq!(data.commits, 12, "7 owned + 5 foreign, case-folded login");
+        assert_eq!(
+            data.contribs, 2,
+            "COUNT(DISTINCT author.repo), not repos.repo"
+        );
+        assert_eq!(data.since_year, Some(2020), "MIN over the author rows");
+        assert_eq!(
+            data.langs,
+            vec![("Rust".to_string(), 1_000), ("TypeScript".to_string(), 400)],
+            "owner scope sums the prefix and excludes the foreign repo"
+        );
+
+        let repo_langs = load_top_langs(&db, LangScope::Repo, &analyzed)
+            .await
+            .expect("repo-scope language SQL must execute");
+        assert_eq!(
+            repo_langs,
+            vec![("Rust".to_string(), 900), ("TypeScript".to_string(), 400)]
+        );
+
+        // A tombstoned owned repo drops out of every column.
+        sqlx::query("UPDATE repos SET missing = TRUE WHERE repo = $1")
+            .bind(&analyzed)
+            .execute(&db.pool)
+            .await
+            .expect("tombstone");
+        let after = load_user_card_data(&db, login).await.expect("card SQL");
+        assert_eq!(after.repos_tracked, 3);
+        assert_eq!(after.repos_analyzed, 1);
+        assert_eq!(after.commits, 5, "the tombstoned repo's commits are hidden");
+        assert_eq!(after.contribs, 1);
+
+        cleanup_card_rows(&state, &prefix).await;
+        cleanup_card_rows(&state, foreign_prefix).await;
     }
 
     /// Cache policy for the multi-repo overlay: a mixed warm+cold request
@@ -6030,5 +7015,326 @@ mod tests {
 
         pipeline.star_jobs_dead = 1;
         assert!(pipeline.degraded());
+    }
+
+    // Profile-level stats
+
+    #[test]
+    fn profile_stat_filenames_dispatch_known_charts_only() {
+        assert!(matches!(
+            parse_user_stat_filename("commit-activity.svg"),
+            Some((UserStatKind::CommitActivity, None))
+        ));
+        assert!(matches!(
+            parse_user_stat_filename("commit-trend.png"),
+            Some((
+                UserStatKind::CommitTrend,
+                Some(crate::raster::RasterFormat::Png)
+            ))
+        ));
+        assert!(matches!(
+            parse_user_stat_filename("languages.webp"),
+            Some((
+                UserStatKind::Languages,
+                Some(crate::raster::RasterFormat::Webp)
+            ))
+        ));
+        // Unknown chart names and formats are 400s, never a silent default.
+        assert!(parse_user_stat_filename("bus-factor.svg").is_none());
+        assert!(parse_user_stat_filename("languages.gif").is_none());
+        assert!(parse_user_stat_filename("languages").is_none());
+    }
+
+    /// The embed attribution footer is on by default and only dropped for
+    /// an explicit in-app render — a README asset must always carry it.
+    #[test]
+    fn profile_stat_in_app_context_is_explicit() {
+        let embed = UserStatQuery {
+            theme: None,
+            animate: None,
+            context: None,
+        };
+        assert!(!embed.in_app());
+        assert!(
+            !UserStatQuery {
+                context: Some("readme".into()),
+                ..embed
+            }
+            .in_app()
+        );
+        assert!(
+            UserStatQuery {
+                theme: None,
+                animate: None,
+                context: Some("app".into()),
+            }
+            .in_app()
+        );
+    }
+
+    /// Profile charts share the media cache policy: a not-yet-analyzed
+    /// profile rides the short TTL so the embed self-heals, a rendered
+    /// one rides the 4h edge policy, and both revalidate on a strong ETag.
+    #[tokio::test]
+    async fn profile_stat_media_policy_and_revalidation() {
+        let none = HeaderMap::new();
+        let pending = user_stat_svg_response(&none, "<svg>pending</svg>".into(), true, true);
+        assert_eq!(
+            pending.headers().get(header::CACHE_CONTROL).unwrap(),
+            &card_cache_control(true)
+        );
+
+        let ready = user_stat_svg_response(&none, "<svg>ready</svg>".into(), false, true);
+        assert_eq!(
+            ready.headers().get(header::CACHE_CONTROL).unwrap(),
+            &card_cache_control(false)
+        );
+        let etag = ready.headers().get(header::ETAG).unwrap().clone();
+
+        let mut revalidate = HeaderMap::new();
+        revalidate.insert(header::IF_NONE_MATCH, etag.clone());
+        let not_modified =
+            user_stat_svg_response(&revalidate, "<svg>ready</svg>".into(), false, true);
+        assert_eq!(not_modified.status(), StatusCode::NOT_MODIFIED);
+        assert_eq!(not_modified.headers().get(header::ETAG).unwrap(), &etag);
+        let body = axum::body::to_bytes(not_modified.into_body(), usize::MAX)
+            .await
+            .unwrap();
+        assert!(body.is_empty(), "304 must carry no body");
+
+        // The in-app variant must be a distinct representation, so its
+        // ETag cannot collide with the branded README bytes.
+        let in_app = user_stat_svg_response(&none, "<svg>ready</svg>".into(), false, false);
+        assert_ne!(in_app.headers().get(header::ETAG).unwrap(), &etag);
+    }
+
+    async fn cleanup_profile_rows(state: &ApiState, prefix: &str) {
+        let like = format!("{prefix}%");
+        for statement in [
+            "DELETE FROM repo_commit_days WHERE repo LIKE $1",
+            "DELETE FROM repo_author_stats WHERE repo LIKE $1",
+            "DELETE FROM repo_lines WHERE repo LIKE $1",
+            "DELETE FROM repo_history WHERE repo LIKE $1",
+            "DELETE FROM repos WHERE repo LIKE $1",
+        ] {
+            sqlx::query(statement)
+                .bind(&like)
+                .execute(&state.analyzer.cache.db().pool)
+                .await
+                .expect("cleanup");
+        }
+    }
+
+    /// The profile report is Postgres-only and every code-derived number
+    /// is gated on a completed analysis pass. This exercises the whole
+    /// aggregate: owned totals, authored commits, the language footprint,
+    /// the star and recent-activity rankings, and the maintenance signal
+    /// (bus factor per owned repo, bots excluded).
+    #[tokio::test]
+    async fn profile_stats_aggregate_owned_repos_from_postgres() {
+        let Some(state) = test_db_state().await else {
+            eprintln!("skipping: set GITDEBT_TEST_DATABASE_URL to run");
+            return;
+        };
+        let login = format!("gitdebtprofile{}", std::process::id());
+        let pool = &state.analyzer.cache.db().pool;
+        cleanup_profile_rows(&state, &format!("{login}/")).await;
+
+        let solo = format!("{login}/solo");
+        let shared = format!("{login}/shared");
+        for (repo, stars, forks) in [(&solo, 120i64, 7i64), (&shared, 40, 2)] {
+            sqlx::query(
+                "INSERT INTO repos (repo, star_count, forks_count, metadata_fetched_at) \
+                 VALUES ($1, $2, $3, NOW())",
+            )
+            .bind(repo)
+            .bind(stars)
+            .bind(forks)
+            .execute(pool)
+            .await
+            .expect("seed repo");
+        }
+
+        // Nothing analyzed yet: the charts must report "pending" so their
+        // embeds ride the short TTL and never pin an empty frame.
+        assert!(
+            user_stat_revision(pool, &login).await.unwrap().is_none(),
+            "revision must be absent until an analysis pass completes"
+        );
+        let cold = load_user_stats(state.analyzer.cache.db(), &login)
+            .await
+            .expect("cold stats");
+        assert!(!cold.ready);
+        assert_eq!(cold.repos_tracked, 2);
+        assert_eq!(cold.total_stars, 160);
+
+        // Star history only for `solo`, through the atomic writer that flips
+        // completeness — `shared` stays incomplete, so it must come back
+        // with no sparkline at all rather than a partial one.
+        use chrono::TimeZone;
+        let events: Vec<crate::cache::StargazerEvent> = (0..6)
+            .map(|i| {
+                (
+                    i + 1,
+                    chrono::Utc
+                        .timestamp_opt(1_600_000_000 + i * 40 * 86_400, 0)
+                        .unwrap(),
+                )
+            })
+            .collect();
+        state
+            .analyzer
+            .cache
+            .put_repo_stargazers(&solo, &events)
+            .await
+            .expect("seed star history");
+        // The writer denormalizes star_count from the events it just wrote;
+        // restore the metadata headline the rest of the assertions use.
+        sqlx::query(
+            "UPDATE repos SET star_count = 120, forks_count = 7, metadata_fetched_at = NOW() \
+             WHERE repo = $1",
+        )
+        .bind(&solo)
+        .execute(pool)
+        .await
+        .expect("restore metadata");
+
+        for (repo, commits) in [(&solo, 300i64), (&shared, 100)] {
+            sqlx::query(
+                "INSERT INTO repo_history (repo, last_analyzed_at, total_commits) \
+                 VALUES ($1, NOW(), $2)",
+            )
+            .bind(repo)
+            .bind(commits)
+            .execute(pool)
+            .await
+            .expect("seed history");
+        }
+        // solo: one human carries >50%. shared: two humans split it evenly,
+        // so half of the authorship needs both. The bot row must not tip
+        // either verdict.
+        for (repo, email, name, gh_login, commits) in [
+            (&solo, "solo@example.com", "Solo", Some(&login), 280i64),
+            (&solo, "helper@example.com", "Helper", None, 20),
+            (&shared, "a@example.com", "A", Some(&login), 50),
+            (&shared, "b@example.com", "B", None, 50),
+            (&shared, "bot@example.com", "renovate[bot]", None, 900),
+        ] {
+            sqlx::query(
+                "INSERT INTO repo_author_stats \
+                     (repo, author_email, author_name, github_login, commits, first_commit_at) \
+                 VALUES ($1, $2, $3, $4, $5, TIMESTAMPTZ '2019-04-02T00:00:00Z')",
+            )
+            .bind(repo)
+            .bind(email)
+            .bind(name)
+            .bind(gh_login)
+            .bind(commits)
+            .execute(pool)
+            .await
+            .expect("seed author");
+        }
+        sqlx::query(
+            "INSERT INTO repo_lines (repo, language, files, lines_code, lines_blank, lines_comment) \
+             VALUES ($1, 'Rust', 10, 5000, 200, 300), ($2, 'Rust', 4, 1000, 50, 60), \
+                    ($2, 'TypeScript', 6, 2000, 100, 120)",
+        )
+        .bind(&solo)
+        .bind(&shared)
+        .execute(pool)
+        .await
+        .expect("seed lines");
+        sqlx::query(
+            "INSERT INTO repo_commit_days (repo, day, commits) \
+             VALUES ($1, CURRENT_DATE - 3, 4), ($1, CURRENT_DATE - 2, 6), \
+                    ($2, CURRENT_DATE - 1, 3)",
+        )
+        .bind(&shared)
+        .bind(&solo)
+        .execute(pool)
+        .await
+        .expect("seed commit days");
+
+        let stats = load_user_stats(state.analyzer.cache.db(), &login)
+            .await
+            .expect("stats");
+        assert!(stats.ready);
+        assert_eq!(stats.repos_tracked, 2);
+        assert_eq!(stats.repos_analyzed, 2);
+        assert_eq!(stats.total_stars, 160);
+        assert_eq!(stats.total_forks, 9);
+        assert_eq!(stats.analyzed_commits, 400);
+        // Only the rows carrying this login count as authored work.
+        assert_eq!(stats.authored_commits, 330);
+        assert_eq!(stats.contributed_repos, 2);
+        assert_eq!(stats.since_year, Some(2019));
+        assert_eq!(stats.solo_maintained, 1);
+        assert_eq!(stats.shared_maintained, 1);
+
+        // Language footprint sums across owned repos, biggest first.
+        assert_eq!(stats.languages.len(), 2);
+        assert_eq!(stats.languages[0].language, "Rust");
+        assert_eq!(stats.languages[0].code, 6000);
+        assert_eq!(stats.languages[1].language, "TypeScript");
+
+        // Star ranking and recent-activity ranking are independent orders.
+        assert_eq!(stats.top_repos[0].repo, solo);
+        assert_eq!(stats.top_repos[0].stars, 120);
+        assert_eq!(stats.top_repos[0].commits, 300);
+        // Sparklines are cumulative and gated on confirmed-complete history.
+        assert_eq!(stats.top_repos[0].spark.last().copied(), Some(6));
+        assert!(
+            stats.top_repos[0]
+                .spark
+                .windows(2)
+                .all(|pair| pair[1] >= pair[0]),
+            "a cumulative star series never decreases"
+        );
+        assert!(
+            stats.top_repos[1].spark.is_empty(),
+            "incomplete history must not draw a sparkline"
+        );
+        assert_eq!(stats.active_repos[0].repo, shared);
+        assert_eq!(stats.active_repos[0].commits_recent, 10);
+
+        let total_days: i64 = stats.commit_days.iter().map(|d| d.value).sum();
+        assert_eq!(total_days, 13);
+
+        // A completed pass yields a revision, and the render revision moves
+        // with the data so a stale chart can never outlive it.
+        let revision = user_stat_revision(pool, &login)
+            .await
+            .unwrap()
+            .expect("revision after analysis");
+        assert!(revision.contains("n2"));
+        assert!(revision.contains("c400"));
+        sqlx::query("UPDATE repo_history SET total_commits = 301 WHERE repo = $1")
+            .bind(&solo)
+            .execute(pool)
+            .await
+            .expect("bump commits");
+        let next = user_stat_revision(pool, &login)
+            .await
+            .unwrap()
+            .expect("revision after bump");
+        assert_ne!(revision, next);
+
+        // Every profile chart renders deterministically from that state.
+        for kind in [
+            UserStatKind::CommitActivity,
+            UserStatKind::CommitTrend,
+            UserStatKind::Languages,
+        ] {
+            let first = render_user_stat_svg(&state, &login, kind, &crate::theme::DARK)
+                .await
+                .expect("render");
+            let second = render_user_stat_svg(&state, &login, kind, &crate::theme::DARK)
+                .await
+                .expect("render");
+            assert_eq!(first, second, "{} must be deterministic", kind.key());
+            assert!(first.starts_with("<svg"));
+        }
+
+        cleanup_profile_rows(&state, &format!("{login}/")).await;
     }
 }

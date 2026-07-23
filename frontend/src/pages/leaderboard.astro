@@ -5,6 +5,17 @@ import BaseHead from "@/components/BaseHead.astro";
 import Seo from "@/components/Seo.astro";
 import SiteHeader from "@/components/SiteHeader.astro";
 import SiteFooter from "@/components/SiteFooter.astro";
+import {
+  BODY,
+  CAPTION,
+  HEADING,
+  PANEL_PADDED,
+  ROW,
+  ROW_BADGE,
+  SECTION_ACTION,
+  SECTION_HEADER,
+  TITLE,
+} from "@/components/style-tokens";
 import { CATEGORIES } from "@/data/categories";
 import { formatCompact } from "@/lib/star-insights";
 
@@ -182,8 +193,14 @@ if (top && topStarred) {
 }
 
 const thClass =
-  "py-3 pr-4 font-mono text-xs font-medium tracking-wide text-muted-foreground uppercase whitespace-nowrap";
-const rowClass = "border-b border-border";
+  "py-3 pr-4 font-mono text-[10px] font-medium tracking-[0.14em] text-muted-foreground/70 uppercase whitespace-nowrap";
+const rowClass = "border-b border-border/40 last:border-0";
+const sectionLinks = [
+  { href: "#trending-daily", label: "Daily" },
+  { href: "#trending-weekly", label: "Weekly" },
+  { href: "#trending-monthly", label: "Monthly" },
+  { href: "#most-starred", label: "Most starred" },
+];
 ---
 
 <!doctype html>
@@ -203,25 +220,28 @@ const rowClass = "border-b border-border";
     <div class="isolate flex min-h-dvh flex-col">
       <SiteHeader />
 
-      <main id="main-content" class="mx-auto flex w-full max-w-5xl flex-1 flex-col gap-10 px-6 py-12">
-        <nav aria-label="Breadcrumb" class="font-mono text-xs text-muted-foreground">
-          <a href="/" class="hover:text-foreground">gitdebt</a>
+      <main id="main-content" class="mx-auto w-full max-w-5xl flex-1 px-6 py-12">
+        <nav aria-label="Breadcrumb" class="font-mono text-[11px] text-muted-foreground">
+          <a
+            href="/"
+            class="rounded outline-none transition-colors duration-150 hover:text-foreground focus-visible:ring-2 focus-visible:ring-accent/30"
+            >gitdebt</a
+          >
           <span class="px-1.5 text-border" aria-hidden="true">/</span>
           <span class="text-foreground">leaderboard</span>
         </nav>
 
-        <header class="space-y-3">
-          <p class="mono-label">
-            Repo leaderboard
-          </p>
-          <h1 class="text-3xl font-semibold tracking-tight text-balance sm:text-4xl">
-            Fastest-growing & most-starred repos
-          </h1>
+        <header class="mt-8">
+          <h1 class={TITLE}>Fastest-growing & most-starred repos</h1>
           {top ? (
-            <p class="max-w-[68ch] text-lg text-pretty text-muted-foreground">
-              <a href={`/${top.repo}`} class="font-medium text-foreground underline decoration-signal/60 underline-offset-4 hover:decoration-signal">{top.repo}</a>
+            <p class:list={["mt-3 max-w-[68ch] text-[15px]", BODY]}>
+              <a
+                href={`/${top.repo}`}
+                class="rounded text-foreground underline decoration-border underline-offset-4 outline-none transition-colors duration-150 hover:decoration-foreground/60 focus-visible:ring-2 focus-visible:ring-accent/30"
+                >{top.repo}</a
+              >
               {" "}is the fastest-growing repo gitdebt tracks right now, gaining{" "}
-              <span class="tabular-nums">{top.velocity.toLocaleString()}</span> stars in the
+              <span class="text-foreground tabular-nums">{top.velocity.toLocaleString()}</span> stars in the
               last {windowDays} days. Rankings are computed from public star timestamps
               {totalAnalyzed
                 ? ` across the ${totalAnalyzed.toLocaleString()} repos gitdebt has analyzed`
@@ -229,56 +249,40 @@ const rowClass = "border-b border-border";
               their full star history is cached.
             </p>
           ) : (
-            <p class="max-w-[68ch] text-lg text-pretty text-muted-foreground">
+            <p class:list={["mt-3 max-w-[68ch] text-[15px]", BODY]}>
               Repos ranked by star growth and total stars, computed from public star
               timestamps across every repo gitdebt has analyzed.
             </p>
           )}
-          <p class="font-mono text-base text-muted-foreground sm:text-xs">
+          <p class:list={["mt-3 font-mono", CAPTION]}>
             Data updated {updatedDate} · rankings refreshed daily from cached public history
           </p>
-          <nav class="flex flex-wrap gap-2 pt-1" aria-label="Leaderboard sections">
-            <a
-              href="#trending-daily"
-              class="dither-control inline-flex min-h-11 items-center px-3 py-2 font-mono text-base text-muted-foreground hover:text-foreground sm:min-h-0 sm:py-1.5 sm:text-xs"
-            >
-              Daily
-            </a>
-            <a
-              href="#trending-weekly"
-              class="dither-control inline-flex min-h-11 items-center px-3 py-2 font-mono text-base text-muted-foreground hover:text-foreground sm:min-h-0 sm:py-1.5 sm:text-xs"
-            >
-              Weekly
-            </a>
-            <a
-              href="#trending-monthly"
-              class="dither-control inline-flex min-h-11 items-center px-3 py-2 font-mono text-base text-muted-foreground hover:text-foreground sm:min-h-0 sm:py-1.5 sm:text-xs"
-            >
-              Monthly
-            </a>
-            <a
-              href="#most-starred"
-              class="dither-control inline-flex min-h-11 items-center px-3 py-2 font-mono text-base text-muted-foreground hover:text-foreground sm:min-h-0 sm:py-1.5 sm:text-xs"
-            >
-              Most starred
-            </a>
+          <nav class="mt-4 flex flex-wrap gap-2" aria-label="Leaderboard sections">
+            {sectionLinks.map((link) => (
+              <a
+                href={link.href}
+                class="dither-chip rounded-md outline-none focus-visible:ring-2 focus-visible:ring-accent/30"
+              >
+                {link.label}
+              </a>
+            ))}
           </nav>
         </header>
 
         {!loaded && (
-          <section class="card-panel p-6" role="alert">
-            <p class="font-mono text-xs tracking-wide text-destructive uppercase">
+          <section class:list={["mt-12", PANEL_PADDED]} role="alert">
+            <p class="font-mono text-[10px] tracking-[0.25em] text-[var(--swatch-red)] uppercase">
               Leaderboard unavailable
             </p>
-            <p class="mt-1.5 text-base text-muted-foreground sm:text-sm">
+            <p class:list={["mt-2", BODY]}>
               We couldn't load the rankings. Try again in a moment.
             </p>
           </section>
         )}
 
         {loaded && !hasRows && (
-          <section class="card-panel p-6">
-            <p class="text-base text-muted-foreground sm:text-sm">
+          <section class:list={["mt-12", PANEL_PADDED]}>
+            <p class={BODY}>
               No repos have a complete star history yet. Look up any repo to start
               tracking it — it joins the leaderboard as soon as its history is cached.
             </p>
@@ -286,20 +290,23 @@ const rowClass = "border-b border-border";
         )}
 
         {momentumBoards.map((board) => board.repos.length > 0 && (
-          <section id={board.id} class="scroll-mt-20 space-y-4">
-            <h2 class="flex items-center gap-2 text-xl font-semibold tracking-tight">
-              <span class="size-1.5 shrink-0 rounded-full bg-signal" aria-hidden="true"></span>
-              {board.label} momentum · stars gained in {board.days}d
-            </h2>
+          <section id={board.id} class="mt-16 scroll-mt-24 border-t border-border/60 pt-12">
+            <div class={SECTION_HEADER}>
+              <h2 class={HEADING}>{board.label} momentum</h2>
+              <p class={CAPTION}>stars gained in {board.days}d</p>
+            </div>
             {board.days === 7 && vsPair && vsLabel && (
-              <p class="text-base text-muted-foreground sm:text-sm">
+              <p class:list={["mt-2", BODY]}>
                 Compare the top two directly:{" "}
-                <a href={`/vs/${vsPair[0]}/${vsPair[1]}`} class="underline decoration-signal/60 underline-offset-4 hover:decoration-signal">
+                <a
+                  href={`/vs/${vsPair[0]}/${vsPair[1]}`}
+                  class="rounded underline decoration-border underline-offset-4 outline-none transition-colors duration-150 hover:text-foreground hover:decoration-foreground/60 focus-visible:ring-2 focus-visible:ring-accent/30"
+                >
                   {vsLabel} star history
                 </a>.
               </p>
             )}
-            <div class="-mx-6 -my-2 overflow-x-auto">
+            <div class="-mx-6 mt-6 overflow-x-auto">
               <div class="inline-block min-w-full px-6 py-2 align-middle">
                 <table class="w-full text-left text-base sm:text-sm">
                   <thead>
@@ -313,9 +320,9 @@ const rowClass = "border-b border-border";
                   <tbody class="tabular-nums">
                     {board.repos.map((r) => (
                       <tr class={rowClass}>
-                        <td class="py-3 pr-4 font-mono text-base text-muted-foreground sm:text-xs">{r.rank}</td>
-                        <td class="py-3 pr-4"><a href={`/${r.repo}`} class="font-medium hover:text-signal">{r.repo}</a></td>
-                        <td class="py-3 pr-4 text-right font-medium text-signal">+{r.velocity.toLocaleString()}</td>
+                        <td class="py-3 pr-4 font-mono text-[11px] text-muted-foreground">{r.rank}</td>
+                        <td class="py-3 pr-4"><a href={`/${r.repo}`} class="rounded outline-none transition-colors duration-150 hover:text-foreground focus-visible:ring-2 focus-visible:ring-accent/30">{r.repo}</a></td>
+                        <td class="py-3 pr-4 text-right">+{r.velocity.toLocaleString()}</td>
                         <td class="py-3 text-right text-muted-foreground">{formatCompact(r.stars)}</td>
                       </tr>
                     ))}
@@ -327,12 +334,12 @@ const rowClass = "border-b border-border";
         ))}
 
         {mostStarred.length > 0 && (
-          <section id="most-starred" class="scroll-mt-20 space-y-4">
-            <h2 class="flex items-center gap-2 text-xl font-semibold tracking-tight">
-              <span class="size-1.5 shrink-0 rounded-full bg-signal" aria-hidden="true"></span>
-              Most-starred repos on gitdebt
-            </h2>
-            <div class="-mx-6 -my-2 overflow-x-auto">
+          <section id="most-starred" class="mt-16 scroll-mt-24 border-t border-border/60 pt-12">
+            <div class={SECTION_HEADER}>
+              <h2 class={HEADING}>Most-starred repos on gitdebt</h2>
+              <p class={CAPTION}>current totals</p>
+            </div>
+            <div class="-mx-6 mt-6 overflow-x-auto">
               <div class="inline-block min-w-full px-6 py-2 align-middle">
                 <table class="w-full text-left text-base sm:text-sm">
                   <thead>
@@ -346,13 +353,16 @@ const rowClass = "border-b border-border";
                   <tbody class="tabular-nums">
                     {mostStarred.map((r) => (
                       <tr class={rowClass}>
-                        <td class="py-3 pr-4 font-mono text-base text-muted-foreground sm:text-xs">{r.rank}</td>
+                        <td class="py-3 pr-4 font-mono text-[11px] text-muted-foreground">{r.rank}</td>
                         <td class="py-3 pr-4">
-                          <a href={`/${r.repo}`} class="font-medium hover:text-signal">
+                          <a
+                            href={`/${r.repo}`}
+                            class="rounded outline-none transition-colors duration-150 hover:text-foreground focus-visible:ring-2 focus-visible:ring-accent/30"
+                          >
                             {r.repo}
                           </a>
                         </td>
-                        <td class="py-3 pr-4 text-right font-medium">
+                        <td class="py-3 pr-4 text-right">
                           {r.stars.toLocaleString()}
                         </td>
                         <td class="py-3 text-right text-muted-foreground">
@@ -367,10 +377,50 @@ const rowClass = "border-b border-border";
           </section>
         )}
 
+        <section class="mt-16 scroll-mt-24 border-t border-border/60 pt-12">
+          <div class={SECTION_HEADER}>
+            <h2 class={HEADING}>Browse by category</h2>
+            <a href="/compare#categories" class={SECTION_ACTION}>
+              all categories
+              <span
+                aria-hidden="true"
+                class="transition-transform duration-150 group-hover:translate-x-0.5 motion-reduce:transition-none"
+                >→</span
+              >
+            </a>
+          </div>
+          <ul role="list" class="mt-6 grid gap-x-10 sm:grid-cols-2">
+            {featuredCategories.map((c) => (
+              <li>
+                <a href={`/compare/${c.slug}`} class={ROW}>
+                  <span class="min-w-0 flex-1 py-2">
+                    <span class="block truncate">{c.name}</span>
+                    <span class="mt-0.5 block truncate text-[11px] text-muted-foreground/80 group-hover:text-muted-foreground">
+                      {c.short}
+                    </span>
+                  </span>
+                  <span class={ROW_BADGE}>{c.repos.length}</span>
+                </a>
+              </li>
+            ))}
+          </ul>
+          <p class:list={["mt-6", BODY]}>
+            Or{" "}
+            <a
+              href="/compare"
+              class="rounded underline decoration-border underline-offset-4 outline-none transition-colors duration-150 hover:text-foreground hover:decoration-foreground/60 focus-visible:ring-2 focus-visible:ring-accent/30"
+            >
+              build your own star-history comparison
+            </a>.
+          </p>
+        </section>
+
         {hasRows && (
-          <section class="card-panel space-y-3 p-6">
-            <h2 class="text-base font-medium">How this leaderboard works</h2>
-            <p class="max-w-[70ch] text-base text-pretty text-muted-foreground sm:text-sm">
+          <section class="mt-16 scroll-mt-24 border-t border-border/60 pt-12">
+            <div class={SECTION_HEADER}>
+              <h2 class={HEADING}>How this leaderboard works</h2>
+            </div>
+            <p class:list={["mt-2 max-w-[70ch]", BODY]}>
               gitdebt caches the public timestamp of every star on the repos it analyzes.
               "Trending" counts stars added in the trailing {windowDays} days; "most
               starred" ranks by current totals. A repo appears once its complete star
@@ -382,33 +432,6 @@ const rowClass = "border-b border-border";
             </p>
           </section>
         )}
-
-        <section class="space-y-4">
-          <h2 class="flex items-center gap-2 text-xl font-semibold tracking-tight">
-            <span class="size-1.5 shrink-0 rounded-full bg-signal" aria-hidden="true"></span>
-            Browse by category
-          </h2>
-          <div class="grid gap-3 sm:grid-cols-2 lg:grid-cols-4">
-            {featuredCategories.map((c) => (
-              <a
-                href={`/compare/${c.slug}`}
-                class="card-panel block p-4 hover:border-signal/50"
-              >
-                <p class="font-medium">{c.name}</p>
-                <p class="mt-1 text-base text-muted-foreground sm:text-sm">{c.short}</p>
-              </a>
-            ))}
-          </div>
-          <p class="text-base text-muted-foreground sm:text-sm">
-            <a href="/compare#categories" class="underline decoration-signal/60 underline-offset-4 hover:decoration-signal">
-              All comparison categories
-            </a>{" "}
-            · or{" "}
-            <a href="/compare" class="underline decoration-signal/60 underline-offset-4 hover:decoration-signal">
-              build your own star-history comparison
-            </a>
-          </p>
-        </section>
       </main>
 
       <SiteFooter />

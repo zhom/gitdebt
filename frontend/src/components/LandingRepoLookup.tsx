@@ -2,6 +2,8 @@ import { useRef, useState } from "react";
 import { AnimatePresence, motion, useReducedMotion } from "motion/react";
 import { ArrowRight } from "lucide-react";
 
+import { EYEBROW } from "@/components/style-tokens";
+import { Button } from "@/components/ui/button";
 import { DURATION, EASE_OUT, REDUCED_MOTION_DURATION } from "@/lib/motion";
 
 const EXAMPLES = ["facebook/react", "vercel/next.js", "zhom/donutbrowser"];
@@ -38,11 +40,14 @@ export function LandingRepoLookup() {
 
   return (
     <div className="w-full">
-      <form onSubmit={submit} className="border-y border-foreground">
-        <div className="flex min-h-14 items-stretch sm:min-h-16">
+      <form
+        onSubmit={submit}
+        className="overflow-hidden rounded-lg border border-border/60 bg-background/40 transition-[border-color] duration-150 focus-within:border-accent/70"
+      >
+        <div className="flex min-h-14 items-stretch">
           <label
             htmlFor="landing-repo"
-            className="flex shrink-0 items-center pl-4 font-mono text-sm text-muted-foreground sm:pl-5"
+            className="flex shrink-0 items-center pl-4 font-mono text-[13px] text-muted-foreground select-none"
           >
             github.com/
           </label>
@@ -59,20 +64,21 @@ export function LandingRepoLookup() {
             aria-label="GitHub repository, as owner/repo"
             aria-invalid={error ? true : undefined}
             aria-describedby={error ? "landing-repo-error" : undefined}
-            className="min-w-0 flex-1 bg-background px-1 py-3 font-mono text-base text-foreground outline-none placeholder:text-muted-foreground/65 focus-visible:bg-muted sm:text-sm"
+            className="min-w-0 flex-1 bg-transparent px-1 py-3 font-mono text-[13px] text-foreground outline-none placeholder:text-muted-foreground/65"
           />
-          <button
+          <Button
             type="submit"
-            className="dither-primary group inline-flex min-h-14 shrink-0 items-center justify-center gap-2 px-4 text-sm font-medium outline-none focus-visible:outline-2 focus-visible:outline-offset-2 focus-visible:outline-ring sm:min-h-16 sm:px-6"
+            variant="primary"
+            className="group m-2 shrink-0 self-center"
           >
             <span className="hidden sm:inline">Analyze repository</span>
             <span className="sm:hidden">Analyze</span>
             <ArrowRight
-              className="dither-arrow size-4 transition-transform duration-150 group-hover:translate-x-0.5 motion-reduce:transition-none"
+              className="size-4 transition-transform duration-150 group-hover:translate-x-0.5 motion-reduce:transition-none"
               strokeWidth={1.75}
               aria-hidden="true"
             />
-          </button>
+          </Button>
         </div>
       </form>
 
@@ -90,7 +96,7 @@ export function LandingRepoLookup() {
                 : DURATION.feedback,
               ease: EASE_OUT,
             }}
-            className="mt-2 text-sm text-foreground"
+            className="mt-2 text-[11px] text-[var(--swatch-red)]"
             role="alert"
           >
             {error}
@@ -98,14 +104,15 @@ export function LandingRepoLookup() {
         )}
       </AnimatePresence>
 
-      <div className="mt-4 flex flex-wrap items-center gap-x-4 gap-y-2">
-        <p className="mono-label">Try</p>
+      <div className="mt-4 flex flex-wrap items-center gap-2">
+        <p className={EYEBROW}>Try</p>
         {EXAMPLES.map((example) => (
           <button
             key={example}
             type="button"
+            data-press="off"
             onClick={() => chooseExample(example)}
-            className="dither-control min-h-11 px-2 font-mono text-sm text-muted-foreground outline-none hover:text-foreground focus-visible:outline-2 focus-visible:outline-offset-4 focus-visible:outline-ring sm:min-h-9"
+            className="dither-chip outline-none focus-visible:ring-2 focus-visible:ring-accent/30"
           >
             {example}
           </button>

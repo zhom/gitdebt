@@ -1,6 +1,8 @@
 import { useEffect, useState } from "react";
 import { motion, useReducedMotion } from "motion/react";
 
+import { DitherSurface } from "@/components/ui/dither-surface";
+import { INK } from "@/lib/dither";
 import { MEDIA_RENDER_REVISION } from "@/lib/media";
 import { SPRING } from "@/lib/motion";
 import { useRenderedTheme } from "@/lib/rendered-theme";
@@ -83,17 +85,18 @@ export function ProfileCardPreview({
   return (
     <motion.a
       href={`/u/${login}`}
-      className="dither-badge-bed block max-w-full rounded-xl p-1.5 focus-visible:outline-2 focus-visible:outline-offset-4 focus-visible:outline-ring"
+      className="dither-fallback relative isolate block max-w-full overflow-hidden rounded-lg p-1.5 outline-none focus-visible:ring-2 focus-visible:ring-accent/30 focus-visible:ring-offset-2 focus-visible:ring-offset-background"
       whileHover={reduceMotion ? undefined : { y: -2, scale: 1.006 }}
       whileTap={reduceMotion ? undefined : { scale: 0.992 }}
       transition={SPRING.snappy}
     >
+      <DitherSurface fill={INK} variant="gradient" edge={0.5} alpha={0.16} />
       <img
         src={`${apiBase}/api/users/${login}/card.svg?theme=${theme}&animate=1&v=${revision}&render=${MEDIA_RENDER_REVISION}`}
         alt={`gitdebt profile statistics for ${login}`}
         loading="lazy"
         decoding="async"
-        className="block h-auto max-w-full"
+        className="relative block h-auto max-w-full"
       />
     </motion.a>
   );

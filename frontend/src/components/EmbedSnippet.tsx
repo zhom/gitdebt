@@ -1,15 +1,54 @@
-import { useEffect, useRef, useState } from "react";
+import {
+  useEffect,
+  useId,
+  useRef,
+  useState,
+  type ReactNode,
+  type SelectHTMLAttributes,
+} from "react";
 import { ChevronDown, Code2 } from "lucide-react";
 import { AnimatePresence, motion, useReducedMotion } from "motion/react";
 import { createPortal } from "react-dom";
 
 import { CopyButton } from "@/components/CopyButton";
+import { CAPTION, EYEBROW, PANEL } from "@/components/style-tokens";
+import { Button } from "@/components/ui/button";
+import { DitherSwitch } from "@/components/ui/dither-switch";
+import { CONTROL, POPOVER } from "@/components/ui/dither-surface";
 import {
   DURATION,
   EASE_OUT,
   REDUCED_MOTION_DURATION,
 } from "@/lib/motion";
 import { MEDIA_RENDER_REVISION } from "@/lib/media";
+import { cn } from "@/lib/utils";
+
+/** Native select plus the chevron every select in the product carries. */
+function SelectField({
+  children,
+  className,
+  ...props
+}: SelectHTMLAttributes<HTMLSelectElement> & { children: ReactNode }) {
+  return (
+    <span className="relative grid grid-cols-1 items-center">
+      <select
+        {...props}
+        className={cn(
+          CONTROL,
+          "col-start-1 row-start-1 appearance-none pr-9 text-foreground",
+          className,
+        )}
+      >
+        {children}
+      </select>
+      <ChevronDown
+        className="pointer-events-none col-start-1 row-start-1 mr-3 size-3.5 justify-self-end text-muted-foreground"
+        strokeWidth={2}
+        aria-hidden="true"
+      />
+    </span>
+  );
+}
 
 export type EmbedState = {
   type?: "date" | "timeline";
@@ -93,6 +132,7 @@ export function EmbedSnippet({
   const panelRef = useRef<HTMLDivElement>(null);
   const [position, setPosition] = useState({ top: 0, left: 0, width: 384, above: false });
   const reduceMotion = useReducedMotion();
+  const controlId = useId().replaceAll(":", "");
 
   useEffect(() => {
     if (!open || variant !== "menu") return;
@@ -177,68 +217,74 @@ export function EmbedSnippet({
 
   const controls = (
     <div className="grid grid-cols-3 gap-2">
-      <label className="mono-label grid gap-1">
+      <label className={`${EYEBROW} grid gap-1.5`}>
         Theme
-        <select
+        <SelectField
           name="theme"
           value={theme}
           onChange={(e) => setTheme(e.target.value as ThemeChoice)}
-          className="dither-control min-h-9 appearance-none bg-background px-2 font-mono text-xs text-foreground outline-none"
         >
           {THEMES.map((t) => (
             <option key={t.id} value={t.id}>
               {t.label}
             </option>
           ))}
-        </select>
+        </SelectField>
       </label>
-      <label className="mono-label grid gap-1">
+      <label className={`${EYEBROW} grid gap-1.5`}>
         Image
-        <select
+        <SelectField
           value={selectedFormat}
           onChange={(event) => setFormat(event.target.value as Format)}
-          className="dither-control min-h-9 appearance-none bg-background px-2 font-mono text-xs text-foreground outline-none"
         >
           {formats.map((value) => <option key={value} value={value}>{value.toUpperCase()}</option>)}
-        </select>
+        </SelectField>
       </label>
-      <label className="mono-label grid gap-1">
+      <label className={`${EYEBROW} grid gap-1.5`}>
         Snippet
-        <select
+        <SelectField
           value={mode}
           onChange={(event) => setMode(event.target.value as Mode)}
-          className="dither-control min-h-9 appearance-none bg-background px-2 font-mono text-xs text-foreground outline-none"
         >
           <option value="markdown">Markdown</option>
           <option value="html">HTML</option>
-        </select>
+        </SelectField>
       </label>
-      {selectedFormat === "svg" && <button
-          type="button"
-          aria-pressed={animatedSvg}
-          onClick={() => setAnimatedSvg((value) => !value)}
-          className={`dither-control col-span-3 min-h-9 px-3 text-left font-mono text-xs ${animatedSvg ? "text-foreground" : "text-muted-foreground"}`}
-        >
-          {animatedSvg ? "● Animated SVG" : "○ Static SVG"}
-        </button>}
+      {selectedFormat === "svg" && (
+        <div className="col-span-3 flex items-center gap-2">
+          <DitherSwitch
+            checked={animatedSvg}
+            onCheckedChange={setAnimatedSvg}
+            aria-labelledby={`${controlId}-animated`}
+          />
+          <span
+            id={`${controlId}-animated`}
+            className="font-mono text-[12px] text-muted-foreground"
+          >
+            {animatedSvg ? "Animated SVG" : "Static SVG"}
+          </span>
+        </div>
+      )}
     </div>
   );
 
   const snippetBody = (
     <>
-      <div className="flex items-center justify-between gap-4 border-t border-border px-4 py-3">
-        <p className="min-w-0 truncate font-mono text-xs text-muted-foreground">
+      <div className="flex items-center justify-between gap-4 border-t border-border/40 px-4 py-3">
+        <p className="min-w-0 truncate font-mono text-[12px] text-muted-foreground">
           {mode === "markdown" ? "README.md" : "HTML"} · {selectedFormat.toUpperCase()} · {theme}
         </p>
         <CopyButton
           value={snippet}
           ariaLabel="Copy embed snippet"
-          className="dither-primary inline-flex min-h-9 shrink-0 items-center gap-1.5 rounded-md px-3 py-2 font-mono text-xs"
+          variant="primary"
+          size="sm"
+          className="shrink-0"
           idleLabel="Copy embed"
         />
       </div>
       {selectedFormat === "gif" && (
-        <p className="border-t border-border px-5 py-3 text-sm text-pretty text-muted-foreground">
+        <p className={cn(CAPTION, "border-t border-border/40 px-4 py-3")}>
           GIF loops a wave animation and uses more bandwidth than SVG. Auto emits separate light and dark assets.
         </p>
       )}
@@ -251,12 +297,12 @@ export function EmbedSnippet({
         ref={rootRef}
         className={`relative ml-auto ${open ? "z-50" : ""}`}
       >
-        <button
+        <Button
           ref={triggerRef}
-          type="button"
+          variant="outline"
+          size="sm"
           aria-expanded={open}
           onClick={() => setOpen((value) => !value)}
-          className="dither-control inline-flex min-h-11 items-center gap-2 rounded-md border px-3 py-2 font-mono text-sm text-foreground focus-visible:outline-2 focus-visible:outline-offset-2 focus-visible:outline-ring sm:min-h-0 sm:text-xs"
         >
           <Code2 className="size-4" strokeWidth={1.75} aria-hidden="true" />
           Add to README
@@ -264,7 +310,7 @@ export function EmbedSnippet({
             className={`size-3.5 text-muted-foreground transition-transform duration-150 motion-reduce:transition-none ${open ? "rotate-180" : ""}`}
             aria-hidden="true"
           />
-        </button>
+        </Button>
         {typeof document !== "undefined" && createPortal(
           <AnimatePresence>
           {open && (
@@ -278,12 +324,12 @@ export function EmbedSnippet({
                 ease: EASE_OUT,
               }}
               style={{ top: position.top, left: position.left, width: position.width, transformOrigin: position.above ? "bottom right" : "top right" }}
-              className="dither-menu fixed z-[100] overflow-hidden text-left"
+              className={cn(POPOVER, "fixed z-[100] overflow-hidden text-left")}
             >
               <div className="space-y-3 px-4 py-3">
                 <div>
-                  <p className="text-sm font-semibold text-foreground">Put this media in your GitHub README</p>
-                  <p className="mt-0.5 text-xs text-muted-foreground">Choose once, copy, paste into README.md.</p>
+                  <p className="text-[13px] font-normal text-foreground">Put this media in your GitHub README</p>
+                  <p className={cn(CAPTION, "mt-1")}>Choose once, copy, paste into README.md.</p>
                 </div>
                 {controls}
               </div>
@@ -296,12 +342,9 @@ export function EmbedSnippet({
   }
 
   return (
-    <figure className="overflow-hidden border-y border-border">
-      <figcaption className="flex flex-wrap items-center justify-between gap-3 border-b border-border bg-muted/40 px-5 py-3">
-        <div className="mono-label inline-flex items-center gap-2">
-          <span className="size-1.5 shrink-0 rounded-full bg-(--dither-wave-2)" aria-hidden="true" />
-          Embed
-        </div>
+    <figure className={cn(PANEL, "overflow-hidden")}>
+      <figcaption className="flex flex-wrap items-center justify-between gap-3 border-b border-border/40 px-4 py-3">
+        <div className={EYEBROW}>Embed</div>
         {controls}
       </figcaption>
       {snippetBody}

@@ -1,11 +1,19 @@
 import { useId, useState } from "react";
 import { motion, useReducedMotion } from "motion/react";
 
-import {
-  DURATION,
-  EASE_IN_OUT,
-  REDUCED_MOTION_DURATION,
-} from "@/lib/motion";
+import { DitherCellPattern } from "@/components/DitherCellPattern";
+import { CAPTION, PANEL } from "@/components/style-tokens";
+import { DitherSegmented } from "@/components/ui/dither-segmented";
+import { SWATCH } from "@/lib/dither";
+import { DURATION, EASE_IN_OUT, REDUCED_MOTION_DURATION } from "@/lib/motion";
+import { cn } from "@/lib/utils";
+
+const SERIES = `rgb(${SWATCH.blue.join(", ")})`;
+
+const MODES = [
+  { value: "calendar" as const, label: "Calendar date" },
+  { value: "timeline" as const, label: "Equal start" },
+];
 
 type Mode = "calendar" | "timeline";
 
@@ -31,45 +39,26 @@ export function ComparisonModeGraphic() {
 
   return (
     <figure
-      className="border-y border-foreground bg-card text-card-foreground"
+      className={cn(PANEL, "overflow-hidden")}
       aria-labelledby="comparison-graphic-caption"
     >
-      <div className="flex flex-col justify-between gap-4 border-b border-border px-4 py-4 sm:flex-row sm:items-center sm:px-5">
+      <div className="flex flex-col justify-between gap-3 border-b border-border/40 p-3.5 sm:flex-row sm:items-center">
         <figcaption id="comparison-graphic-caption">
-          <p className="font-medium">Change the question, not the data</p>
-          <p className="mt-1 text-sm text-muted-foreground">
+          <p className="text-[13px]">Change the question, not the data</p>
+          <p className={cn(CAPTION, "mt-1")}>
             Illustrative axes — no repository values
           </p>
         </figcaption>
-        <div className="flex gap-1" aria-label="Comparison axis">
-          {(["calendar", "timeline"] as const).map((option) => (
-            <button
-              key={option}
-              type="button"
-              onClick={() => setMode(option)}
-              aria-pressed={mode === option}
-              className="dither-control relative min-h-11 px-3 font-mono text-xs text-muted-foreground outline-none hover:text-foreground focus-visible:outline-2 focus-visible:outline-offset-2 focus-visible:outline-ring aria-pressed:text-foreground sm:min-h-9"
-            >
-              {option === "calendar" ? "Calendar date" : "Equal start"}
-              {mode === option && (
-                <motion.span
-                  layoutId="comparison-mode-underline"
-                  transition={{
-                    duration: reduceMotion
-                      ? REDUCED_MOTION_DURATION
-                      : DURATION.move,
-                    ease: EASE_IN_OUT,
-                  }}
-                  className="absolute inset-x-0 -bottom-px h-px bg-foreground"
-                  aria-hidden="true"
-                />
-              )}
-            </button>
-          ))}
-        </div>
+        <DitherSegmented
+          role="radiogroup"
+          aria-label="Comparison axis"
+          value={mode}
+          options={MODES}
+          onValueChange={setMode}
+        />
       </div>
 
-      <div className="px-4 py-5 sm:px-5">
+      <div className="p-3.5">
         <svg
           viewBox="0 0 352 220"
           role="img"
@@ -81,15 +70,7 @@ export function ComparisonModeGraphic() {
           className="block h-auto w-full"
         >
           <defs>
-            <linearGradient id={`${id}-wave`} x1="0" x2="1">
-              <stop offset="0" stopColor="var(--dither-wave-1)" />
-              <stop offset=".55" stopColor="var(--dither-wave-2)" />
-              <stop offset="1" stopColor="var(--dither-wave-3)" />
-            </linearGradient>
-            <pattern id={`${id}-dots`} width="4" height="4" patternUnits="userSpaceOnUse">
-              <rect width="1.4" height="1.4" fill={`url(#${id}-wave)`} />
-              <rect x="2" y="2" width=".8" height=".8" fill={`url(#${id}-wave)`} opacity=".65" />
-            </pattern>
+            <DitherCellPattern id={`${id}-cells`} fill={SERIES} density={0.55} />
           </defs>
           <path d="M20 24V188H336" fill="none" stroke="var(--border)" />
           {[76, 132].map((y) => (
@@ -110,8 +91,7 @@ export function ComparisonModeGraphic() {
                 : DURATION.chart + 0.1,
               ease: EASE_IN_OUT,
             }}
-            fill={`url(#${id}-dots)`}
-            opacity="0.8"
+            fill={`url(#${id}-cells)`}
           />
           <motion.path
             d={active.first}
@@ -123,9 +103,9 @@ export function ComparisonModeGraphic() {
               ease: EASE_IN_OUT,
             }}
             fill="none"
-            stroke={`url(#${id}-wave)`}
+            stroke={SERIES}
             strokeLinecap="round"
-            strokeWidth="2.5"
+            strokeWidth="2"
           />
           <motion.path
             d={active.second}
@@ -165,10 +145,11 @@ export function ComparisonModeGraphic() {
           ))}
         </svg>
 
-        <div className="flex flex-wrap gap-x-6 gap-y-2 border-t border-border pt-4 text-sm">
+        <div className="flex flex-wrap gap-x-6 gap-y-2 border-t border-border/40 pt-4 text-[11px]">
           <span className="inline-flex items-center gap-2">
             <span
-              className="h-0.5 w-5 bg-linear-to-r from-(--dither-wave-1) via-(--dither-wave-2) to-(--dither-wave-3)"
+              className="size-2 rounded-[1px]"
+              style={{ backgroundColor: SERIES }}
               aria-hidden="true"
             />
             Repository A

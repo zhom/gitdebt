@@ -6,6 +6,7 @@ import BaseHead from "@/components/BaseHead.astro";
 import Seo from "@/components/Seo.astro";
 import SiteHeader from "@/components/SiteHeader.astro";
 import SiteFooter from "@/components/SiteFooter.astro";
+import { BODY, CAPTION, HEADING, TITLE } from "@/components/style-tokens";
 import { staticApiBase } from "@/lib/static-api-base";
 
 const apiBase = staticApiBase();
@@ -69,51 +70,48 @@ const jsonLd = {
     <div class="isolate flex min-h-dvh flex-col">
       <SiteHeader />
 
-      <main id="main-content" class="mx-auto flex w-full max-w-3xl flex-1 flex-col gap-10 px-6 py-12">
-        <nav aria-label="Breadcrumb" class="font-mono text-xs text-muted-foreground">
-          <a href="/" class="hover:text-foreground">gitdebt</a>
+      <main id="main-content" class="mx-auto w-full max-w-3xl flex-1 px-6 py-12">
+        <nav aria-label="Breadcrumb" class="font-mono text-[11px] text-muted-foreground">
+          <a
+            href="/"
+            class="rounded outline-none transition-colors duration-150 hover:text-foreground focus-visible:ring-2 focus-visible:ring-accent/30"
+            >gitdebt</a
+          >
           <span class="px-1.5 text-border" aria-hidden="true">/</span>
           <span class="text-foreground">terms</span>
         </nav>
 
-        <header class="space-y-2">
-          <p class="mono-label">
-            Terms
-          </p>
-          <h1 class="text-3xl font-semibold tracking-tight text-balance sm:text-4xl">
-            Terms of use
-          </h1>
-          <p class="text-base text-pretty text-muted-foreground sm:text-sm">
+        <header class="mt-8">
+          <h1 class={TITLE}>Terms of use</h1>
+          <p class:list={["mt-3", CAPTION]}>
             Last updated <time datetime={updated} class="tabular-nums">{updated}</time>
           </p>
         </header>
 
-        <section class="space-y-4">
-          <p class="text-base text-pretty text-muted-foreground sm:text-sm">
+        <section class="mt-12">
+          <p class:list={["max-w-[68ch]", BODY]}>
             By using gitdebt you agree to these terms. If you don't agree,
             please don't use the service.
           </p>
-          <dl class="space-y-6">
+          <dl class="mt-8 grid gap-x-12 gap-y-8 sm:grid-cols-2">
             {
               terms.map((item) => (
-                <div class="space-y-1.5">
-                  <dt class="text-base font-medium">{item.term}</dt>
-                  <dd class="text-base text-pretty text-muted-foreground sm:text-sm">
-                    {item.desc}
-                  </dd>
+                <div>
+                  <dt class="text-[13px] text-foreground/90">{item.term}</dt>
+                  <dd class:list={["mt-1.5 max-w-[52ch]", BODY]}>{item.desc}</dd>
                 </div>
               ))
             }
           </dl>
         </section>
 
-        <section class="space-y-4">
-          <h2 class="text-xl font-semibold tracking-tight">Contact</h2>
-          <p class="text-base text-pretty text-muted-foreground sm:text-sm">
+        <section class="mt-16 scroll-mt-24 border-t border-border/60 pt-12">
+          <h2 class={HEADING}>Contact</h2>
+          <p class:list={["mt-2 max-w-[68ch]", BODY]}>
             Questions about these terms? Open a
             <a
               href="https://github.com/zhom/gitdebt/issues"
-              class="underline decoration-primary decoration-2 underline-offset-4 hover:decoration-primary/60"
+              class="rounded underline decoration-border underline-offset-4 outline-none transition-colors duration-150 hover:text-foreground hover:decoration-foreground/60 focus-visible:ring-2 focus-visible:ring-accent/30"
             >
               GitHub issue
             </a>

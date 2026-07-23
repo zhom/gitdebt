@@ -34,10 +34,10 @@ const ogImage = `${apiBase}/api/og.png`;
     <div class="isolate flex min-h-dvh flex-col">
       <SiteHeader />
 
-      <main id="main-content" class="mx-auto w-full max-w-7xl flex-1 px-6 py-12 sm:py-16 lg:px-10">
+      <main id="main-content" class="mx-auto w-full max-w-6xl flex-1 px-6 py-12">
         <LiveRepoReport client:only="react" apiBase={apiBase} />
         <noscript>
-          <div class="border-y border-border py-12 text-center">
+          <div class="rounded-lg border border-border/60 bg-background/40 p-3.5 text-[13px] leading-relaxed text-muted-foreground">
             JavaScript is required to open a repository that has not been included in the static catalog yet.
           </div>
         </noscript>

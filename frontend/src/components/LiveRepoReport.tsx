@@ -1,10 +1,13 @@
 import { useMemo } from "react";
 
+import { ButtonLink } from "@/components/ButtonLink";
+import { BODY, HEADING, TITLE } from "@/components/style-tokens";
 import { ChartViewer } from "@/components/ChartViewer";
 import { EarnedBadges } from "@/components/EarnedBadges";
 import { InteractiveRepoSignals } from "@/components/InteractiveRepoSignals";
 import { RepoHero } from "@/components/RepoHero";
 import { UsageSection } from "@/components/UsageSection";
+import { cn } from "@/lib/utils";
 
 const SLUG_RE = /^([A-Za-z0-9._-]+)\/([A-Za-z0-9._-]+)$/;
 const RESERVED_FIRST_SEGMENTS = new Set([
@@ -40,19 +43,14 @@ export function LiveRepoReport({ apiBase }: { apiBase: string }) {
 
   if (!selected) {
     return (
-      <div className="border-y border-border py-8">
-        <h1 className="text-2xl font-semibold tracking-tight">
-          Choose a public GitHub repository
-        </h1>
-        <p className="mt-2 text-muted-foreground">
+      <div>
+        <h1 className={TITLE}>Choose a public GitHub repository</h1>
+        <p className={cn(BODY, "mt-2")}>
           Use the homepage lookup and enter a repository as owner/repo.
         </p>
-        <a
-          href="/"
-          className="dither-primary mt-5 inline-flex min-h-11 items-center rounded-md px-4 py-2 font-medium"
-        >
+        <ButtonLink href="/" variant="primary" className="mt-5">
           Open repo lookup
-        </a>
+        </ButtonLink>
       </div>
     );
   }
@@ -71,12 +69,11 @@ export function LiveRepoReport({ apiBase }: { apiBase: string }) {
       />
 
       <section className="space-y-4">
-        <header className="flex flex-wrap items-end justify-between gap-3">
-          <div>
-            <p className="mono-label">Earned badges</p>
-            <h2 className="mt-1 text-xl font-semibold tracking-tight">Computed from commit and star history</h2>
-          </div>
-          <p className="max-w-md text-sm text-muted-foreground">Embeddable maintenance, ownership, and star-momentum signals.</p>
+        <header className="flex items-baseline justify-between gap-4">
+          <h2 className={HEADING}>Earned badges</h2>
+          <p className="text-[11px] text-muted-foreground">
+            Computed from commit and star history
+          </p>
         </header>
         <EarnedBadges owner={owner} repo={repo} apiBase={apiBase} embedLink={embedLink} />
       </section>
@@ -94,11 +91,8 @@ export function LiveRepoReport({ apiBase }: { apiBase: string }) {
 
       <section className="space-y-6">
         <header className="max-w-2xl space-y-2">
-          <p className="mono-label">Maintenance signals</p>
-          <h2 className="text-2xl font-semibold tracking-tight text-balance sm:text-3xl">
-            What deserves attention first
-          </h2>
-          <p className="text-base leading-relaxed text-pretty text-muted-foreground">
+          <h2 className={HEADING}>What deserves attention first</h2>
+          <p className={BODY}>
             Fix concentration, file churn, ownership risk, and maintenance
             cadence are the clearest starting points for understanding this
             codebase.
@@ -112,11 +106,8 @@ export function LiveRepoReport({ apiBase }: { apiBase: string }) {
       </section>
 
       <section className="space-y-6">
-        <header className="max-w-2xl space-y-2">
-          <p className="mono-label">Adoption</p>
-          <h2 className="text-2xl font-semibold tracking-tight text-balance sm:text-3xl">
-            Attention versus real usage
-          </h2>
+        <header className="max-w-2xl">
+          <h2 className={HEADING}>Attention versus real usage</h2>
         </header>
         <UsageSection
           owner={owner}

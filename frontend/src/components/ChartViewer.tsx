@@ -2,8 +2,13 @@ import { useEffect, useId, useMemo, useState } from "react";
 
 import { DitherAreaChart } from "@/components/DitherAreaChart";
 import { EmbedSnippet } from "@/components/EmbedSnippet";
+import { EYEBROW, PANEL } from "@/components/style-tokens";
+import { Button } from "@/components/ui/button";
+import { DitherSegmented } from "@/components/ui/dither-segmented";
+import { CONTROL } from "@/components/ui/dither-surface";
 import { MEDIA_RENDER_REVISION } from "@/lib/media";
 import { useRenderedTheme } from "@/lib/rendered-theme";
+import { cn } from "@/lib/utils";
 
 export type ChartType = "date" | "timeline";
 export type StarPoint = { date: string; stars: number };
@@ -22,6 +27,13 @@ type Props = {
 };
 
 const DATE_RE = /^\d{4}-\d{2}-\d{2}$/;
+
+const AXIS_OPTIONS = [
+  { value: "date" as const, label: "Date" },
+  { value: "timeline" as const, label: "Timeline" },
+];
+
+const DATE_FIELD = "w-[8.5rem] tabular-nums scheme-dark";
 
 export function ChartViewer({
   apiBase,
@@ -86,14 +98,21 @@ export function ChartViewer({
 
   const validFrom = DATE_RE.test(from) ? from : "";
   const validTo = DATE_RE.test(to) ? to : "";
+  // An inverted range is reported rather than silently applied: emptying the
+  // series without saying why reads as a broken chart.
+  const invertedRange = Boolean(validFrom && validTo && validFrom > validTo);
+  const appliedFrom = invertedRange ? "" : validFrom;
+  const appliedTo = invertedRange ? "" : validTo;
   const visibleSeries = useMemo(() => {
-    const fromMs = validFrom ? Date.parse(`${validFrom}T00:00:00Z`) : -Infinity;
-    const toMs = validTo ? Date.parse(`${validTo}T23:59:59Z`) : Infinity;
+    const fromMs = appliedFrom
+      ? Date.parse(`${appliedFrom}T00:00:00Z`)
+      : -Infinity;
+    const toMs = appliedTo ? Date.parse(`${appliedTo}T23:59:59Z`) : Infinity;
     return series.filter((point) => {
       const at = Date.parse(point.date);
       return Number.isFinite(at) && at >= fromMs && at <= toMs;
     });
-  }, [series, validFrom, validTo]);
+  }, [series, appliedFrom, appliedTo]);
 
   const params: string[] = [
     `type=${type}`,
@@ -101,8 +120,8 @@ export function ChartViewer({
     `render=${MEDIA_RENDER_REVISION}`,
   ];
   if (logScale) params.push("log=1");
-  if (validFrom) params.push(`from=${validFrom}`);
-  if (validTo) params.push(`to=${validTo}`);
+  if (appliedFrom) params.push(`from=${appliedFrom}`);
+  if (appliedTo) params.push(`to=${appliedTo}`);
   if (revision > 0) params.push(`v=${revision}`);
 
   const src = `${apiBase}${path}`;
@@ -110,28 +129,15 @@ export function ChartViewer({
   const withParams = (theme: "light" | "dark") =>
     `${src}${sep}${params.join("&")}&theme=${theme}`;
 
-  const tabClass = (active: boolean) =>
-    `dither-control min-h-11 rounded-md px-3 py-2 font-mono text-base tracking-wide uppercase sm:min-h-0 sm:px-2.5 sm:py-1 sm:text-xs ${
-      active
-        ? "text-accent-foreground"
-        : "text-muted-foreground hover:text-accent-foreground"
-    }`;
-
-  const dateInputClass =
-    "dither-control min-h-11 w-full rounded-md border px-2 py-2 font-mono text-base text-foreground outline-none scheme-dark focus-visible:outline-2 focus-visible:-outline-offset-1 focus-visible:outline-ring sm:min-h-0 sm:w-[8.5rem] sm:py-1 sm:text-xs";
+  const hasRange = Boolean(from || to);
 
   const figure = (
-    <figure className="signal-panel relative">
-      <figcaption className="flex flex-wrap items-center justify-between gap-3 border-b border-border bg-muted/40 px-5 py-3">
-        {caption && (
-          <div className="mono-label inline-flex items-center gap-2">
-            <span className="size-1.5 shrink-0 rounded-full bg-(--dither-wave-2)" aria-hidden="true" />
-            {caption}
-          </div>
-        )}
-        <div className="flex w-full flex-wrap items-center gap-3 sm:w-auto">
-          <div className="grid w-full grid-cols-[auto_1fr] items-center gap-2 sm:flex sm:w-auto sm:gap-1.5">
-            <label htmlFor={`${id}-from`} className="mono-label">
+    <figure className={cn(PANEL, "relative overflow-hidden")}>
+      <figcaption className="flex flex-wrap items-center justify-between gap-3 border-b border-border/40 px-4 py-3">
+        {caption && <div className={EYEBROW}>{caption}</div>}
+        <div className="flex w-full flex-wrap items-center gap-2 sm:w-auto">
+          <div className="flex flex-wrap items-center gap-2">
+            <label htmlFor={`${id}-from`} className={EYEBROW}>
               From
               <span className="sr-only"> date (YYYY-MM-DD)</span>
             </label>
@@ -144,9 +150,9 @@ export function ChartViewer({
                 setControlsChanged(true);
                 setFrom(e.target.value);
               }}
-              className={dateInputClass}
+              className={cn(CONTROL, DATE_FIELD)}
             />
-            <label htmlFor={`${id}-to`} className="mono-label">
+            <label htmlFor={`${id}-to`} className={EYEBROW}>
               To
               <span className="sr-only"> date (YYYY-MM-DD)</span>
             </label>
@@ -159,58 +165,68 @@ export function ChartViewer({
                 setControlsChanged(true);
                 setTo(e.target.value);
               }}
-              className={dateInputClass}
+              className={cn(CONTROL, DATE_FIELD)}
             />
+            {hasRange && (
+              <Button
+                variant="ghost"
+                size="sm"
+                onClick={() => {
+                  setControlsChanged(true);
+                  setFrom("");
+                  setTo("");
+                }}
+              >
+                Reset
+              </Button>
+            )}
           </div>
-          <div className="flex items-center gap-1" role="group" aria-label="Y-axis scale">
-            <button
-              type="button"
-              aria-pressed={logScale}
-              onClick={() => {
-                setControlsChanged(true);
-                setLogScale((v) => !v);
-              }}
-              className={tabClass(logScale)}
-            >
-              Log
-            </button>
-          </div>
-          <div className="flex items-center gap-1" role="group" aria-label="Chart axis">
-            <button
-              type="button"
-              aria-pressed={type === "date"}
-              onClick={() => {
-                setControlsChanged(true);
-                setType("date");
-              }}
-              className={tabClass(type === "date")}
-            >
-              Date
-            </button>
-            <button
-              type="button"
-              aria-pressed={type === "timeline"}
-              onClick={() => {
-                setControlsChanged(true);
-                setType("timeline");
-              }}
-              className={tabClass(type === "timeline")}
-            >
-              Timeline
-            </button>
-          </div>
+          <Button
+            variant={logScale ? "primary" : "outline"}
+            size="sm"
+            aria-pressed={logScale}
+            onClick={() => {
+              setControlsChanged(true);
+              setLogScale((v) => !v);
+            }}
+          >
+            Log
+          </Button>
+          <DitherSegmented
+            role="radiogroup"
+            aria-label="Chart axis"
+            value={type}
+            options={AXIS_OPTIONS}
+            onValueChange={(next) => {
+              setControlsChanged(true);
+              setType(next);
+            }}
+          />
           {embedLink && label && (
             <EmbedSnippet
               apiBase={apiBase}
               chartPath={path}
               linkHref={embedLink}
               label={label}
-              state={{ type, log: logScale, from: validFrom, to: validTo }}
+              state={{
+                type,
+                log: logScale,
+                from: appliedFrom,
+                to: appliedTo,
+              }}
               variant="menu"
             />
           )}
         </div>
       </figcaption>
+      {invertedRange && (
+        <p
+          role="alert"
+          className="border-b border-border/40 px-4 py-2 text-[11px] text-[var(--swatch-red)]"
+        >
+          The end date is before the start date. Showing the full range.
+        </p>
+      )}
       <InteractiveChart
         src={withParams(theme)}
         alt={alt}
@@ -263,7 +279,7 @@ function InteractiveChart({
   }
 
   return (
-    <div className="relative overflow-hidden rounded-b-[inherit] bg-card">
+    <div className="relative overflow-hidden rounded-b-[inherit]">
       <img
         src={src}
         alt={alt}

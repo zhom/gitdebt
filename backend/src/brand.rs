@@ -31,30 +31,79 @@ pub fn themed_logo_mark(x: f32, y: f32, size: f32, theme: &Theme) -> String {
     logo_mark(x, y, size, theme.fg, theme.bg)
 }
 
-/// Small-size brand mark: a Bayer-ordered dithered square chip.
+/// Grid resolution of [`MARK_BITMAP`] (square).
+pub(crate) const MARK_GRID: usize = 14;
+
+/// Favicon-grade rendition of the canonical robot, on a 14×14 pixel grid.
 ///
-/// The 512px robot silhouette turns to mush below ~24px, so compact
-/// surfaces (badges, footers at chip scale) use this 4×4 ordered-dither
-/// tile instead: one ink, alpha-only modulation (lit cells full strength,
-/// off cells at 0.4×), which reads as the product's pixel-grain signature
-/// at any size ≥ 8px. Deterministic geometry, no gradients.
-pub fn chip_mark(x: f32, y: f32, size: f32, ink: &str) -> String {
-    const LIT_THRESHOLD: u8 = 10;
-    let cell = size / 4.0;
-    let mut cells = String::new();
-    for (row, values) in crate::texture::BAYER_4.iter().enumerate() {
-        for (col, value) in values.iter().enumerate() {
-            let opacity = if *value < LIT_THRESHOLD {
-                "0.92"
-            } else {
-                "0.36"
-            };
-            cells.push_str(&format!(
-                "<rect x=\"{:.2}\" y=\"{:.2}\" width=\"{cell:.2}\" height=\"{cell:.2}\" opacity=\"{opacity}\" />",
-                col as f32 * cell,
-                row as f32 * cell,
-            ));
+/// The 512px artwork carries a rotated rounded-rect head with an outlined
+/// screen, two X-shaped eyes, and a left ear tab. Below ~24px its outlines
+/// land on sub-pixel boundaries and the whole glyph collapses into a
+/// smudge, so compact surfaces get this hand-authored reduction instead:
+/// the same three recognizable features, snapped to whole cells so a 14px
+/// mark is exactly 1 device pixel per cell (2px at the standard 2× raster).
+/// 14 rather than 12 cells because at 12 the eyes touch the head outline
+/// and the glyph reads as noise.
+///
+/// `#` is ink, `.` is transparent. Row-major, top to bottom.
+pub(crate) const MARK_BITMAP: [&str; MARK_GRID] = [
+    "..............",
+    "...##########.",
+    "..#..........#",
+    "..#..........#",
+    "..#..........#",
+    "..#.#.#..#.#.#",
+    "###..#....#..#",
+    "###.#.#..#.#.#",
+    "###..........#",
+    "..#..........#",
+    "..#..........#",
+    "..#..........#",
+    "...##########.",
+    "..............",
+];
+
+/// Horizontal runs of [`MARK_BITMAP`] as `(col, row, len)`. Merging runs
+/// keeps the emitted markup small and, more importantly, removes the
+/// hairline seams a per-cell rect grid shows at fractional cell sizes.
+pub(crate) fn mark_runs() -> Vec<(usize, usize, usize)> {
+    let mut runs = Vec::new();
+    for (row, line) in MARK_BITMAP.iter().enumerate() {
+        let cells: Vec<bool> = line.chars().map(|c| c == '#').collect();
+        let mut col = 0usize;
+        while col < cells.len() {
+            if !cells[col] {
+                col += 1;
+                continue;
+            }
+            let start = col;
+            while col < cells.len() && cells[col] {
+                col += 1;
+            }
+            runs.push((start, row, col - start));
         }
+    }
+    runs
+}
+
+/// Small-size brand mark: the gitdebt robot as a solid, single-ink pixel
+/// glyph (see [`MARK_BITMAP`]).
+///
+/// Solid fill on purpose — a dither pattern inside a 12px glyph samples
+/// below one cell per feature and destroys the silhouette. The dither
+/// system still surrounds the mark (panel washes, chart fills); the logo
+/// itself stays crisp so it reads as the logo at badge scale, in either
+/// theme, in SVG and after rasterization.
+pub fn pixel_mark(x: f32, y: f32, size: f32, ink: &str) -> String {
+    let cell = size / MARK_GRID as f32;
+    let mut cells = String::new();
+    for (col, row, len) in mark_runs() {
+        cells.push_str(&format!(
+            "<rect x=\"{:.2}\" y=\"{:.2}\" width=\"{:.2}\" height=\"{cell:.2}\" />",
+            col as f32 * cell,
+            row as f32 * cell,
+            len as f32 * cell,
+        ));
     }
     format!(
         "  <g data-gitdebt-logo=\"true\" aria-label=\"gitdebt\" transform=\"translate({x:.1} {y:.1})\" fill=\"{ink}\" shape-rendering=\"crispEdges\">{cells}</g>\n"
@@ -72,7 +121,9 @@ pub fn footer_lockup(right_x: f32, baseline_y: f32, theme: &Theme) -> String {
     let mark_y = baseline_y - 15.0;
     format!(
         "  <a href=\"https://gitdebt.com\" target=\"_blank\" rel=\"noopener\" aria-label=\"gitdebt\">\n{}    <text class=\"footer-link\" x=\"{right_x:.1}\" y=\"{baseline_y:.1}\" text-anchor=\"end\" fill=\"{muted}\">gitdebt</text>\n  </a>\n",
-        themed_logo_mark(mark_x, mark_y, mark_size, theme),
+        // The pixel-grid mark, not the full logo path: at 18px the detailed
+        // artwork is still sub-pixel enough to read as a smudge.
+        pixel_mark(mark_x, mark_y, mark_size, theme.muted),
         muted = theme.muted,
     )
 }
@@ -135,19 +186,48 @@ mod tests {
     }
 
     #[test]
-    fn chip_mark_is_a_one_ink_alpha_only_dither_tile() {
-        let chip = chip_mark(100.0, 8.0, 12.0, "#9b7bff");
-        assert_eq!(chip, chip_mark(100.0, 8.0, 12.0, "#9b7bff"));
-        assert!(chip.contains("data-gitdebt-logo=\"true\""));
-        // 4×4 grid → 16 cells, all carried by ONE ink on the group.
-        assert_eq!(chip.matches("<rect").count(), 16);
-        assert_eq!(chip.matches("fill=").count(), 1);
-        assert!(chip.contains("fill=\"#9b7bff\""));
-        // Alpha-only modulation: lit and dim tiers both present.
-        assert!(chip.contains("opacity=\"0.92\""));
-        assert!(chip.contains("opacity=\"0.36\""));
-        // Never the unreadable-at-small-size robot path data.
-        assert!(!chip.contains("M320.5 110.5"));
+    fn pixel_mark_is_the_robot_not_a_uniform_chip() {
+        let mark = pixel_mark(100.0, 8.0, 12.0, "#fafafa");
+        assert_eq!(mark, pixel_mark(100.0, 8.0, 12.0, "#fafafa"));
+        assert!(mark.contains("data-gitdebt-logo=\"true\""));
+        // One ink for the whole glyph, carried on the group.
+        assert_eq!(mark.matches("fill=").count(), 1);
+        assert!(mark.contains("fill=\"#fafafa\""));
+        assert!(mark.contains("shape-rendering=\"crispEdges\""));
+        // Never the unreadable-at-small-size robot path data, and never a
+        // solid square: the glyph must have holes.
+        assert!(!mark.contains("M320.5 110.5"));
+        let ink: usize = MARK_BITMAP
+            .iter()
+            .map(|row| row.chars().filter(|c| *c == '#').count())
+            .sum();
+        let total = MARK_GRID * MARK_GRID;
+        assert!(
+            (total / 6..total / 2).contains(&ink),
+            "mark ink coverage must read as a glyph, got {ink}/{total}"
+        );
+        // Structure: a framed head with two eyes and a left ear tab.
+        assert!(MARK_BITMAP[0].chars().all(|c| c == '.'));
+        assert!(MARK_BITMAP[MARK_GRID - 1].chars().all(|c| c == '.'));
+        assert_eq!(MARK_BITMAP[1].chars().filter(|c| *c == '#').count(), 10);
+        for row in MARK_BITMAP.iter() {
+            assert_eq!(row.chars().count(), MARK_GRID);
+        }
+    }
+
+    #[test]
+    fn mark_runs_merge_horizontal_neighbours() {
+        let runs = mark_runs();
+        // The head's top edge is one 10-cell run, not ten rects.
+        assert!(runs.contains(&(3, 1, 10)));
+        assert!(runs.contains(&(3, 12, 10)));
+        // Runs are non-empty, in-bounds, and row-major.
+        let mut previous = (0usize, 0usize);
+        for (col, row, len) in &runs {
+            assert!(*len > 0 && col + len <= MARK_GRID && *row < MARK_GRID);
+            assert!((*row, *col) > previous || previous == (0, 0));
+            previous = (*row, *col);
+        }
     }
 
     #[test]

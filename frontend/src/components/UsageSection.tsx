@@ -3,6 +3,9 @@ import { AnimatePresence, motion, useReducedMotion } from "motion/react";
 import { ChevronDown, Loader2 } from "lucide-react";
 
 import { EmbedSnippet } from "@/components/EmbedSnippet";
+import { BODY, EYEBROW, KPI, PANEL, ROW } from "@/components/style-tokens";
+import { DitherSegmented } from "@/components/ui/dither-segmented";
+import { CONTROL } from "@/components/ui/dither-surface";
 import type { ChartType } from "@/components/ChartViewer";
 import { MEDIA_RENDER_REVISION } from "@/lib/media";
 import {
@@ -11,6 +14,7 @@ import {
   REDUCED_MOTION_DURATION,
 } from "@/lib/motion";
 import { useRenderedTheme } from "@/lib/rendered-theme";
+import { cn } from "@/lib/utils";
 
 type DownloadSeriesPoint = { date: string; downloads: number };
 type RegistryDownloads = { total: number; series: DownloadSeriesPoint[] };
@@ -52,6 +56,11 @@ function availableSources(data: UsageResponse): UsageSource[] {
   if (data.resolved.pypi && data.downloads.pypi) out.push("pypi");
   return out;
 }
+
+const AXIS_OPTIONS = [
+  { value: "date" as const, label: "Date" },
+  { value: "timeline" as const, label: "Timeline" },
+];
 
 const SOURCE_LABEL: Record<UsageSource, string> = {
   auto: "Auto",
@@ -165,20 +174,13 @@ export function UsageSection({
     return parts.reduce((a, b) => a + b, 0);
   }, [data]);
 
-  const tabClass = (active: boolean) =>
-    `dither-control min-h-11 rounded-md px-3 py-2 font-mono text-base tracking-wide uppercase sm:min-h-0 sm:px-2.5 sm:py-1 sm:text-xs ${
-      active
-        ? "text-accent-foreground"
-        : "text-muted-foreground hover:text-accent-foreground"
-    }`;
-
   if (loading) {
     return (
       <AsyncSwap state="loading">
-        <div className="signal-panel p-6">
-          <p className="mono-label inline-flex items-center gap-2">
+        <div className={cn(PANEL, "p-3.5")}>
+          <p className={cn(EYEBROW, "inline-flex items-center gap-2")}>
             <Loader2
-              className="size-3.5 shrink-0 motion-safe:animate-spin text-(--dither-wave-2)"
+              className="size-3.5 shrink-0 motion-safe:animate-spin"
               aria-hidden="true"
             />
             Resolving packages
@@ -191,16 +193,12 @@ export function UsageSection({
   if (errored || !data || !hasPackage) {
     return (
       <AsyncSwap state="empty">
-        <figure className="overflow-hidden rounded-xl border border-border border-dashed bg-card">
-          <figcaption className="mono-label flex items-center gap-2 border-b border-border px-5 py-3">
-            <span
-              className="size-1.5 shrink-0 rounded-full bg-muted-foreground/50"
-              aria-hidden="true"
-            />
+        <figure className={cn(PANEL, "overflow-hidden")}>
+          <figcaption className={cn(EYEBROW, "border-b border-border/40 px-4 py-3")}>
             Stars vs. usage
           </figcaption>
-          <div className="px-5 py-8">
-            <p className="text-base text-pretty text-muted-foreground sm:text-sm">
+          <div className="px-4 py-6">
+            <p className={BODY}>
               {errored
                 ? "Couldn't load usage data right now."
                 : "No published package detected for this repo — nothing to overlay against star growth."}
@@ -223,28 +221,25 @@ export function UsageSection({
   return (
     <AsyncSwap state="ready">
       <section className="space-y-6">
-        <figure className="signal-panel overflow-visible">
-          <figcaption className="flex flex-wrap items-center justify-between gap-3 border-b border-border bg-muted/40 px-5 py-3">
-            <div className="mono-label inline-flex items-center gap-2">
-              <span
-                className="size-1.5 shrink-0 rounded-full bg-(--dither-wave-2)"
-                aria-hidden="true"
-              />
-              Stars vs. usage
-            </div>
-            <div className="flex flex-wrap items-center gap-3">
+        <figure className={cn(PANEL, "overflow-hidden")}>
+          <figcaption className="flex flex-wrap items-center justify-between gap-3 border-b border-border/40 px-4 py-3">
+            <div className={EYEBROW}>Stars vs. usage</div>
+            <div className="flex flex-wrap items-center gap-2">
               {sources.length > 1 && (
                 <div className="inline-flex items-center gap-2">
-                  <label htmlFor="usage-source" className="mono-label">
+                  <label htmlFor="usage-source" className={EYEBROW}>
                     Source
                   </label>
-                  <div className="grid grid-cols-1">
+                  <span className="relative grid grid-cols-1 items-center">
                     <select
                       id="usage-source"
                       name="source"
                       value={source}
                       onChange={(e) => setSource(e.target.value as UsageSource)}
-                      className="dither-control col-start-1 row-start-1 min-h-11 appearance-none rounded-md border py-2 pr-8 pl-3 font-mono text-base text-foreground outline-none focus-visible:outline-2 focus-visible:-outline-offset-1 focus-visible:outline-ring sm:min-h-0 sm:py-1 sm:pr-7 sm:pl-2 sm:text-xs"
+                      className={cn(
+                        CONTROL,
+                        "col-start-1 row-start-1 w-auto appearance-none pr-9 text-foreground",
+                      )}
                     >
                       {sources.map((s) => (
                         <option key={s} value={s}>
@@ -253,61 +248,48 @@ export function UsageSection({
                       ))}
                     </select>
                     <ChevronDown
-                      className="pointer-events-none col-start-1 row-start-1 mr-2 size-3.5 self-center justify-self-end text-muted-foreground"
+                      className="pointer-events-none col-start-1 row-start-1 mr-3 size-3.5 justify-self-end text-muted-foreground"
                       strokeWidth={2}
                       aria-hidden="true"
                     />
-                  </div>
+                  </span>
                 </div>
               )}
-              <div className="flex items-center gap-1" role="group" aria-label="Chart axis">
-                <button
-                  type="button"
-                  aria-pressed={type === "date"}
-                  onClick={() => setType("date")}
-                  className={tabClass(type === "date")}
-                >
-                  Date
-                </button>
-                <button
-                  type="button"
-                  aria-pressed={type === "timeline"}
-                  onClick={() => setType("timeline")}
-                  className={tabClass(type === "timeline")}
-                >
-                  Timeline
-                </button>
-              </div>
+              <DitherSegmented
+                role="radiogroup"
+                aria-label="Chart axis"
+                value={type}
+                options={AXIS_OPTIONS}
+                onValueChange={setType}
+              />
             </div>
           </figcaption>
 
-          <div className="grid gap-px border-b border-border bg-border sm:grid-cols-2">
-            <dl className="bg-card px-5 py-4">
-              <dt className="mono-label">Resolved packages</dt>
-              <dd className="mt-2 flex flex-col gap-1.5">
+          <div className="grid gap-4 border-b border-border/40 p-3.5 sm:grid-cols-2">
+            <dl>
+              <dt className={EYEBROW}>Resolved packages</dt>
+              <dd className="mt-2 flex flex-col">
                 {resolvedRows.map((row) => (
                   <a
                     key={row.label}
                     href={row.href}
                     target="_blank"
                     rel="noreferrer"
-                    className="group flex items-baseline justify-between gap-4 font-mono text-base sm:text-sm"
+                    className={cn(ROW, "-mx-2.5 justify-between")}
                   >
-                    <span className="text-muted-foreground">{row.label}</span>
-                    <span className="truncate text-foreground underline decoration-border underline-offset-4 group-hover:decoration-foreground">
+                    <span>{row.label}</span>
+                    <span className="truncate text-foreground/90">
                       {row.value} ↗
                     </span>
                   </a>
                 ))}
               </dd>
             </dl>
-            <dl className="grid grid-cols-3 divide-x divide-border bg-card px-5 py-4">
+            <dl className="grid grid-cols-3 divide-x divide-border/40">
               {totals.map((t) => (
-                <div key={t.label} className="px-2 first:pl-0 last:pr-0">
-                  <dt className="mono-label">{t.label}</dt>
-                  <dd className="mt-1.5 text-lg font-semibold tabular-nums">
-                    {t.value}
-                  </dd>
+                <div key={t.label} className="min-w-0 px-3.5 first:pl-0 last:pr-0">
+                  <dt className={EYEBROW}>{t.label}</dt>
+                  <dd className={cn("mt-2", KPI)}>{t.value}</dd>
                 </div>
               ))}
             </dl>
@@ -323,8 +305,8 @@ export function UsageSection({
               className="block w-full"
             />
           ) : (
-            <div className="px-5 py-8">
-              <p className="text-base text-pretty text-muted-foreground sm:text-sm">
+            <div className="px-4 py-6">
+              <p className={BODY}>
                 A package is published, but no download history is available
                 to chart against star growth.
               </p>

@@ -6,6 +6,12 @@ import BaseHead from "@/components/BaseHead.astro";
 import Seo from "@/components/Seo.astro";
 import SiteHeader from "@/components/SiteHeader.astro";
 import SiteFooter from "@/components/SiteFooter.astro";
+import {
+  BODY,
+  HEADING,
+  SECTION_HEADER,
+  TITLE,
+} from "@/components/style-tokens";
 import { staticApiBase } from "@/lib/static-api-base";
 
 const apiBase = staticApiBase();
@@ -71,57 +77,58 @@ const jsonLd = {
     <div class="isolate flex min-h-dvh flex-col">
       <SiteHeader />
 
-      <main id="main-content" class="mx-auto flex w-full max-w-3xl flex-1 flex-col gap-10 px-6 py-12">
-        <nav aria-label="Breadcrumb" class="font-mono text-xs text-muted-foreground">
-          <a href="/" class="hover:text-foreground">gitdebt</a>
+      <main id="main-content" class="mx-auto w-full max-w-3xl flex-1 px-6 py-12">
+        <nav aria-label="Breadcrumb" class="font-mono text-[11px] text-muted-foreground">
+          <a
+            href="/"
+            class="rounded outline-none transition-colors duration-150 hover:text-foreground focus-visible:ring-2 focus-visible:ring-accent/30"
+            >gitdebt</a
+          >
           <span class="px-1.5 text-border" aria-hidden="true">/</span>
           <span class="text-foreground">about</span>
         </nav>
 
-        <header class="space-y-3">
-          <p class="mono-label">
-            About
-          </p>
-          <h1 class="text-3xl font-semibold tracking-tight text-balance sm:text-4xl">
-            How gitdebt works
-          </h1>
-          <p class="max-w-[60ch] text-lg text-pretty text-muted-foreground">
+        <header class="mt-8">
+          <h1 class={TITLE}>How gitdebt works</h1>
+          <p class:list={["mt-3 max-w-[62ch] text-[15px]", BODY]}>
             gitdebt charts the star history of any public GitHub repository
             and pairs it with health signals read from the git history itself:
             churn, bug magnets, contributors, and TODO drift.
           </p>
         </header>
 
-        <section class="space-y-4">
-          <h2 class="text-xl font-semibold tracking-tight">What we compute</h2>
-          <p class="max-w-[60ch] text-base text-pretty text-muted-foreground sm:text-sm">
+        <section class="mt-16 scroll-mt-24 border-t border-border/60 pt-12">
+          <div class={SECTION_HEADER}>
+            <h2 class={HEADING}>What we compute</h2>
+          </div>
+          <p class:list={["mt-2 max-w-[68ch]", BODY]}>
             Star history comes from GitHub's API; the repo-debt stats come from
             a shallow git clone analyzed on our side. Each signal is a pure,
             unit-tested function over that data.
           </p>
-          <dl class="space-y-6">
+          <dl class="mt-8 grid gap-x-12 gap-y-8 sm:grid-cols-2">
             {
               stats.map((item) => (
-                <div class="space-y-1.5">
-                  <dt class="text-base font-medium">{item.term}</dt>
-                  <dd class="max-w-[68ch] text-base text-pretty text-muted-foreground sm:text-sm">
-                    {item.desc}
-                  </dd>
+                <div>
+                  <dt class="text-[13px] text-foreground/90">{item.term}</dt>
+                  <dd class:list={["mt-1.5 max-w-[52ch]", BODY]}>{item.desc}</dd>
                 </div>
               ))
             }
           </dl>
         </section>
 
-        <section class="space-y-4">
-          <h2 class="text-xl font-semibold tracking-tight">Freshness & caching</h2>
-          <p class="max-w-[68ch] text-base text-pretty text-muted-foreground sm:text-sm">
+        <section class="mt-16 scroll-mt-24 border-t border-border/60 pt-12">
+          <div class={SECTION_HEADER}>
+            <h2 class={HEADING}>Freshness &amp; caching</h2>
+          </div>
+          <p class:list={["mt-2 max-w-[68ch]", BODY]}>
             The first time a repo is requested it's cold: star history starts
             in the background while the git clone is analyzed for repo-health
             charts. The report shows a measured live ETA, then fills each
             finished section on its own—no reload needed.
           </p>
-          <p class="max-w-[68ch] text-base text-pretty text-muted-foreground sm:text-sm">
+          <p class:list={["mt-3 max-w-[68ch]", BODY]}>
             Once analyzed, results are cached and served from the edge, so
             repeat views are near-instant. Popular repos refresh more often;
             our browser extension reports the repos people are actively viewing
@@ -130,11 +137,11 @@ const jsonLd = {
           </p>
         </section>
 
-        <section class="space-y-4">
-          <h2 class="text-xl font-semibold tracking-tight">
-            What gitdebt does not do
-          </h2>
-          <p class="max-w-[68ch] text-base text-pretty text-muted-foreground sm:text-sm">
+        <section class="mt-16 scroll-mt-24 border-t border-border/60 pt-12">
+          <div class={SECTION_HEADER}>
+            <h2 class={HEADING}>What gitdebt does not do</h2>
+          </div>
+          <p class:list={["mt-2 max-w-[68ch]", BODY]}>
             gitdebt does not flag stars as fake, real, or suspicious, and it
             doesn't score individual accounts. That can't be done correctly
             without privileged access to GitHub's full dataset, so we don't
@@ -142,11 +149,11 @@ const jsonLd = {
           </p>
         </section>
 
-        <section class="space-y-4">
-          <h2 class="text-xl font-semibold tracking-tight">
-            Sign-in is optional
-          </h2>
-          <p class="max-w-[68ch] text-base text-pretty text-muted-foreground sm:text-sm">
+        <section class="mt-16 scroll-mt-24 border-t border-border/60 pt-12">
+          <div class={SECTION_HEADER}>
+            <h2 class={HEADING}>Sign-in is optional</h2>
+          </div>
+          <p class:list={["mt-2 max-w-[68ch]", BODY]}>
             Every public repository report works without an account. GitHub
             sign-in currently adds a one-click shortcut to your profile-wide
             aggregate report; it does not unlock private repository analysis or

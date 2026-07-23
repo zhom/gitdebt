@@ -10,6 +10,29 @@ import { LiveUserProfile } from "@/components/LiveUserProfile";
 import { staticApiBase } from "@/lib/static-api-base";
 
 const apiBase = staticApiBase();
+
+const included = [
+  {
+    label: "Aggregate star history",
+    blurb: "Every public repo you own, summed into one cumulative curve.",
+  },
+  {
+    label: "Commit activity",
+    blurb: "52 weeks of commits across your repositories, one cell per day.",
+  },
+  {
+    label: "Language footprint",
+    blurb: "Lines of code by language across every analyzed repository.",
+  },
+  {
+    label: "Maintenance signals",
+    blurb: "Which repos rest on a single author, and which are genuinely shared.",
+  },
+  {
+    label: "README assets",
+    blurb: "Light and dark embeds for the profile card and every chart.",
+  },
+];
 ---
 
 <!doctype html>
@@ -18,7 +41,7 @@ const apiBase = staticApiBase();
     <BaseHead />
     <Seo
       title="Your GitHub profile report · gitdebt"
-      description="Open a live aggregate report for your public GitHub repositories."
+      description="Open a live aggregate report for your public GitHub repositories: star history, commit activity, language footprint and embeddable README assets."
       canonicalPath="/profile"
       ogImage={`${apiBase}/api/og.png`}
       noindex={true}
@@ -28,7 +51,41 @@ const apiBase = staticApiBase();
     <div class="isolate flex min-h-dvh flex-col">
       <SiteHeader />
       <main id="main-content" class="mx-auto w-full max-w-6xl flex-1 px-6 py-12">
-        <LiveUserProfile client:only="react" apiBase={apiBase} />
+        <header>
+          <h1 class="text-3xl tracking-tight text-balance sm:text-4xl">Profile report</h1>
+          <p class="mt-3 max-w-[68ch] text-[15px] leading-relaxed text-pretty text-muted-foreground">
+            An aggregate report across a maintainer's public repositories — star
+            history, commit activity, language footprint and the README assets to
+            embed them. Everything is read from gitdebt's own database, so nothing
+            here waits on GitHub.
+          </p>
+        </header>
+
+        <div class="mt-12">
+          <LiveUserProfile client:only="react" apiBase={apiBase} />
+        </div>
+
+        <section class="mt-16 scroll-mt-24 border-t border-border/60 pt-8">
+          <div class="flex items-baseline justify-between gap-4">
+            <h2 class="text-lg tracking-tight">What a profile report contains</h2>
+            <a
+              href="/leaderboard"
+              class="rounded font-mono text-[11px] text-muted-foreground outline-none transition-colors duration-150 hover:text-foreground focus-visible:ring-2 focus-visible:ring-accent/30"
+            >
+              leaderboard →
+            </a>
+          </div>
+          <ul class="mt-6 grid gap-x-12 gap-y-8 sm:grid-cols-2 lg:grid-cols-3">
+            {included.map((item) => (
+              <li>
+                <h3 class="text-[13px] text-foreground/90">{item.label}</h3>
+                <p class="mt-1.5 text-[11px] leading-relaxed text-pretty text-muted-foreground">
+                  {item.blurb}
+                </p>
+              </li>
+            ))}
+          </ul>
+        </section>
       </main>
       <SiteFooter />
     </div>

@@ -391,47 +391,254 @@ async fn repo_analysis_enqueue_is_freshness_bounded_and_old_dead_jobs_revive() {
     assert_eq!(missing_status, "dead", "404 tombstones stay terminal");
 
     let fresh = format!("{prefix}fresh");
-    sqlx::query(
-        "INSERT INTO repo_history \
-            (repo, last_analyzed_sha, last_analyzed_at, analysis_revision) \
-         VALUES ($1, 'abc', NOW(), $2)",
-    )
-    .bind(&fresh)
-    .bind(CURRENT_ANALYSIS_REVISION)
-    .execute(&db.pool)
-    .await
-    .unwrap();
+    seed_current_analysis(&db, &fresh, "abc").await;
     assert_eq!(
         repo_analysis::enqueue(&db, &fresh).await.unwrap(),
         repo_analysis::EnqueueOutcome::Fresh
     );
 
-    let unresolved = format!("{prefix}unresolved");
+    // Analysis stopped short of the head it observed: the run did not
+    // finish, so it is not current and must be re-enqueued.
+    let mid = format!("{prefix}mid-analysis");
     sqlx::query(
         "INSERT INTO repo_history \
-            (repo, last_analyzed_sha, last_analyzed_at, analysis_revision) \
-         VALUES ($1, 'def', NOW(), $2)",
+            (repo, last_analyzed_sha, head_sha, last_analyzed_at, analysis_revision) \
+         VALUES ($1, 'ghi', 'jkl', NOW(), $2)",
     )
-    .bind(&unresolved)
+    .bind(&mid)
     .bind(CURRENT_ANALYSIS_REVISION)
     .execute(&db.pool)
     .await
     .unwrap();
+    assert_eq!(
+        repo_analysis::enqueue(&db, &mid).await.unwrap(),
+        repo_analysis::EnqueueOutcome::Enqueued,
+        "an analysis that never reached its observed head is not current"
+    );
+
+    // A superseded algorithm revision is likewise not current.
+    let stale_revision = format!("{prefix}stale-revision");
     sqlx::query(
-        "INSERT INTO repo_author_stats \
-            (repo, author_email, avatar_url, commits, first_commit_at, last_commit_at) \
-         VALUES ($1, 'author@example.com', \
-                 'https://www.gravatar.com/avatar/example', 1, NOW(), NOW())",
+        "INSERT INTO repo_history \
+            (repo, last_analyzed_sha, head_sha, last_analyzed_at, analysis_revision) \
+         VALUES ($1, 'mno', 'mno', NOW(), $2)",
     )
-    .bind(&unresolved)
+    .bind(&stale_revision)
+    .bind(CURRENT_ANALYSIS_REVISION - 1)
     .execute(&db.pool)
     .await
     .unwrap();
     assert_eq!(
-        repo_analysis::enqueue(&db, &unresolved).await.unwrap(),
-        repo_analysis::EnqueueOutcome::Enqueued,
-        "fresh commits with an unattempted author mapping must retry enrichment"
+        repo_analysis::enqueue(&db, &stale_revision).await.unwrap(),
+        repo_analysis::EnqueueOutcome::Enqueued
     );
+
+    cleanup(&db, prefix).await;
+}
+
+/// Seed the exact state `repo_stats::write_commits_at_head` +
+/// `record_analysis_details` leave behind for a completed, current run.
+async fn seed_current_analysis(db: &Db, repo: &str, sha: &str) {
+    sqlx::query(
+        "INSERT INTO repo_history \
+            (repo, last_analyzed_sha, head_sha, last_analyzed_at, analysis_revision) \
+         VALUES ($1, $2, $2, NOW(), $3) \
+         ON CONFLICT (repo) DO UPDATE SET \
+            last_analyzed_sha = EXCLUDED.last_analyzed_sha, \
+            head_sha = EXCLUDED.head_sha, \
+            last_analyzed_at = EXCLUDED.last_analyzed_at, \
+            analysis_revision = EXCLUDED.analysis_revision",
+    )
+    .bind(repo)
+    .bind(sha)
+    .bind(CURRENT_ANALYSIS_REVISION)
+    .execute(&db.pool)
+    .await
+    .unwrap();
+}
+
+async fn seed_unresolved_author(db: &Db, repo: &str, email: &str) {
+    sqlx::query(
+        "INSERT INTO repo_author_stats \
+            (repo, author_email, avatar_url, commits, first_commit_at, last_commit_at) \
+         VALUES ($1, $2, 'https://www.gravatar.com/avatar/example', 1, NOW(), NOW()) \
+         ON CONFLICT (repo, author_email) DO UPDATE SET enrich_attempted_at = NULL",
+    )
+    .bind(repo)
+    .bind(email)
+    .execute(&db.pool)
+    .await
+    .unwrap();
+}
+
+async fn unstamped_author_count(db: &Db, repo: &str) -> i64 {
+    sqlx::query_scalar(
+        "SELECT COUNT(*)::BIGINT FROM repo_author_stats \
+         WHERE repo = $1 AND enrich_attempted_at IS NULL",
+    )
+    .bind(repo)
+    .fetch_one(&db.pool)
+    .await
+    .unwrap()
+}
+
+/// The 12-hour "Analyzing 7 repositories" loop, as a regression test.
+///
+/// Author login/avatar enrichment is best-effort GitHub metadata, and some
+/// commit emails can never resolve to a login. When readiness required
+/// every such row to be enriched, the repositories holding them could never
+/// become ready: the profile poll re-enqueued them every few seconds, each
+/// run applied zero commits and completed, and the queue never drained.
+///
+/// A repository whose analysis is done and current is ready, unenriched
+/// authors or not — `enqueue` answers `Fresh`, deletes any leftover queue
+/// row, and the readiness counts include it.
+#[tokio::test]
+async fn unenriched_authors_never_block_analysis_readiness() {
+    let Some(db) = test_db().await else {
+        eprintln!("skipping: set GITDEBT_TEST_DATABASE_URL to run");
+        return;
+    };
+    let prefix = "gitdebt-test-enrich-gate/";
+    cleanup(&db, prefix).await;
+
+    let repo = format!("{prefix}stuck");
+    seed_current_analysis(&db, &repo, "head1").await;
+    for i in 0..5 {
+        seed_unresolved_author(&db, &repo, &format!("ghost-{i}@example.com")).await;
+    }
+    assert_eq!(unstamped_author_count(&db, &repo).await, 5);
+
+    assert!(
+        repo_analysis::analysis_is_current(&db, &repo)
+            .await
+            .unwrap(),
+        "a current analysis is current regardless of author enrichment"
+    );
+    assert_eq!(
+        repo_analysis::enqueue(&db, &repo).await.unwrap(),
+        repo_analysis::EnqueueOutcome::Fresh,
+        "unenriched authors must not re-open a finished analysis"
+    );
+    assert!(
+        !analysis_queue_row_exists(&db, &repo).await,
+        "a Fresh enqueue drains the queue instead of scheduling a no-op run"
+    );
+
+    // The profile poll's repeat enqueues stay no-ops — this is the loop.
+    for _ in 0..3 {
+        assert_eq!(
+            repo_analysis::enqueue(&db, &repo).await.unwrap(),
+            repo_analysis::EnqueueOutcome::Fresh
+        );
+    }
+    assert!(!analysis_queue_row_exists(&db, &repo).await);
+
+    // A stale leftover queue row is cleared by the same path, so a queue
+    // that was already stuck drains as soon as this ships.
+    sqlx::query(
+        "INSERT INTO repo_analysis_queue (repo, status, enqueued_at) \
+         VALUES ($1, 'pending', NOW())",
+    )
+    .bind(&repo)
+    .execute(&db.pool)
+    .await
+    .unwrap();
+    assert_eq!(
+        repo_analysis::enqueue(&db, &repo).await.unwrap(),
+        repo_analysis::EnqueueOutcome::Fresh
+    );
+    assert!(!analysis_queue_row_exists(&db, &repo).await);
+
+    // The profile card's own count over this same state is asserted where
+    // that SQL lives (`api.rs::user_card_sql_aggregates_without_ambiguous_columns`),
+    // rather than mirrored here where it could silently drift.
+    cleanup(&db, prefix).await;
+}
+
+/// The background author-enrichment sweep must converge on its own.
+///
+/// It runs with no local clone here (and, in CI, no GitHub budget), which
+/// is the case that used to make no progress at all: rows were selected,
+/// nothing could be resolved, nothing was stamped, and the next pass picked
+/// the identical rows. The sweep now stamps every row it selects, so the
+/// first pass drains the backlog and the second finds nothing.
+#[tokio::test]
+async fn author_enrichment_sweep_stamps_attempted_rows_and_terminates() {
+    let Some(db) = test_db().await else {
+        eprintln!("skipping: set GITDEBT_TEST_DATABASE_URL to run");
+        return;
+    };
+    let prefix = "gitdebt-test-enrich-sweep/";
+    cleanup(&db, prefix).await;
+
+    let repo = format!("{prefix}unresolvable");
+    seed_current_analysis(&db, &repo, "head1").await;
+    // A clone path this replica does not hold: no commit can be sampled.
+    sqlx::query("UPDATE repo_history SET clone_path = $2 WHERE repo = $1")
+        .bind(&repo)
+        .bind("/nonexistent/gitdebt-test-enrich-sweep")
+        .execute(&db.pool)
+        .await
+        .unwrap();
+    for i in 0..4 {
+        seed_unresolved_author(&db, &repo, &format!("ghost-{i}@example.com")).await;
+    }
+    assert_eq!(unstamped_author_count(&db, &repo).await, 4);
+
+    let rate = std::sync::Arc::new(
+        gitdebt::rate_limit::RateLimitTracker::load(db.clone())
+            .await
+            .unwrap(),
+    );
+    let ctx = repo_analysis::AnalysisCtx {
+        db: db.clone(),
+        storage: std::sync::Arc::new(RepoStorage::from_env()),
+        github: std::sync::Arc::new(gitdebt::github::GithubClient::new(None, rate).unwrap()),
+        gh_app: None,
+    };
+
+    // One pass covers at most AUTHOR_ENRICH_SWEEP_REPOS repositories, and
+    // the shared test database may hold other fixtures' backlogs; a handful
+    // of passes is still a hard bound, which is the point.
+    let mut attempted = 0usize;
+    for _ in 0..3 {
+        let pass = tokio::time::timeout(
+            std::time::Duration::from_secs(20),
+            repo_analysis::sweep_author_enrichment_until(
+                &ctx,
+                std::time::Instant::now() + std::time::Duration::from_secs(5),
+            ),
+        )
+        .await
+        .expect("the sweep is wall-clock bounded")
+        .expect("sweep pass");
+        attempted += pass.rows_attempted;
+        if unstamped_author_count(&db, &repo).await == 0 {
+            break;
+        }
+    }
+    assert!(attempted >= 4, "the sweep must attempt this repo's rows");
+    assert_eq!(
+        unstamped_author_count(&db, &repo).await,
+        0,
+        "every selected row leaves the pass stamped, even with nothing resolvable"
+    );
+
+    // The stamp is deliberately short of `now` so a transient failure
+    // retries in hours — but it is far enough inside the TTL that the very
+    // next pass cannot re-pick the same rows. That is what terminates.
+    let reselected: i64 = sqlx::query_scalar(
+        "SELECT COUNT(*)::BIGINT FROM repo_author_stats \
+         WHERE repo = $1 \
+           AND (enrich_attempted_at IS NULL \
+                OR enrich_attempted_at < NOW() - INTERVAL '30 days')",
+    )
+    .bind(&repo)
+    .fetch_one(&db.pool)
+    .await
+    .unwrap();
+    assert_eq!(reselected, 0, "no row is eligible for the following pass");
 
     cleanup(&db, prefix).await;
 }
@@ -446,16 +653,7 @@ async fn repo_analysis_enqueue_many_skips_settled_jobs_and_bounds_new_work() {
     cleanup(&db, prefix).await;
 
     let fresh = format!("{prefix}fresh");
-    sqlx::query(
-        "INSERT INTO repo_history \
-            (repo, last_analyzed_sha, last_analyzed_at, analysis_revision) \
-         VALUES ($1, 'abc', NOW(), $2)",
-    )
-    .bind(&fresh)
-    .bind(CURRENT_ANALYSIS_REVISION)
-    .execute(&db.pool)
-    .await
-    .unwrap();
+    seed_current_analysis(&db, &fresh, "abc").await;
     let active = format!("{prefix}active");
     repo_analysis::enqueue(&db, &active).await.unwrap();
     let cold_a = format!("{prefix}cold-a");

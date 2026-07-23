@@ -8,6 +8,14 @@ import SiteHeader from "@/components/SiteHeader.astro";
 import SiteFooter from "@/components/SiteFooter.astro";
 import { VsHero } from "@/components/VsHero";
 import { ChartViewer } from "@/components/ChartViewer";
+import {
+  BODY,
+  EYEBROW,
+  HEADING,
+  PANEL_PADDED,
+  SECTION_ACTION,
+  SECTION_HEADER,
+} from "@/components/style-tokens";
 
 export function getStaticPaths() {
   return staticComparisonPaths();
@@ -149,6 +157,9 @@ const jsonLd = [
   },
 ];
 
+const thClass =
+  "py-3 pr-4 font-mono text-[10px] font-medium tracking-[0.14em] text-muted-foreground/70 uppercase whitespace-nowrap";
+
 const heroLeft =
   left.data !== null
     ? {
@@ -185,35 +196,45 @@ const heroRight =
     <div class="isolate flex min-h-dvh flex-col">
       <SiteHeader />
 
-      <main id="main-content" class="mx-auto flex w-full max-w-6xl flex-1 flex-col gap-10 px-6 py-12">
-        <nav aria-label="Breadcrumb" class="font-mono text-xs text-muted-foreground">
-          <a href="/" class="hover:text-foreground">gitdebt</a>
+      <main id="main-content" class="mx-auto w-full max-w-6xl flex-1 px-6 py-12">
+        <nav aria-label="Breadcrumb" class="font-mono text-[11px] text-muted-foreground">
+          <a
+            href="/"
+            class="rounded outline-none transition-colors duration-150 hover:text-foreground focus-visible:ring-2 focus-visible:ring-accent/30"
+            >gitdebt</a
+          >
           <span class="px-1.5 text-border" aria-hidden="true">/</span>
-          <span class="text-foreground">vs</span>
+          <a
+            href="/compare"
+            class="rounded outline-none transition-colors duration-150 hover:text-foreground focus-visible:ring-2 focus-visible:ring-accent/30"
+            >vs</a
+          >
           <span class="px-1.5 text-border" aria-hidden="true">/</span>
           <span class="text-foreground">{slug1} · {slug2}</span>
         </nav>
 
         {bothLoaded && heroLeft && heroRight ? (
           <>
-            <VsHero client:load left={heroLeft} right={heroRight} />
+            <div class="mt-8">
+              <VsHero client:load left={heroLeft} right={heroRight} />
+            </div>
 
             {ready ? (
-              <ChartViewer
-                client:load
-                apiBase={apiBase}
-                path={overlayPath}
-                alt={`Star history overlay of ${slug1} and ${slug2}`}
-                caption="Star history overlay"
-                embedLink={canonical}
-                label={`${slug1} vs ${slug2}`}
-              />
+              <div class="mt-12">
+                <ChartViewer
+                  client:load
+                  apiBase={apiBase}
+                  path={overlayPath}
+                  alt={`Star history overlay of ${slug1} and ${slug2}`}
+                  caption="Star history overlay"
+                  embedLink={canonical}
+                  label={`${slug1} vs ${slug2}`}
+                />
+              </div>
             ) : (
-              <section class="border-y border-border py-6">
-                <p class="mono-label">
-                  Current totals ready
-                </p>
-                <p class="mt-2 max-w-[70ch] text-base/7 text-pretty text-muted-foreground sm:text-sm/6">
+              <section class:list={["mt-12", PANEL_PADDED]}>
+                <p class={EYEBROW}>Current totals ready</p>
+                <p class:list={["mt-2 max-w-[70ch]", BODY]}>
                   The head-to-head totals below are live. A historical overlay
                   needs stargazer timestamps for both repositories, which
                   GitHub may not expose.
@@ -221,29 +242,33 @@ const heroRight =
               </section>
             )}
 
-            <section class="space-y-4">
-              <h2 class="flex items-center gap-2 text-base font-medium">
-                <span class="size-1.5 shrink-0 rounded-full bg-signal" aria-hidden="true"></span>
-                Summary
-              </h2>
-              <div class="-mx-6 -my-2 overflow-x-auto">
+            <section class="mt-16 scroll-mt-24 border-t border-border/60 pt-12">
+              <div class={SECTION_HEADER}>
+                <h2 class={HEADING}>Summary</h2>
+                <a
+                  href={`/compare?repos=${encodeURIComponent(`${slug1},${slug2}`)}`}
+                  class={SECTION_ACTION}
+                >
+                  add a third repo
+                  <span
+                    aria-hidden="true"
+                    class="transition-transform duration-150 group-hover:translate-x-0.5 motion-reduce:transition-none"
+                    >→</span
+                  >
+                </a>
+              </div>
+              <div class="-mx-6 mt-6 overflow-x-auto">
                 <div class="inline-block min-w-full px-6 py-2 align-middle">
                   <table class="w-full text-left text-base sm:text-sm">
                     <thead>
                       <tr class="border-b border-border">
-                        <th class="py-3 pr-4 font-mono text-xs font-medium tracking-wide text-muted-foreground uppercase whitespace-nowrap">
-                          Metric
-                        </th>
-                        <th class="py-3 pr-4 text-right font-mono text-xs font-medium tracking-wide text-muted-foreground uppercase whitespace-nowrap">
-                          {slug1}
-                        </th>
-                        <th class="py-3 text-right font-mono text-xs font-medium tracking-wide text-muted-foreground uppercase whitespace-nowrap">
-                          {slug2}
-                        </th>
+                        <th class={thClass}>Metric</th>
+                        <th class={`${thClass} text-right`}>{slug1}</th>
+                        <th class={`${thClass} text-right`}>{slug2}</th>
                       </tr>
                     </thead>
                     <tbody class="tabular-nums">
-                      <tr class="border-b border-border">
+                      <tr class="border-b border-border/40">
                         <td class="py-3 pr-4 text-muted-foreground">Total stars</td>
                         <td class="py-3 pr-4 text-right">
                           {heroLeft.totalStars.toLocaleString()}
@@ -252,7 +277,7 @@ const heroRight =
                           {heroRight.totalStars.toLocaleString()}
                         </td>
                       </tr>
-                      <tr class="border-b border-border">
+                      <tr>
                         <td class="py-3 pr-4 text-muted-foreground">First star</td>
                         <td class="py-3 pr-4 text-right text-muted-foreground">
                           {heroLeft.firstStarYear ?? "—"}
@@ -268,16 +293,12 @@ const heroRight =
             </section>
           </>
         ) : (
-          <section class="card-panel p-6" role="alert">
-            <p class="font-mono text-xs tracking-wide text-destructive uppercase">
+          <section class:list={["mt-8", PANEL_PADDED]} role="alert">
+            <p class="font-mono text-[10px] tracking-[0.25em] text-[var(--swatch-red)] uppercase">
               Comparison unavailable
             </p>
-            <h1 class="mt-2 text-xl font-semibold tracking-tight">
-              We couldn't load both repos
-            </h1>
-            <p class="mt-2 text-base text-pretty text-muted-foreground sm:text-sm">
-              Try again in a moment.
-            </p>
+            <h1 class:list={["mt-2", HEADING]}>We couldn't load both repos</h1>
+            <p class:list={["mt-2", BODY]}>Try again in a moment.</p>
           </section>
         )}
       </main>

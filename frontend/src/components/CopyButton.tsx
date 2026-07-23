@@ -2,6 +2,7 @@ import { useEffect, useRef, useState } from "react";
 import { AnimatePresence, motion, useReducedMotion } from "motion/react";
 import { Check, Copy } from "lucide-react";
 
+import { Button, type ButtonProps } from "@/components/ui/button";
 import {
   DURATION,
   EASE_OUT,
@@ -11,9 +12,11 @@ import {
 type Props = {
   value: string;
   ariaLabel: string;
-  className: string;
+  className?: string;
   idleLabel?: string;
   successLabel?: string;
+  variant?: ButtonProps["variant"];
+  size?: ButtonProps["size"];
 };
 
 export function CopyButton({
@@ -22,6 +25,8 @@ export function CopyButton({
   className,
   idleLabel = "Copy",
   successLabel = "Copied",
+  variant = "outline",
+  size = "sm",
 }: Props) {
   const [copied, setCopied] = useState(false);
   const [feedbackKey, setFeedbackKey] = useState(0);
@@ -52,8 +57,9 @@ export function CopyButton({
     : DURATION.feedback;
 
   return (
-    <button
-      type="button"
+    <Button
+      variant={variant}
+      size={size}
       onClick={copy}
       aria-label={ariaLabel}
       className={className}
@@ -95,7 +101,7 @@ export function CopyButton({
           >
             {copied ? (
               <Check
-                className="size-3.5 shrink-0 text-(--dither-wave-2)"
+                className="size-3.5 shrink-0"
                 strokeWidth={2}
                 aria-hidden="true"
               />
@@ -110,6 +116,6 @@ export function CopyButton({
           </motion.span>
         </AnimatePresence>
       </span>
-    </button>
+    </Button>
   );
 }

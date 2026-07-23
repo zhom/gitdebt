@@ -2,8 +2,10 @@ import { useEffect, useId, useRef, useState } from "react";
 import { AnimatePresence, motion, useReducedMotion } from "motion/react";
 import { ArrowRight, Plus, X } from "lucide-react";
 
+import { ButtonLink } from "@/components/ButtonLink";
 import { Button } from "@/components/ui/button";
 import { ChartViewer } from "@/components/ChartViewer";
+import { EYEBROW, HEADING, PANEL } from "@/components/style-tokens";
 import { warmRepos } from "@/components/WarmRepos";
 import { CATEGORIES } from "@/data/categories";
 import {
@@ -12,6 +14,7 @@ import {
   EASE_OUT,
   REDUCED_MOTION_DURATION,
 } from "@/lib/motion";
+import { cn } from "@/lib/utils";
 
 type Props = {
   apiBase: string;
@@ -140,9 +143,9 @@ export function CompareBuilder({ apiBase, initialRepos = [] }: Props) {
 
   return (
     <div className="space-y-8">
-      <form onSubmit={compare} className="card-panel p-6">
-        <p className="mono-label">Repos to overlay</p>
-        <div className="mt-4 space-y-3">
+      <form onSubmit={compare} className={cn(PANEL, "p-3.5")}>
+        <p className={EYEBROW}>Repos to overlay</p>
+        <div className="mt-3 space-y-2">
           <AnimatePresence initial={false}>
             {rows.map((row, i) => (
               <motion.div
@@ -176,10 +179,10 @@ export function CompareBuilder({ apiBase, initialRepos = [] }: Props) {
                 }}
                 className="flex items-center gap-2"
               >
-                <div className="dither-control flex flex-1 items-center rounded-md border font-mono text-base focus-within:outline-2 focus-within:outline-offset-2 focus-within:outline-ring sm:text-sm">
+                <div className="flex min-h-10 flex-1 items-center rounded-md border border-border/60 bg-background/60 font-mono text-[13px] transition-[border-color] duration-150 hover:border-foreground/25 focus-within:border-accent/70">
                   <label
                     htmlFor={`compare-repo-${row.id}`}
-                    className="pl-3.5 text-muted-foreground select-none"
+                    className="pl-3 text-muted-foreground select-none"
                   >
                     github.com/
                   </label>
@@ -197,37 +200,33 @@ export function CompareBuilder({ apiBase, initialRepos = [] }: Props) {
                     autoCorrect="off"
                     spellCheck={false}
                     aria-label={`Repository ${i + 1}, as owner/repo`}
-                    className="w-full flex-1 bg-transparent py-2.5 pr-3.5 pl-1 text-foreground placeholder:text-muted-foreground/50 outline-none"
+                    className="w-full flex-1 bg-transparent py-2 pr-3 pl-1 text-foreground placeholder:text-muted-foreground/50 outline-none"
                   />
                 </div>
-                <button
-                  type="button"
+                <Button
+                  variant="ghost"
+                  size="icon"
                   onClick={() => removeRow(i)}
                   disabled={rows.length <= MIN_ROWS}
                   aria-label={`Remove repository ${i + 1}`}
-                  className="inline-flex size-12 shrink-0 items-center justify-center rounded-md text-muted-foreground hover:bg-accent hover:text-accent-foreground disabled:pointer-events-none disabled:opacity-40 sm:size-9"
+                  className="shrink-0"
                 >
-                  <X
-                    className="size-6"
-                    strokeWidth={1.75}
-                    aria-hidden="true"
-                  />
-                </button>
+                  <X className="size-4" strokeWidth={1.75} aria-hidden="true" />
+                </Button>
               </motion.div>
             ))}
           </AnimatePresence>
         </div>
 
         <div className="mt-4 flex flex-col gap-3 sm:flex-row sm:items-center sm:justify-between">
-          <button
-            type="button"
+          <Button
+            variant="outline"
             onClick={addRow}
             disabled={rows.length >= MAX_REPOS}
-            className="dither-control inline-flex min-h-11 items-center justify-center gap-1.5 rounded-md border px-3 py-2 font-mono text-base text-muted-foreground hover:text-accent-foreground disabled:pointer-events-none disabled:opacity-40 sm:min-h-0 sm:py-1.5 sm:text-sm"
           >
             <Plus className="size-4 shrink-0" strokeWidth={2} aria-hidden="true" />
             Add repo
-          </button>
+          </Button>
           <Button type="submit" size="lg" className="w-full sm:w-auto">
             Compare
           </Button>
@@ -249,7 +248,7 @@ export function CompareBuilder({ apiBase, initialRepos = [] }: Props) {
                   : DURATION.enter,
                 ease: EASE_OUT,
               }}
-              className="mt-3 text-base text-destructive sm:text-sm"
+              className="mt-3 text-[11px] text-[var(--swatch-red)]"
               role="alert"
             >
               {error}
@@ -262,13 +261,10 @@ export function CompareBuilder({ apiBase, initialRepos = [] }: Props) {
         <div className="space-y-6">
           {vsHref && (
             <div>
-              <a
-                href={vsHref}
-                className="dither-control inline-flex min-h-11 items-center gap-2 rounded-md border px-3 py-2 font-mono text-base text-muted-foreground hover:text-accent-foreground sm:min-h-0 sm:py-1.5 sm:text-sm"
-              >
+              <ButtonLink href={vsHref} variant="outline">
                 Open the {active[0]} vs {active[1]} head-to-head page
                 <ArrowRight className="size-4 shrink-0" strokeWidth={2} aria-hidden="true" />
-              </a>
+              </ButtonLink>
             </div>
           )}
 
@@ -326,44 +322,36 @@ function RepoTable({ apiBase, repos }: { apiBase: string; repos: string[] }) {
 
   return (
     <section className="space-y-4">
-      <h3 className="flex items-center gap-2 text-base font-medium">
-        <span className="size-1.5 shrink-0 rounded-full bg-(--dither-wave-2)" aria-hidden="true" />
-        Summary
-      </h3>
-      <div className="-mx-6 -my-2 overflow-x-auto">
-        <div className="inline-block min-w-full px-6 py-2 align-middle">
-          <table className="w-full text-left text-base sm:text-sm">
-            <thead>
-              <tr className="border-b border-border">
-                <th className="mono-label py-3 pr-4 whitespace-nowrap">
-                  Repo
-                </th>
-                <th className="mono-label py-3 pr-4 text-right whitespace-nowrap">
-                  Total stars
-                </th>
-                <th className="mono-label py-3 text-right whitespace-nowrap">
-                  First star
-                </th>
+      <h3 className={HEADING}>Summary</h3>
+      <div className={cn(PANEL, "overflow-x-auto")}>
+        <table className="w-full text-left text-[13px]">
+          <thead>
+            <tr className="border-b border-border/40">
+              <th className={cn(EYEBROW, "px-3.5 py-3 font-medium whitespace-nowrap")}>
+                Repo
+              </th>
+              <th className={cn(EYEBROW, "px-3.5 py-3 text-right font-medium whitespace-nowrap")}>
+                Total stars
+              </th>
+              <th className={cn(EYEBROW, "px-3.5 py-3 text-right font-medium whitespace-nowrap")}>
+                First star
+              </th>
+            </tr>
+          </thead>
+          <tbody className="tabular-nums">
+            {data.map((row) => (
+              <tr key={row.slug} className="border-b border-border/40 last:border-0">
+                <td className="px-3.5 py-3 font-mono">{row.slug}</td>
+                <td className="px-3.5 py-3 text-right">
+                  {row.total === null ? "—" : row.total.toLocaleString()}
+                </td>
+                <td className="px-3.5 py-3 text-right text-muted-foreground">
+                  {row.year ?? "—"}
+                </td>
               </tr>
-            </thead>
-            <tbody className="tabular-nums">
-              {data.map((row) => (
-                <tr
-                  key={row.slug}
-                  className="border-b border-border"
-                >
-                  <td className="py-3 pr-4 font-mono">{row.slug}</td>
-                  <td className="py-3 pr-4 text-right">
-                    {row.total === null ? "—" : row.total.toLocaleString()}
-                  </td>
-                  <td className="py-3 text-right text-muted-foreground">
-                    {row.year ?? "—"}
-                  </td>
-                </tr>
-              ))}
-            </tbody>
-          </table>
-        </div>
+            ))}
+          </tbody>
+        </table>
       </div>
     </section>
   );

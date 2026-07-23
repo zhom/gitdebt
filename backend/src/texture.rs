@@ -84,20 +84,37 @@ pub fn tier_defs(color: &str, cell: f32) -> String {
     out
 }
 
+/// The default id namespace for density-tier patterns.
+const TIER_NS: &str = "gd";
+
 /// One density-tier `<pattern>` def (`gd-t{tier}`) for surfaces that only
 /// need a couple of tiers (badges, small cards) and want to keep bytes down.
 pub fn tier_pattern(color: &str, cell: f32, tier: usize) -> String {
+    tier_pattern_ns(TIER_NS, color, cell, tier)
+}
+
+/// Namespaced density-tier `<pattern>` def (`{ns}-t{tier}`).
+///
+/// A chart with one ink per series needs several tier ladders in the same
+/// document; the id namespace keeps them from colliding. `ns` must be an
+/// XML-name-safe literal chosen by the caller (never user input).
+pub fn tier_pattern_ns(ns: &str, color: &str, cell: f32, tier: usize) -> String {
     let tier = tier.min(TIER_COUNT - 1);
     let tile = (cell * 4.0).max(1.0);
     let cells = pattern_cells(color, tier as u8 + 1);
     format!(
-        "<pattern id=\"gd-t{tier}\" width=\"{tile:.0}\" height=\"{tile:.0}\" patternUnits=\"userSpaceOnUse\"><g shape-rendering=\"crispEdges\" transform=\"scale({cell:.1})\">{cells}</g></pattern>",
+        "<pattern id=\"{ns}-t{tier}\" width=\"{tile:.0}\" height=\"{tile:.0}\" patternUnits=\"userSpaceOnUse\"><g shape-rendering=\"crispEdges\" transform=\"scale({cell:.1})\">{cells}</g></pattern>",
     )
 }
 
 /// Fill reference for a density tier, clamped to the valid range.
 pub fn tier_fill(tier: usize) -> String {
-    format!("url(#gd-t{})", tier.min(TIER_COUNT - 1))
+    tier_fill_ns(TIER_NS, tier)
+}
+
+/// Fill reference for a namespaced density tier, clamped to the valid range.
+pub fn tier_fill_ns(ns: &str, tier: usize) -> String {
+    format!("url(#{ns}-t{})", tier.min(TIER_COUNT - 1))
 }
 
 /// A subtle background field makes every rendered chart share the same pixel
@@ -249,5 +266,22 @@ mod tests {
         assert!(!defs.contains("var(--"));
         assert_eq!(tier_fill(7), "url(#gd-t7)");
         assert_eq!(tier_fill(99), "url(#gd-t15)");
+    }
+
+    #[test]
+    fn namespaced_tiers_let_one_document_carry_several_inks() {
+        let a = tier_pattern_ns("gd-lang0", "#dea584", 2.0, 11);
+        let b = tier_pattern_ns("gd-lang1", "#3178c6", 2.0, 11);
+        assert!(a.contains("id=\"gd-lang0-t11\""));
+        assert!(b.contains("id=\"gd-lang1-t11\""));
+        assert!(a.contains("#dea584") && !a.contains("#3178c6"));
+        assert_eq!(tier_fill_ns("gd-lang0", 11), "url(#gd-lang0-t11)");
+        assert_eq!(tier_fill_ns("gd-heat", 99), "url(#gd-heat-t15)");
+        // Same cell geometry as the default namespace — only the ids differ.
+        assert_eq!(
+            tier_pattern_ns("gd", "#dea584", 2.0, 11),
+            tier_pattern("#dea584", 2.0, 11)
+        );
+        assert_eq!(a, tier_pattern_ns("gd-lang0", "#dea584", 2.0, 11));
     }
 }

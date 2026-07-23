@@ -28,18 +28,18 @@ const legalLinks = [
 ];
 ---
 
-<footer class="relative overflow-hidden border-t border-border bg-background">
+<footer class="relative isolate overflow-hidden border-t border-border/60">
   <div class="mx-auto max-w-6xl px-4 pt-12 sm:px-6 sm:pt-14">
     <div class="grid gap-10 lg:grid-cols-[minmax(0,1fr)_auto] lg:gap-16">
       <div class="max-w-sm space-y-3">
         <a
           href="/"
           aria-label="gitdebt homepage"
-          class="inline-flex min-h-12 items-center rounded-md focus-visible:outline-2 focus-visible:outline-offset-4 focus-visible:outline-ring"
+          class="inline-flex min-h-10 items-center rounded-md outline-none focus-visible:ring-2 focus-visible:ring-accent/30 focus-visible:ring-offset-4 focus-visible:ring-offset-background"
         >
           <Brand markClass="size-7" />
         </a>
-        <p class="text-base text-pretty text-muted-foreground sm:text-sm">
+        <p class="text-[13px] leading-relaxed text-muted-foreground [text-wrap:pretty]">
           GitHub star history and repo-debt analytics. Chart any repo's star
           growth, overlay several at once, and embed it in your README.
         </p>
@@ -47,12 +47,14 @@ const legalLinks = [
 
       <div class="grid grid-cols-2 gap-x-6 gap-y-10 sm:grid-cols-3 sm:gap-x-12">
         <nav class="flex min-w-0 flex-col">
-          <p class="mono-label mb-2">Explore</p>
+          <p class="mb-2 font-mono text-[10px] tracking-[0.25em] text-muted-foreground/70 uppercase">
+            Explore
+          </p>
           {
             footerLinks.map((link) => (
               <a
                 href={link.href}
-                class="flex min-h-12 items-center rounded-sm text-base font-normal text-muted-foreground transition-colors duration-150 hover:text-foreground focus-visible:outline-2 focus-visible:outline-offset-2 focus-visible:outline-ring sm:min-h-9 sm:text-sm"
+                class="-mx-2.5 flex min-h-10 items-center rounded-md px-2.5 text-[13px] text-muted-foreground outline-none transition-colors duration-150 hover:bg-card/60 hover:text-foreground focus-visible:ring-2 focus-visible:ring-accent/30"
               >
                 {link.label}
               </a>
@@ -61,12 +63,14 @@ const legalLinks = [
         </nav>
 
         <nav class="flex min-w-0 flex-col">
-          <p class="mono-label mb-2">Categories</p>
+          <p class="mb-2 font-mono text-[10px] tracking-[0.25em] text-muted-foreground/70 uppercase">
+            Categories
+          </p>
           {
             categoryLinks.map((link) => (
               <a
                 href={link.href}
-                class="flex min-h-12 items-center rounded-sm text-base font-normal text-muted-foreground transition-colors duration-150 hover:text-foreground focus-visible:outline-2 focus-visible:outline-offset-2 focus-visible:outline-ring sm:min-h-9 sm:text-sm"
+                class="-mx-2.5 flex min-h-10 items-center rounded-md px-2.5 text-[13px] text-muted-foreground outline-none transition-colors duration-150 hover:bg-card/60 hover:text-foreground focus-visible:ring-2 focus-visible:ring-accent/30"
               >
                 {link.label}
               </a>
@@ -75,12 +79,14 @@ const legalLinks = [
         </nav>
 
         <nav class="col-span-2 flex min-w-0 flex-col sm:col-span-1">
-          <p class="mono-label mb-2">Legal</p>
+          <p class="mb-2 font-mono text-[10px] tracking-[0.25em] text-muted-foreground/70 uppercase">
+            Legal
+          </p>
           {
             legalLinks.map((link) => (
               <a
                 href={link.href}
-                class="flex min-h-12 items-center rounded-sm text-base font-normal text-muted-foreground transition-colors duration-150 hover:text-foreground focus-visible:outline-2 focus-visible:outline-offset-2 focus-visible:outline-ring sm:min-h-9 sm:text-sm"
+                class="-mx-2.5 flex min-h-10 items-center rounded-md px-2.5 text-[13px] text-muted-foreground outline-none transition-colors duration-150 hover:bg-card/60 hover:text-foreground focus-visible:ring-2 focus-visible:ring-accent/30"
               >
                 {link.label}
               </a>
@@ -91,7 +97,7 @@ const legalLinks = [
     </div>
 
     <div
-      class="mt-10 flex flex-col gap-2 border-t border-border pt-6 font-mono text-xs tracking-[0.08em] text-muted-foreground uppercase sm:flex-row sm:items-center sm:justify-between"
+      class="mt-10 flex flex-col gap-2 border-t border-border/60 pt-6 font-mono text-[10px] tracking-[0.25em] text-muted-foreground/70 uppercase sm:flex-row sm:items-center sm:justify-between"
     >
       <p>© <span class="tabular-nums">{year}</span> gitdebt</p>
       <p>Not affiliated with GitHub</p>
@@ -102,7 +108,7 @@ const legalLinks = [
       class="pointer-events-none mt-6 -mb-[0.28em] overflow-hidden select-none"
     >
       <p
-        class="font-mono text-[clamp(4rem,16vw,11rem)] leading-none font-semibold tracking-tight whitespace-nowrap text-foreground/5"
+        class="font-mono text-[clamp(4rem,16vw,11rem)] leading-none font-medium tracking-tight whitespace-nowrap text-foreground/5"
       >
         gitdebt
       </p>
@@ -110,42 +116,4 @@ const legalLinks = [
   </div>
 </footer>
 
-<style>
-  footer {
-    isolation: isolate;
-  }
 
-  footer::before {
-    position: absolute;
-    z-index: -1;
-    inset: 0;
-    pointer-events: none;
-    content: "";
-    color: var(--foreground);
-    opacity: 0.045;
-    background-image:
-      radial-gradient(currentColor 0.6px, transparent 0.8px),
-      radial-gradient(currentColor 0.5px, transparent 0.7px);
-    background-position:
-      0 0,
-      2px 2px;
-    background-size: 4px 4px;
-    mask-image: linear-gradient(180deg, transparent 30%, black);
-  }
-
-  footer::after {
-    position: absolute;
-    inset: 0 0 auto;
-    height: 1px;
-    pointer-events: none;
-    content: "";
-    opacity: 0.55;
-    background: linear-gradient(
-      90deg,
-      var(--dither-wave-1),
-      var(--dither-wave-2) 45%,
-      var(--dither-wave-3) 85%,
-      transparent
-    );
-  }
-</style>

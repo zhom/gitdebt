@@ -2,6 +2,7 @@ import { useRef, useState } from "react";
 import { AnimatePresence, motion, useReducedMotion } from "motion/react";
 import { ArrowRight } from "lucide-react";
 
+import { EYEBROW } from "@/components/style-tokens";
 import { Button } from "@/components/ui/button";
 import { DURATION, EASE_OUT, REDUCED_MOTION_DURATION } from "@/lib/motion";
 
@@ -41,12 +42,12 @@ export function RepoLookup() {
     <div className="mx-auto w-full max-w-xl">
       <form onSubmit={onSubmit} className="flex flex-col gap-3 sm:flex-row">
         <div
-          className="dither-control flex flex-1 items-center rounded-md border font-mono text-base focus-within:outline-2 focus-within:outline-offset-2 focus-within:outline-ring sm:text-sm"
+          className="flex min-h-10 flex-1 items-center rounded-md border border-border/60 bg-background/60 font-mono text-[13px] transition-[border-color] duration-150 hover:border-foreground/25 focus-within:border-accent/70"
           data-invalid={error ? "" : undefined}
         >
           <label
             htmlFor="repo-lookup"
-            className="pl-3.5 text-muted-foreground select-none"
+            className="pl-3 text-muted-foreground select-none"
           >
             github.com/
           </label>
@@ -62,7 +63,7 @@ export function RepoLookup() {
             spellCheck={false}
             aria-label="GitHub repository, as owner/repo"
             aria-invalid={error ? true : undefined}
-            className="w-full flex-1 bg-transparent py-2.5 pr-3.5 pl-1 text-foreground placeholder:text-muted-foreground/50 outline-none"
+            className="w-full flex-1 bg-transparent py-2 pr-3 pl-1 text-foreground placeholder:text-muted-foreground/50 outline-none"
           />
         </div>
         <Button type="submit" size="lg" className="w-full sm:w-auto">
@@ -85,7 +86,7 @@ export function RepoLookup() {
               duration: reduceMotion ? REDUCED_MOTION_DURATION : DURATION.enter,
               ease: EASE_OUT,
             }}
-            className="mt-2 text-base text-destructive sm:text-sm"
+            className="mt-2 text-[11px] text-[var(--swatch-red)]"
             role="alert"
           >
             {error}
@@ -93,14 +94,15 @@ export function RepoLookup() {
         )}
       </AnimatePresence>
 
-      <div className="mt-4 flex flex-wrap items-center gap-2 text-sm">
-        <span className="mono-label">Try</span>
+      <div className="mt-4 flex flex-wrap items-center gap-2">
+        <span className={EYEBROW}>Try</span>
         {EXAMPLES.map((example) => (
           <button
             key={example}
             type="button"
+            data-press="off"
             onClick={() => pick(example)}
-            className="dither-control min-h-11 rounded-md border px-2.5 py-2 font-mono text-foreground/80 hover:text-accent-foreground sm:min-h-0 sm:py-1"
+            className="dither-chip outline-none focus-visible:ring-2 focus-visible:ring-accent/30"
           >
             {example}
           </button>

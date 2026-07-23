@@ -1,10 +1,32 @@
 import { useEffect, useMemo, useState } from "react";
-import { motion, useReducedMotion } from "motion/react";
 
 import { DitherAreaChart, type DitherPoint } from "@/components/DitherAreaChart";
+import { DitherMeter } from "@/components/DitherMeter";
 import { EmbedSnippet } from "@/components/EmbedSnippet";
 import { StatCard } from "@/components/StatCard";
-import { SPRING } from "@/lib/motion";
+import { languageColor } from "@/components/language-colors";
+import {
+  CAPTION,
+  EYEBROW,
+  HEADING,
+  KPI,
+  PANEL,
+} from "@/components/style-tokens";
+import { BAYER4, INK, OFF_TIER } from "@/lib/dither";
+import { cn } from "@/lib/utils";
+
+/**
+ * A heatmap day is one dither cell: the same density-to-alpha rule the charts
+ * use, so the section speaks one visual language instead of three.
+ */
+function heatAlpha(value: number, max: number, index: number): number {
+  const density = max > 0 ? value / max : 0;
+  const lit = density > BAYER4[index & 3][(index >> 2) & 3];
+  const alpha = (0.3 + 0.7 * density) * (lit ? 1 : OFF_TIER);
+  return Math.round(alpha * 1000) / 1000;
+}
+
+const INK_RGB = `${INK[0]}, ${INK[1]}, ${INK[2]}`;
 
 type FileSignal = { path: string; commits: number; fix_commits: number };
 type Author = { label: string; login?: string; avatar_url?: string; commits: number };
@@ -63,11 +85,8 @@ function SignalHeader({
   label: string;
 }) {
   return (
-    <header className="flex min-h-14 items-center justify-between gap-3 border-b border-border px-5 py-3">
-      <h3 className="mono-label inline-flex items-center gap-2">
-        <span className="size-1.5 bg-foreground" aria-hidden="true" />
-        {label}
-      </h3>
+    <header className="flex items-center justify-between gap-3 border-b border-border/40 px-3.5 py-3">
+      <h3 className={EYEBROW}>{label}</h3>
       <EmbedSnippet
         apiBase={apiBase}
         chartPath={`/api/repos/${slug}/stats/${name}.svg`}
@@ -106,7 +125,6 @@ export function InteractiveRepoSignals(props: Props) {
   const { apiBase, slug, embedLink } = props;
   const [stats, setStats] = useState<Stats | null>(null);
   const [activeDay, setActiveDay] = useState<Day | null>(null);
-  const reducedMotion = useReducedMotion();
 
   useEffect(() => {
     let active = true;
@@ -160,13 +178,13 @@ export function InteractiveRepoSignals(props: Props) {
         <FileBars apiBase={apiBase} slug={slug} embedLink={embedLink} name="bug-magnets" label="Where fixes cluster" rows={filesByFix.map((file) => ({ label: file.path, value: file.fix_commits }))} />
         <FileBars apiBase={apiBase} slug={slug} embedLink={embedLink} name="top-files" label="Files carrying the churn" rows={filesByChurn.map((file) => ({ label: file.path, value: file.commits }))} />
 
-        <section className="signal-panel">
+        <section className={PANEL}>
           <SignalHeader apiBase={apiBase} slug={slug} embedLink={embedLink} name="bus-factor" label="Ownership concentration" />
-          <div className="grid min-h-44 gap-5 px-5 py-5 sm:grid-cols-[10rem_1fr] sm:items-center">
+          <div className="grid min-h-44 gap-5 p-3.5 sm:grid-cols-[10rem_1fr] sm:items-center">
             <div>
-              <p className="mono-label">Risk · factor {stats.bus_factor}</p>
-              <p className="mt-1 text-4xl font-semibold tracking-tight">{risk}</p>
-              <p className="mt-3 text-xs text-muted-foreground">{compact(stats.total_commits)} total repository commits</p>
+              <p className={EYEBROW}>Risk · factor {stats.bus_factor}</p>
+              <p className={cn(KPI, "mt-2 text-[28px]")}>{risk}</p>
+              <p className={cn(CAPTION, "mt-3")}>{compact(stats.total_commits)} total repository commits</p>
             </div>
             <div className="flex items-center overflow-visible pl-3">
               {majorAuthors.map((author, index) => <ContributorAvatar key={`${author.login}-${author.label}`} author={author} index={index} />)}
@@ -174,32 +192,31 @@ export function InteractiveRepoSignals(props: Props) {
           </div>
         </section>
 
-        <section className="signal-panel sm:col-span-2">
+        <section className={cn(PANEL, "sm:col-span-2")}>
           <SignalHeader apiBase={apiBase} slug={slug} embedLink={embedLink} name="commit-trend" label="Maintenance pulse" />
-          <div className="px-2 py-3 sm:px-4">
+          <div className="px-2 py-3 sm:px-3.5">
             <DitherAreaChart points={maintenance} height={360} valueLabel="commits / month" />
           </div>
         </section>
       </div>
 
-      <div>
-        <p className="mono-label">More repository signals</p>
-        <h3 className="mt-2 text-xl font-semibold tracking-tight">People, language, cadence, and debt markers</h3>
-      </div>
+      <h3 className={HEADING}>
+        People, language, cadence, and debt markers
+      </h3>
 
       <div className="grid gap-x-10 gap-y-14 sm:grid-cols-2">
-        <section className="signal-panel sm:col-span-2">
+        <section className={cn(PANEL, "sm:col-span-2")}>
           <SignalHeader apiBase={apiBase} slug={slug} embedLink={embedLink} name="contributors" label="Contributors" />
-          <div className="overflow-x-auto px-5 pt-10 pb-7">
+          <div className="overflow-x-auto px-3.5 pt-10 pb-7">
             <div className="flex min-w-max items-center pl-3 pr-8">
               {stats.authors.slice(0, 32).map((author, index) => <ContributorAvatar key={`${author.login}-${author.label}`} author={author} index={index} large />)}
             </div>
           </div>
         </section>
 
-        <section className="signal-panel">
+        <section className={PANEL}>
           <SignalHeader apiBase={apiBase} slug={slug} embedLink={embedLink} name="lines" label="Language activity" />
-          <div className="space-y-4 px-5 py-5">
+          <div className="space-y-4 p-3.5">
             {stats.languages.map((language) => {
               const lines = language.code + language.blank + language.comment;
               const total = lines > 0 ? lines : language.files;
@@ -210,22 +227,26 @@ export function InteractiveRepoSignals(props: Props) {
               const unit = lines > 0 ? "lines" : language.files === 1 ? "file" : "files";
               return (
                 <div key={language.language} title={`${language.files.toLocaleString()} files${lines > 0 ? ` · ${lines.toLocaleString()} lines` : ""}`}>
-                  <div className="flex items-center justify-between gap-4 font-mono text-xs"><span>{language.language}</span><span className="text-muted-foreground">{compact(total)} {unit}</span></div>
-                  <div className="mt-1.5 h-2 bg-muted"><motion.div initial={false} animate={{ scaleX: total / max }} transition={reducedMotion ? { duration: 0 } : SPRING.snappy} className="signal-dither-fill h-full origin-left bg-foreground" /></div>
+                  <div className="flex items-center justify-between gap-4 font-mono text-[12px]"><span>{language.language}</span><span className="text-muted-foreground tabular-nums">{compact(total)} {unit}</span></div>
+                  <DitherMeter
+                    className="mt-1.5"
+                    ratio={total / max}
+                    fill={languageColor(language.language)}
+                  />
                 </div>
               );
             })}
           </div>
         </section>
 
-        <section className="signal-panel">
+        <section className={PANEL}>
           <SignalHeader apiBase={apiBase} slug={slug} embedLink={embedLink} name="heatmap" label="Commit activity" />
-          <div className="px-5 py-5">
+          <div className="p-3.5">
             <p className="mb-4 min-h-5 font-mono text-[11px] text-muted-foreground" aria-live="polite">
               {activeDay ? `${activeDay.date} · ${activeDay.value.toLocaleString()} commit${activeDay.value === 1 ? "" : "s"} · open on GitHub` : "Hover for the exact day. Select a square to inspect its commits."}
             </p>
             <div className="grid grid-flow-col grid-rows-7 gap-1 overflow-x-auto overflow-y-visible py-2" aria-label="Last 52 weeks of commit activity">
-              {heatmap.map((day) => (
+              {heatmap.map((day, index) => (
                 <a
                   key={day.date}
                   href={`https://github.com/${slug}/commits?since=${day.date}T00%3A00%3A00Z&until=${day.date}T23%3A59%3A59Z`}
@@ -237,17 +258,19 @@ export function InteractiveRepoSignals(props: Props) {
                   onFocus={() => setActiveDay(day)}
                   onPointerLeave={() => setActiveDay(null)}
                   onBlur={() => setActiveDay(null)}
-                  className="size-2.5 bg-[var(--dither-wave-2)] transition-[transform,opacity] duration-200 ease-out hover:z-10 hover:-translate-y-1 hover:scale-150 focus-visible:z-10 focus-visible:-translate-y-1 focus-visible:scale-150 motion-reduce:transition-none"
-                  style={{ opacity: 0.12 + (day.value / heatMax) * 0.88 }}
+                  className="size-2.5 rounded-[1px] outline-none transition-transform duration-200 ease-out hover:z-10 hover:-translate-y-1 hover:scale-150 focus-visible:z-10 focus-visible:-translate-y-1 focus-visible:scale-150 focus-visible:ring-2 focus-visible:ring-accent/30 motion-reduce:transition-none"
+                  style={{
+                    backgroundColor: `rgba(${INK_RGB}, ${heatAlpha(day.value, heatMax, index)})`,
+                  }}
                 />
               ))}
             </div>
           </div>
         </section>
 
-        <section className="signal-panel sm:col-span-2">
+        <section className={cn(PANEL, "sm:col-span-2")}>
           <SignalHeader apiBase={apiBase} slug={slug} embedLink={embedLink} name="todo-trend" label="TODO/FIXME trend" />
-          <div className="px-2 py-3 sm:px-4">
+          <div className="px-2 py-3 sm:px-3.5">
             <DitherAreaChart points={stats.todo_days} height={280} valueLabel="debt markers" />
           </div>
         </section>
@@ -258,7 +281,7 @@ export function InteractiveRepoSignals(props: Props) {
 
 function ContributorAvatar({ author, index, large = false }: { author: Author; index: number; large?: boolean }) {
   const size = large ? "size-16" : "size-13";
-  const classes = `${index === 0 ? "ml-0" : large ? "-ml-4" : "-ml-3"} relative block shrink-0 rounded-full border-2 border-background bg-muted outline-none transition-[transform,filter] duration-300 ease-out hover:z-50 hover:-translate-y-2 hover:scale-110 hover:saturate-125 focus-visible:z-50 focus-visible:-translate-y-2 focus-visible:scale-110 focus-visible:outline-2 focus-visible:outline-offset-2 focus-visible:outline-ring motion-reduce:transition-none ${size}`;
+  const classes = `${index === 0 ? "ml-0" : large ? "-ml-4" : "-ml-3"} relative block shrink-0 rounded-full border-2 border-background bg-muted outline-none transition-[transform,filter] duration-300 ease-out hover:z-50 hover:-translate-y-2 hover:scale-110 hover:saturate-125 focus-visible:z-50 focus-visible:-translate-y-2 focus-visible:scale-110 focus-visible:ring-2 focus-visible:ring-accent/30 motion-reduce:transition-none ${size}`;
   const content = author.avatar_url
     ? <img src={author.avatar_url} alt="" loading="lazy" className="size-full rounded-full object-cover [image-rendering:auto]" />
     : <span className="grid size-full place-items-center rounded-full bg-muted font-mono font-semibold">{author.label.slice(0, 1).toUpperCase()}</span>;
@@ -269,15 +292,14 @@ function ContributorAvatar({ author, index, large = false }: { author: Author; i
 
 function FileBars({ apiBase, slug, embedLink, name, label, rows }: { apiBase: string; slug: string; embedLink: string; name: string; label: string; rows: { label: string; value: number }[] }) {
   const max = Math.max(1, ...rows.map((row) => row.value));
-  const reducedMotion = useReducedMotion();
   return (
-    <section className="signal-panel">
+    <section className={PANEL}>
       <SignalHeader apiBase={apiBase} slug={slug} embedLink={embedLink} name={name} label={label} />
-      <div className="space-y-3 px-5 py-5">
+      <div className="space-y-3 p-3.5">
         {rows.map((row) => (
           <div key={row.label} title={`${row.label}: ${row.value}`}>
-            <div className="flex items-center justify-between gap-3 font-mono text-[11px]"><span className="min-w-0 truncate text-muted-foreground">{row.label}</span><span>{row.value}</span></div>
-            <div className="mt-1 h-2 bg-muted"><motion.div initial={false} animate={{ scaleX: row.value / max }} transition={reducedMotion ? { duration: 0 } : SPRING.snappy} className="signal-dither-fill h-full origin-left bg-foreground" /></div>
+            <div className="flex items-center justify-between gap-3 font-mono text-[11px]"><span className="min-w-0 truncate text-muted-foreground">{row.label}</span><span className="tabular-nums">{row.value}</span></div>
+            <DitherMeter className="mt-1" ratio={row.value / max} />
           </div>
         ))}
       </div>

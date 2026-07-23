@@ -3,8 +3,19 @@ import { ArrowUpRight, Eye, GitBranch, Star } from "lucide-react";
 import { AnimatePresence, motion, useReducedMotion } from "motion/react";
 
 import { formatCountdown, useLiveCountdown } from "@/lib/live-eta";
-import { DURATION, EASE_OUT, REDUCED_MOTION_DURATION, SPRING } from "@/lib/motion";
+import { DURATION, EASE_OUT, REDUCED_MOTION_DURATION } from "@/lib/motion";
 import { DitherAreaChart } from "@/components/DitherAreaChart";
+import { DitherMeter } from "@/components/DitherMeter";
+import { DitherRail } from "@/components/DitherRail";
+import { StatStrip } from "@/components/StatStrip";
+import {
+  CAPTION,
+  EYEBROW,
+  HEADING,
+  PANEL,
+  ROW,
+} from "@/components/style-tokens";
+import { cn } from "@/lib/utils";
 
 type ActivityRepo = {
   repo: string;
@@ -158,7 +169,10 @@ export function PlatformPulse({ apiBase }: { apiBase: string }) {
 
   return (
     <div
-      className="grid border-y border-foreground lg:grid-cols-[0.82fr_1.18fr]"
+      className={cn(
+        PANEL,
+        "grid overflow-hidden lg:grid-cols-[0.82fr_1.18fr]",
+      )}
       onMouseEnter={() => setPaused(true)}
       onMouseLeave={() => setPaused(false)}
       onFocusCapture={() => setPaused(true)}
@@ -166,16 +180,10 @@ export function PlatformPulse({ apiBase }: { apiBase: string }) {
         if (!event.currentTarget.contains(event.relatedTarget)) setPaused(false);
       }}
     >
-      <div className="border-b border-border lg:border-r lg:border-b-0">
-        <div className="flex min-h-14 items-center justify-between border-b border-border px-5 py-3">
-          <span className="mono-label">Recently viewed</span>
-          <span className="inline-flex items-center gap-2 font-mono text-xs text-muted-foreground">
-            <span className="relative flex size-2" aria-hidden="true">
-              <span className="absolute inline-flex size-full motion-safe:animate-ping rounded-full bg-(--dither-wave-2) opacity-35" />
-              <span className="relative inline-flex size-2 rounded-full bg-(--dither-wave-2)" />
-            </span>
-            Live platform data
-          </span>
+      <div className="border-b border-border/40 lg:border-r lg:border-b-0">
+        <div className="flex items-center justify-between gap-3 border-b border-border/40 px-3.5 py-3">
+          <span className={EYEBROW}>Recently viewed</span>
+          <span className={CAPTION}>Live platform data</span>
         </div>
 
         {repos.length > 0 ? (
@@ -197,40 +205,37 @@ export function PlatformPulse({ apiBase }: { apiBase: string }) {
                     visible: { opacity: 1, y: 0 },
                   }}
                   transition={{ duration, ease: EASE_OUT }}
-                  className="relative border-b border-border last:border-b-0"
+                  className="relative px-2 first:pt-2 last:pb-2"
                 >
-                  {selectedRow && (
-                    <motion.span
-                      layoutId="platform-pulse-selection"
-                      className="absolute inset-y-0 left-0 w-0.5 bg-foreground"
-                      transition={reduceMotion ? { duration: 0 } : SPRING.snappy}
-                      aria-hidden="true"
-                    />
-                  )}
                   <a
                     href={`/${entry.repo}`}
                     onMouseEnter={() => setSelectedRepo(entry.repo)}
                     onFocus={() => setSelectedRepo(entry.repo)}
-                    className={`group flex min-h-[4.5rem] items-center justify-between gap-4 px-5 py-3 outline-none focus-visible:outline-2 focus-visible:-outline-offset-2 focus-visible:outline-ring ${selectedRow ? "bg-muted" : "hover:bg-muted/60"}`}
+                    className={cn(
+                      ROW,
+                      "h-auto justify-between py-2.5 pl-3.5",
+                      selectedRow && "bg-card text-foreground",
+                    )}
                   >
-                    <div className="min-w-0">
-                      <p className="truncate font-mono text-sm font-medium text-foreground">{entry.repo}</p>
-                      <p className="mt-1 font-mono text-xs text-muted-foreground">{relativeTime(entry.viewed_at)}</p>
-                    </div>
-                    <div className="flex shrink-0 items-center gap-4 font-mono text-xs text-muted-foreground">
-                      <span className="inline-flex items-center gap-1.5">
+                    {selectedRow && <DitherRail />}
+                    <span className="min-w-0">
+                      <span className="block truncate text-[13px] text-foreground">{entry.repo}</span>
+                      <span className="mt-0.5 block text-[11px] text-muted-foreground">{relativeTime(entry.viewed_at)}</span>
+                    </span>
+                    <span className="flex shrink-0 items-center gap-3 text-[11px] text-muted-foreground">
+                      <span className="inline-flex items-center gap-1.5 tabular-nums">
                         <Star className="size-3.5" strokeWidth={1.75} aria-hidden="true" />
                         {compact(entry.stars)}
                       </span>
-                      <ArrowUpRight className="size-4 text-muted-foreground transition-transform duration-150 group-hover:-translate-y-0.5 group-hover:translate-x-0.5 motion-reduce:transition-none" aria-hidden="true" />
-                    </div>
+                      <ArrowUpRight className="size-4 transition-transform duration-150 group-hover:-translate-y-0.5 group-hover:translate-x-0.5 motion-reduce:transition-none" aria-hidden="true" />
+                    </span>
                   </a>
                 </motion.li>
               );
             })}
           </motion.ol>
         ) : (
-          <div className="flex min-h-72 items-center px-5 py-8 text-sm text-muted-foreground" aria-live="polite">
+          <div className="flex min-h-72 items-center px-3.5 py-8 text-[13px] text-muted-foreground" aria-live="polite">
             {failed
               ? "Live activity is temporarily unavailable."
               : loaded
@@ -240,7 +245,7 @@ export function PlatformPulse({ apiBase }: { apiBase: string }) {
         )}
       </div>
 
-      <div className="min-h-[26rem] bg-muted/45 p-5 sm:p-7">
+      <div className="min-h-[26rem] p-3.5 sm:p-5">
         <AnimatePresence mode="wait" initial={false}>
           {selected && (
             <motion.a
@@ -254,40 +259,59 @@ export function PlatformPulse({ apiBase }: { apiBase: string }) {
               className="flex h-full flex-col"
             >
               <div className="flex flex-wrap items-start justify-between gap-4">
-                <div>
-                  <p className="mono-label">Current signal</p>
-                  <h3 className="mt-2 text-xl font-semibold tracking-tight">{selected.repo}</h3>
-                </div>
-                <div className="flex flex-wrap gap-2 font-mono text-[11px] uppercase">
-                  <span className={`border px-2 py-1 ${historyReady ? "border-(--dither-wave-2)/35 bg-(--dither-wave-2)/10 text-(--dither-wave-2)" : "border-border bg-background text-muted-foreground"}`}>
+                <h3 className={HEADING}>{selected.repo}</h3>
+                <div className="flex flex-wrap gap-1.5">
+                  <span
+                    className={cn(
+                      "dither-chip",
+                      historyReady && "border-foreground/30 text-foreground",
+                    )}
+                  >
                     history {historyStatus}
                   </span>
-                  <span className={`border px-2 py-1 ${selected.analysis_ready ? "border-(--dither-wave-2)/35 bg-(--dither-wave-2)/10 text-(--dither-wave-2)" : "border-border bg-background text-muted-foreground"}`}>
+                  <span
+                    className={cn(
+                      "dither-chip",
+                      selected.analysis_ready &&
+                        "border-foreground/30 text-foreground",
+                    )}
+                  >
                     health {selected.analysis_ready ? "ready" : "analyzing"}
                   </span>
                 </div>
               </div>
 
-              <div className="mt-6 grid grid-cols-3 border-y border-border py-4">
-                <div>
-                  <p className="mono-label flex items-center gap-2">
-                    <Star className="size-3.5" aria-hidden="true" /> current stars
-                  </p>
-                  <p className="mt-2 text-2xl font-semibold tabular-nums">{compact(selected.stars)}</p>
-                </div>
-                <div className="border-l border-border pl-5">
-                  <p className="mono-label flex items-center gap-2">
-                    <Eye className="size-3.5" aria-hidden="true" /> platform views
-                  </p>
-                  <p className="mt-2 text-2xl font-semibold tabular-nums">{compact(selected.views)}</p>
-                </div>
-                <div className="border-l border-border pl-5">
-                  <p className="mono-label">30d gain</p>
-                  <p className="mt-2 text-2xl font-semibold tabular-nums">+{compact(selected.gained_30d)}</p>
-                </div>
-              </div>
+              <StatStrip
+                className="mt-5"
+                columns={3}
+                items={[
+                  {
+                    label: (
+                      <span className="inline-flex items-center gap-1.5">
+                        <Star className="size-3" aria-hidden="true" /> current stars
+                      </span>
+                    ),
+                    key: "stars",
+                    value: compact(selected.stars),
+                  },
+                  {
+                    label: (
+                      <span className="inline-flex items-center gap-1.5">
+                        <Eye className="size-3" aria-hidden="true" /> platform views
+                      </span>
+                    ),
+                    key: "views",
+                    value: compact(selected.views),
+                  },
+                  {
+                    label: "30d gain",
+                    key: "gain",
+                    value: `+${compact(selected.gained_30d)}`,
+                  },
+                ]}
+              />
 
-              <div className="mt-6 flex flex-1 items-center justify-center overflow-hidden border-y border-border bg-card">
+              <div className={cn(PANEL, "mt-5 flex flex-1 items-center justify-center overflow-hidden")}>
                 {history.length > 1 ? (
                   <DitherAreaChart
                     points={chartPoints}
@@ -297,25 +321,23 @@ export function PlatformPulse({ apiBase }: { apiBase: string }) {
                 ) : (
                   <div className="max-w-sm px-8 py-12 text-center">
                     <GitBranch className="mx-auto size-6 text-muted-foreground" strokeWidth={1.5} aria-hidden="true" />
-                    <p className="mt-4 text-sm font-medium">
+                    <p className="mt-4 text-[13px]">
                       {remaining !== undefined
                         ? `Star history in about ${formatCountdown(remaining)}`
                         : "Measuring star-history wait"}
                     </p>
-                    <p className="mt-1 text-sm text-muted-foreground">
+                    <p className={cn(CAPTION, "mt-1")}>
                       {starProgress?.percent !== undefined
                         ? `${starProgress.percent}% complete · updates live`
                         : "The estimate appears as soon as processing starts."}
                     </p>
                     {starProgress?.percent !== undefined && (
-                      <div className="mx-auto mt-5 h-1.5 max-w-56 overflow-hidden rounded-full bg-muted">
-                        <motion.div
-                          initial={false}
-                          animate={{ scaleX: Math.max(0.015, starProgress.percent / 100) }}
-                          transition={reduceMotion ? { duration: 0.12 } : SPRING.snappy}
-                          className="signal-dither-fill h-full origin-left rounded-full"
-                        />
-                      </div>
+                      <DitherMeter
+                        className="mx-auto mt-5 h-1.5 max-w-56"
+                        ratio={Math.max(0.015, starProgress.percent / 100)}
+                        percent={starProgress.percent}
+                        label="Star history progress"
+                      />
                     )}
                   </div>
                 )}

@@ -1,6 +1,9 @@
 import { useEffect, useState } from "react";
 import { Star } from "lucide-react";
 
+import { ROW } from "@/components/style-tokens";
+import { cn } from "@/lib/utils";
+
 type Repo = {
   repo: string;
   stars: number;
@@ -33,24 +36,28 @@ export function GrowthTicker({ apiBase }: { apiBase: string }) {
     };
   }, [apiBase]);
 
-  if (repos.length === 0) return <div className="h-[4.5rem] border-t border-border" aria-hidden="true" />;
+  if (repos.length === 0)
+    return <div className="h-16 border-t border-border/60" aria-hidden="true" />;
   const repeated = [...repos, ...repos];
 
   return (
-    <div className="group evidence-band overflow-hidden border-t border-foreground bg-background" aria-label="Repository growth ticker">
-      <div className="growth-ticker-track flex w-max">
+    <div
+      className="group relative isolate overflow-hidden border-t border-border/60"
+      aria-label="Repository growth ticker"
+    >
+      <div className="growth-ticker-track flex w-max py-2">
         {repeated.map((repo, index) => (
           <a
             key={`${repo.repo}-${index}`}
             href={`/${repo.repo}`}
-            className="flex min-h-[4.5rem] shrink-0 items-center gap-4 border-r border-border px-7 font-mono text-xs outline-none transition-colors hover:bg-muted focus-visible:bg-muted focus-visible:outline-2 focus-visible:-outline-offset-2 focus-visible:outline-ring motion-reduce:transition-none"
+            className={cn(ROW, "mx-1 shrink-0 gap-4 px-3.5")}
           >
-            <span className="font-semibold text-foreground">{repo.repo}</span>
-            <span className="inline-flex items-center gap-1 text-muted-foreground">
+            <span className="text-foreground">{repo.repo}</span>
+            <span className="inline-flex items-center gap-1 tabular-nums">
               {compact(repo.stars)} <Star className="size-3" aria-hidden="true" />
             </span>
-            <span className="text-foreground">+{compact(repo.gained_7d)} / 7d</span>
-            <span className="text-muted-foreground">+{compact(repo.gained_30d)} / 30d</span>
+            <span className="text-foreground tabular-nums">+{compact(repo.gained_7d)} / 7d</span>
+            <span className="tabular-nums">+{compact(repo.gained_30d)} / 30d</span>
           </a>
         ))}
       </div>

@@ -71,7 +71,8 @@
   --secondary-foreground: oklch(0.91 0.003 265);
   --muted: oklch(0.205 0.006 265);
   --muted-foreground: oklch(0.7 0.005 265);
-  --accent: oklch(0.24 0.006 265);
+  /* The accent is a hue, and it is spent only on focus and selection. */
+  --accent: oklch(0.66 0.15 255);
   --accent-foreground: oklch(0.95 0.003 265);
 
   --destructive: oklch(0.77 0.13 24);
@@ -90,9 +91,26 @@
   --input: oklch(1 0 0 / 0.2);
   --ring: oklch(0.94 0.003 265);
   --grid: oklch(1 0 0 / 0.06);
-  --dither-wave-1: #9b7bff;
-  --dither-wave-2: #46b3ff;
-  --dither-wave-3: #ef72ff;
+
+  /* Categorical swatches. Assigned per series key, never cycled by index.
+     Grey is documented as "no data". */
+  --swatch-green: rgb(40, 210, 110);
+  --swatch-blue: rgb(53, 143, 243);
+  --swatch-purple: rgb(150, 110, 255);
+  --swatch-pink: rgb(240, 90, 190);
+  --swatch-orange: rgb(255, 150, 50);
+  --swatch-red: rgb(240, 70, 70);
+  --swatch-grey: rgb(92, 92, 100);
+
+  /* Foreground as a raw RGB triplet, for canvas fills. */
+  --ink: 237 237 237;
+
+  /* Deprecated: the accidental purple/blue/pink brand. Neutralised here so
+     nothing reads as branded, and kept only until the last `var(--dither-wave-*)`
+     reference is migrated to a swatch. */
+  --dither-wave-1: rgb(150, 152, 160);
+  --dither-wave-2: rgb(120, 124, 134);
+  --dither-wave-3: rgb(96, 100, 110);
 
   --shadow-card: none;
 }
@@ -117,45 +135,12 @@
     text-rendering: optimizeLegibility;
     -webkit-tap-highlight-color: transparent;
   }
-  body::before {
-    position: fixed;
-    z-index: -1;
-    inset: 0 auto 0 0;
-    width: min(24rem, 28vw);
-    pointer-events: none;
-    content: "";
-    opacity: 0.16;
-    background-image:
-      radial-gradient(color-mix(in oklab, var(--dither-wave-1) 16%, transparent) 0.65px, transparent 0.85px),
-      radial-gradient(color-mix(in oklab, var(--dither-wave-2) 11%, transparent) 0.55px, transparent 0.8px);
-    background-position: 0 0, 3px 3px;
-    background-size: 7px 7px;
-    mask-image:
-      radial-gradient(ellipse 85% 16% at 0% 18%, black, transparent 72%),
-      radial-gradient(ellipse 95% 18% at 0% 54%, black, transparent 74%),
-      radial-gradient(ellipse 80% 15% at 0% 84%, black, transparent 72%);
-  }
-  body::after {
-    position: fixed;
-    z-index: -1;
-    inset: 0 0 0 auto;
-    width: min(22rem, 25vw);
-    pointer-events: none;
-    content: "";
-    opacity: 0.13;
-    background-image:
-      radial-gradient(color-mix(in oklab, var(--dither-wave-3) 18%, transparent) 0.65px, transparent 0.85px),
-      radial-gradient(color-mix(in oklab, var(--dither-wave-2) 12%, transparent) 0.55px, transparent 0.8px);
-    background-position: 0 0, 3px 3px;
-    background-size: 7px 7px;
-    mask-image:
-      radial-gradient(ellipse 90% 18% at 100% 30%, black, transparent 72%),
-      radial-gradient(ellipse 82% 16% at 100% 70%, black, transparent 74%);
-  }
   :focus-visible {
     outline: 2px solid var(--ring);
     outline-offset: 3px;
   }
+  /* Fallback press feedback for hand-rolled buttons. Components that own their
+     press animation opt out with `data-press="off"`. */
   button:not(:disabled):not([data-press="off"]) {
     transition: transform 120ms var(--motion-ease-out);
   }
@@ -234,12 +219,103 @@ details[open][data-state="open"] .mobile-nav-panel {
   }
 }
 
-@utility bg-grid {
-  background: none;
+/* ---------------------------------------------------------------------------
+   Dither support classes.
+
+   Real ordered dithering is a low-resolution canvas upscaled with
+   `image-rendering: pixelated`, where per-cell alpha comes from a threshold
+   test (see `src/lib/dither.ts`). CSS cannot express a varying-density
+   threshold field: a fixed-density radial-gradient screen reads as noise, not
+   as dither. Everything below is therefore a no-JS fallback, a flat treatment,
+   or plain chrome. No dot screens.
+   --------------------------------------------------------------------------- */
+
+/* Honest stand-in for a canvas that has not hydrated: a 4px checkerboard tint
+   in the current text color. Islands drop the class on mount. */
+@utility dither-fallback {
+  background-image: linear-gradient(
+    135deg,
+    color-mix(in oklab, currentColor 10%, transparent) 25%,
+    transparent 25% 50%,
+    color-mix(in oklab, currentColor 10%, transparent) 50% 75%,
+    transparent 75%
+  );
+  background-size: 4px 4px;
 }
 
-@utility signal-glow {
-  background: none;
+/* Interactive surfaces that cannot ship an island: flat, never textured. */
+@utility control-flat {
+  border-color: color-mix(in oklab, var(--border) 60%, transparent);
+  background-color: color-mix(in oklab, var(--background) 40%, transparent);
+  transition:
+    border-color 150ms var(--motion-ease-out),
+    background-color 150ms var(--motion-ease-out),
+    color 150ms var(--motion-ease-out);
+
+  &:hover,
+  &[aria-expanded="true"],
+  &[aria-pressed="true"] {
+    border-color: color-mix(in oklab, var(--foreground) 25%, transparent);
+    background-color: color-mix(in oklab, var(--card) 60%, transparent);
+  }
+}
+
+/* Sticky chrome carries no border: the hairline is a gradient that dies at
+   both ends. Host needs `position: relative`. */
+.chrome {
+  background: color-mix(in oklab, var(--background) 82%, transparent);
+  backdrop-filter: blur(14px) saturate(1.5);
+}
+
+.chrome::after {
+  position: absolute;
+  inset-inline: 0;
+  top: 100%;
+  height: 1px;
+  content: "";
+  background: linear-gradient(
+    to right,
+    transparent,
+    color-mix(in oklab, var(--border) 80%, transparent) 20%,
+    color-mix(in oklab, var(--border) 80%, transparent) 80%,
+    transparent
+  );
+}
+
+@media (max-width: 40rem) {
+  .chrome {
+    background: color-mix(in oklab, var(--background) 93%, transparent);
+  }
+}
+
+@media (prefers-reduced-transparency: reduce) {
+  .chrome {
+    background: var(--background);
+    backdrop-filter: none;
+  }
+}
+
+/* One staggered rise, once, driven by an inline `--reveal-delay`. */
+.reveal {
+  animation: reveal 700ms cubic-bezier(0.2, 0, 0, 1) both;
+  animation-delay: var(--reveal-delay, 0ms);
+}
+
+@keyframes reveal {
+  from {
+    opacity: 0;
+    transform: translateY(10px);
+  }
+  to {
+    opacity: 1;
+    transform: none;
+  }
+}
+
+@media (prefers-reduced-motion: reduce) {
+  .reveal {
+    animation: none;
+  }
 }
 
 @utility card-panel {
@@ -254,141 +330,122 @@ details[open][data-state="open"] .mobile-nav-panel {
   background: transparent;
 }
 
-.signal-panel::after {
-  position: absolute;
-  inset: 0 0 auto;
-  height: 9px;
-  pointer-events: none;
-  content: "";
-  opacity: 0.16;
-  background-image: radial-gradient(var(--dither-wave-1) 0.7px, transparent 0.85px);
-  background-size: 4px 4px;
-  mask-image: linear-gradient(90deg, black, transparent 78%);
-}
-
-.dither-control {
-  position: relative;
-  border-color: color-mix(in oklab, var(--border) 76%, var(--dither-wave-1));
-  background-color: color-mix(in oklab, var(--background) 94%, var(--dither-wave-1) 6%);
-  background-image: radial-gradient(
-    color-mix(in oklab, var(--dither-wave-1) 22%, transparent) 0.55px,
-    transparent 0.75px
-  );
-  background-size: 4px 4px;
-  box-shadow:
-    inset 0 -1px color-mix(in oklab, var(--foreground) 8%, transparent),
-    0 1px 0 color-mix(in oklab, var(--background) 80%, transparent);
-  transition:
-    border-color 180ms var(--motion-ease-out),
-    background-color 180ms var(--motion-ease-out),
-    color 180ms var(--motion-ease-out),
-    transform 120ms var(--motion-ease-out);
-}
-
-.dither-control:hover,
-.dither-control[aria-expanded="true"],
-.dither-control[aria-pressed="true"] {
-  border-color: color-mix(in oklab, var(--dither-wave-1) 68%, var(--border));
-  background-color: color-mix(in oklab, var(--background) 88%, var(--dither-wave-1) 12%);
-}
-
-.dither-menu {
-  border: 1px solid color-mix(in oklab, var(--border) 74%, var(--dither-wave-1));
-  background-color: color-mix(in oklab, var(--popover) 97%, var(--dither-wave-1) 3%);
-  background-image:
-    radial-gradient(color-mix(in oklab, var(--dither-wave-1) 16%, transparent) 0.55px, transparent 0.75px),
-    linear-gradient(135deg, transparent 68%, color-mix(in oklab, var(--dither-wave-2) 7%, transparent));
-  background-size: 5px 5px, 100% 100%;
-  box-shadow: 0 18px 50px oklch(0 0 0 / 0.5);
-}
-
 .evidence-band {
   position: relative;
   isolation: isolate;
   overflow: hidden;
 }
 
+/* ---------------------------------------------------------------------------
+   Deprecated aliases.
+
+   Every class in this block used to paint a fixed-density CSS dot screen. The
+   dots are gone; what remains is the flat treatment each call site should have
+   had. They exist only until the last call site moves to `<Button>`, the
+   control classes, or a canvas primitive, then they are deleted.
+   --------------------------------------------------------------------------- */
+
+/* -> `<Button variant="outline" | "ghost">`, or the shared CONTROL field. */
+.dither-control {
+  position: relative;
+  border-color: color-mix(in oklab, var(--border) 60%, transparent);
+  background-color: color-mix(in oklab, var(--background) 40%, transparent);
+  transition:
+    border-color 150ms var(--motion-ease-out),
+    background-color 150ms var(--motion-ease-out),
+    color 150ms var(--motion-ease-out);
+}
+
+.dither-control:hover,
+.dither-control[aria-expanded="true"],
+.dither-control[aria-pressed="true"] {
+  border-color: color-mix(in oklab, var(--foreground) 25%, transparent);
+  background-color: color-mix(in oklab, var(--card) 60%, transparent);
+}
+
+/* -> POPOVER in `ui/dither-surface.tsx`. */
+.dither-menu {
+  border: 1px solid color-mix(in oklab, var(--border) 80%, transparent);
+  border-radius: var(--radius);
+  background-color: var(--card);
+  box-shadow: 0 8px 24px rgb(0 0 0 / 0.32);
+}
+
+/* -> `<DitherField>` on the section itself. */
 .dither-depth {
   background: transparent;
 }
 
+/* -> `<DitherSurface variant="gradient" edge={0.5}>`. */
 .dither-badge-bed {
-  background-image:
-    radial-gradient(color-mix(in oklab, var(--dither-wave-1) 18%, transparent) 0.6px, transparent 0.8px),
-    linear-gradient(100deg, transparent, color-mix(in oklab, var(--dither-wave-2) 4%, transparent), transparent);
-  background-size: 5px 5px, 100% 100%;
+  background-color: color-mix(in oklab, var(--card) 45%, transparent);
 }
 
+/* -> a plain arrow glyph; movement, not glow. */
 .dither-arrow {
-  filter: drop-shadow(2px 1px 0 color-mix(in oklab, var(--dither-wave-1) 32%, transparent));
+  filter: none;
 }
 
+/* -> `<Button variant="primary">`. */
 .dither-primary {
   background-color: var(--primary);
   color: var(--primary-foreground);
-  background-image:
-    radial-gradient(color-mix(in oklab, var(--dither-wave-1) 42%, transparent) 0.65px, transparent 0.85px),
-    linear-gradient(110deg, transparent 25%, color-mix(in oklab, var(--dither-wave-2) 22%, transparent), transparent 72%);
-  background-size: 4px 4px, 180% 100%;
-  transition: background-position 320ms var(--motion-ease-out), transform 120ms var(--motion-ease-out);
+  transition:
+    opacity 150ms var(--motion-ease-out),
+    transform 120ms var(--motion-ease-out);
 }
 
-.dither-primary:hover {
-  background-position: 0 0, 100% 0;
-}
-
-/* Keeps the primary treatment stable when composed with .dither-control
-   (e.g. Button default variant): the control hover tint must not override
-   the primary surface. */
 .dither-primary:hover,
 .dither-primary[aria-expanded="true"],
 .dither-primary[aria-pressed="true"] {
   border-color: transparent;
-  background-color: color-mix(in oklab, var(--primary) 92%, var(--dither-wave-1));
+  opacity: 0.92;
 }
 
+/* -> `rounded-lg border border-border/60 bg-background/40 p-3.5`. */
 .dither-panel {
   position: relative;
   isolation: isolate;
-  border: 1px solid var(--border);
-  background-color: var(--card);
+  border: 1px solid color-mix(in oklab, var(--border) 60%, transparent);
+  border-radius: var(--radius);
+  background-color: color-mix(in oklab, var(--background) 40%, transparent);
 }
 
-.dither-panel::before {
-  position: absolute;
-  z-index: -1;
-  inset: 0;
-  pointer-events: none;
-  content: "";
-  color: var(--foreground);
-  opacity: 0.07;
-  background-image:
-    radial-gradient(currentColor 0.6px, transparent 0.8px),
-    radial-gradient(currentColor 0.5px, transparent 0.7px);
-  background-position: 0 0, 2px 2px;
-  background-size: 4px 4px;
-  mask-image: radial-gradient(120% 110% at 100% 0%, black, transparent 52%);
-}
-
+/* Kept by name, rebuilt without the dot screen. */
 .dither-chip {
   display: inline-flex;
   align-items: center;
   gap: 0.375rem;
-  border: 1px solid color-mix(in oklab, var(--border) 82%, var(--dither-wave-1));
-  border-radius: calc(var(--radius) - 2px);
-  padding: 0.1875rem 0.5rem;
-  background-color: color-mix(in oklab, var(--background) 94%, var(--dither-wave-1) 6%);
-  background-image: radial-gradient(
-    color-mix(in oklab, var(--dither-wave-1) 20%, transparent) 0.5px,
-    transparent 0.7px
-  );
-  background-size: 4px 4px;
+  border: 1px solid color-mix(in oklab, var(--border) 60%, transparent);
+  border-radius: calc(var(--radius) - 4px);
+  padding: 0.125rem 0.5rem;
+  background-color: transparent;
   color: var(--muted-foreground);
   font-family: var(--font-mono);
-  font-size: 0.6875rem;
+  font-size: 0.625rem;
   font-variant-numeric: tabular-nums;
   letter-spacing: 0.08em;
   text-transform: uppercase;
+}
+
+/* Interactive chips are never smaller than a finger. */
+a.dither-chip,
+button.dither-chip,
+label.dither-chip {
+  min-height: 2.25rem;
+  padding-inline: 0.625rem;
+  font-size: 0.6875rem;
+  text-transform: none;
+  transition:
+    background-color 150ms var(--motion-ease-out),
+    color 150ms var(--motion-ease-out);
+}
+
+a.dither-chip:hover,
+button.dither-chip:hover,
+label.dither-chip:hover {
+  background-color: color-mix(in oklab, var(--card) 60%, transparent);
+  color: var(--foreground);
 }
 
 .mono-label {
@@ -401,24 +458,10 @@ details[open][data-state="open"] .mobile-nav-panel {
   text-transform: uppercase;
 }
 
-.evidence-band::before {
-  position: absolute;
-  z-index: -1;
-  inset: 0;
-  content: "";
-  color: var(--foreground);
-  opacity: 0.13;
-  background-image: radial-gradient(currentColor 0.75px, transparent 0.85px);
-  background-size: 4px 4px;
-  mask-image: linear-gradient(90deg, transparent, black 22%, black 78%, transparent);
-}
-
+/* -> a 1-row canvas progress fill. */
 .signal-dither-fill {
-  background-color: var(--dither-wave-1);
-  background-image:
-    radial-gradient(var(--background) 0.7px, transparent 0.85px),
-    linear-gradient(90deg, var(--dither-wave-1), var(--dither-wave-2), var(--dither-wave-3));
-  background-size: 3px 3px, 100% 100%;
+  background-color: color-mix(in oklab, var(--foreground) 82%, transparent);
+  background-image: none;
 }
 
 @keyframes growth-ticker-scroll {

@@ -6,9 +6,12 @@ import {
   DURATION,
   EASE_OUT,
   REDUCED_MOTION_DURATION,
-  SPRING,
 } from "@/lib/motion";
 import { DitherAreaChart } from "@/components/DitherAreaChart";
+import { DitherMeter } from "@/components/DitherMeter";
+import { StatStrip } from "@/components/StatStrip";
+import { CAPTION, EYEBROW, PANEL } from "@/components/style-tokens";
+import { cn } from "@/lib/utils";
 
 type LiveRepo = {
   repo: string;
@@ -118,10 +121,10 @@ export function SignalFlowGraphic({ apiBase }: { apiBase: string }) {
     <a
       href={selected ? `/${selected.repo}` : undefined}
       aria-label={selected ? `Open the ${selected.repo} repository report` : "Live repository activity"}
-      className="block outline-none focus-visible:outline-2 focus-visible:outline-offset-2 focus-visible:outline-ring"
+      className="group block rounded-lg outline-none focus-visible:ring-2 focus-visible:ring-accent/30 focus-visible:ring-offset-2 focus-visible:ring-offset-background"
     >
     <figure
-      className="w-full min-w-0 overflow-hidden border-y border-foreground bg-card text-card-foreground"
+      className={cn(PANEL, "w-full min-w-0 overflow-hidden")}
       aria-labelledby="live-repo-caption"
       onMouseEnter={() => setPaused(true)}
       onMouseLeave={() => setPaused(false)}
@@ -132,21 +135,15 @@ export function SignalFlowGraphic({ apiBase }: { apiBase: string }) {
     >
       <figcaption
         id="live-repo-caption"
-        className="flex min-h-14 items-center justify-between gap-4 border-b border-border px-4 sm:px-5"
+        className="flex items-center justify-between gap-4 border-b border-border/40 px-3.5 py-3"
       >
-        <p className="mono-label inline-flex items-center gap-2">
-          <span className="relative flex size-2" aria-hidden="true">
-            <span className="absolute inline-flex size-full motion-safe:animate-ping rounded-full bg-(--dither-wave-2) opacity-35" />
-            <span className="relative inline-flex size-2 rounded-full bg-(--dither-wave-2)" />
-          </span>
-          Live repository
-        </p>
-        <p className="font-mono text-xs text-muted-foreground">
+        <p className={EYEBROW}>Live repository</p>
+        <p className={CAPTION}>
           {selected ? viewedLabel(selected.viewed_at) : "connecting…"}
         </p>
       </figcaption>
 
-      <div className="min-h-[27rem] p-4 sm:p-5">
+      <div className="min-h-[27rem] p-3.5">
         <AnimatePresence mode="wait" initial={false}>
           {selected ? (
             <motion.div
@@ -157,12 +154,9 @@ export function SignalFlowGraphic({ apiBase }: { apiBase: string }) {
               transition={{ duration, ease: EASE_OUT }}
               className="group block"
             >
-              <div className="flex items-start justify-between gap-4 border-b border-foreground pb-4">
-                <div className="min-w-0">
-                  <p className="mono-label">Now inspecting</p>
-                  <p className="mt-1 truncate font-mono text-base font-medium">{selected.repo}</p>
-                </div>
-                <span className="group inline-flex min-h-11 shrink-0 items-center gap-1.5 text-sm text-muted-foreground group-hover:text-foreground sm:min-h-0">
+              <div className="flex items-baseline justify-between gap-4">
+                <p className="min-w-0 truncate font-mono text-[13px] text-foreground">{selected.repo}</p>
+                <span className="inline-flex shrink-0 items-center gap-1.5 text-[11px] text-muted-foreground group-hover:text-foreground">
                   Full report
                   <ArrowUpRight
                     className="size-3.5 transition-transform duration-150 group-hover:-translate-y-0.5 group-hover:translate-x-0.5 motion-reduce:transition-none"
@@ -171,50 +165,37 @@ export function SignalFlowGraphic({ apiBase }: { apiBase: string }) {
                 </span>
               </div>
 
-              <div className="grid grid-cols-3 border-b border-border">
-                <div className="py-5 pr-4">
-                  <p className="mono-label flex items-center gap-2">
-                    <Star className="size-3.5" aria-hidden="true" /> Current stars
-                  </p>
-                  <motion.p
-                    key={`stars-${selected.repo}`}
-                    initial={{ opacity: 0, y: reduceMotion ? 0 : 6 }}
-                    animate={{ opacity: 1, y: 0 }}
-                    transition={{ duration, ease: EASE_OUT }}
-                    className="mt-2 text-3xl font-semibold tracking-[-0.035em] tabular-nums"
-                  >
-                    {formatNumber(selected.stars)}
-                  </motion.p>
-                </div>
-                <div className="border-l border-border py-5 pl-4">
-                  <p className="mono-label flex items-center gap-2">
-                    <Eye className="size-3.5" aria-hidden="true" /> Report views
-                  </p>
-                  <motion.p
-                    key={`views-${selected.repo}`}
-                    initial={{ opacity: 0, y: reduceMotion ? 0 : 6 }}
-                    animate={{ opacity: 1, y: 0 }}
-                    transition={{ duration, delay: reduceMotion ? 0 : 0.04, ease: EASE_OUT }}
-                    className="mt-2 text-3xl font-semibold tracking-[-0.035em] tabular-nums"
-                  >
-                    {formatNumber(selected.views)}
-                  </motion.p>
-                </div>
-                <div className="border-l border-border py-5 pl-4">
-                  <p className="mono-label">30d gain</p>
-                  <motion.p
-                    key={`gain-${selected.repo}`}
-                    initial={{ opacity: 0, y: reduceMotion ? 0 : 6 }}
-                    animate={{ opacity: 1, y: 0 }}
-                    transition={{ duration, delay: reduceMotion ? 0 : 0.06, ease: EASE_OUT }}
-                    className="mt-2 text-3xl font-semibold tracking-[-0.035em] tabular-nums"
-                  >
-                    +{formatNumber(selected.gained_30d)}
-                  </motion.p>
-                </div>
-              </div>
+              <StatStrip
+                className="mt-3"
+                columns={3}
+                items={[
+                  {
+                    key: "stars",
+                    label: (
+                      <span className="inline-flex items-center gap-1.5">
+                        <Star className="size-3" aria-hidden="true" /> Current stars
+                      </span>
+                    ),
+                    value: formatNumber(selected.stars),
+                  },
+                  {
+                    key: "views",
+                    label: (
+                      <span className="inline-flex items-center gap-1.5">
+                        <Eye className="size-3" aria-hidden="true" /> Report views
+                      </span>
+                    ),
+                    value: formatNumber(selected.views),
+                  },
+                  {
+                    key: "gain",
+                    label: "30d gain",
+                    value: `+${formatNumber(selected.gained_30d)}`,
+                  },
+                ]}
+              />
 
-              <div className="mt-4 overflow-hidden border-y border-border bg-background">
+              <div className={cn(PANEL, "mt-3 overflow-hidden")}>
                 {history.length > 1 ? (
                   <DitherAreaChart
                     points={chartPoints}
@@ -223,11 +204,11 @@ export function SignalFlowGraphic({ apiBase }: { apiBase: string }) {
                   />
                 ) : (
                   <div className="flex min-h-44 flex-col justify-center px-6">
-                    <p className="inline-flex items-center gap-2 text-sm font-medium">
+                    <p className="inline-flex items-center gap-2 text-[13px]">
                       <Activity className="size-4" aria-hidden="true" />
                       Building star history
                     </p>
-                    <div className="mt-4 h-1.5 overflow-hidden rounded-full bg-muted">
+                    <div className="mt-4 h-1.5 overflow-hidden rounded-[2px]">
                       <motion.span
                         initial={{ x: "-65%" }}
                         animate={{ x: "260%" }}
@@ -236,32 +217,31 @@ export function SignalFlowGraphic({ apiBase }: { apiBase: string }) {
                             ? { duration: 0 }
                             : { duration: 1.4, repeat: Infinity, ease: EASE_OUT }
                         }
-                        className="signal-dither-fill block h-full w-1/3 rounded-full"
-                      />
+                        className="block h-full w-1/3"
+                      >
+                        <DitherMeter ratio={1} className="h-full" />
+                      </motion.span>
                     </div>
-                    <p className="mt-3 text-sm text-muted-foreground">A measured ETA replaces this as soon as work starts.</p>
+                    <p className={cn(CAPTION, "mt-3")}>A measured ETA replaces this as soon as work starts.</p>
                   </div>
                 )}
               </div>
 
-              <div className="mt-4 flex items-center gap-3">
+              <div className="mt-3 flex items-center gap-3">
                 <div className="flex flex-1 gap-1" aria-label={`${readySignals} of 2 report layers ready`}>
                   {[selected.history_ready, selected.analysis_ready].map((ready, signalIndex) => (
-                    <span key={signalIndex} className="h-1 flex-1 overflow-hidden rounded-full bg-muted">
-                      <motion.span
-                        initial={false}
-                        animate={{ scaleX: ready ? 1 : 0.08 }}
-                        transition={reduceMotion ? { duration: 0.12 } : SPRING.snappy}
-                        className="signal-dither-fill block h-full origin-left rounded-full"
-                      />
-                    </span>
+                    <DitherMeter
+                      key={signalIndex}
+                      ratio={ready ? 1 : 0.08}
+                      className="h-1 flex-1"
+                    />
                   ))}
                 </div>
-                <p className="font-mono text-xs text-muted-foreground">stars · health</p>
+                <p className={CAPTION}>stars · health</p>
               </div>
             </motion.div>
           ) : (
-            <div className="grid min-h-[27rem] place-items-center text-sm text-muted-foreground" aria-live="polite">
+            <div className="grid min-h-[27rem] place-items-center text-[13px] text-muted-foreground" aria-live="polite">
               Connecting to live repository activity…
             </div>
           )}

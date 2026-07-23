@@ -138,31 +138,17 @@ export function DitherAreaChart({
     const plotWidth = Math.max(1, right - left);
     const plotHeight = Math.max(1, bottom - top);
     let intensity = reducedMotion ? (hoverRef.current ? 1 : 0) : 0;
-    let phase = 0;
-    let previous = performance.now();
     let raf = 0;
 
-    const draw = (now = performance.now()) => {
-      const elapsed = Math.min(48, Math.max(0, now - previous));
-      previous = now;
+    const draw = () => {
       const target = hoverRef.current ? 1 : 0;
       intensity += (target - intensity) * (reducedMotion ? 1 : 0.17);
-      if (hoverRef.current && !reducedMotion) phase += elapsed * 0.0045;
       ctx.clearRect(0, 0, cols, rows);
       const styles = getComputedStyle(root);
-      const wave = ctx.createLinearGradient(left, top, right, bottom);
-      wave.addColorStop(
-        0,
-        styles.getPropertyValue("--dither-wave-1").trim() || styles.color,
-      );
-      wave.addColorStop(
-        0.52,
-        styles.getPropertyValue("--dither-wave-2").trim() || styles.color,
-      );
-      wave.addColorStop(
-        1,
-        styles.getPropertyValue("--dither-wave-3").trim() || styles.color,
-      );
+      // One series, one fill. Hover raises intensity; nothing ripples, so the
+      // same inputs always produce the same pixels.
+      const wave =
+        styles.getPropertyValue("--swatch-blue").trim() || styles.color;
       for (let x = left; x <= right; x += 1) {
         const fraction = (x - left) / plotWidth;
         const sample = sampleAt(parsed, fraction, axis);
@@ -176,10 +162,9 @@ export function DitherAreaChart({
         const depth = Math.max(1, bottom - lineY);
         for (let y = lineY; y <= bottom; y += 1) {
           const depthFraction = (y - lineY) / depth;
-          const ripple = Math.sin(x * 0.16 + y * 0.09 + phase) * 0.045 * intensity;
           const density = Math.min(
             0.985,
-            0.34 + depthFraction * 0.6 + intensity * 0.14 + ripple,
+            0.34 + depthFraction * 0.6 + intensity * 0.14,
           );
           const threshold = BAYER[y & 3][x & 3];
           if (density <= threshold) continue;
@@ -192,10 +177,7 @@ export function DitherAreaChart({
         ctx.fillRect(x, lineY, 1, 1);
       }
       ctx.globalAlpha = 1;
-      if (
-        Math.abs(intensity - target) > 0.002 ||
-        (hoverRef.current && !reducedMotion)
-      ) {
+      if (Math.abs(intensity - target) > 0.002) {
         raf = requestAnimationFrame(draw);
       }
     };

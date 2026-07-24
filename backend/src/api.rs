@@ -311,6 +311,10 @@ pub fn router(state: ApiState) -> Router {
             "/api/repos/{owner}/{repo}/progress.json",
             get(crate::progress::repo_progress_snapshot),
         )
+        .route(
+            "/api/users/{login}/progress",
+            get(crate::progress::profile_progress),
+        )
         .layer(axum::middleware::from_fn_with_state(
             analyze_limiter,
             admission,
@@ -334,6 +338,7 @@ pub fn router(state: ApiState) -> Router {
         .route("/api/users/{login}/chart.svg", get(user_chart))
         .route("/api/users/{login}/chart.png", get(user_chart_png))
         .route("/api/users/{login}/chart.webp", get(user_chart_webp))
+        .route("/api/users/{login}/chart.gif", get(user_chart_gif))
         .route("/api/repos/{owner}/{repo}/usage", get(usage_json))
         .route("/api/repos/{owner}/{repo}/usage.svg", get(usage_svg))
         .route("/api/repos/{owner}/{repo}/usage.png", get(usage_png))
@@ -352,6 +357,7 @@ pub fn router(state: ApiState) -> Router {
         .route("/api/users/{login}/card.svg", get(user_card_svg))
         .route("/api/users/{login}/card.png", get(user_card_png))
         .route("/api/users/{login}/card.webp", get(user_card_webp))
+        .route("/api/users/{login}/card.gif", get(user_card_gif))
         .route("/api/repos/{owner}/{repo}/card.svg", get(repo_card_svg))
         .route("/api/repos/{owner}/{repo}/card.png", get(repo_card_png))
         .route("/api/repos/{owner}/{repo}/card.webp", get(repo_card_webp))
@@ -1908,16 +1914,22 @@ impl UserStatKind {
     }
 }
 
-/// `{name}.{svg|png|webp}` — the profile mirror of the per-repo stat
-/// dispatcher. Rasters share the process-wide encode cap.
-fn parse_user_stat_filename(
-    s: &str,
-) -> Option<(UserStatKind, Option<crate::raster::RasterFormat>)> {
+#[derive(Clone, Copy)]
+enum UserStatFormat {
+    Svg,
+    Raster(crate::raster::RasterFormat),
+    Gif,
+}
+
+/// `{name}.{svg|gif|png|webp}` — the profile mirror of the per-repo stat
+/// dispatcher. Every raster format shares the process-wide encode cap.
+fn parse_user_stat_filename(s: &str) -> Option<(UserStatKind, UserStatFormat)> {
     let (name, ext) = s.rsplit_once('.')?;
     let format = match ext {
-        "svg" => None,
-        "png" => Some(crate::raster::RasterFormat::Png),
-        "webp" => Some(crate::raster::RasterFormat::Webp),
+        "svg" => UserStatFormat::Svg,
+        "gif" => UserStatFormat::Gif,
+        "png" => UserStatFormat::Raster(crate::raster::RasterFormat::Png),
+        "webp" => UserStatFormat::Raster(crate::raster::RasterFormat::Webp),
         _ => return None,
     };
     Some((UserStatKind::parse(name)?, format))
@@ -1996,7 +2008,7 @@ async fn user_stat_dispatcher(
     if !cards::is_valid_login(&login) {
         return Err(ApiError::bad_request("invalid login"));
     }
-    let Some((kind, raster)) = parse_user_stat_filename(&filename) else {
+    let Some((kind, format)) = parse_user_stat_filename(&filename) else {
         return Err(ApiError::bad_request("unknown chart or format"));
     };
     let login = login.to_ascii_lowercase();
@@ -2010,11 +2022,27 @@ async fn user_stat_dispatcher(
         if q.in_app() {
             svg = crate::brand::without_embed_footer(svg);
         }
-        return Ok(match raster {
-            None => user_stat_svg_response(&request_headers, svg, true, !q.in_app()),
-            Some(format) => {
+        return Ok(match format {
+            UserStatFormat::Svg => user_stat_svg_response(&request_headers, svg, true, !q.in_app()),
+            UserStatFormat::Raster(format) => {
                 let bytes = rasterize_limited(svg, format, RASTER_SCALE).await?;
                 card_raster_response(&request_headers, format, std::sync::Arc::new(bytes), true)
+            }
+            UserStatFormat::Gif => {
+                let encoded =
+                    with_raster_permit(move || crate::animated_gif::encode_dither_loop(&svg))
+                        .await?
+                        .map_err(ApiError::from)?;
+                gif_media_response(
+                    &request_headers,
+                    std::sync::Arc::new(encoded.bytes),
+                    true,
+                    &format!(
+                        "{login}-{}-{}.gif",
+                        kind.key(),
+                        if theme.dark { "dark" } else { "light" }
+                    ),
+                )?
             }
         });
     };
@@ -2037,13 +2065,41 @@ async fn user_stat_dispatcher(
         svg = crate::brand::without_embed_footer(svg);
     }
 
-    let Some(format) = raster else {
-        return Ok(user_stat_svg_response(
-            &request_headers,
-            svg,
-            false,
-            !q.in_app(),
-        ));
+    let format = match format {
+        UserStatFormat::Svg => {
+            return Ok(user_stat_svg_response(
+                &request_headers,
+                svg,
+                false,
+                !q.in_app(),
+            ));
+        }
+        UserStatFormat::Gif => {
+            let gif_key = format!(
+                "{key}|gif|svg:{}|{}",
+                svg_digest(&svg),
+                if q.in_app() { "app" } else { "embed" }
+            );
+            let (bytes, short_ttl) = single_flight_gif(&state.raster_cache, gif_key, async move {
+                let encoded =
+                    with_raster_permit(move || crate::animated_gif::encode_dither_loop(&svg))
+                        .await?
+                        .map_err(ApiError::from)?;
+                Ok(std::sync::Arc::new(encoded.bytes))
+            })
+            .await?;
+            return gif_media_response(
+                &request_headers,
+                bytes,
+                short_ttl,
+                &format!(
+                    "{login}-{}-{}.gif",
+                    kind.key(),
+                    if theme.dark { "dark" } else { "light" }
+                ),
+            );
+        }
+        UserStatFormat::Raster(format) => format,
     };
     let raster_key = format!(
         "{key}|{}|{}",
@@ -2097,6 +2153,27 @@ fn user_stat_svg_response(
         svg
     };
     conditional_media_response(request_headers, headers, body.into_bytes())
+}
+
+fn gif_media_response(
+    request_headers: &HeaderMap,
+    bytes: std::sync::Arc<Vec<u8>>,
+    short_ttl: bool,
+    filename: &str,
+) -> Result<axum::response::Response, ApiError> {
+    let mut headers = HeaderMap::new();
+    headers.insert(header::CONTENT_TYPE, HeaderValue::from_static("image/gif"));
+    headers.insert(header::CACHE_CONTROL, card_cache_control(short_ttl));
+    headers.insert(
+        header::CONTENT_DISPOSITION,
+        HeaderValue::from_str(&format!("inline; filename=\"{filename}\""))
+            .map_err(|_| ApiError::bad_request("invalid media filename"))?,
+    );
+    Ok(conditional_media_response(
+        request_headers,
+        headers,
+        (*bytes).clone(),
+    ))
 }
 
 /// Render-or-fetch the aggregate star chart for a login: the summed series
@@ -2239,6 +2316,88 @@ async fn user_chart_webp(
         bytes,
         short_ttl,
     ))
+}
+
+/// Real README motion for aggregate profile star history. This is the same
+/// bounded wave encoder and exact chart geometry as repository GIFs, fed by
+/// the Postgres-only summed series.
+async fn user_chart_gif(
+    State(state): State<ApiState>,
+    Path(login): Path<String>,
+    Query(q): Query<ChartQuery>,
+    request_headers: HeaderMap,
+) -> Result<impl IntoResponse, ApiError> {
+    if !aggregate::is_valid_login(&login) {
+        return Err(ApiError::bad_request("invalid login"));
+    }
+    q.gif_motion()?;
+    let theme = theme_for(q.theme.as_deref());
+    let (bytes, short_ttl) = ensure_user_chart_gif(&state, &login, theme, &q).await?;
+    let mut headers = HeaderMap::new();
+    headers.insert(header::CONTENT_TYPE, HeaderValue::from_static("image/gif"));
+    headers.insert(header::CACHE_CONTROL, card_cache_control(short_ttl));
+    let filename = format!(
+        "inline; filename=\"{}-star-history-{}.gif\"",
+        login.to_ascii_lowercase(),
+        if theme.dark { "dark" } else { "light" }
+    );
+    headers.insert(
+        header::CONTENT_DISPOSITION,
+        HeaderValue::from_str(&filename).map_err(|_| ApiError::bad_request("invalid login"))?,
+    );
+    Ok(conditional_media_response(
+        &request_headers,
+        headers,
+        (*bytes).clone(),
+    ))
+}
+
+async fn ensure_user_chart_gif(
+    state: &ApiState,
+    login: &str,
+    theme: &crate::theme::Theme,
+    q: &ChartQuery,
+) -> Result<(std::sync::Arc<Vec<u8>>, bool), ApiError> {
+    let motion = q.gif_motion()?;
+    let spec = q.range_spec()?;
+    let login = login.to_ascii_lowercase();
+    let aggregate = build_user_aggregate(state, &login).await?;
+    let series = export::filter_points(&aggregate.series, &spec);
+    let complete = aggregate.repos_pending == 0 && !series.is_empty();
+    let revision = crate::animated_gif::data_revision(&series);
+    let theme_key = if theme.dark { "dark" } else { "light" };
+    let completeness_key = if complete { "complete" } else { "pending" };
+    let key = format!(
+        "user-chart-gif:{login}|{theme_key}|{}|{}|motion:{motion}|rev:{revision}|{completeness_key}|{RENDER_REVISION}",
+        q.series_opts_key(),
+        spec.key(),
+    );
+    let cfg = ChartConfig {
+        repo: login.clone(),
+        ..ChartConfig::default()
+    };
+    let mut opts = q.opts();
+    opts.animate = false;
+    let theme = *theme;
+    let seed = crate::animated_gif::fnv1a(&format!("user:{login}"));
+    single_flight_gif(&state.raster_cache, key, async move {
+        let encoded = with_raster_permit(move || {
+            if motion == crate::animated_gif::MOTION_DRAW {
+                crate::animated_gif::encode_draw(&series, &cfg, &theme, &opts)
+            } else {
+                crate::animated_gif::encode_wave(&series, &cfg, &theme, &opts, seed)
+            }
+        })
+        .await?
+        .map_err(ApiError::from)?;
+        let bytes = std::sync::Arc::new(encoded.bytes);
+        if complete {
+            Ok(bytes)
+        } else {
+            Err(GifMiss::Pending(bytes))
+        }
+    })
+    .await
 }
 
 // Browser extension
@@ -3418,7 +3577,7 @@ fn evaluate_repo_badges(
             id: "momentum",
             label: "star momentum",
             detail: evidence.stars_30d.map_or_else(
-                || "history pending".to_string(),
+                || "collecting star data".to_string(),
                 |gain| format!("+{} stars / 30d", crate::badge::humanize(gain)),
             ),
             earned: momentum,
@@ -3599,10 +3758,10 @@ fn needs_downloads(metrics: &[Metric]) -> bool {
 /// Render-revision constant baked into every media cache key (badges,
 /// cards, OG images, GIFs, charts). Bump it whenever renderer output
 /// changes for identical data so stale in-process/CDN entries can never
-/// serve the previous look under the same key. `r17` = the animated
-/// star-history SVG now waves its dithered underfill (marching Bayer phase)
-/// instead of only drawing the line in.
-pub(crate) const RENDER_REVISION: &str = "r17";
+/// serve the previous look under the same key. `r18` = aggregate profile
+/// charts/cards gain bounded GIF motion, card signal rails use the shared
+/// dither, and star fills follow their data line exactly.
+pub(crate) const RENDER_REVISION: &str = "r18";
 
 struct RepoRenderReadiness {
     stars: bool,
@@ -5072,6 +5231,38 @@ async fn ensure_user_card_raster(
     ))
 }
 
+async fn ensure_user_card_gif(
+    state: &ApiState,
+    login: &str,
+    theme: &crate::theme::Theme,
+    q: &CardQuery,
+) -> Result<(std::sync::Arc<Vec<u8>>, bool), ApiError> {
+    if !cards::is_valid_login(login) {
+        return Err(ApiError::bad_request("invalid login"));
+    }
+    let login = login.to_ascii_lowercase();
+    let card = ensure_user_card_svg(state, &login, theme, q).await?;
+    let key = format!(
+        "card:user-gif:{login}|{}|svg:{}|{RENDER_REVISION}",
+        q.key_fragment(theme),
+        svg_digest(&card.svg),
+    );
+    let short_ttl = card.short_ttl;
+    let svg = card.svg;
+    single_flight_gif(&state.raster_cache, key, async move {
+        let encoded = with_raster_permit(move || crate::animated_gif::encode_dither_loop(&svg))
+            .await?
+            .map_err(ApiError::from)?;
+        let bytes = std::sync::Arc::new(encoded.bytes);
+        if short_ttl {
+            Err(GifMiss::Pending(bytes))
+        } else {
+            Ok(bytes)
+        }
+    })
+    .await
+}
+
 async fn ensure_repo_card_raster(
     state: &ApiState,
     owner: &str,
@@ -5147,6 +5338,33 @@ async fn user_card_webp(
         crate::raster::RasterFormat::Webp,
         bytes,
         short_ttl,
+    ))
+}
+
+async fn user_card_gif(
+    State(state): State<ApiState>,
+    Path(login): Path<String>,
+    Query(q): Query<CardQuery>,
+    request_headers: HeaderMap,
+) -> Result<impl IntoResponse, ApiError> {
+    let theme = theme_for(q.theme.as_deref());
+    let (bytes, short_ttl) = ensure_user_card_gif(&state, &login, theme, &q).await?;
+    let mut headers = HeaderMap::new();
+    headers.insert(header::CONTENT_TYPE, HeaderValue::from_static("image/gif"));
+    headers.insert(header::CACHE_CONTROL, card_cache_control(short_ttl));
+    let filename = format!(
+        "inline; filename=\"{}-profile-card-{}.gif\"",
+        login.to_ascii_lowercase(),
+        if theme.dark { "dark" } else { "light" }
+    );
+    headers.insert(
+        header::CONTENT_DISPOSITION,
+        HeaderValue::from_str(&filename).map_err(|_| ApiError::bad_request("invalid login"))?,
+    );
+    Ok(conditional_media_response(
+        &request_headers,
+        headers,
+        (*bytes).clone(),
     ))
 }
 
@@ -7224,7 +7442,7 @@ mod tests {
         assert!(badges.iter().all(|badge| !badge.earned));
         assert!(badges.iter().all(|badge| badge.pending));
         assert_eq!(badges[0].detail, "analysis pending");
-        assert_eq!(badges[2].detail, "history pending");
+        assert_eq!(badges[2].detail, "collecting star data");
     }
 
     #[test]
@@ -7455,29 +7673,32 @@ mod tests {
     fn profile_stat_filenames_dispatch_known_charts_only() {
         assert!(matches!(
             parse_user_stat_filename("commit-activity.svg"),
-            Some((UserStatKind::CommitActivity, None))
+            Some((UserStatKind::CommitActivity, UserStatFormat::Svg))
         ));
         assert!(matches!(
             parse_user_stat_filename("commit-trend.png"),
             Some((
                 UserStatKind::CommitTrend,
-                Some(crate::raster::RasterFormat::Png)
+                UserStatFormat::Raster(crate::raster::RasterFormat::Png)
             ))
         ));
         assert!(matches!(
             parse_user_stat_filename("languages.webp"),
             Some((
                 UserStatKind::Languages,
-                Some(crate::raster::RasterFormat::Webp)
+                UserStatFormat::Raster(crate::raster::RasterFormat::Webp)
             ))
         ));
         assert!(matches!(
             parse_user_stat_filename("contributions.svg"),
-            Some((UserStatKind::Contributions, None))
+            Some((UserStatKind::Contributions, UserStatFormat::Svg))
+        ));
+        assert!(matches!(
+            parse_user_stat_filename("languages.gif"),
+            Some((UserStatKind::Languages, UserStatFormat::Gif))
         ));
         // Unknown chart names and formats are 400s, never a silent default.
         assert!(parse_user_stat_filename("bus-factor.svg").is_none());
-        assert!(parse_user_stat_filename("languages.gif").is_none());
         assert!(parse_user_stat_filename("languages").is_none());
     }
 

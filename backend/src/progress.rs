@@ -148,6 +148,21 @@ struct ProgressSnapshot {
     analysis: WorkProgress,
 }
 
+/// Aggregate profile progress over the atomically cached repository list.
+/// Counts intentionally mirror `aggregate::UserAggregate`: every unfinished
+/// repo is represented, even while the bounded queues admit it in batches.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize)]
+struct ProfileProgressSnapshot {
+    login: String,
+    terminal: bool,
+    repos_included: u32,
+    repos_pending: u32,
+    repos_analyzed: u32,
+    repos_analyzing: u32,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    repos_total: Option<u64>,
+}
+
 #[derive(Debug, Clone, Default)]
 struct RawProgress {
     missing: bool,
@@ -511,11 +526,93 @@ async fn load_snapshot_bounded(state: &ApiState, repo: &str) -> Result<ProgressS
         .map_err(|_| ApiError::unavailable("progress snapshot timed out"))?
 }
 
+async fn load_profile_snapshot(
+    state: &ApiState,
+    login: &str,
+) -> Result<ProfileProgressSnapshot, ApiError> {
+    // The list meta row gates the read exactly as Cache::get_login_repos does:
+    // no profile progress is inferred from a half-replaced login_repos set.
+    // All other relations are primary-key joins over the bounded top-repo
+    // slice, so this stays cheap enough for the two-second SSE cadence.
+    let row = sqlx::query(
+        "SELECT lists.public_repos, \
+                COUNT(owned.repo) FILTER ( \
+                    WHERE NOT COALESCE(repo.missing, FALSE))::BIGINT AS candidates, \
+                COUNT(owned.repo) FILTER ( \
+                    WHERE NOT COALESCE(repo.missing, FALSE) \
+                      AND COALESCE(repo.history_complete, FALSE) \
+                      AND repo.metadata_fetched_at IS NOT NULL)::BIGINT AS included, \
+                COUNT(owned.repo) FILTER ( \
+                    WHERE NOT COALESCE(repo.missing, FALSE) \
+                      AND history.last_analyzed_at >= $2 \
+                      AND history.analysis_revision >= $3 \
+                      AND history.last_analyzed_sha IS NOT NULL \
+                      AND history.head_sha = history.last_analyzed_sha \
+                      AND (analysis.status IS NULL \
+                           OR analysis.status NOT IN ('pending', 'in_progress')))::BIGINT \
+                    AS analyzed \
+         FROM login_repo_lists lists \
+         LEFT JOIN login_repos owned ON owned.login = lists.login \
+         LEFT JOIN repos repo ON repo.repo = owned.repo \
+         LEFT JOIN repo_history history ON history.repo = owned.repo \
+         LEFT JOIN repo_analysis_queue analysis ON analysis.repo = owned.repo \
+         WHERE lists.login = $1 AND lists.complete = TRUE AND lists.missing = FALSE \
+         GROUP BY lists.public_repos",
+    )
+    .bind(login)
+    .bind(Utc::now() - crate::repo_analysis::analysis_freshness())
+    .bind(crate::repo_analysis::CURRENT_ANALYSIS_REVISION)
+    .fetch_optional(&state.analyzer.cache.db().pool)
+    .await?
+    .ok_or_else(|| ApiError::unavailable("profile progress unavailable"))?;
+
+    let candidates = row.try_get::<i64, _>("candidates")?.max(0) as u64;
+    let included = row.try_get::<i64, _>("included")?.max(0) as u64;
+    let analyzed = row.try_get::<i64, _>("analyzed")?.max(0) as u64;
+    let repos_pending = candidates.saturating_sub(included);
+    let repos_analyzing = candidates.saturating_sub(analyzed);
+    let bounded = |value: u64| value.min(u64::from(u32::MAX)) as u32;
+
+    Ok(ProfileProgressSnapshot {
+        login: login.to_string(),
+        terminal: repos_pending == 0 && repos_analyzing == 0,
+        repos_included: bounded(included),
+        repos_pending: bounded(repos_pending),
+        repos_analyzed: bounded(analyzed),
+        repos_analyzing: bounded(repos_analyzing),
+        repos_total: row
+            .try_get::<Option<i64>, _>("public_repos")?
+            .and_then(|value| u64::try_from(value).ok()),
+    })
+}
+
+async fn load_profile_snapshot_bounded(
+    state: &ApiState,
+    login: &str,
+) -> Result<ProfileProgressSnapshot, ApiError> {
+    tokio::time::timeout(SNAPSHOT_TIMEOUT, load_profile_snapshot(state, login))
+        .await
+        .map_err(|_| ApiError::unavailable("profile progress snapshot timed out"))?
+}
+
 struct StreamState {
     state: ApiState,
     repo: String,
     last: ProgressSnapshot,
     initial: Option<ProgressSnapshot>,
+    interval: Interval,
+    deadline: Instant,
+    event_id: u64,
+    done: bool,
+    _permit: SemaphorePermit<'static>,
+    _client_permit: ClientPermit,
+}
+
+struct ProfileStreamState {
+    state: ApiState,
+    login: String,
+    last: ProfileProgressSnapshot,
+    initial: Option<ProfileProgressSnapshot>,
     interval: Interval,
     deadline: Instant,
     event_id: u64,
@@ -542,6 +639,26 @@ fn control_event(name: &'static str, repo: &str) -> Event {
             "retry_after_ms": CLIENT_RETRY.as_millis(),
         }))
         .expect("control event is always JSON serializable")
+}
+
+fn profile_progress_event(snapshot: &ProfileProgressSnapshot, id: u64) -> Event {
+    Event::default()
+        .event("progress")
+        .id(id.to_string())
+        .retry(CLIENT_RETRY)
+        .json_data(snapshot)
+        .expect("profile progress snapshots are always JSON serializable")
+}
+
+fn profile_control_event(name: &'static str, login: &str) -> Event {
+    Event::default()
+        .event(name)
+        .retry(CLIENT_RETRY)
+        .json_data(serde_json::json!({
+            "login": login,
+            "retry_after_ms": CLIENT_RETRY.as_millis(),
+        }))
+        .expect("profile control event is always JSON serializable")
 }
 
 pub async fn repo_progress(
@@ -620,6 +737,95 @@ pub async fn repo_progress(
                     );
                     stream.done = true;
                     let event = control_event("unavailable", &stream.repo);
+                    return Some((Ok(event), stream));
+                }
+            }
+        }
+    });
+
+    let mut response = Sse::new(events)
+        .keep_alive(
+            KeepAlive::new()
+                .interval(HEARTBEAT_INTERVAL)
+                .text("keep-alive"),
+        )
+        .into_response();
+    set_stream_headers(response.headers_mut());
+    Ok(response)
+}
+
+/// Read-only profile progress stream. The initial `/analyze` or `/warm`
+/// request creates durable work; this endpoint only observes the cached
+/// owned-repository set and the two queues, so EventSource reconnects cannot
+/// amplify GitHub or git work.
+pub async fn profile_progress(
+    State(state): State<ApiState>,
+    Path(login): Path<String>,
+    connect_info: ConnectInfo<SocketAddr>,
+    headers: HeaderMap,
+) -> Result<Response, ApiError> {
+    if !crate::aggregate::is_valid_login(&login) {
+        return Err(ApiError::bad_request("invalid login"));
+    }
+    let login = login.to_ascii_lowercase();
+    let permit = PROGRESS_PERMITS
+        .try_acquire()
+        .map_err(|_| ApiError::unavailable("progress stream capacity reached"))?;
+    let client_ip = crate::api::request_client_ip(&headers, Some(connect_info))
+        .unwrap_or(IpAddr::V4(Ipv4Addr::UNSPECIFIED));
+    let client_permit = ClientPermit::try_acquire(client_ip)
+        .ok_or_else(|| ApiError::unavailable("client progress stream capacity reached"))?;
+    let initial = load_profile_snapshot_bounded(&state, &login).await?;
+    let mut interval = tokio::time::interval_at(Instant::now() + POLL_INTERVAL, POLL_INTERVAL);
+    interval.set_missed_tick_behavior(MissedTickBehavior::Skip);
+    let stream_state = ProfileStreamState {
+        state,
+        login,
+        last: initial.clone(),
+        initial: Some(initial),
+        interval,
+        deadline: Instant::now() + MAX_STREAM_LIFETIME,
+        event_id: 0,
+        done: false,
+        _permit: permit,
+        _client_permit: client_permit,
+    };
+
+    let events = stream::unfold(stream_state, |mut stream| async move {
+        if stream.done {
+            return None;
+        }
+        if let Some(initial) = stream.initial.take() {
+            stream.event_id += 1;
+            stream.done = initial.terminal;
+            let event = profile_progress_event(&initial, stream.event_id);
+            return Some((Ok::<Event, Infallible>(event), stream));
+        }
+
+        loop {
+            if Instant::now() >= stream.deadline {
+                stream.done = true;
+                let event = profile_control_event("timeout", &stream.login);
+                return Some((Ok(event), stream));
+            }
+            stream.interval.tick().await;
+            match load_profile_snapshot_bounded(&stream.state, &stream.login).await {
+                Ok(snapshot) if snapshot != stream.last => {
+                    stream.event_id += 1;
+                    stream.done = snapshot.terminal;
+                    stream.last = snapshot;
+                    let event = profile_progress_event(&stream.last, stream.event_id);
+                    return Some((Ok(event), stream));
+                }
+                Ok(_) => {}
+                Err(error) => {
+                    tracing::warn!(
+                        login = %stream.login,
+                        error = ?error,
+                        "profile progress stream poll failed"
+                    );
+                    stream.done = true;
+                    let event = profile_control_event("unavailable", &stream.login);
                     return Some((Ok(event), stream));
                 }
             }
@@ -795,6 +1001,25 @@ mod tests {
             "no-store, no-transform"
         );
         assert_eq!(headers.get("x-accel-buffering").unwrap(), "no");
+    }
+
+    #[test]
+    fn profile_progress_snapshot_reports_the_full_unfinished_slice() {
+        let snapshot = ProfileProgressSnapshot {
+            login: "google".into(),
+            terminal: false,
+            repos_included: 8,
+            repos_pending: 42,
+            repos_analyzed: 6,
+            repos_analyzing: 44,
+            repos_total: Some(2_913),
+        };
+        let json = serde_json::to_value(snapshot).unwrap();
+        assert_eq!(json["login"], "google");
+        assert_eq!(json["terminal"], false);
+        assert_eq!(json["repos_pending"], 42);
+        assert_eq!(json["repos_analyzing"], 44);
+        assert_eq!(json["repos_total"], 2_913);
     }
 
     #[test]

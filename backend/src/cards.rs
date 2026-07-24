@@ -150,14 +150,27 @@ fn accent_ink(theme: &Theme) -> &'static str {
 /// Card-scale Bayer grain: a low-density tier pattern def plus a quiet
 /// full-surface wash. One ink (theme fg), alpha-only — the dithered
 /// terminal signature at card scale.
-fn card_texture(w: f32, h: f32, rx: f32, theme: &Theme) -> String {
+fn card_texture(w: f32, h: f32, rx: f32, theme: &Theme, animate: bool) -> String {
+    let mut signal_defs = crate::texture::defs_sized(theme, w, h);
+    if animate
+        && let Some(pattern) = signal_defs.find("<pattern id=\"gd-pixel-fill\"")
+        && let Some(relative_close) = signal_defs[pattern..].find("</pattern>")
+    {
+        let close = pattern + relative_close;
+        signal_defs.insert_str(
+            close,
+            "<animateTransform class=\"motion\" attributeName=\"patternTransform\" type=\"translate\" from=\"0.5 0.5\" to=\"8.5 0.5\" dur=\"0.8s\" repeatCount=\"indefinite\" />",
+        );
+    }
     format!(
-        "  <defs>{}</defs>\n  <rect x=\"1\" y=\"1\" width=\"{:.1}\" height=\"{:.1}\" rx=\"{:.1}\" fill=\"{}\" fill-opacity=\"0.05\" pointer-events=\"none\" />\n",
+        "{signal_defs}\n  <defs>{}</defs>\n  <rect x=\"1\" y=\"1\" width=\"{:.1}\" height=\"{:.1}\" rx=\"{:.1}\" fill=\"{}\" fill-opacity=\"0.09\" pointer-events=\"none\" />\n  <rect x=\"1\" y=\"1\" width=\"{:.1}\" height=\"5\" rx=\"{:.1}\" fill=\"url(#gd-pixel-fill)\" fill-opacity=\"0.9\" pointer-events=\"none\" />\n",
         crate::texture::tier_pattern(theme.fg, 2.0, 2),
         w - 2.0,
         h - 2.0,
         (rx - 1.0).max(0.0),
         crate::texture::tier_fill(2),
+        w - 2.0,
+        (rx - 1.0).max(0.0),
     )
 }
 
@@ -580,9 +593,9 @@ pub fn render_user_card(
         border = theme.border,
         stroke_opacity = if opts.hide_border { "0" } else { "1" },
     ));
-    body.push_str(&card_texture(w, h, 12.0, theme));
+    body.push_str(&card_texture(w, h, 12.0, theme, opts.animate));
     body.push_str(&format!(
-        "  <text class=\"ey\" x=\"24\" y=\"25\" fill=\"{pal0}\">{persona}</text>\n",
+        "  <text class=\"ey\" x=\"24\" y=\"25\" fill=\"{pal0}\">:: {persona}</text>\n",
     ));
     if !opts.hide_title {
         body.push_str(&format!(
@@ -609,6 +622,9 @@ pub fn render_user_card(
         body.push_str(&format!(
             "    <rect x=\"{x:.1}\" y=\"{y:.1}\" width=\"{cell_w:.1}\" height=\"46\" rx=\"7\" fill=\"{track}\" opacity=\"0.22\" />\n",
             track = theme.track,
+        ));
+        body.push_str(&format!(
+            "    <rect x=\"{x:.1}\" y=\"{y:.1}\" width=\"3\" height=\"46\" rx=\"1.5\" fill=\"url(#gd-pixel-fill)\" opacity=\"0.78\" />\n"
         ));
         match row {
             UserRow::Stat {
@@ -948,7 +964,7 @@ pub fn render_repo_card(
 
     let mut body = String::new();
     body.push_str(&chrome(w, h, theme, opts.hide_border));
-    body.push_str(&card_texture(w, h, 4.5, theme));
+    body.push_str(&card_texture(w, h, 4.5, theme, opts.animate));
 
     // Header: repo glyph + full slug, linked to GitHub.
     body.push_str(&format!(
@@ -1098,7 +1114,7 @@ fn notice_card(title: &str, message: &str, theme: &Theme) -> String {
         "{open}{CARD_STYLE}{chrome}{texture}  <rect x=\"0\" y=\"8\" width=\"3\" height=\"{strip_h:.0}\" rx=\"1.5\" fill=\"{accent}\" />\n  <text class=\"rt\" x=\"25\" y=\"42\" fill=\"{fg}\">{title}</text>\n  <text class=\"c\" x=\"25\" y=\"66\" fill=\"{muted}\">{message}</text>\n{footer}</svg>",
         open = svg_open(w, h, "gitdebt"),
         chrome = chrome(w, h, theme, false),
-        texture = card_texture(w, h, 4.5, theme),
+        texture = card_texture(w, h, 4.5, theme, false),
         strip_h = h - 16.0,
         accent = accent_ink(theme),
         fg = theme.fg,
@@ -1611,7 +1627,11 @@ mod tests {
             // Bayer tier wash: one ink, alpha carried by the consumer.
             assert!(svg.contains("id=\"gd-t2\""), "tier pattern def present");
             assert!(svg.contains("fill=\"url(#gd-t2)\""));
-            assert!(svg.contains("fill-opacity=\"0.05\""));
+            assert!(svg.contains("fill-opacity=\"0.09\""));
+            assert!(
+                svg.contains("fill=\"url(#gd-pixel-fill)\""),
+                "card edge and metric rails use the shared signal dither"
+            );
             // Wave accent (dark trio lead) is the only chroma.
             assert!(svg.contains("#9b7bff"));
             assert!(!svg.contains("var(--"));

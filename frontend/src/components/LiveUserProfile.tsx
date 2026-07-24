@@ -1,11 +1,14 @@
 import { useEffect, useMemo, useState, type ReactNode } from "react";
 import { ExternalLink, Loader2 } from "lucide-react";
+import { motion, useReducedMotion } from "motion/react";
 
 import { ButtonLink } from "@/components/ButtonLink";
 import { ChartViewer } from "@/components/ChartViewer";
+import { DitherAreaChart } from "@/components/DitherAreaChart";
 import { EmbedSnippet } from "@/components/EmbedSnippet";
 import { ProfileCardPreview } from "@/components/ProfileCardPreview";
 import { StatCard } from "@/components/StatCard";
+import { useDitherSurface } from "@/components/ui/dither-surface";
 import {
   BODY,
   CAPTION,
@@ -20,6 +23,8 @@ import {
   TITLE,
 } from "@/components/style-tokens";
 import { MEDIA_RENDER_REVISION } from "@/lib/media";
+import { INK } from "@/lib/dither";
+import { SPRING } from "@/lib/motion";
 import { useRenderedTheme } from "@/lib/rendered-theme";
 import {
   firstStarYear,
@@ -37,6 +42,10 @@ export type UserAnalyze = {
   repos_pending: number;
   repos_analyzed?: number;
   repos_analyzing?: number;
+  repos_total?: number | null;
+  repos_cap?: number;
+  account_type?: "User" | "Organization" | null;
+  list_truncated?: boolean;
   total_stars: number;
   history: { date: string; stars: number }[];
 };
@@ -63,6 +72,7 @@ export type UserStats = {
   login: string;
   ready: boolean;
   repos_tracked: number;
+  repos_scanned: number;
   repos_analyzed: number;
   total_stars: number;
   total_forks: number;
@@ -170,6 +180,68 @@ function sparkPath(values: number[], w = 132, h = 30): string | null {
     .join(" ");
 }
 
+function AchievementCard({ achievement }: { achievement: VisionaryRepo }) {
+  const reducedMotion = useReducedMotion();
+  const { surface, handlers } = useDitherSurface({
+    fill: INK,
+    variant: "gradient",
+    edge: 0.76,
+    alpha: 0.3,
+    pulse: true,
+  });
+  const early = achievement.stars_at_first_contribution;
+  const growth =
+    early > 0
+      ? `${(achievement.current_stars / early).toFixed(1)}× growth`
+      : "before the first recorded star";
+
+  return (
+    <motion.a
+      href={`/${achievement.repo}`}
+      initial="rest"
+      whileHover={reducedMotion ? undefined : "hover"}
+      whileTap={reducedMotion ? undefined : { scale: 0.992 }}
+      variants={{
+        rest: { y: 0 },
+        hover: { y: -3 },
+      }}
+      transition={SPRING.snappy}
+      className={cn(
+        PANEL,
+        "dither-fallback group relative isolate overflow-hidden p-4 outline-none focus-visible:ring-2 focus-visible:ring-accent/30",
+      )}
+      {...handlers}
+    >
+      {surface}
+      <motion.p
+        aria-hidden="true"
+        variants={{
+          rest: { x: 0, opacity: 0.13 },
+          hover: { x: -10, opacity: 0.28 },
+        }}
+        transition={SPRING.snappy}
+        className="pointer-events-none absolute top-3 right-3 max-w-32 text-right font-mono text-[0.625rem] tracking-[0.18em] text-foreground"
+      >
+        56 49 53 49
+        <br />
+        4F 4E 41 52 59
+      </motion.p>
+      <div className="relative pr-20">
+        <p className="font-mono text-[0.625rem] font-semibold tracking-[0.16em] text-[var(--swatch-purple)] uppercase">
+          [*] Visionary // early signal
+        </p>
+        <p className="mt-2 truncate font-mono text-[0.8125rem] text-foreground">
+          {achievement.repo}
+        </p>
+        <p className={cn(CAPTION, "mt-2")}>
+          Contributed at {num(early)} stars · now{" "}
+          {num(achievement.current_stars)} · {growth}
+        </p>
+      </div>
+    </motion.a>
+  );
+}
+
 async function fetchJson<T>(url: string): Promise<T | null> {
   try {
     const response = await fetch(url, {
@@ -239,9 +311,60 @@ export function LiveUserProfile({
     if (!login || seedIsSettled) return;
     let cancelled = false;
     let timer: ReturnType<typeof setTimeout> | null = null;
+    let events: EventSource | null = null;
+    let fetching = false;
     let warmAttempted = false;
 
+    const clearTimer = () => {
+      if (timer) clearTimeout(timer);
+      timer = null;
+    };
+
+    const closeEvents = () => {
+      events?.close();
+      events = null;
+    };
+
+    const scheduleFallback = (target: string) => {
+      if (timer || cancelled) return;
+      timer = setTimeout(() => {
+        timer = null;
+        void load(target);
+      }, POLL_MS);
+    };
+
+    const connectProgress = (target: string) => {
+      if (events || cancelled) return;
+      events = new EventSource(
+        `${apiBase}/api/users/${encodeURIComponent(target)}/progress`,
+      );
+      events.addEventListener("open", clearTimer);
+      events.addEventListener("progress", (event) => {
+        try {
+          const update = JSON.parse((event as MessageEvent<string>).data) as {
+            terminal?: boolean;
+          };
+          if (update.terminal) closeEvents();
+        } catch {
+          // A malformed event should not prevent the authoritative refetch.
+        }
+        void load(target);
+      });
+      for (const eventName of ["timeout", "unavailable"]) {
+        events.addEventListener(eventName, () => {
+          closeEvents();
+          scheduleFallback(target);
+        });
+      }
+      events.addEventListener("error", () => {
+        closeEvents();
+        scheduleFallback(target);
+      });
+    };
+
     async function load(target: string) {
+      if (fetching || cancelled) return;
+      fetching = true;
       try {
         setLoading(true);
         let response: Response | null = null;
@@ -272,13 +395,20 @@ export function LiveUserProfile({
           repos_pending: payload.repos_pending ?? 0,
           repos_analyzed: payload.repos_analyzed ?? 0,
           repos_analyzing: payload.repos_analyzing ?? 0,
+          repos_total: payload.repos_total ?? null,
+          repos_cap: payload.repos_cap ?? 50,
+          account_type: payload.account_type ?? null,
+          list_truncated: payload.list_truncated ?? false,
           total_stars: payload.total_stars ?? 0,
           history: payload.history ?? [],
         };
         setData(next);
         setError(null);
         if (next.repos_pending > 0 || (next.repos_analyzing ?? 0) > 0) {
-          timer = setTimeout(() => void load(target), POLL_MS);
+          connectProgress(target);
+        } else {
+          clearTimer();
+          closeEvents();
         }
       } catch (reason) {
         if (cancelled) return;
@@ -287,8 +417,9 @@ export function LiveUserProfile({
             ? reason.message
             : "Profile data is temporarily unavailable.",
         );
-        timer = setTimeout(() => void load(target), POLL_MS);
+        scheduleFallback(target);
       } finally {
+        fetching = false;
         if (!cancelled) setLoading(false);
       }
     }
@@ -296,7 +427,8 @@ export function LiveUserProfile({
     void load(login);
     return () => {
       cancelled = true;
-      if (timer) clearTimeout(timer);
+      clearTimer();
+      closeEvents();
     };
   }, [apiBase, login, seedIsSettled]);
 
@@ -340,6 +472,18 @@ export function LiveUserProfile({
   const canonical = `${siteOrigin.replace(/\/$/, "")}/${login}`;
   const hasData =
     data !== null && data.repos_included > 0 && data.history.length > 0;
+  const reposTotal = data?.repos_total ?? null;
+  const reposCap = data?.repos_cap ?? 50;
+  const cappedAccount = reposTotal !== null && reposTotal > reposCap;
+  const accountNoun =
+    data?.account_type === "Organization" ? "organization" : "account";
+  const githubReposHref =
+    data?.account_type === "Organization"
+      ? `https://github.com/orgs/${login}/repositories`
+      : `https://github.com/${login}?tab=repositories`;
+  const aggregateCoverage = cappedAccount
+    ? `${num(data?.repos_included)} complete histories · top ${num(reposCap)} of ${num(reposTotal)} public repos`
+    : `${num(data?.repos_included)} public ${data?.repos_included === 1 ? "repo" : "repos"}`;
   const gained30 = data ? gainedInTrailingDays(data.history, 30) : null;
   const gained90 = data ? gainedInTrailingDays(data.history, 90) : null;
   const trend = data ? growthTrend(data.history) : null;
@@ -403,7 +547,9 @@ export function LiveUserProfile({
     {
       label: "Stars",
       value: hasData ? formatCompact(data!.total_stars) : "—",
-      note: `across ${num(data?.repos_included ?? null)} tracked repos`,
+      note: cappedAccount
+        ? `top-${num(reposCap)} analysis slice · ${num(data?.repos_included)} ready`
+        : `across ${num(data?.repos_included ?? null)} tracked repos`,
     },
     {
       label: "Last 30 days",
@@ -459,8 +605,19 @@ export function LiveUserProfile({
                   {gained90 !== null && gained90 > 0
                     ? `, ${gained90.toLocaleString()} of them in the last 90 days`
                     : ""}
-                  , across {data!.repos_included} tracked{" "}
-                  {data!.repos_included === 1 ? "repo" : "repos"}.
+                  {cappedAccount ? (
+                    <>
+                      , measured across {data!.repos_included} completed
+                      histories in gitdebt's top-{reposCap} slice. GitHub
+                      reports {reposTotal!.toLocaleString()} public
+                      repositories for this {accountNoun}.
+                    </>
+                  ) : (
+                    <>
+                      , across {data!.repos_included} tracked{" "}
+                      {data!.repos_included === 1 ? "repo" : "repos"}.
+                    </>
+                  )}
                 </>
               ) : (
                 <>
@@ -490,9 +647,9 @@ export function LiveUserProfile({
             />
             <p className={CAPTION}>
               {(data?.repos_analyzing ?? 0) > 0
-                ? `Analyzing ${data!.repos_analyzing} repositories with interactive priority. `
+                ? `Reading code history for ${data!.repos_analyzing} repositories. `
                 : "Discovering public repositories. "}
-              This page updates every few seconds.
+              Live backend events update this page as each job finishes.
             </p>
           </div>
         )}
@@ -524,7 +681,7 @@ export function LiveUserProfile({
           <div className={SECTION_HEADER}>
             <h2 className={HEADING}>Star history</h2>
             <p className="font-mono text-[11px] text-muted-foreground">
-              summed across {num(data.repos_included)} repos
+              summed across {aggregateCoverage}
             </p>
           </div>
           <div className="mt-6">
@@ -545,10 +702,29 @@ export function LiveUserProfile({
         <section className="mt-16 scroll-mt-24" id="top-repositories">
           <div className={SECTION_HEADER}>
             <h2 className={HEADING}>Top repositories</h2>
-            <a href="/leaderboard" className={SECTION_ACTION}>
-              leaderboard →
+            <a
+              href={
+                cappedAccount
+                  ? githubReposHref
+                  : "/leaderboard"
+              }
+              target={cappedAccount ? "_blank" : undefined}
+              rel={cappedAccount ? "noopener noreferrer" : undefined}
+              className={SECTION_ACTION}
+            >
+              {cappedAccount
+                ? `all ${reposTotal!.toLocaleString()} on GitHub ↗`
+                : "leaderboard →"}
             </a>
           </div>
+          {cappedAccount && (
+            <p className={cn(BODY, "mt-2 max-w-[72ch]")}>
+              Showing the strongest repositories in gitdebt's bounded top-
+              {reposCap} analysis slice. This is not the {accountNoun}'s full
+              repository list, and the aggregate above does not claim to be
+              account-wide.
+            </p>
+          )}
           <ul className="mt-6">
             {topRepos.map((row) => {
               const path = sparkPath(row.spark);
@@ -584,20 +760,15 @@ export function LiveUserProfile({
                           vectorEffect="non-scaling-stroke"
                         />
                       </svg>
-                    ) : (
-                      <span className="hidden w-[132px] shrink-0 text-right font-mono text-[10px] tracking-[0.08em] text-muted-foreground/70 uppercase sm:block">
-                        history pending
-                      </span>
-                    )}
+                    ) : null}
                   </a>
                 </li>
               );
             })}
           </ul>
           <p className={cn(BODY, "mt-3")}>
-            Sparklines plot cumulative stars by month, and only render once a
-            repository's full star history is cached — a partial series would
-            draw a shape that isn't real.
+            Sparklines use complete cumulative monthly history only. Current
+            GitHub totals remain visible while a full series is being collected.
           </p>
         </section>
       )}
@@ -666,38 +837,12 @@ export function LiveUserProfile({
             <div className="mt-8">
               <h3 className={EYEBROW}>Earned achievements</h3>
               <div className="mt-3 grid gap-3 sm:grid-cols-2">
-                {visionaryRepos.map((achievement) => {
-                  const early = achievement.stars_at_first_contribution;
-                  const growth =
-                    early > 0
-                      ? `${(achievement.current_stars / early).toFixed(1)}× growth`
-                      : "before the first recorded star";
-                  return (
-                    <a
-                      key={achievement.repo}
-                      href={`/${achievement.repo}`}
-                      className={cn(
-                        PANEL,
-                        "group relative overflow-hidden p-4 outline-none focus-visible:ring-2 focus-visible:ring-accent/30",
-                      )}
-                    >
-                      <span className="font-mono text-[10px] font-semibold tracking-[0.16em] text-[var(--swatch-purple)] uppercase">
-                        Visionary
-                      </span>
-                      <span className="mt-2 block truncate font-mono text-[13px] text-foreground">
-                        {achievement.repo}
-                      </span>
-                      <span className={cn(CAPTION, "mt-2 block")}>
-                        Contributed at {num(early)} stars · now{" "}
-                        {num(achievement.current_stars)} · {growth}
-                      </span>
-                      <span
-                        className="absolute inset-x-0 bottom-0 h-1 origin-left scale-x-50 bg-[linear-gradient(90deg,var(--swatch-purple),var(--swatch-blue),var(--swatch-pink))] transition-transform duration-200 group-hover:scale-x-100 motion-reduce:transition-none"
-                        aria-hidden="true"
-                      />
-                    </a>
-                  );
-                })}
+                {visionaryRepos.map((achievement) => (
+                  <AchievementCard
+                    key={achievement.repo}
+                    achievement={achievement}
+                  />
+                ))}
               </div>
               <p className={cn(BODY, "mt-3 max-w-[70ch]")}>
                 Visionary is earned when a complete star history proves a
@@ -714,11 +859,16 @@ export function LiveUserProfile({
           <div className={SECTION_HEADER}>
             <h2 className={HEADING}>Code signals</h2>
             <p className="font-mono text-[11px] text-muted-foreground">
-              {num(stats!.repos_analyzed)} of {num(stats!.repos_tracked)} repos analyzed
+              {num(stats!.repos_analyzed)} analyzed
+              {cappedAccount
+                ? ` · top ${num(stats!.repos_scanned)} of ${num(reposTotal)}`
+                : ` of ${num(stats!.repos_tracked)} repos`}
             </p>
           </div>
           <p className={cn(BODY, "mt-2 max-w-[70ch]")}>
-            Aggregated from cached git history across every repo {login} owns.
+            {cappedAccount
+              ? `Aggregated from cached git history within the bounded ${stats!.repos_scanned}-repository code-analysis slice.`
+              : `Aggregated from cached git history across the public repositories ${login} owns.`}{" "}
             Each chart is embeddable — use its “Add to README”.
           </p>
           <div className="mt-6 grid gap-8">
@@ -847,10 +997,13 @@ export function LiveUserProfile({
         <section className="mt-16 scroll-mt-24" id="readme-assets">
           <div className={SECTION_HEADER}>
             <h2 className={HEADING}>Add to your README</h2>
-            <p className="font-mono text-[11px] text-muted-foreground">svg · png · webp</p>
+            <p className="font-mono text-[11px] text-muted-foreground">
+              gif · svg · png · webp
+            </p>
           </div>
           <p className={cn(BODY, "mt-2 max-w-[70ch]")}>
-            Every profile asset ships light and dark variants behind a{" "}
+            Every profile asset ships an animated dither GIF plus light and
+            dark static variants behind a{" "}
             <code className="font-mono text-[12px] text-foreground">&lt;picture&gt;</code>{" "}
             element, so they follow the reader's GitHub theme. Copy a snippet and
             paste it into your profile README.
@@ -880,7 +1033,18 @@ export function LiveUserProfile({
               label="Aggregate star history"
               altText={`Aggregate star history across ${login}'s public repos`}
               linkHref={canonical}
-            />
+            >
+              <DitherAreaChart
+                points={data.history.map((point) => ({
+                  date: point.date,
+                  value: point.stars,
+                }))}
+                height={360}
+                valueLabel="stars"
+                seed={`user:${login}`}
+                className="rounded-t-[inherit]"
+              />
+            </AssetPanel>
 
             {PROFILE_CHARTS.map((chart) => (
               <AssetPanel

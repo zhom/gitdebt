@@ -31,9 +31,14 @@ pub const DURATION_MS: u32 = 220;
 /// Frames in one seamless wave cycle (~1s loop at 70ms/frame).
 pub const WAVE_FRAME_COUNT: usize = 14;
 pub const WAVE_FRAME_DELAY_MS: u32 = 70;
+/// Generic shareable-media loop: one crisp pixel of horizontal phase per
+/// frame across the shared 8px Bayer tile.
+pub const DITHER_FRAME_COUNT: usize = 8;
+pub const DITHER_FRAME_DELAY_MS: u32 = 90;
 pub const TARGET_BYTES: usize = 1_000_000;
 /// The 14-frame loop gets a little more headroom than the 5-frame draw.
 pub const WAVE_TARGET_BYTES: usize = 1_500_000;
+pub const DITHER_TARGET_BYTES: usize = 1_500_000;
 pub const HARD_MAX_BYTES: usize = 5_000_000;
 
 /// FNV-1a over a slug: a stable, dependency-free 32-bit seed so every
@@ -102,6 +107,62 @@ pub fn encode_wave(
     encode_bounded(WAVE_TARGET_BYTES, |scale| {
         encode_wave_at_scale(series, cfg, theme, opts, seed, scale)
     })
+}
+
+/// Turn any self-contained gitdebt SVG into a real GitHub-safe animated
+/// asset by marching every authored Bayer pattern through one complete tile.
+///
+/// The source is first frozen to its correct final semantic state (revealed
+/// labels, completed bars), then only the decorative pattern phase changes.
+/// Every frame therefore remains fully readable and a README consumer never
+/// sees partial data masquerading as animation.
+pub fn encode_dither_loop(svg: &str) -> Result<EncodedGif> {
+    let frozen = crate::raster::freeze_svg_animations(svg);
+    let delays = [DITHER_FRAME_DELAY_MS; DITHER_FRAME_COUNT];
+    let svgs = (0..DITHER_FRAME_COUNT)
+        .map(|frame| phase_dither_patterns(&frozen, frame))
+        .collect::<Vec<_>>();
+
+    let mut last = None;
+    for scale in [1.0_f32, 0.75, 0.5] {
+        let encoded = encode_frames(&svgs, &delays, scale, Some(Repeat::Infinite))?;
+        if encoded.bytes.len() <= DITHER_TARGET_BYTES {
+            return Ok(encoded);
+        }
+        last = Some(encoded);
+    }
+    let encoded = last.context("dither GIF scale candidates are non-empty")?;
+    if encoded.bytes.len() >= HARD_MAX_BYTES {
+        bail!(
+            "animated dither GIF exceeds hard byte cap ({} >= {})",
+            encoded.bytes.len(),
+            HARD_MAX_BYTES
+        );
+    }
+    Ok(encoded)
+}
+
+/// Replace every `patternTransform="translate(...)"` phase without touching
+/// element transforms. Shared media patterns use an 8px tile, so frame 8
+/// wraps exactly to frame 0 and the loop has no visual jump.
+fn phase_dither_patterns(svg: &str, frame: usize) -> String {
+    const OPEN: &str = "patternTransform=\"translate(";
+    let phase = frame % DITHER_FRAME_COUNT;
+    let mut out = String::with_capacity(svg.len());
+    let mut cursor = 0;
+    while let Some(relative) = svg[cursor..].find(OPEN) {
+        let start = cursor + relative;
+        let values_start = start + OPEN.len();
+        let Some(relative_end) = svg[values_start..].find(")\"") else {
+            break;
+        };
+        let end = values_start + relative_end;
+        out.push_str(&svg[cursor..values_start]);
+        out.push_str(&format!("{}.5 .5", phase));
+        cursor = end;
+    }
+    out.push_str(&svg[cursor..]);
+    out
 }
 
 /// Shared deterministic scale-retry ladder + hard byte cap.
@@ -404,6 +465,27 @@ mod tests {
     }
 
     #[test]
+    fn generic_dither_gif_loops_and_keeps_complete_content() {
+        let svg = r##"<svg xmlns="http://www.w3.org/2000/svg" width="80" height="40" viewBox="0 0 80 40">
+  <defs><pattern id="p" width="8" height="8" patternUnits="userSpaceOnUse" patternTransform="translate(.5 .5)"><rect width="4" height="4" fill="#9b7bff" /><animateTransform attributeName="patternTransform" type="translate" from="0.5 0.5" to="8.5 0.5" dur="1s" repeatCount="indefinite" /></pattern></defs>
+  <rect width="80" height="40" fill="#0a0a0a" />
+  <rect width="80" height="40" fill="url(#p)" />
+  <text x="8" y="24" fill="#fafafa">ready</text>
+</svg>"##;
+        let gif = encode_dither_loop(svg).unwrap();
+        assert_eq!(gif.frame_count, DITHER_FRAME_COUNT);
+        assert!(has_netscape_loop(&gif.bytes));
+        assert!(gif.bytes.len() <= DITHER_TARGET_BYTES);
+        let frames = decode(&gif.bytes);
+        assert_eq!(frames.len(), DITHER_FRAME_COUNT);
+        assert_ne!(
+            frames[0].buffer().as_raw(),
+            frames[1].buffer().as_raw(),
+            "Bayer phase must visibly advance"
+        );
+    }
+
+    #[test]
     fn fnv1a_is_stable_and_slug_sensitive() {
         assert_eq!(fnv1a(""), 0x811c_9dc5);
         assert_eq!(fnv1a("owner/repo"), fnv1a("owner/repo"));
@@ -418,6 +500,14 @@ mod tests {
         assert_eq!(data_revision(&a), data_revision(&a));
         assert_ne!(data_revision(&a), data_revision(&b));
         assert_ne!(data_revision(&[]), data_revision(&a));
+    }
+
+    #[test]
+    fn pattern_phase_rewrite_is_scoped_and_wraps() {
+        let svg = r#"<pattern patternTransform="translate(.5 .5)"></pattern><g transform="translate(2 3)"></g>"#;
+        let phased = phase_dither_patterns(svg, DITHER_FRAME_COUNT + 3);
+        assert!(phased.contains(r#"patternTransform="translate(3.5 .5)""#));
+        assert!(phased.contains(r#"transform="translate(2 3)""#));
     }
 
     #[test]

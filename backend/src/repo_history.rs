@@ -12,7 +12,11 @@ use chrono::{DateTime, NaiveDate, Utc};
 use serde::Serialize;
 use tokio::process::Command;
 
-const DEFAULT_ANALYSIS_COMMIT_LIMIT: usize = 10_000;
+// Five thousand recent non-merge commits is enough to stabilize ownership,
+// churn, cadence, and fix-concentration signals while keeping a cold
+// interactive report bounded. The exact reachable commit total is still
+// computed from the full graph and the UI labels a capped analysis window.
+const DEFAULT_ANALYSIS_COMMIT_LIMIT: usize = 5_000;
 const MIN_ANALYSIS_COMMIT_LIMIT: usize = 5_000;
 const HARD_ANALYSIS_COMMIT_LIMIT: usize = 50_000;
 /// Patch bodies are substantially more expensive than commit metadata because

@@ -15,8 +15,9 @@ import {
   type Variant,
 } from "@/lib/dither";
 
-/** Seconds for one breath of the hover pulse. */
-const PULSE_PERIOD = 1.6;
+/** One ring lives long enough for the next to begin just before it disappears. */
+const PULSE_LIFETIME = 0.92;
+const PULSE_INTERVAL = 0.7;
 
 export type DitherSurfaceOptions = {
   /** Stable module-level tuple: the paint effect keys off its identity. */
@@ -29,7 +30,7 @@ export type DitherSurfaceOptions = {
   className?: string;
   /** Global alpha multiplier. Quiet beds sit near 0.15; controls stay at 1. */
   alpha?: number;
-  /** Breathes a dithered ring at the pointer while the host is hovered. */
+  /** Emits overlapping one-shot dither rings at the live pointer position. */
   pulse?: boolean;
 };
 
@@ -45,6 +46,7 @@ const CANVAS_CLASS =
 export function useDitherSurface(opts: DitherSurfaceOptions) {
   const canvasRef = useRef<HTMLCanvasElement>(null);
   const ctrl = useRef<SurfaceController | null>(null);
+  const hovering = useRef(false);
   const { fill, variant, edge, cell, className, alpha, pulse } = opts;
 
   useEffect(() => {
@@ -57,6 +59,8 @@ export function useDitherSurface(opts: DitherSurfaceOptions) {
     host.classList.remove("dither-fallback");
 
     let buf: RasterBuffer | null = null;
+    let lastEmission = -Infinity;
+    const trail: { x: number; y: number; born: number }[] = [];
     const paint = (m: SurfaceMotion) => {
       const box = host.getBoundingClientRect();
       const { cols, rows } = gridFor(box.width, box.height, cell);
@@ -66,17 +70,36 @@ export function useDitherSurface(opts: DitherSurfaceOptions) {
         canvas.height = rows;
       }
       paintPanel(buf, fill, variant ?? "gradient", m.intensity, { edge, alpha });
-      if (pulse && m.pulse > 0) {
-        const breath =
-          0.5 + 0.5 * Math.sin((m.time / PULSE_PERIOD) * Math.PI * 2);
+      if (
+        pulse &&
+        hovering.current &&
+        (trail.length === 0 || m.time - lastEmission >= PULSE_INTERVAL)
+      ) {
+        trail.push({ x: m.px, y: m.py, born: m.time });
+        lastEmission = m.time;
+      }
+      if (pulse && trail.length > 0) {
+        while (trail.length > 0 && m.time - trail[0].born >= PULSE_LIFETIME) {
+          trail.shift();
+        }
         const base = Math.max(5, Math.min(cols, rows) * 0.8);
-        stampPulse(buf, fill, {
-          x: m.px * cols,
-          y: m.py * rows,
-          radius: base * (0.55 + 0.45 * breath),
-          // A wider ring carries less alpha, so the breath reads as one gesture.
-          energy: m.pulse * (0.95 - 0.35 * breath),
-        });
+        for (const ring of trail) {
+          const progress = Math.max(
+            0,
+            Math.min(1, (m.time - ring.born) / PULSE_LIFETIME),
+          );
+          const eased = 1 - (1 - progress) ** 3;
+          // Fast rise, long dissolve. Adjacent one-shot rings overlap for
+          // ~220ms and retain their own cursor positions.
+          const envelope =
+            Math.min(1, progress / 0.14) * (1 - progress) ** 0.72;
+          stampPulse(buf, fill, {
+            x: ring.x * cols,
+            y: ring.y * rows,
+            radius: base * (0.24 + 0.96 * eased),
+            energy: envelope * Math.max(0.35, m.pulse),
+          });
+        }
       }
       ctx.putImageData(buf.image, 0, 0);
     };
@@ -122,16 +145,19 @@ export function useDitherSurface(opts: DitherSurfaceOptions) {
     ),
     handlers: animated
       ? {
-          // The pulse anchors where the pointer first crossed into the host and
-          // breathes in place from there. It deliberately does not track
-          // `onPointerMove`: once the pulsation has started it stays put instead
-          // of chasing the cursor around the button. A press only deepens the
-          // same ring (`down()` with no coordinates keeps the anchor).
           onPointerEnter: (event: ReactPointerEvent<HTMLElement>) => {
             const { x, y } = local(event);
+            hovering.current = true;
             ctrl.current?.enter(x, y);
           },
-          onPointerLeave: () => ctrl.current?.leave(),
+          onPointerMove: (event: ReactPointerEvent<HTMLElement>) => {
+            const { x, y } = local(event);
+            ctrl.current?.move(x, y);
+          },
+          onPointerLeave: () => {
+            hovering.current = false;
+            ctrl.current?.leave();
+          },
           onPointerDown: () => ctrl.current?.down(),
           onPointerUp: () => ctrl.current?.up(),
           onPointerCancel: () => ctrl.current?.up(),

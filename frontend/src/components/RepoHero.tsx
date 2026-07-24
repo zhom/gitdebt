@@ -1,4 +1,4 @@
-import { useEffect, useMemo, useRef, useState } from "react";
+import { useEffect, useRef, useState } from "react";
 import {
   animate,
   motion,
@@ -11,7 +11,6 @@ import { ExternalLink, Loader2 } from "lucide-react";
 import { BalancedText } from "@/components/BalancedText";
 import { ButtonLink } from "@/components/ButtonLink";
 import { DitherMeter } from "@/components/DitherMeter";
-import { StarCurveStory } from "@/components/StarCurveStory";
 import { StatStrip } from "@/components/StatStrip";
 import { BODY, CAPTION, EYEBROW, HEADING, PANEL, TITLE } from "@/components/style-tokens";
 import { BRAND } from "@/lib/dither";
@@ -89,7 +88,7 @@ type Props = {
 const POLL_MS = 20_000;
 const PROGRESS_POLL_MS = 4_000;
 
-/** The hero's standing description, flowed around the repo's star curve. */
+/** The hero's standing description. The actual star curve belongs below. */
 const HERO_BLURB =
   "Star momentum, maintenance concentration, contributor health, and codebase change — one report built from public repository data.";
 
@@ -116,7 +115,7 @@ function formatDate(value: string | null | undefined): string {
   if (!value) return "—";
   const d = new Date(value);
   if (Number.isNaN(d.getTime())) return "—";
-  return d.toLocaleDateString(undefined, {
+  return d.toLocaleDateString("en-US", {
     year: "numeric",
     month: "short",
     day: "numeric",
@@ -286,15 +285,6 @@ export function RepoHero({ owner, repo, apiBase, initialData }: Props) {
     };
   }, [owner, repo, apiBase, initialData]);
 
-  const storyPoints = useMemo(
-    () =>
-      (data?.history ?? []).map((point) => ({
-        date: point.date,
-        value: point.stars,
-      })),
-    [data?.history],
-  );
-
   const slug = data?.repo ?? `${owner}/${repo}`;
   const latest = data?.history[data.history.length - 1]?.date ?? null;
   const year = data ? firstStarYear(data) : null;
@@ -350,30 +340,26 @@ export function RepoHero({ owner, repo, apiBase, initialData }: Props) {
     next_page: null,
   };
   const analysisWork: ProgressWork = progress?.analysis ?? {
-    phase: "pending",
+    phase: "idle",
     complete: false,
   };
-  // The strip is a working indicator, not a checklist: once both halves have
-  // settled there is nothing to report, so it disappears instead of showing
-  // rows of ticks.
+  // The strip is a working indicator, not a checklist. `idle` is terminal
+  // backend state, not a synonym for "still loading"; treating it as active
+  // left the analysis panel pinned to already-finished reports forever.
   const showProgress =
     (!data && loading) ||
-    !isSettled(starsWork) ||
-    !isSettled(analysisWork) ||
+    isActive(starsWork) ||
+    isActive(analysisWork) ||
     (data !== null && needsPolling(data));
 
   return (
     <section className="space-y-6">
       <header className="flex flex-col gap-4 sm:flex-row sm:items-end sm:justify-between">
-        <div className="space-y-2">
+        <div className="min-w-0 space-y-3">
           <BalancedText as="h1" className={TITLE}>
             {slug}
           </BalancedText>
-          <StarCurveStory
-            text={HERO_BLURB}
-            points={storyPoints}
-            className="max-w-[62ch]"
-          />
+          <p className={cn(BODY, "max-w-[62ch]")}>{HERO_BLURB}</p>
         </div>
         <ButtonLink
           href={`https://github.com/${owner}/${repo}`}
@@ -392,7 +378,7 @@ export function RepoHero({ owner, repo, apiBase, initialData }: Props) {
       </header>
 
       <StatStrip
-        columns={4}
+        columns={3}
         items={stats.map((stat, index) => ({
           label: stat.label,
           value:
@@ -510,8 +496,8 @@ function ReportProgress({
   analysis: ProgressWork;
   live: boolean;
 }) {
-  const active = !isSettled(stars) ? stars : analysis;
-  const label = !isSettled(stars)
+  const active = isActive(stars) ? stars : analysis;
+  const label = isActive(stars)
     ? "Collecting star history"
     : "Reading repository history";
   const remaining = useLiveCountdown(
@@ -552,6 +538,18 @@ function ReportProgress({
 function isSettled(work: ProgressWork): boolean {
   return (
     work.complete || work.phase === "complete" || work.phase === "not_found"
+  );
+}
+
+function isActive(work: ProgressWork): boolean {
+  return (
+    work.phase === "pending" ||
+    work.phase === "retrying" ||
+    work.phase === "fetching" ||
+    work.phase === "backfilling" ||
+    work.phase === "analyzing" ||
+    work.phase === "failed" ||
+    work.phase === "restricted"
   );
 }
 

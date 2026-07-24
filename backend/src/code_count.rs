@@ -48,7 +48,10 @@ const BINARY_SNIFF_BYTES: usize = 8 * 1024;
 /// gigabytes of blobs; the UI and embed renderer explicitly label that
 /// fallback in files rather than pretending it is a line count.
 const DEFAULT_EXACT_LINE_COUNT_MAX_FILES: usize = 20_000;
-const DEFAULT_EXACT_LINE_COUNT_TIMEOUT_SECS: u64 = 20;
+// Exact lines are a refinement over the cheap, always-saved language census.
+// Do not let that refinement hold an otherwise complete interactive report
+// open for tens of seconds.
+const DEFAULT_EXACT_LINE_COUNT_TIMEOUT_SECS: u64 = 8;
 
 #[derive(Debug, Clone)]
 pub struct LanguageCount {

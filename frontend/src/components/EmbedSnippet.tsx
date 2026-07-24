@@ -72,8 +72,9 @@ type Format = "svg" | "gif" | "png" | "webp";
 type ThemeChoice = "auto" | "light" | "dark";
 
 const STATIC_FORMATS: Format[] = ["svg", "png", "webp"];
-/** Repo star-history charts are the only surface with a looping wave GIF. */
-const GIF_CHART_RE = /^\/api\/repos\/[^/]+\/[^/]+\/chart\.svg(?:\?|$)/;
+/** Surfaces with real raster motion that survives GitHub's SVG sanitizer. */
+const GIF_ASSET_RE =
+  /^\/api\/(?:repos\/[^/]+\/[^/]+\/chart|users\/[^/]+\/(?:chart|card|stats\/[^/?]+))\.svg(?:\?|$)/;
 const THEMES: { id: ThemeChoice; label: string }[] = [
   { id: "auto", label: "Auto" },
   { id: "light", label: "Light" },
@@ -125,11 +126,10 @@ export function EmbedSnippet({
   variant = "panel",
 }: Props) {
   const [mode, setMode] = useState<Mode>("markdown");
-  // Default the shareable to the looping wave GIF where one exists — it is the
-  // only format that actually animates once pasted into a GitHub README.
-  const [format, setFormat] = useState<Format>(() =>
-    GIF_CHART_RE.test(chartPath) ? "gif" : "svg",
-  );
+  // README assets remain static until the author explicitly chooses GIF or
+  // enables SVG motion. GitHub-safe GIF is available wherever the renderer can
+  // preserve a complete final frame while moving only the decorative dither.
+  const [format, setFormat] = useState<Format>("svg");
   const [theme, setTheme] = useState<ThemeChoice>("auto");
   const [animatedSvg, setAnimatedSvg] = useState(false);
   const [open, setOpen] = useState(false);
@@ -186,7 +186,7 @@ export function EmbedSnippet({
     };
   }, [open, variant]);
 
-  const supportsGif = GIF_CHART_RE.test(chartPath);
+  const supportsGif = GIF_ASSET_RE.test(chartPath);
   const formats: readonly Format[] = supportsGif
     ? (["svg", "gif", "png", "webp"] as const)
     : STATIC_FORMATS;
@@ -287,7 +287,8 @@ export function EmbedSnippet({
       </div>
       {selectedFormat === "gif" && (
         <p className={cn(CAPTION, "border-t border-border/40 px-4 py-3")}>
-          GIF loops a wave animation and uses more bandwidth than SVG. Auto emits separate light and dark assets.
+          GIF carries real dither motion through GitHub's image proxy and uses
+          more bandwidth than SVG. Auto emits separate light and dark assets.
         </p>
       )}
     </>

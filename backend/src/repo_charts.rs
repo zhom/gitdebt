@@ -655,6 +655,8 @@ fn render_contribution_profile_inner(
     let own_pattern = moving_tier_pattern("gd-contrib-own", own_color, 11, 0.68, false);
     let external_pattern =
         moving_tier_pattern("gd-contrib-external", external_color, 8, 0.82, true);
+    let visionary_pattern =
+        moving_tier_pattern("gd-contrib-visionary", visionary_color, 10, 0.74, false);
     let owned_fill = if owned_w > 0.0 {
         format!(
             r##"<rect x="{plot_x}" y="126" width="{owned_w:.1}" height="{lane_h}" rx="5" fill="url(#gd-contrib-own-t11)" fill-opacity="0.95" stroke="{own_color}" stroke-opacity="0.8" />"##
@@ -719,11 +721,12 @@ fn render_contribution_profile_inner(
     let visionary = if profile.visionary_count > 0 {
         format!(
             r##"<g transform="translate({pad:.0} 276)">
-  <rect width="310" height="34" rx="17" fill="{visionary_color}" fill-opacity="0.14" stroke="{visionary_color}" stroke-opacity="0.72" />
+  <rect width="310" height="34" rx="17" fill="url(#gd-contrib-visionary-t10)" fill-opacity="0.62" stroke="{visionary_color}" stroke-opacity="0.78" />
   <circle cx="18" cy="17" r="5" fill="{visionary_color}">
-    <animate class="motion" attributeName="r" values="4;7;4" dur="0.72s" repeatCount="indefinite" />
+    <animate class="motion" attributeName="r" values="4;6.5;4" dur="0.72s" repeatCount="indefinite" />
+    <animate class="motion" attributeName="fill-opacity" values="0.65;1;0.65" dur="0.72s" repeatCount="indefinite" />
   </circle>
-  <text class="visionary" x="32" y="21">VISIONARY · {count} breakout {projects}</text>
+  <text class="visionary" x="32" y="21">[*] VISIONARY · {count} breakout {projects}</text>
 </g>"##,
             count = profile.visionary_count,
             projects = if profile.visionary_count == 1 {
@@ -738,7 +741,7 @@ fn render_contribution_profile_inner(
 
     format!(
         r##"<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 {width} {height}" role="img" aria-label="Contribution footprint for {login}">
-  <defs>{own_pattern}{external_pattern}</defs>
+  <defs>{own_pattern}{external_pattern}{visionary_pattern}</defs>
   <style><![CDATA[
     .title {{ fill: {fg}; font: 600 18px ui-sans-serif, system-ui, sans-serif; }}
     .subtitle {{ fill: {muted}; font: 13px ui-sans-serif, system-ui, sans-serif; }}

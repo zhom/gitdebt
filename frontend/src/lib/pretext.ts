@@ -3,10 +3,9 @@
  *
  * pretext measures and wraps text with the browser's own font engine as
  * ground truth, entirely off the DOM — no `getBoundingClientRect`, no reflow.
- * That buys three things this app uses:
+ * That buys two things this app uses:
  *   1. seamless, constant-speed marquees (measure N items, zero layout thrash)
  *   2. pixel-balanced, zero-CLS headings (reserve the exact wrapped height)
- *   3. text that flows around an arbitrary data curve (variable width per line)
  *
  * SSR safety: pretext only touches a canvas the first time a measurement runs
  * (`getMeasureContext()` is lazy), so importing this module is safe during
@@ -16,12 +15,9 @@
  */
 
 import {
-  layoutNextLineRange,
-  materializeLineRange,
   measureLineStats,
   measureNaturalWidth,
   prepareWithSegments,
-  type LayoutCursor,
 } from "@chenglou/pretext";
 
 export const isBrowser = (): boolean =>
@@ -114,72 +110,4 @@ export function balancedLayout(
   }
   const width = Math.ceil(hi);
   return { width, lineCount: target, height: target * lineHeight };
-}
-
-/** One laid-out line produced by {@link flowAroundBoundary}. */
-export type FlowedLine = {
-  text: string;
-  /** Baseline-independent top offset of the line box, in px. */
-  y: number;
-  /** Left inset applied to this line, in px. */
-  x: number;
-  /** Measured width of the line, in px. */
-  width: number;
-};
-
-/**
- * Flow a paragraph into a region whose usable width changes with vertical
- * position — e.g. the empty space above a rising data curve. `widthAt(yBottom)`
- * returns the px width available to a line whose box bottom sits at `yBottom`;
- * return `0` to skip a band entirely.
- *
- * This is pretext's variable-width path (`layoutNextLineRange`): each line is
- * routed at its own width without ever building intermediate strings for lines
- * we discard, and without a single DOM measurement.
- */
-export function flowAroundBoundary(
-  text: string,
-  font: string,
-  opts: {
-    top: number;
-    bottom: number;
-    lineHeight: number;
-    letterSpacing?: number;
-    left?: number;
-    minWidth?: number;
-    /** px width available to a line ending at `yBottom`. */
-    widthAt: (yBottom: number) => number;
-  },
-): FlowedLine[] {
-  const {
-    top,
-    bottom,
-    lineHeight,
-    letterSpacing = 0,
-    left = 0,
-    minWidth = 24,
-    widthAt,
-  } = opts;
-  const prepared = prepareWithSegments(text, font, { letterSpacing });
-  const lines: FlowedLine[] = [];
-  let cursor: LayoutCursor = { segmentIndex: 0, graphemeIndex: 0 };
-  let y = top;
-  // A generous cap: never loop past the region even if `widthAt` misbehaves.
-  const maxLines = Math.ceil((bottom - top) / lineHeight) + 2;
-  for (let i = 0; i < maxLines; i++) {
-    if (y + lineHeight > bottom) break;
-    const avail = Math.max(0, widthAt(y + lineHeight) - left);
-    if (avail < minWidth) {
-      // Too narrow here; drop down a row and try again (flows around a bulge).
-      y += lineHeight;
-      continue;
-    }
-    const range = layoutNextLineRange(prepared, cursor, avail);
-    if (range === null) break;
-    const line = materializeLineRange(prepared, range);
-    lines.push({ text: line.text, y, x: left, width: line.width });
-    cursor = range.end;
-    y += lineHeight;
-  }
-  return lines;
 }

@@ -203,6 +203,8 @@ pub struct UserAggregate {
     /// currently being refreshed.
     pub repos_analyzed: u32,
     /// Owned repositories still waiting on or running code-health analysis.
+    /// This counts every unfinished candidate, not only rows that happen to
+    /// be active in the bounded worker queue right now.
     pub repos_analyzing: u32,
     /// The account's public-repository count as GitHub reports it, when
     /// known. The aggregate covers at most [`MAX_AGGREGATE_REPOS`] of them,
@@ -559,19 +561,15 @@ async fn build_from_repos(
         .map_err(anyhow::Error::from)?
         .max(0) as u32
     };
-    let repos_analyzing = if analysis_candidates.is_empty() {
-        0
-    } else {
-        sqlx::query_scalar::<_, i64>(
-            "SELECT COUNT(*)::BIGINT FROM repo_analysis_queue \
-             WHERE repo = ANY($1) AND status IN ('pending', 'in_progress')",
-        )
-        .bind(&analysis_candidates)
-        .fetch_one(&db.pool)
-        .await
-        .map_err(anyhow::Error::from)?
-        .max(0) as u32
-    };
+    // `enqueue_many` deliberately admits only a small batch per build. Using
+    // active queue rows here made a profile look settled in the gap between
+    // batches: the frontend stopped observing it, so the remaining repos were
+    // never offered to the queue. Report the actual unfinished candidate set;
+    // every completion event triggers another aggregate build, which admits
+    // the next bounded batch until this reaches zero.
+    let repos_analyzing = u32::try_from(analysis_candidates.len())
+        .unwrap_or(u32::MAX)
+        .saturating_sub(repos_analyzed);
 
     Ok(UserAggregate {
         login,

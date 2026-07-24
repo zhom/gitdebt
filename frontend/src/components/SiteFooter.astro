@@ -1,13 +1,11 @@
 ---
 import { CATEGORIES } from "@/data/categories";
 import Brand from "@/components/Brand.astro";
+import { FooterAsciiMark } from "@/components/FooterAsciiMark";
 import logoSource from "../../../assets/gitdebt-logo.svg?raw";
 
 const year = new Date().getFullYear();
 
-// The watermark draws the repository artwork's own path. Its dither fill is
-// dropped: at watermark scale the 32-unit cell becomes a 70px checker that
-// reads as damage rather than as texture.
 const robot = logoSource.match(/fill="url\(#gitdebt-dither\)"\s+d="([^"]+)"/);
 if (!robot) {
   throw new Error("assets/gitdebt-logo.svg no longer exposes the robot path");
@@ -39,15 +37,7 @@ const legalLinks = [
 ---
 
 <footer class="relative isolate overflow-hidden border-t border-border/60">
-  <svg
-    class="footer-watermark"
-    viewBox="41.436 108.392 429.115 299.305"
-    fill="currentColor"
-    aria-hidden="true"
-    focusable="false"
-  >
-    <path d={ROBOT_PATH}></path>
-  </svg>
+  <FooterAsciiMark client:visible path={ROBOT_PATH} />
   <div class="relative mx-auto max-w-6xl px-4 pt-12 pb-14 sm:px-6 sm:pt-14 sm:pb-20">
     <div class="grid gap-10 lg:grid-cols-[minmax(0,1fr)_auto] lg:gap-16">
       <div class="max-w-sm space-y-3">
@@ -123,43 +113,3 @@ const legalLinks = [
     </div>
   </div>
 </footer>
-
-<style>
-  /* Oversized mark anchored to the page edge, so its lower quarter is cropped
-     away by the end of the document rather than by a mask. `-z-10` keeps it
-     behind the footer's own content inside the footer's stacking context.
-     Narrow viewports size by width (a stacked footer is far taller than it is
-     wide); from the first breakpoint the glyph is sized against the footer's
-     own height so it lands the same way at any column count. */
-  .footer-watermark {
-    position: absolute;
-    bottom: -10%;
-    left: 50%;
-    z-index: -10;
-    /* Stated rather than inferred: an absolutely positioned replaced element
-       with one auto axis needs the ratio to resolve the other. */
-    aspect-ratio: 429.115 / 299.305;
-    width: 165%;
-    height: auto;
-    color: var(--foreground);
-    opacity: 0.045;
-    transform: translateX(-50%);
-    pointer-events: none;
-    user-select: none;
-  }
-
-  @media (min-width: 40rem) {
-    .footer-watermark {
-      bottom: -25%;
-      width: auto;
-      height: 125%;
-    }
-  }
-
-  /* Both preferences ask for fewer competing layers behind text. */
-  @media (prefers-reduced-transparency: reduce), (prefers-contrast: more) {
-    .footer-watermark {
-      display: none;
-    }
-  }
-</style>

@@ -1,7 +1,7 @@
 import { useEffect, useState } from "react";
 import { motion, useReducedMotion } from "motion/react";
 
-import { DitherSurface } from "@/components/ui/dither-surface";
+import { useDitherSurface } from "@/components/ui/dither-surface";
 import { INK } from "@/lib/dither";
 import { MEDIA_RENDER_REVISION } from "@/lib/media";
 import { SPRING } from "@/lib/motion";
@@ -31,6 +31,13 @@ export function ProfileCardPreview({
   const [revision, setRevision] = useState(initialRevision);
   const theme = useRenderedTheme();
   const reduceMotion = useReducedMotion();
+  const { surface, handlers } = useDitherSurface({
+    fill: INK,
+    variant: "gradient",
+    edge: 0.5,
+    alpha: 0.2,
+    pulse: true,
+  });
 
   useEffect(() => {
     let cancelled = false;
@@ -89,8 +96,9 @@ export function ProfileCardPreview({
       whileHover={reduceMotion ? undefined : { y: -2, scale: 1.006 }}
       whileTap={reduceMotion ? undefined : { scale: 0.992 }}
       transition={SPRING.snappy}
+      {...handlers}
     >
-      <DitherSurface fill={INK} variant="gradient" edge={0.5} alpha={0.16} />
+      {surface}
       <img
         src={`${apiBase}/api/users/${login}/card.svg?theme=${theme}&animate=1&v=${revision}&render=${MEDIA_RENDER_REVISION}`}
         alt={`gitdebt profile statistics for ${login}`}

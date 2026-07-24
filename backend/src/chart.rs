@@ -271,55 +271,31 @@ fn render_single_svg(
     let baseline = y_at(0.0);
     let first_x = x_at(xs[0]);
     let last_x = x_at(*xs.last().unwrap_or(&xs[0]));
-    // The dithered underfill has three modes. Default: a flat wash. GIF frame
-    // (`wave` is `Some`): the crest is displaced and the Bayer phase baked for
-    // that frame. On-site SVG (`animate`): a seeded wavy crest plus a dither
-    // that marches its Bayer phase forever via SMIL. Every mode collapses to a
-    // fully-painted, non-blank fill when a consumer strips the animation.
+    // The dithered underfill always uses the exact data path as its contour.
+    // Motion belongs to the ink density/pattern phase, never the geometry:
+    // separating the fill edge from the line creates a visible black seam and
+    // makes the shaded area appear to describe different data.
     let (area, area_fill, wave_defs) = if let Some(w) = wave {
-        let area = wave_area_path(
-            &xs,
-            series,
-            &x_at,
-            &y_at,
-            baseline,
-            geom.pad,
-            geom.plot_w,
-            &w,
-        );
+        let area = format!("{path} L {last_x:.1} {baseline:.1} L {first_x:.1} {baseline:.1} Z");
         // Advance the pattern by one full 8px tile per cycle, snapped to the
         // 2px cell grid so cells stay crisp (a marching threshold phase, not a
         // sub-pixel smear).
+        let seed_phase = ((w.seed as usize) & 3) * 2;
+        let seed_row = (((w.seed >> 2) as usize) & 3) * 2;
         let phase = if w.frames == 0 {
-            0
+            seed_phase
         } else {
-            (w.frame * 4 / w.frames) * 2
+            (seed_phase + (w.frame * 4 / w.frames) * 2) % 8
         };
         let dense = crate::texture::dense_cells();
         let defs = format!(
-            "  <defs><pattern id=\"gd-wave-fill\" width=\"8\" height=\"8\" patternUnits=\"userSpaceOnUse\" patternTransform=\"translate({phase}.5 .5)\"><g shape-rendering=\"crispEdges\" opacity=\"0.96\" transform=\"scale(2)\">{dense}</g></pattern></defs>\n",
+            "  <defs><pattern id=\"gd-wave-fill\" width=\"8\" height=\"8\" patternUnits=\"userSpaceOnUse\" patternTransform=\"translate({phase}.5 {seed_row}.5)\"><g shape-rendering=\"crispEdges\" opacity=\"0.96\" transform=\"scale(2)\">{dense}</g></pattern></defs>\n",
         );
         (area, "url(#gd-wave-fill)".to_string(), defs)
     } else if animate {
-        // Frame-0 crest gives a static wavy silhouette; the `<animateTransform>`
-        // marches the dither one full 8px tile per cycle (seamless loop) and is
-        // gated by the same `.motion` reduced-motion switch as the line draw.
-        // Stripping SMIL leaves the crest + phase-0 wash — never a flat monotone.
-        let crest = WaveSpec {
-            frame: 0,
-            frames: 1,
-            seed: crate::animated_gif::fnv1a(&cfg.repo),
-        };
-        let area = wave_area_path(
-            &xs,
-            series,
-            &x_at,
-            &y_at,
-            baseline,
-            geom.pad,
-            geom.plot_w,
-            &crest,
-        );
+        // March the dither one full 8px tile per cycle. Consumers that strip
+        // SMIL retain the complete phase-0 fill and exact data contour.
+        let area = format!("{path} L {last_x:.1} {baseline:.1} L {first_x:.1} {baseline:.1} Z");
         let dense = crate::texture::dense_cells();
         let defs = format!(
             "  <defs><pattern id=\"gd-wave-fill\" width=\"8\" height=\"8\" patternUnits=\"userSpaceOnUse\" patternTransform=\"translate(.5 .5)\"><g shape-rendering=\"crispEdges\" opacity=\"0.96\" transform=\"scale(2)\">{dense}</g><animateTransform class=\"motion\" attributeName=\"patternTransform\" type=\"translate\" from=\"0.5 0.5\" to=\"8.5 0.5\" dur=\"0.8s\" repeatCount=\"indefinite\" /></pattern></defs>\n",
@@ -376,7 +352,6 @@ fn render_single_svg(
       .motion {{ display: none; }}
     }}
   ]]></style>
-  <rect width="{w}" height="{h}" fill="{bg}" />
 {wave_defs}  <text class="title" x="{title_x}" y="{title_y}">{repo}</text>
   <text class="subtitle" x="{title_x}" y="{subtitle_y}">{subtitle}</text>
 {axis_lines}
@@ -389,7 +364,6 @@ fn render_single_svg(
         w = geom.w,
         h = geom.h,
         repo = escape_xml(&cfg.repo),
-        bg = theme.bg,
         fg = theme.fg,
         muted = theme.muted,
         title_x = geom.pad,
@@ -523,7 +497,6 @@ fn render_multi_svg_inner(
     .footer-link {{ fill: {muted}; font: 600 11px ui-sans-serif, system-ui, sans-serif; text-decoration: none; letter-spacing: 0.02em; }}
     .footer-link:hover {{ fill: {fg}; }}
   ]]></style>
-  <rect width="{w}" height="{h}" fill="{bg}" />
   <text class="title" x="{title_x}" y="{title_y}">{title}</text>
 {axis_lines}
 {paths}  <g class="legend-row">
@@ -534,7 +507,6 @@ fn render_multi_svg_inner(
         h = geom.h,
         fg = theme.fg,
         muted = theme.muted,
-        bg = theme.bg,
         title_x = geom.pad,
         title_y = geom.pad - 14.0,
         title = title,
@@ -781,7 +753,6 @@ fn render_overlay_svg_inner(
     .footer-link {{ fill: {muted}; font: 600 11px ui-sans-serif, system-ui, sans-serif; text-decoration: none; letter-spacing: 0.02em; }}
     .footer-link:hover {{ fill: {fg}; }}
   ]]></style>
-  <rect width="{w}" height="{h}" fill="{bg}" />
   <text class="title" x="{title_x}" y="{title_y}">{title}</text>
 {note}{axis}{paths}  <g class="legend-row">
 {legend}  </g>
@@ -792,7 +763,6 @@ fn render_overlay_svg_inner(
         repo = escape_xml(&overlay.repo),
         fg = theme.fg,
         muted = theme.muted,
-        bg = theme.bg,
         title_x = geom.pad,
         title_y = geom.pad - 14.0,
         title = title,
@@ -929,57 +899,6 @@ impl YScale {
             nice_y_ticks(self.y_max as f32)
         }
     }
-}
-
-/// The wave-motion underfill: the line's y values displaced downward by
-/// three layered sines that are loop-periodic in `frame / frames` (integer
-/// time multipliers ⇒ frame N == frame 0, a seamless cycle). Phases come
-/// from the caller's seed so every repo gets a stable, unique swell.
-#[allow(clippy::too_many_arguments)]
-fn wave_area_path(
-    xs: &[f32],
-    series: &[Point],
-    x_at: &impl Fn(f32) -> f32,
-    y_at: &impl Fn(f32) -> f32,
-    baseline: f32,
-    pad: f32,
-    plot_w: f32,
-    wave: &WaveSpec,
-) -> String {
-    const TAU: f32 = std::f32::consts::TAU;
-    let t = if wave.frames == 0 {
-        0.0
-    } else {
-        wave.frame as f32 / wave.frames as f32
-    };
-    let p1 = (wave.seed & 0x3ff) as f32 / 1024.0 * TAU;
-    let p2 = ((wave.seed >> 10) & 0x3ff) as f32 / 1024.0 * TAU;
-    let p3 = ((wave.seed >> 20) & 0x3ff) as f32 / 1024.0 * TAU;
-    let mut s = String::new();
-    let mut first_x = pad;
-    let mut last_x = pad;
-    for (i, p) in series.iter().enumerate() {
-        let x = x_at(xs[i]);
-        let u = ((x - pad) / plot_w.max(1.0)).clamp(0.0, 1.0);
-        let swell = (TAU * (2.0 * u + t) + p1).sin() * 1.7
-            + (TAU * (3.7 * u - t) + p2).sin() * 1.1
-            + (TAU * (6.1 * u + 2.0 * t) + p3).sin() * 0.7;
-        let y = y_at(p.stars as f32);
-        // The undulating edge always sits just below the crisp line and
-        // never dips past the baseline.
-        let edge = (y + 3.6 + swell).clamp(y + 0.5, baseline);
-        if i == 0 {
-            first_x = x;
-            s.push_str(&format!("M {x:.1} {edge:.1}"));
-        } else {
-            s.push_str(&format!(" L {x:.1} {edge:.1}"));
-        }
-        last_x = x;
-    }
-    s.push_str(&format!(
-        " L {last_x:.1} {baseline:.1} L {first_x:.1} {baseline:.1} Z"
-    ));
-    s
 }
 
 fn build_path(
@@ -1194,14 +1113,12 @@ fn empty_svg(cfg: &ChartConfig, theme: &Theme) -> String {
   <style><![CDATA[
     .footer-link {{ fill: {muted}; font: 600 11px ui-sans-serif, system-ui, sans-serif; text-decoration: none; letter-spacing: 0.02em; }}
   ]]></style>
-  <rect width="{w}" height="{h}" fill="{bg}" />
   <text x="{cx}" y="{cy}" text-anchor="middle" fill="{muted}"
         font-family="ui-sans-serif, system-ui, sans-serif" font-size="14">No star history available</text>
 {footer}
 </svg>"##,
         w = cfg.width,
         h = cfg.height,
-        bg = theme.bg,
         cx = cfg.width / 2,
         cy = cfg.height / 2,
         muted = theme.muted,

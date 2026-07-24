@@ -59,7 +59,7 @@ fn max_pending_analyses() -> i64 {
         .unwrap_or(DEFAULT_MAX_PENDING_ANALYSES)
 }
 
-fn analysis_freshness() -> chrono::Duration {
+pub(crate) fn analysis_freshness() -> chrono::Duration {
     let hours = std::env::var("REPO_ANALYSIS_FRESH_HOURS")
         .ok()
         .and_then(|value| value.parse().ok())
@@ -323,7 +323,10 @@ const EVICT_EVERY_N_JOBS: u64 = 16;
 
 async fn run_worker(worker_id: String, ctx: AnalysisCtx) {
     tracing::info!(worker_id, "repo-analysis worker started");
-    let idle = Duration::from_secs(5);
+    // Interactive requests should not wait behind a five-second polling nap.
+    // One indexed claim per idle worker per second keeps wake-up latency low
+    // without turning an empty queue into a busy loop.
+    let idle = Duration::from_secs(1);
     let mut jobs_since_evict: u64 = 0;
     loop {
         let job = match claim_one(&ctx.db, &worker_id).await {
@@ -643,25 +646,15 @@ async fn process(job: &AnalysisJob, ctx: &AnalysisCtx) -> Result<usize> {
         .await?;
     }
 
-    // Two independent post-passes, overlapped with `tokio::join!`:
-    //   * author enrichment is GitHub-API-bound (network RTT, rate-limit
-    //     acquire waits) and writes `repo_author_stats`;
-    //   * line counting is CPU-bound (`spawn_blocking` walk) and writes
-    //     `repo_lines`.
-    // They touch disjoint tables and only read the (immutable) clone, so
-    // running them concurrently overlaps the network wait with the CPU work
-    // instead of serializing them. Each logs + swallows its own error so a
-    // failure in one never aborts the other (matching the prior best-effort
-    // behavior).
+    // Language counting is the only post-pass on the completion path.
+    // Author/login enrichment is presentation metadata owned by the bounded
+    // background sweep spawned with the pool. Waiting up to 15 seconds for
+    // GitHub identity lookups here kept the queue row—and therefore the live
+    // "analyzing" UI—open after every repository signal was already saved.
     update_work_progress(&ctx.db, repo, "finishing", Some(n), n).await?;
-    let github = user_scoped_github(job, ctx).await;
-    let enrich = run_author_enrichment(&ctx.db, Some(handle.path.as_path()), repo, &github);
-    let line_counts = async {
-        if let Err(e) = run_line_counts(&ctx.db, &handle, repo).await {
-            tracing::warn!(repo, error = %e, "line counts failed");
-        }
-    };
-    tokio::join!(enrich, line_counts);
+    if let Err(e) = run_line_counts(&ctx.db, &handle, repo).await {
+        tracing::warn!(repo, error = %e, "line counts failed");
+    }
     repo_stats::record_analysis_details(
         &ctx.db,
         repo,
@@ -766,7 +759,6 @@ async fn run_line_counts(db: &Db, handle: &RepoHandle, repo: &str) -> Result<()>
 /// letting a since-created GitHub account eventually resolve.
 const AUTHOR_ENRICH_TTL: chrono::Duration = chrono::Duration::days(30);
 const AUTHOR_ENRICH_MAX_PER_RUN: i64 = 24;
-const AUTHOR_ENRICH_TIMEOUT: Duration = Duration::from_secs(15);
 
 /// Deferral stamp for rows a pass *selected* but could not genuinely
 /// attempt — its wall-clock budget lapsed, the shared GitHub budget was
@@ -789,23 +781,6 @@ const AUTHOR_ENRICH_DEFER: chrono::Duration = chrono::Duration::hours(6);
 /// doesn't pile up acquire wakeups, large enough that wall-clock drops
 /// ~6× versus serial.
 const AUTHOR_ENRICH_CONCURRENCY: usize = 6;
-
-/// Author identity is presentation-only metadata. A depleted shared GitHub
-/// budget must never keep a durable repository-analysis worker occupied
-/// until the hourly reset, so every best-effort pass gets a small fixed
-/// wall-clock budget. Never returns an error: analysis completion does not
-/// depend on this.
-async fn run_author_enrichment(
-    db: &Db,
-    repo_path: Option<&std::path::Path>,
-    repo: &str,
-    github: &Arc<GithubClient>,
-) {
-    let deadline = Instant::now() + AUTHOR_ENRICH_TIMEOUT;
-    if let Err(error) = enrich_author_batch(db, repo_path, repo, github, deadline).await {
-        tracing::warn!(repo, %error, "author-login enrichment failed");
-    }
-}
 
 /// One bounded author-enrichment pass over a single repository.
 ///

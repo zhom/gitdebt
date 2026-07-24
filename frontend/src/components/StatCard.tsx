@@ -74,11 +74,12 @@ export function StatCard({
       if (!targetRepo) return;
       const detail = (event as CustomEvent<{
         repo?: string;
-        analysis?: { phase?: string };
+        analysis?: { phase?: string; complete?: boolean };
       }>).detail;
       if (
         detail?.repo?.toLowerCase() === targetRepo.toLowerCase() &&
-        detail.analysis?.phase === "complete"
+        (detail.analysis?.phase === "complete" ||
+          detail.analysis?.complete === true)
       ) {
         if (timerRef.current) clearTimeout(timerRef.current);
         setPhase("gathering");

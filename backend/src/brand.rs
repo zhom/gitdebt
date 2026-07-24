@@ -97,7 +97,7 @@ pub fn footer_lockup(right_x: f32, baseline_y: f32, theme: &Theme) -> String {
     // Centre the glyph on the wordmark's x-height rather than its baseline.
     let mark_y = baseline_y - 4.0 - mark_height(MARK_W) / 2.0;
     format!(
-        "  <a href=\"https://gitdebt.com\" target=\"_blank\" rel=\"noopener\" aria-label=\"gitdebt\">\n{}    <text class=\"footer-link\" x=\"{right_x:.1}\" y=\"{baseline_y:.1}\" text-anchor=\"end\" fill=\"{muted}\">gitdebt</text>\n  </a>\n",
+        "  <a href=\"https://gitdebt.com\" target=\"_blank\" rel=\"noopener\" aria-label=\"gitdebt\">\n{}    <text class=\"footer-link\" x=\"{right_x:.1}\" y=\"{baseline_y:.1}\" text-anchor=\"end\" fill=\"{muted}\" font-family=\"ui-monospace, SFMono-Regular, Menlo, Consolas, monospace\" font-size=\"11\" font-weight=\"600\" letter-spacing=\"0.02em\">gitdebt</text>\n  </a>\n",
         logo_mark(mark_x, mark_y, MARK_W, theme.muted),
         muted = theme.muted,
     )

@@ -2,6 +2,8 @@ import assert from "node:assert/strict";
 import { test } from "node:test";
 
 import {
+  ambientOrbitPoint,
+  ambientWave,
   brailleGlyph,
   contourSignal,
   mosaicSignal,
@@ -48,6 +50,22 @@ test("braille activity is deterministic and uses only braille glyphs", () => {
   assert.match(glyph, /^[\u2800-\u28ff]$/u);
 });
 
+test("ambient wave and orbit motion stay bounded and respond to time", () => {
+  const seed = signalSeed("zhom/donutbrowser");
+  const values = [3_445, 1_567, 367];
+  const wave = ambientWave(seed, 0.42, 2, 1, values);
+  const movedWave = ambientWave(seed, 0.42, 2, 8, values);
+  assert.ok(wave >= 0 && wave <= 1);
+  assert.notEqual(wave, movedWave);
+
+  const orbit = ambientOrbitPoint(seed, 9, 48, 2, 1, values);
+  const movedOrbit = ambientOrbitPoint(seed, 9, 48, 2, 8, values);
+  assert.ok(orbit.x >= 0 && orbit.x <= 1);
+  assert.ok(orbit.y >= 0 && orbit.y <= 1);
+  assert.ok(orbit.energy >= 0 && orbit.energy <= 1);
+  assert.notDeepEqual(orbit, movedOrbit);
+});
+
 test("signal normalization handles empty and non-finite inputs", () => {
   assert.deepEqual(normalizeSignals([]), [0.5]);
   assert.deepEqual(normalizeSignals([Number.NaN, Number.POSITIVE_INFINITY]), [0.5]);
@@ -70,5 +88,18 @@ test("route insight selects repository, profile, and comparison grammars", () =>
   );
   assert.equal(comparison.kind, "comparison");
   assert.equal(comparison.mode, "contour");
+  assert.deepEqual(comparison.labels, ["denoland/deno", "oven-sh/bun"]);
+});
+
+test("route insights never expose Astro output extensions", () => {
+  const repo = pageInsightForPath("/zhom/donutbrowser.html");
+  assert.equal(repo.seed, "zhom/donutbrowser");
+  assert.deepEqual(repo.labels, ["zhom/donutbrowser", "stars + code health"]);
+  assert.doesNotMatch(repo.question, /\.html/i);
+  assert.doesNotMatch(repo.answer, /\.html/i);
+
+  const comparison = pageInsightForPath(
+    "/vs/denoland/deno/oven-sh/bun.html?mode=date",
+  );
   assert.deepEqual(comparison.labels, ["denoland/deno", "oven-sh/bun"]);
 });

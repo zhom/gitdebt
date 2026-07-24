@@ -13,6 +13,7 @@ import BaseHead from "@/components/BaseHead.astro";
 import Seo from "@/components/Seo.astro";
 import SiteHeader from "@/components/SiteHeader.astro";
 import SiteFooter from "@/components/SiteFooter.astro";
+import { PageAmbientSignal } from "@/components/PageAmbientSignal";
 import { RepoHero } from "@/components/RepoHero";
 import { ChartViewer } from "@/components/ChartViewer";
 import { EarnedBadges } from "@/components/EarnedBadges";
@@ -305,6 +306,16 @@ const vsLinks = (categoryRelated.length > 0 ? categoryRelated : FALLBACK_SUGGEST
   </head>
   <body>
     <div class="isolate flex min-h-dvh flex-col">
+      <PageAmbientSignal
+        client:load
+        mode="repository"
+        seed={repoSlug}
+        values={[
+          data?.total_stars ?? 0,
+          data?.history_event_count ?? 0,
+          history.length,
+        ]}
+      />
       <SiteHeader />
 
       <main id="main-content" class="mx-auto w-full max-w-6xl flex-1 px-6 py-12">

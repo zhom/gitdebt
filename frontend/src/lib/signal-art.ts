@@ -133,6 +133,73 @@ export function contourSignal(
   return clampUnit(0.5 + left * 0.2 + right * 0.18 + basin * 0.12);
 }
 
+/**
+ * A bounded, data-shaped path for the repository background's moving ASCII
+ * currents. Bands remain stable for a route but travel at distinct speeds.
+ */
+export function ambientWave(
+  seed: number,
+  u: number,
+  band: number,
+  phase: number,
+  values: readonly number[],
+): number {
+  const signals = normalizeSignals(values);
+  const strength = signals[band % signals.length] ?? 0.5;
+  const offset = ((seed >>> (band * 3)) & 255) / 255;
+  const center = 0.2 + band * 0.22;
+  const primary = Math.sin(
+    u * Math.PI * (2.2 + strength * 1.8) +
+      phase * (0.2 + band * 0.045) +
+      offset * Math.PI * 2,
+  );
+  const detail = Math.sin(
+    u * Math.PI * (9 + band * 1.7) -
+      phase * 0.12 +
+      strength * Math.PI,
+  );
+  return clampUnit(center + primary * (0.07 + strength * 0.045) + detail * 0.018);
+}
+
+export type AmbientOrbitPoint = {
+  x: number;
+  y: number;
+  energy: number;
+};
+
+/**
+ * Elliptical braille packets for profile backgrounds. Returning normalized
+ * coordinates keeps the painter responsive and makes the motion testable.
+ */
+export function ambientOrbitPoint(
+  seed: number,
+  index: number,
+  total: number,
+  ring: number,
+  phase: number,
+  values: readonly number[],
+): AmbientOrbitPoint {
+  const signals = normalizeSignals(values);
+  const strength = signals[ring % signals.length] ?? 0.5;
+  const seedPhase = ((seed >>> (ring * 4)) & 511) / 511;
+  const angle =
+    (index / Math.max(1, total)) * Math.PI * 2 +
+    phase * (0.07 + ring * 0.018) * (ring % 2 === 0 ? 1 : -1) +
+    seedPhase * Math.PI * 2;
+  const radiusX = 0.13 + ring * 0.048 + strength * 0.02;
+  const radiusY = radiusX * (0.44 + strength * 0.12);
+  const ripple = 1 + Math.sin(angle * (3 + ring) - phase * 0.16) * 0.035;
+  return {
+    x: clampUnit(0.68 + Math.cos(angle) * radiusX * ripple),
+    y: clampUnit(0.34 + Math.sin(angle) * radiusY * ripple),
+    energy: clampUnit(
+      0.28 +
+        strength * 0.42 +
+        signalHash(seed ^ ring, index, ring) * 0.3,
+    ),
+  };
+}
+
 function segmentValues(segments: readonly string[], seed: string): number[] {
   return [
     ...segments.map((segment) => Math.max(1, segment.length)),
@@ -151,6 +218,15 @@ export function pageInsightForPath(pathname: string): PageInsight {
     .split("/")
     .filter(Boolean)
     .map((segment) => decodeURIComponent(segment).toLowerCase());
+
+  // Astro's file output may expose `/owner/repo.html` while prerendering.
+  // Keep that implementation detail out of visible copy and visual seeds.
+  const finalSegment = segments.at(-1);
+  if (finalSegment === "index.html" || finalSegment === "index.htm") {
+    segments.pop();
+  } else if (finalSegment) {
+    segments[segments.length - 1] = finalSegment.replace(/\.(?:html?|md)$/i, "");
+  }
   const seed = segments.join("/") || "gitdebt";
 
   if (segments[0] === "vs" && segments.length >= 5) {

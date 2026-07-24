@@ -7,8 +7,8 @@
 //! For theme-aware README embedding, point a `<picture>` element at the
 //! `light` and `dark` URLs separately.
 //!
-//! Format: each stat is reachable as `.svg`, `.png`, or `.webp` via a
-//! single dispatcher route. PNG / WebP are rasterized from the SVG via
+//! Format: each stat is reachable as `.svg`, `.gif`, `.png`, or `.webp` via a
+//! single dispatcher route. GIF / PNG / WebP are rasterized from the SVG via
 //! `raster::rasterize` and cached separately (`stat_svg_cache` holds
 //! the source SVG; `raster_cache` holds the encoded bytes).
 
@@ -500,6 +500,7 @@ enum StatKind {
 #[derive(Copy, Clone, Debug, PartialEq, Eq)]
 enum OutputFormat {
     Svg,
+    Gif,
     Png,
     Webp,
 }
@@ -508,13 +509,14 @@ impl OutputFormat {
     fn cache_suffix(self) -> &'static str {
         match self {
             OutputFormat::Svg => "svg",
+            OutputFormat::Gif => "gif",
             OutputFormat::Png => "png",
             OutputFormat::Webp => "webp",
         }
     }
     fn raster(self) -> Option<RasterFormat> {
         match self {
-            OutputFormat::Svg => None,
+            OutputFormat::Svg | OutputFormat::Gif => None,
             OutputFormat::Png => Some(RasterFormat::Png),
             OutputFormat::Webp => Some(RasterFormat::Webp),
         }
@@ -536,6 +538,7 @@ fn parse_filename(s: &str) -> Option<(StatKind, OutputFormat)> {
     };
     let format = match ext {
         "svg" => OutputFormat::Svg,
+        "gif" => OutputFormat::Gif,
         "png" => OutputFormat::Png,
         "webp" => OutputFormat::Webp,
         _ => return None,
@@ -592,6 +595,18 @@ async fn stat_dispatcher(
         if q.in_app() {
             svg = brand::without_embed_footer(svg);
         }
+        if format == OutputFormat::Gif {
+            let encoded = crate::api::with_raster_permit(move || {
+                crate::animated_gif::encode_dither_loop(&svg)
+            })
+            .await?
+            .map_err(ApiError::from)?;
+            return Ok(gif_response_with_policy(
+                &request_headers,
+                Arc::new(encoded.bytes),
+                true,
+            ));
+        }
         let Some(raster_format) = format.raster() else {
             return Ok(svg_response_with_policy(
                 &request_headers,
@@ -631,6 +646,20 @@ async fn stat_dispatcher(
     let mut svg = crate::texture::decorate(stat_svg_motion(animated_svg, q.animate()), theme);
     if q.in_app() {
         svg = brand::without_embed_footer(svg);
+    }
+
+    if format == OutputFormat::Gif {
+        let gif_key = format!("{svg_key}|gif|{}", if q.in_app() { "app" } else { "embed" });
+        if let Some(cached) = state.raster_cache.get(&gif_key).await {
+            return Ok(gif_response_with_policy(&request_headers, cached, false));
+        }
+        let encoded =
+            crate::api::with_raster_permit(move || crate::animated_gif::encode_dither_loop(&svg))
+                .await?
+                .map_err(ApiError::from)?;
+        let arc = Arc::new(encoded.bytes);
+        state.raster_cache.insert(gif_key, arc.clone()).await;
+        return Ok(gif_response_with_policy(&request_headers, arc, false));
     }
 
     let Some(raster_format) = format.raster() else {
@@ -1138,6 +1167,17 @@ fn raster_response_with_policy(
     crate::api::conditional_media_response(request_headers, headers, (*bytes).clone())
 }
 
+fn gif_response_with_policy(
+    request_headers: &HeaderMap,
+    bytes: Arc<Vec<u8>>,
+    pending: bool,
+) -> Response {
+    let mut headers = HeaderMap::new();
+    headers.insert(header::CONTENT_TYPE, HeaderValue::from_static("image/gif"));
+    headers.insert(header::CACHE_CONTROL, stat_cache_control(pending));
+    crate::api::conditional_media_response(request_headers, headers, (*bytes).clone())
+}
+
 /// Cache policy split for the stat charts. Ready charts ride the same 4h
 /// edge policy as the other media (`api::MEDIA_CACHE_CONTROL` semantics);
 /// a repo whose analysis hasn't landed yet renders a "pending" frame that
@@ -1230,11 +1270,14 @@ mod tests {
             parse_filename("commit-trend.webp"),
             Some((StatKind::CommitTrend, OutputFormat::Webp))
         ));
+        assert!(matches!(
+            parse_filename("commit-trend.gif"),
+            Some((StatKind::CommitTrend, OutputFormat::Gif))
+        ));
     }
 
     #[test]
     fn parse_filename_rejects_unknown_names_and_formats() {
-        assert!(parse_filename("bus-factor.gif").is_none());
         assert!(parse_filename("bus-factor").is_none());
         assert!(parse_filename("unknown.svg").is_none());
     }

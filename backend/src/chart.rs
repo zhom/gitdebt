@@ -113,15 +113,15 @@ impl Default for ChartConfig {
     }
 }
 
-/// Categorical series palette. The product is deliberately monochrome:
-/// light embeds run from ink to mid-gray, while dark embeds reverse that
-/// relationship. Every tone keeps usable contrast against its canvas and
-/// the stable series order keeps a repo's treatment deterministic.
+/// Categorical series palette shared by exports and the interactive web
+/// charts. The first series is the product's star-history blue; subsequent
+/// series use the established signal colors so comparisons remain legible
+/// without collapsing into eight nearly-identical gray lines.
 pub const PALETTE_LIGHT: [&str; 8] = [
-    "#0a0a0a", "#262626", "#404040", "#525252", "#626262", "#737373", "#7f7f7f", "#8a8a8a",
+    "#087fea", "#7c4dff", "#d729a9", "#0a8f55", "#d06a00", "#d33434", "#007f91", "#525252",
 ];
 pub const PALETTE_DARK: [&str; 8] = [
-    "#fafafa", "#e5e5e5", "#d4d4d4", "#c4c4c4", "#b8b8b8", "#a3a3a3", "#939393", "#828282",
+    "#358ff3", "#966eff", "#f05abe", "#28d26e", "#ff9632", "#f04646", "#23b8c8", "#d4d4d4",
 ];
 
 /// The categorical palette for `theme`. `palette(theme)[i % 8]` is the
@@ -243,6 +243,26 @@ pub(crate) fn render_svg_wave_frame(
     )
 }
 
+/// Blue ink is deliberately most solid at the baseline and resolves into a
+/// sparse ordered-dither field at the data contour. Keeping this luminance
+/// ramp separate from the moving cell pattern makes every animation frame
+/// describe the exact same data while matching the interactive chart.
+fn star_area_defs(color: &str, top: f32, bottom: f32) -> String {
+    format!(
+        r##"<linearGradient id="gd-star-base" gradientUnits="userSpaceOnUse" x1="0" y1="{top:.1}" x2="0" y2="{bottom:.1}">
+      <stop offset="0" stop-color="{color}" stop-opacity="0.07" />
+      <stop offset="0.48" stop-color="{color}" stop-opacity="0.27" />
+      <stop offset="1" stop-color="{color}" stop-opacity="0.94" />
+    </linearGradient>
+    <linearGradient id="gd-star-dither-alpha" gradientUnits="userSpaceOnUse" x1="0" y1="{top:.1}" x2="0" y2="{bottom:.1}">
+      <stop offset="0" stop-color="#fff" stop-opacity="0.98" />
+      <stop offset="0.56" stop-color="#fff" stop-opacity="0.74" />
+      <stop offset="1" stop-color="#fff" stop-opacity="0.14" />
+    </linearGradient>
+    <mask id="gd-star-dither-mask"><rect width="100%" height="100%" fill="url(#gd-star-dither-alpha)" /></mask>"##,
+    )
+}
+
 fn render_single_svg(
     series: &[Point],
     cfg: &ChartConfig,
@@ -277,35 +297,34 @@ fn render_single_svg(
     // makes the shaded area appear to describe different data.
     let (area, area_fill, wave_defs) = if let Some(w) = wave {
         let area = format!("{path} L {last_x:.1} {baseline:.1} L {first_x:.1} {baseline:.1} Z");
-        // Advance the pattern by one full 8px tile per cycle, snapped to the
-        // 2px cell grid so cells stay crisp (a marching threshold phase, not a
-        // sub-pixel smear).
-        let seed_phase = ((w.seed as usize) & 3) * 2;
-        let seed_row = (((w.seed >> 2) as usize) & 3) * 2;
-        let phase = if w.frames == 0 {
-            seed_phase
-        } else {
-            (seed_phase + (w.frame * 4 / w.frames) * 2) % 8
-        };
-        let dense = crate::texture::dense_cells();
+        // The 32-column cell strip advances a seeded sine threshold, matching
+        // the interactive chart's density wave without moving the contour.
+        let dense = crate::texture::wave_cells_with(color, w.frame, w.frames, w.seed);
         let defs = format!(
-            "  <defs><pattern id=\"gd-wave-fill\" width=\"8\" height=\"8\" patternUnits=\"userSpaceOnUse\" patternTransform=\"translate({phase}.5 {seed_row}.5)\"><g shape-rendering=\"crispEdges\" opacity=\"0.96\" transform=\"scale(2)\">{dense}</g></pattern></defs>\n",
+            "  <defs><pattern id=\"gd-wave-fill\" width=\"64\" height=\"8\" patternUnits=\"userSpaceOnUse\" patternTransform=\"translate(.5 .5)\"><g shape-rendering=\"crispEdges\" opacity=\"0.96\" transform=\"scale(2)\">{dense}</g></pattern>{}</defs>\n",
+            star_area_defs(color, geom.pad, baseline),
         );
         (area, "url(#gd-wave-fill)".to_string(), defs)
     } else if animate {
         // March the dither one full 8px tile per cycle. Consumers that strip
         // SMIL retain the complete phase-0 fill and exact data contour.
         let area = format!("{path} L {last_x:.1} {baseline:.1} L {first_x:.1} {baseline:.1} Z");
-        let dense = crate::texture::dense_cells();
+        let dense = crate::texture::dense_cells_with(color);
         let defs = format!(
-            "  <defs><pattern id=\"gd-wave-fill\" width=\"8\" height=\"8\" patternUnits=\"userSpaceOnUse\" patternTransform=\"translate(.5 .5)\"><g shape-rendering=\"crispEdges\" opacity=\"0.96\" transform=\"scale(2)\">{dense}</g><animateTransform class=\"motion\" attributeName=\"patternTransform\" type=\"translate\" from=\"0.5 0.5\" to=\"8.5 0.5\" dur=\"0.8s\" repeatCount=\"indefinite\" /></pattern></defs>\n",
+            "  <defs><pattern id=\"gd-wave-fill\" width=\"8\" height=\"8\" patternUnits=\"userSpaceOnUse\" patternTransform=\"translate(.5 .5)\"><g shape-rendering=\"crispEdges\" opacity=\"0.96\" transform=\"scale(2)\">{dense}</g><animateTransform class=\"motion\" attributeName=\"patternTransform\" type=\"translate\" from=\"0.5 0.5\" to=\"8.5 0.5\" dur=\"0.8s\" repeatCount=\"indefinite\" /></pattern>{}</defs>\n",
+            star_area_defs(color, geom.pad, baseline),
         );
         (area, "url(#gd-wave-fill)".to_string(), defs)
     } else {
+        let defs = format!(
+            "  <defs><pattern id=\"gd-wave-fill\" width=\"8\" height=\"8\" patternUnits=\"userSpaceOnUse\" patternTransform=\"translate(.5 .5)\"><g shape-rendering=\"crispEdges\" opacity=\"0.96\" transform=\"scale(2)\">{}</g></pattern>{}</defs>\n",
+            crate::texture::dense_cells_with(color),
+            star_area_defs(color, geom.pad, baseline),
+        );
         (
             format!("{path} L {last_x:.1} {baseline:.1} L {first_x:.1} {baseline:.1} Z"),
-            crate::texture::FILL.to_string(),
-            String::new(),
+            "url(#gd-wave-fill)".to_string(),
+            defs,
         )
     };
     let dash = approximate_path_length(&xs, series, &x_at, &y_at);
@@ -355,7 +374,8 @@ fn render_single_svg(
 {wave_defs}  <text class="title" x="{title_x}" y="{title_y}">{repo}</text>
   <text class="subtitle" x="{title_x}" y="{subtitle_y}">{subtitle}</text>
 {axis_lines}
-  <path d="{area}" fill="{area_fill}" opacity="0.62" />
+  <path d="{area}" fill="url(#gd-star-base)" />
+  <path d="{area}" fill="{area_fill}" mask="url(#gd-star-dither-mask)" opacity="0.94" />
   <path d="{path}" fill="none" stroke="{color}" stroke-width="2.5" stroke-linecap="round" stroke-linejoin="round" stroke-dasharray="{dash}" stroke-dashoffset="{dash_offset}">
 {motion}
   </path>
@@ -380,7 +400,7 @@ fn render_single_svg(
         axis_lines = axis_lines,
         subtitle = escape_xml(&subtitle_text),
         metric_label = escape_xml(&cfg.metric_label),
-        footer = brand::footer_lockup(geom.w - geom.pad, geom.h - 12.0, theme),
+        footer = brand::footer_lockup(geom.w - geom.pad, geom.h - 8.0, theme),
     )
 }
 
@@ -390,10 +410,10 @@ fn render_single_svg(
 /// (slug + color swatch). `series_per_repo` is `(slug, points)` in the
 /// order the caller wants them treated — index 0 gets the strongest ink.
 ///
-/// Output is intentionally **static**: no SMIL animation, because GitHub
-/// sanitizes `<animate>` out of embedded SVGs and an animated overlay
-/// would render blank in a README. Determinism holds: same input → same
-/// bytes.
+/// The semantic final frame is always baked into the paths. `animate=1` adds
+/// a brief line reveal plus a looping ordered-dither phase; consumers that
+/// sanitize SMIL still receive the complete chart. Determinism holds: same
+/// input → same bytes.
 pub fn render_multi_svg(
     series_per_repo: &[(String, Vec<Point>)],
     cfg: &ChartConfig,
@@ -459,15 +479,34 @@ fn render_multi_svg_inner(
     // One path per repo, plus a legend row.
     let mut paths = String::new();
     let mut legend = String::new();
+    let mut series_defs = String::new();
     let legend_x = geom.pad;
     let legend_y = geom.h - 12.0;
     let mut lx = legend_x;
     for (i, ((slug, series), xs)) in active.iter().zip(per_xs.iter()).enumerate() {
         let color = pal[i % pal.len()];
         let d = build_path(xs, series, &x_at, &y_at);
+        let dash = approximate_path_length(xs, series, &x_at, &y_at);
+        let motion = if opts.animate {
+            format!(
+                "<animate class=\"motion\" attributeName=\"stroke-dashoffset\" from=\"{dash}\" to=\"0\" begin=\"{begin:.2}s\" dur=\"{dur}s\" fill=\"freeze\" calcMode=\"spline\" keySplines=\"0.23 1 0.32 1\" />",
+                begin = (i as f32 * 0.07).min(0.35),
+                dur = cfg.draw_seconds,
+            )
+        } else {
+            String::new()
+        };
+        let pattern_motion = if opts.animate {
+            "<animateTransform class=\"motion\" attributeName=\"patternTransform\" type=\"translate\" from=\"0.5 0.5\" to=\"8.5 0.5\" dur=\"1.6s\" repeatCount=\"indefinite\" />"
+        } else {
+            ""
+        };
+        series_defs.push_str(&format!(
+            "    <pattern id=\"gd-series-{i}\" width=\"8\" height=\"8\" patternUnits=\"userSpaceOnUse\" patternTransform=\"translate(.5 .5)\"><g shape-rendering=\"crispEdges\" opacity=\"0.96\" transform=\"scale(2)\">{cells}</g>{pattern_motion}</pattern>\n",
+            cells = crate::texture::dense_cells_with(color),
+        ));
         paths.push_str(&format!(
-            "  <path d=\"{d}\" fill=\"none\" stroke=\"{pixel_fill}\" stroke-width=\"8\" opacity=\"0.38\" stroke-linecap=\"square\" stroke-linejoin=\"miter\" />\n  <path d=\"{d}\" fill=\"none\" stroke=\"{color}\" stroke-width=\"2.5\" stroke-linecap=\"round\" stroke-linejoin=\"round\" />\n",
-            pixel_fill = crate::texture::FILL,
+            "  <path d=\"{d}\" fill=\"none\" stroke=\"url(#gd-series-{i})\" stroke-width=\"8\" opacity=\"0.34\" stroke-linecap=\"square\" stroke-linejoin=\"miter\" />\n  <path d=\"{d}\" fill=\"none\" stroke=\"{color}\" stroke-width=\"2.5\" stroke-linecap=\"round\" stroke-linejoin=\"round\" stroke-dasharray=\"{dash}\" stroke-dashoffset=\"0\">{motion}</path>\n",
         ));
         // Legend swatch + label. Advance `lx` by an estimate of the label
         // width so entries don't overlap (deterministic: 6.5px/char).
@@ -496,7 +535,10 @@ fn render_multi_svg_inner(
     .legend {{ fill: {fg}; font: 13px ui-sans-serif, system-ui, sans-serif; }}
     .footer-link {{ fill: {muted}; font: 600 11px ui-sans-serif, system-ui, sans-serif; text-decoration: none; letter-spacing: 0.02em; }}
     .footer-link:hover {{ fill: {fg}; }}
+    @media (prefers-reduced-motion: reduce) {{ .motion {{ display: none; }} }}
   ]]></style>
+  <defs>
+{series_defs}  </defs>
   <text class="title" x="{title_x}" y="{title_y}">{title}</text>
 {axis_lines}
 {paths}  <g class="legend-row">
@@ -507,13 +549,14 @@ fn render_multi_svg_inner(
         h = geom.h,
         fg = theme.fg,
         muted = theme.muted,
+        series_defs = series_defs,
         title_x = geom.pad,
         title_y = geom.pad - 14.0,
         title = title,
         axis_lines = axis_lines,
         paths = paths,
         legend = legend,
-        footer = brand::footer_lockup(geom.w - geom.pad, geom.h - 28.0, theme),
+        footer = brand::footer_lockup(geom.w - geom.pad, geom.h - 8.0, theme),
     )
 }
 
@@ -770,7 +813,7 @@ fn render_overlay_svg_inner(
         axis = axis,
         paths = paths,
         legend = legend,
-        footer = brand::footer_lockup(geom.w - geom.pad, geom.h - 28.0, theme),
+        footer = brand::footer_lockup(geom.w - geom.pad, geom.h - 8.0, theme),
     )
 }
 
@@ -1124,7 +1167,7 @@ fn empty_svg(cfg: &ChartConfig, theme: &Theme) -> String {
         muted = theme.muted,
         footer = brand::footer_lockup(
             cfg.width as f32 - cfg.padding as f32,
-            cfg.height as f32 - 12.0,
+            cfg.height as f32 - 8.0,
             theme,
         ),
     )
@@ -1283,12 +1326,13 @@ mod tests {
         // Deterministic bytes.
         assert_eq!(anim, render_svg(&series, &cfg, &DARK, &animated_opts()));
 
-        // Default (static) chart is a flat wash: no marching transform, and the
-        // area keeps the shared pixel-fill pattern.
+        // Default (static) chart keeps the same blue ordered-dither treatment,
+        // frozen at phase zero, and never emits a marching transform.
         let stat = render_svg(&series, &cfg, &DARK, &ChartOpts::default());
         assert!(!stat.contains("animateTransform"));
-        assert!(!stat.contains("url(#gd-wave-fill)"));
-        assert!(stat.contains(crate::texture::FILL));
+        assert!(stat.contains("url(#gd-wave-fill)"));
+        assert!(stat.contains("#358ff3"));
+        assert!(stat.contains("gd-star-dither-mask"));
     }
 
     #[test]
@@ -1424,16 +1468,31 @@ mod tests {
             &ChartOpts::default(),
         );
         // First two light palette colors must appear (series 0 and 1).
-        assert!(light.contains("#0a0a0a"));
-        assert!(light.contains("#262626"));
+        assert!(light.contains("#087fea"));
+        assert!(light.contains("#7c4dff"));
         let dark = render_multi_svg(
             &series,
             &ChartConfig::default(),
             &crate::theme::DARK,
             &ChartOpts::default(),
         );
-        assert!(dark.contains("#fafafa"));
-        assert!(dark.contains("#e5e5e5"));
+        assert!(dark.contains("#358ff3"));
+        assert!(dark.contains("#966eff"));
+    }
+
+    #[test]
+    fn animated_multi_svg_moves_colored_dither_without_hiding_data() {
+        let a = cumulative_series(&[at(1), at(2), at(3)]);
+        let b = cumulative_series(&[at(1), at(2)]);
+        let series = vec![("o/a".to_string(), a), ("o/b".to_string(), b)];
+        let svg = render_multi_svg(&series, &ChartConfig::default(), &DARK, &animated_opts());
+        assert!(svg.contains("id=\"gd-series-0\""));
+        assert!(svg.contains("id=\"gd-series-1\""));
+        assert!(svg.contains("#358ff3"));
+        assert!(svg.contains("#966eff"));
+        assert!(svg.contains("<animateTransform"));
+        assert!(svg.contains("stroke-dashoffset=\"0\""));
+        assert!(svg.contains("prefers-reduced-motion: reduce"));
     }
 
     fn cum_dl(days_vals: &[(i64, u64)]) -> Vec<DownloadCumPoint> {
@@ -1461,9 +1520,9 @@ mod tests {
         assert!(!a.contains("<animate"));
         // Deterministic.
         assert_eq!(a, b);
-        // Both monochrome series colors are present.
-        assert!(a.contains("#0a0a0a"));
-        assert!(a.contains("#262626"));
+        // Both categorical series colors are present.
+        assert!(a.contains("#087fea"));
+        assert!(a.contains("#7c4dff"));
         // Dual-axis legend carries both labels.
         assert!(a.contains("stars"));
         assert!(a.contains("npm downloads"));
@@ -1508,8 +1567,8 @@ mod tests {
             &DARK,
             &ChartOpts::default(),
         );
-        assert!(svg.contains("#fafafa")); // dark stars
-        assert!(svg.contains("#e5e5e5")); // dark downloads (index 1)
+        assert!(svg.contains("#358ff3")); // dark stars
+        assert!(svg.contains("#966eff")); // dark downloads (index 1)
         assert!(!svg.contains("var(--"));
     }
 

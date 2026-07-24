@@ -512,7 +512,13 @@ const vsLinks = (categoryRelated.length > 0 ? categoryRelated : FALLBACK_SUGGEST
         />
       </main>
 
-      <SiteFooter />
+      <SiteFooter
+        signalValues={[
+          data?.total_stars ?? 0,
+          data?.history_event_count ?? 0,
+          history.length,
+        ]}
+      />
     </div>
   </body>
 </html>

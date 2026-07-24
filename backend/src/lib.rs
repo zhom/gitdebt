@@ -31,6 +31,7 @@ pub mod repo_charts;
 pub mod repo_endpoints;
 pub mod repo_history;
 pub mod repo_stats;
+pub mod streak;
 pub mod texture;
 pub mod theme;
 pub mod usage;

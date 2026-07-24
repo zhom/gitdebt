@@ -1,0 +1,56 @@
+---
+import { PageSignalCanvas } from "@/components/PageSignalCanvas";
+import type { PageInsight } from "@/lib/signal-art";
+
+interface Props {
+  insight: PageInsight;
+}
+
+const { insight } = Astro.props;
+const headingId = `page-insight-${insight.kind}`;
+---
+
+<section
+  class="relative isolate overflow-hidden rounded-lg border border-border/70 bg-card/35"
+  aria-labelledby={headingId}
+>
+  <div class="grid min-h-44 lg:grid-cols-[5fr_4fr]">
+    <div class="relative z-10 flex flex-col justify-center gap-3 p-6 sm:p-8">
+      <p class="font-mono text-[0.6875rem] tracking-[0.18em] text-muted-foreground uppercase">
+        {insight.eyebrow}
+      </p>
+      <h2
+        id={headingId}
+        class="max-w-[32ch] text-balance text-lg font-medium text-foreground sm:text-base"
+      >
+        {insight.question}
+      </h2>
+      <p class="max-w-[72ch] text-pretty text-base text-muted-foreground sm:text-sm">
+        {insight.answer}
+      </p>
+      <div class="flex flex-wrap gap-2 pt-1" aria-label="Signals represented">
+        {
+          insight.labels.map((label) => (
+            <span class="rounded-sm border border-border/60 bg-background/45 px-2 py-1 font-mono text-[0.6875rem] text-muted-foreground">
+              {label}
+            </span>
+          ))
+        }
+      </div>
+    </div>
+    <div class="relative min-h-36 overflow-hidden border-t border-border/60 lg:min-h-full lg:border-t-0 lg:border-l">
+      <PageSignalCanvas
+        client:visible
+        mode={insight.mode}
+        seed={insight.seed}
+        values={insight.values}
+      />
+      <p
+        class="pointer-events-none absolute right-3 bottom-2 font-mono text-[0.625rem] tracking-[0.14em] text-foreground/55 uppercase"
+        aria-hidden="true"
+      >
+        {insight.mode} / {insight.seed}
+      </p>
+    </div>
+  </div>
+</section>

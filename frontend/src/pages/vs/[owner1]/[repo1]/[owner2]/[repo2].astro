@@ -75,8 +75,8 @@ const ready =
 const reposParam = encodeURIComponent(`${slug1},${slug2}`);
 const overlayPath = `/api/chart.svg?repos=${reposParam}`;
 
-const title = `${repo1} vs ${repo2} — GitHub stars compared · gitdebt`;
-const description = `Compare ${slug1} and ${slug2} by current GitHub stars, with a historical growth overlay when stargazer timestamps are available.`;
+const title = `${repo1} vs ${repo2}: stars, code, and maintenance · gitdebt`;
+const description = `Compare ${slug1} and ${slug2} by GitHub star growth, forks, dominant language, codebase size, commit cadence, bus factor, contributor concentration, and change pressure.`;
 const site = (Astro.site ?? new URL("https://gitdebt.com")).href.replace(/\/$/, "");
 const canonicalPath = `/vs/${slug1}/${slug2}`;
 const canonical = `${site}${canonicalPath}`;
@@ -124,7 +124,7 @@ const jsonLd = [
     <div class="isolate flex min-h-dvh flex-col">
       <SiteHeader />
 
-      <main id="main-content" class="mx-auto w-full max-w-6xl flex-1 px-6 py-12">
+      <main id="main-content" class="mx-auto min-w-0 w-full max-w-6xl flex-1 px-6 py-12">
         <nav aria-label="Breadcrumb" class="font-mono text-[11px] text-muted-foreground">
           <a
             href="/"
@@ -153,7 +153,14 @@ const jsonLd = [
         />
       </main>
 
-      <SiteFooter />
+      <SiteFooter
+        signalValues={[
+          left.data?.total_stars ?? 0,
+          right.data?.total_stars ?? 0,
+          left.data?.history.length ?? 0,
+          right.data?.history.length ?? 0,
+        ]}
+      />
     </div>
   </body>
 </html>

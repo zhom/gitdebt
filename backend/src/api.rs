@@ -38,6 +38,7 @@ use crate::export::{self, RangeSpec};
 use crate::og::{self, CompareEntry, RepoCard};
 use crate::redis::{Decision, HttpLimiter, RedisHandle, WindowLimit};
 use crate::repo_endpoints::is_valid_slug;
+use crate::streak::{CommitStreak, summarize_commit_streak};
 use crate::theme::theme_for;
 use crate::usage::{self, Resolved, UsageDownloads, UsageOverrides};
 
@@ -335,6 +336,7 @@ pub fn router(state: ApiState) -> Router {
         .route("/api/chart.svg", get(multi_chart))
         .route("/api/chart.png", get(multi_chart_png))
         .route("/api/chart.webp", get(multi_chart_webp))
+        .route("/api/chart.gif", get(multi_chart_gif))
         .route("/api/users/{login}/chart.svg", get(user_chart))
         .route("/api/users/{login}/chart.png", get(user_chart_png))
         .route("/api/users/{login}/chart.webp", get(user_chart_webp))
@@ -361,6 +363,7 @@ pub fn router(state: ApiState) -> Router {
         .route("/api/repos/{owner}/{repo}/card.svg", get(repo_card_svg))
         .route("/api/repos/{owner}/{repo}/card.png", get(repo_card_png))
         .route("/api/repos/{owner}/{repo}/card.webp", get(repo_card_webp))
+        .route("/api/repos/{owner}/{repo}/card.gif", get(repo_card_gif))
         .route("/api/repos/{owner}/{repo}/og.png", get(repo_og_png))
         .route("/api/repos/{owner}/{repo}/og.webp", get(repo_og_webp))
         .route("/api/users/{login}/og.png", get(user_og_png))
@@ -1352,6 +1355,10 @@ struct UserStats {
     top_repos: Vec<UserRepoRow>,
     active_repos: Vec<UserRepoRow>,
     commit_days: Vec<UserDay>,
+    /// Consecutive calendar days authored by this resolved GitHub login across
+    /// analyzed public repositories. The full tier ladder is public; the UI
+    /// only reveals unearned goals to the signed-in owner.
+    commit_streak: CommitStreak,
 }
 
 /// The bounded owned-repository set every profile code signal reads:
@@ -1596,6 +1603,7 @@ async fn load_user_stats(db: &crate::db::Db, login: &str) -> Result<UserStats, A
             value: day.commits,
         })
         .collect();
+    let commit_streak = load_user_commit_streak(pool, login, Utc::now().date_naive()).await?;
 
     // Per owned analyzed repo: how many top non-bot authors it takes to
     // pass half of the authorship. Mirrors `repo_charts::compute_bus_factor`
@@ -1657,6 +1665,7 @@ async fn load_user_stats(db: &crate::db::Db, login: &str) -> Result<UserStats, A
         top_repos,
         active_repos,
         commit_days,
+        commit_streak,
     })
 }
 
@@ -1790,6 +1799,43 @@ async fn load_user_commit_days(
         });
     }
     Ok(out)
+}
+
+/// Complete active-day history for the profile achievement ladder.
+///
+/// This is intentionally a Postgres-only read over author/day rows, joined to
+/// the already-enriched login in `repo_author_stats`. Repository-wide daily
+/// totals cannot prove individual activity and are never used for awards.
+/// The database reduces every matching repository/day row to at most one date
+/// before Rust applies the pure streak math.
+async fn load_user_commit_streak(
+    pool: &sqlx::PgPool,
+    login: &str,
+    today: chrono::NaiveDate,
+) -> Result<CommitStreak, ApiError> {
+    let rows = sqlx::query(
+        "SELECT days.day AS day \
+         FROM repo_author_stats author \
+         JOIN repo_author_commit_days days \
+           ON days.repo = author.repo AND days.author_email = author.author_email \
+         JOIN repos public_repo ON public_repo.repo = author.repo \
+         WHERE LOWER(author.github_login) = $1 \
+           AND days.day <= $2 \
+           AND public_repo.missing = FALSE \
+           AND public_repo.metadata_fetched_at IS NOT NULL \
+         GROUP BY days.day \
+         HAVING SUM(days.commits) > 0 \
+         ORDER BY days.day ASC",
+    )
+    .bind(login)
+    .bind(today)
+    .fetch_all(pool)
+    .await?;
+    let active_days = rows
+        .into_iter()
+        .map(|row| row.try_get::<chrono::NaiveDate, _>("day"))
+        .collect::<Result<Vec<_>, sqlx::Error>>()?;
+    Ok(summarize_commit_streak(active_days, today))
 }
 
 /// Cache/render revision for the profile charts: the number of analyzed
@@ -2993,6 +3039,24 @@ async fn multi_chart_webp(
     ))
 }
 
+async fn multi_chart_gif(
+    State(state): State<ApiState>,
+    Query(q): Query<ChartQuery>,
+    request_headers: HeaderMap,
+) -> Result<impl IntoResponse, ApiError> {
+    let theme = theme_for(q.theme.as_deref());
+    let (bytes, short_ttl) = ensure_multi_gif(&state, theme, &q).await?;
+    gif_media_response(
+        &request_headers,
+        bytes,
+        short_ttl,
+        &format!(
+            "star-history-comparison-{}.gif",
+            if theme.dark { "dark" } else { "light" }
+        ),
+    )
+}
+
 /// Parse, validate, dedup, and cap the `?repos=` slug list. Returns the
 /// normalized `(owner, repo)` pairs in input order plus the canonical
 /// `owner/repo` slugs (lowercased). Rejects the request if any slug is
@@ -3126,6 +3190,38 @@ async fn ensure_multi_raster(
         rasterize_cached(state, &key, card.svg, format).await?,
         false,
     ))
+}
+
+/// Animated comparison export. The chart geometry and categorical line
+/// colors stay fixed; only the ordered-dither signal phase moves, so every
+/// frame remains a truthful rendering of the same Postgres-backed series.
+async fn ensure_multi_gif(
+    state: &ApiState,
+    theme: &crate::theme::Theme,
+    q: &ChartQuery,
+) -> Result<(std::sync::Arc<Vec<u8>>, bool), ApiError> {
+    let card = ensure_multi_svg(state, theme, q).await?;
+    let spec = q.range_spec()?;
+    let pairs = parse_overlay_repos(q.repos.as_deref())?;
+    let key = format!(
+        "{}|gif|svg:{}|{RENDER_REVISION}",
+        overlay_key(&pairs, theme, q, &spec),
+        svg_digest(&card.svg),
+    );
+    let short_ttl = card.short_ttl;
+    let svg = card.svg;
+    single_flight_gif(&state.raster_cache, key, async move {
+        let encoded = with_raster_permit(move || crate::animated_gif::encode_dither_loop(&svg))
+            .await?
+            .map_err(ApiError::from)?;
+        let bytes = std::sync::Arc::new(encoded.bytes);
+        if short_ttl {
+            Err(GifMiss::Pending(bytes))
+        } else {
+            Ok(bytes)
+        }
+    })
+    .await
 }
 
 fn raster_fmt_key(format: crate::raster::RasterFormat) -> &'static str {
@@ -3758,10 +3854,10 @@ fn needs_downloads(metrics: &[Metric]) -> bool {
 /// Render-revision constant baked into every media cache key (badges,
 /// cards, OG images, GIFs, charts). Bump it whenever renderer output
 /// changes for identical data so stale in-process/CDN entries can never
-/// serve the previous look under the same key. `r18` = aggregate profile
-/// charts/cards gain bounded GIF motion, card signal rails use the shared
-/// dither, and star fills follow their data line exactly.
-pub(crate) const RENDER_REVISION: &str = "r18";
+/// serve the previous look under the same key. `r19` = star exports use the
+/// app-blue density wave, comparisons/cards/stat charts gain GitHub-safe GIF
+/// motion, and the profile-card hierarchy becomes data-scaled.
+pub(crate) const RENDER_REVISION: &str = "r19";
 
 struct RepoRenderReadiness {
     stars: bool,
@@ -5294,6 +5390,40 @@ async fn ensure_repo_card_raster(
     ))
 }
 
+async fn ensure_repo_card_gif(
+    state: &ApiState,
+    owner: &str,
+    repo: &str,
+    theme: &crate::theme::Theme,
+    q: &CardQuery,
+) -> Result<(std::sync::Arc<Vec<u8>>, bool), ApiError> {
+    if !is_valid_slug(owner) || !is_valid_slug(repo) {
+        return Err(ApiError::bad_request("invalid owner/repo"));
+    }
+    let owner = owner.to_ascii_lowercase();
+    let repo = repo.to_ascii_lowercase();
+    let card = ensure_repo_card_svg(state, &owner, &repo, theme, q).await?;
+    let key = format!(
+        "card:repo-gif:{owner}/{repo}|{}|svg:{}|{RENDER_REVISION}",
+        q.key_fragment(theme),
+        svg_digest(&card.svg),
+    );
+    let short_ttl = card.short_ttl;
+    let svg = card.svg;
+    single_flight_gif(&state.raster_cache, key, async move {
+        let encoded = with_raster_permit(move || crate::animated_gif::encode_dither_loop(&svg))
+            .await?
+            .map_err(ApiError::from)?;
+        let bytes = std::sync::Arc::new(encoded.bytes);
+        if short_ttl {
+            Err(GifMiss::Pending(bytes))
+        } else {
+            Ok(bytes)
+        }
+    })
+    .await
+}
+
 async fn user_card_svg(
     State(state): State<ApiState>,
     Path(login): Path<String>,
@@ -5425,6 +5555,27 @@ async fn repo_card_webp(
         bytes,
         short_ttl,
     ))
+}
+
+async fn repo_card_gif(
+    State(state): State<ApiState>,
+    Path((owner, repo)): Path<(String, String)>,
+    Query(q): Query<CardQuery>,
+    request_headers: HeaderMap,
+) -> Result<impl IntoResponse, ApiError> {
+    let theme = theme_for(q.theme.as_deref());
+    let (bytes, short_ttl) = ensure_repo_card_gif(&state, &owner, &repo, theme, &q).await?;
+    gif_media_response(
+        &request_headers,
+        bytes,
+        short_ttl,
+        &format!(
+            "{}-{}-repository-card-{}.gif",
+            owner.to_ascii_lowercase(),
+            repo.to_ascii_lowercase(),
+            if theme.dark { "dark" } else { "light" }
+        ),
+    )
 }
 
 // Sitemap data
@@ -6602,6 +6753,7 @@ mod tests {
         let like = format!("{prefix}%");
         for statement in [
             "DELETE FROM repo_analysis_queue WHERE repo LIKE $1",
+            "DELETE FROM repo_author_commit_days WHERE repo LIKE $1",
             "DELETE FROM repo_author_stats WHERE repo LIKE $1",
             "DELETE FROM repo_lines WHERE repo LIKE $1",
             "DELETE FROM repo_history WHERE repo LIKE $1",
@@ -6966,6 +7118,11 @@ mod tests {
             vec![5 * PROFILE_MAX_REPOS],
             "only in-scope repositories contribute commit days"
         );
+        assert_eq!(
+            stats.commit_streak.longest_days, 0,
+            "repository-wide activity cannot impersonate an individual streak"
+        );
+        assert_eq!(stats.commit_streak.latest_active_date, None);
         assert_eq!(stats.active_repos.len(), 8);
         assert!(
             stats
@@ -7911,6 +8068,17 @@ mod tests {
         .execute(pool)
         .await
         .expect("seed commit days");
+        sqlx::query(
+            "INSERT INTO repo_author_commit_days (repo, author_email, day, commits) \
+             VALUES ($1, 'a@example.com', CURRENT_DATE - 3, 4), \
+                    ($1, 'a@example.com', CURRENT_DATE - 2, 6), \
+                    ($2, 'solo@example.com', CURRENT_DATE - 1, 3)",
+        )
+        .bind(&shared)
+        .bind(&solo)
+        .execute(pool)
+        .await
+        .expect("seed author commit days");
 
         let stats = load_user_stats(state.analyzer.cache.db(), &login)
             .await
@@ -7961,6 +8129,19 @@ mod tests {
 
         let total_days: i64 = stats.commit_days.iter().map(|d| d.value).sum();
         assert_eq!(total_days, 13);
+        assert_eq!(stats.commit_streak.current_days, 3);
+        assert_eq!(stats.commit_streak.longest_days, 3);
+        assert_eq!(stats.commit_streak.tiers.len(), 5);
+        assert!(stats.commit_streak.tiers.iter().all(|tier| !tier.earned));
+
+        // The JSON contract carries both public earned-state data and the
+        // stable locked ladder used only when `/api/me` identifies the owner.
+        let shape = serde_json::to_value(&stats).expect("serialize profile stats");
+        assert_eq!(shape["commit_streak"]["current_days"], 3);
+        assert_eq!(shape["commit_streak"]["longest_days"], 3);
+        assert_eq!(shape["commit_streak"]["tiers"][0]["days"], 7);
+        assert_eq!(shape["commit_streak"]["tiers"][4]["key"], "year-in-motion");
+        assert_eq!(shape["commit_streak"]["tiers"][4]["earned"], false);
 
         // A completed pass yields a revision, and the render revision moves
         // with the data so a stale chart can never outlive it.

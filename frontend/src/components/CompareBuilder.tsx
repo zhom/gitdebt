@@ -4,8 +4,12 @@ import { ArrowRight, Plus, X } from "lucide-react";
 
 import { ButtonLink } from "@/components/ButtonLink";
 import { Button } from "@/components/ui/button";
-import { ChartViewer } from "@/components/ChartViewer";
-import { EYEBROW, HEADING, PANEL } from "@/components/style-tokens";
+import { DitherComparisonChart } from "@/components/DitherComparisonChart";
+import {
+  RepoComparisonMatrix,
+  type ComparisonInitialRepo,
+} from "@/components/RepoComparisonMatrix";
+import { BODY, EYEBROW, PANEL, PANEL_PADDED } from "@/components/style-tokens";
 import { warmRepos } from "@/components/WarmRepos";
 import { CATEGORIES } from "@/data/categories";
 import {
@@ -268,91 +272,107 @@ export function CompareBuilder({ apiBase, initialRepos = [] }: Props) {
             </div>
           )}
 
-          <ChartViewer
+          <BuilderComparisonResults
             apiBase={apiBase}
             path={chartPath}
-            alt={`Star history overlay of ${overlayLabel}`}
-            caption="Star history overlay"
+            repos={active}
             embedLink={`https://gitdebt.com${embedHref}`}
             label={overlayLabel}
           />
-
-          <RepoTable apiBase={apiBase} repos={active} />
         </div>
       )}
     </div>
   );
 }
 
-type RowData = { slug: string; total: number | null; year: string | null };
-
 type AnalyzeResponse = {
+  repo: string;
   total_stars: number;
+  created_at: string | null;
+  pending?: boolean;
+  backfilling?: boolean;
+  not_found?: boolean;
   history: { date: string; stars: number }[];
 };
 
-function RepoTable({ apiBase, repos }: { apiBase: string; repos: string[] }) {
-  const [data, setData] = useState<RowData[]>(() =>
-    repos.map((slug) => ({ slug, total: null, year: null })),
-  );
-
+function BuilderComparisonResults({
+  apiBase,
+  path,
+  repos,
+  embedLink,
+  label,
+}: {
+  apiBase: string;
+  path: string;
+  repos: string[];
+  embedLink: string;
+  label: string;
+}) {
+  const [data, setData] = useState<ComparisonInitialRepo[]>([]);
+  const [settled, setSettled] = useState(false);
   useEffect(() => {
     let cancelled = false;
-    setData(repos.map((slug) => ({ slug, total: null, year: null })));
+    setData([]);
+    setSettled(false);
     Promise.all(
-      repos.map(async (slug): Promise<RowData> => {
+      repos.map(async (slug): Promise<ComparisonInitialRepo | null> => {
         try {
           const res = await fetch(`${apiBase}/api/repos/${slug}/analyze`);
-          if (!res.ok) return { slug, total: null, year: null };
+          if (!res.ok) return null;
           const json = (await res.json()) as AnalyzeResponse;
-          const first = json.history[0]?.date;
-          const year = first ? String(new Date(first).getUTCFullYear()) : null;
-          return { slug, total: json.total_stars, year };
+          if (json.not_found) return null;
+          return {
+            slug,
+            total_stars: json.total_stars,
+            created_at: json.created_at,
+            history: json.history,
+            pending: json.pending,
+            backfilling: json.backfilling,
+          };
         } catch {
-          return { slug, total: null, year: null };
+          return null;
         }
       }),
     ).then((rows) => {
-      if (!cancelled) setData(rows);
+      if (cancelled) return;
+      setData(
+        rows.filter((row): row is ComparisonInitialRepo => row !== null),
+      );
+      setSettled(true);
     });
     return () => {
       cancelled = true;
     };
   }, [apiBase, repos]);
 
+  const chartSeries = data
+    .filter((repo) => repo.history.length >= 2)
+    .map((repo) => ({ slug: repo.slug, points: repo.history }));
+
   return (
-    <section className="space-y-4">
-      <h3 className={HEADING}>Summary</h3>
-      <div className={cn(PANEL, "overflow-x-auto")}>
-        <table className="w-full text-left text-[13px]">
-          <thead>
-            <tr className="border-b border-border/40">
-              <th className={cn(EYEBROW, "px-3.5 py-3 font-medium whitespace-nowrap")}>
-                Repo
-              </th>
-              <th className={cn(EYEBROW, "px-3.5 py-3 text-right font-medium whitespace-nowrap")}>
-                Total stars
-              </th>
-              <th className={cn(EYEBROW, "px-3.5 py-3 text-right font-medium whitespace-nowrap")}>
-                First star
-              </th>
-            </tr>
-          </thead>
-          <tbody className="tabular-nums">
-            {data.map((row) => (
-              <tr key={row.slug} className="border-b border-border/40 last:border-0">
-                <td className="px-3.5 py-3 font-mono">{row.slug}</td>
-                <td className="px-3.5 py-3 text-right">
-                  {row.total === null ? "—" : row.total.toLocaleString()}
-                </td>
-                <td className="px-3.5 py-3 text-right text-muted-foreground">
-                  {row.year ?? "—"}
-                </td>
-              </tr>
-            ))}
-          </tbody>
-        </table>
-      </div>
-    </section>
+    <>
+      {chartSeries.length >= 2 ? (
+        <DitherComparisonChart
+          apiBase={apiBase}
+          path={path}
+          caption="Star history overlay"
+          embedLink={embedLink}
+          label={label}
+          series={chartSeries}
+        />
+      ) : (
+        <section className={PANEL_PADDED} aria-live="polite">
+          <p className={EYEBROW}>
+            {settled ? "Historical coverage incomplete" : "Loading comparison"}
+          </p>
+          <p className={`mt-2 max-w-[70ch] ${BODY}`}>
+            {settled
+              ? "At least two complete star series are needed for the interactive overlay. Current metadata and available health analysis remain visible below."
+              : "Reading the completed star series for every repository. The animated overlay appears here automatically."}
+          </p>
+        </section>
+      )}
+      <RepoComparisonMatrix apiBase={apiBase} repos={repos} initial={data} />
+    </>
   );
 }

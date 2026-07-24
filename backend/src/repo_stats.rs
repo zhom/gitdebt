@@ -97,6 +97,7 @@ struct TodoAgg {
 /// pre-existing DB rows with the same COALESCE / LEAST / GREATEST rules.
 struct BatchAggregates {
     authors: HashMap<String, AuthorAgg>,
+    author_commit_days: HashMap<(String, NaiveDate), i64>,
     files: HashMap<String, FileAgg>,
     commit_days: HashMap<NaiveDate, i64>,
     todo_days: HashMap<NaiveDate, TodoAgg>,
@@ -110,6 +111,7 @@ struct BatchAggregates {
 /// equivalence with the previous row-by-row path.
 fn aggregate_commits(commits: &[CommitInfo]) -> BatchAggregates {
     let mut authors: HashMap<String, AuthorAgg> = HashMap::new();
+    let mut author_commit_days: HashMap<(String, NaiveDate), i64> = HashMap::new();
     let mut files: HashMap<String, FileAgg> = HashMap::new();
     let mut commit_days: HashMap<NaiveDate, i64> = HashMap::new();
     let mut todo_days: HashMap<NaiveDate, TodoAgg> = HashMap::new();
@@ -149,6 +151,9 @@ fn aggregate_commits(commits: &[CommitInfo]) -> BatchAggregates {
                 last_commit_at: committed_at,
             });
 
+        *author_commit_days
+            .entry((commit.author_email.clone(), day))
+            .or_insert(0) += 1;
         *commit_days.entry(day).or_insert(0) += 1;
 
         if commit.todo_added > 0 || commit.todo_removed > 0 {
@@ -178,6 +183,7 @@ fn aggregate_commits(commits: &[CommitInfo]) -> BatchAggregates {
 
     BatchAggregates {
         authors,
+        author_commit_days,
         files,
         commit_days,
         todo_days,
@@ -281,6 +287,7 @@ async fn write_commits_at_head(
 
     if replace {
         for table in [
+            "repo_author_commit_days",
             "repo_author_stats",
             "repo_commit_days",
             "repo_todo_deltas",
@@ -340,6 +347,36 @@ async fn write_commits_at_head(
         .execute(&mut *tx)
         .await
         .context("upsert authors")?;
+    }
+
+    // Per-author/day buckets back truthful user streaks. Store the same stable
+    // author key as repo_author_stats; GitHub-login enrichment can then join
+    // the two without rewriting historical day rows.
+    let author_day_rows: Vec<(&(String, NaiveDate), &i64)> =
+        agg.author_commit_days.iter().collect();
+    for chunk in author_day_rows.chunks(UPSERT_CHUNK) {
+        let mut emails: Vec<String> = Vec::with_capacity(chunk.len());
+        let mut days: Vec<NaiveDate> = Vec::with_capacity(chunk.len());
+        let mut counts: Vec<i64> = Vec::with_capacity(chunk.len());
+        for ((email, day), count) in chunk {
+            emails.push(email.clone());
+            days.push(*day);
+            counts.push(**count);
+        }
+        sqlx::query(
+            "INSERT INTO repo_author_commit_days (repo, author_email, day, commits) \
+             SELECT $1, e, d, c \
+             FROM UNNEST($2::text[], $3::date[], $4::bigint[]) AS t(e, d, c) \
+             ON CONFLICT (repo, author_email, day) DO UPDATE SET \
+                commits = repo_author_commit_days.commits + EXCLUDED.commits",
+        )
+        .bind(repo)
+        .bind(&emails)
+        .bind(&days)
+        .bind(&counts)
+        .execute(&mut *tx)
+        .await
+        .context("upsert author commit days")?;
     }
 
     // Per-day commit buckets
@@ -822,6 +859,7 @@ mod tests {
     /// `aggregate_commits` must produce identical maps.
     fn oracle(commits: &[CommitInfo]) -> BatchAggregates {
         let mut authors: HashMap<String, AuthorAgg> = HashMap::new();
+        let mut author_commit_days: HashMap<(String, NaiveDate), i64> = HashMap::new();
         let mut files: HashMap<String, FileAgg> = HashMap::new();
         let mut commit_days: HashMap<NaiveDate, i64> = HashMap::new();
         let mut todo_days: HashMap<NaiveDate, TodoAgg> = HashMap::new();
@@ -852,6 +890,9 @@ mod tests {
                     a.last_commit_at = a.last_commit_at.max(c.committed_at);
                 }
             }
+            *author_commit_days
+                .entry((c.author_email.clone(), c.committed_day))
+                .or_insert(0) += 1;
             *commit_days.entry(c.committed_day).or_insert(0) += 1;
             if c.todo_added > 0 || c.todo_removed > 0 {
                 let t = todo_days.entry(c.committed_day).or_default();
@@ -881,6 +922,7 @@ mod tests {
         }
         BatchAggregates {
             authors,
+            author_commit_days,
             files,
             commit_days,
             todo_days,
@@ -891,6 +933,10 @@ mod tests {
         let a = aggregate_commits(commits);
         let b = oracle(commits);
         assert_eq!(a.authors, b.authors, "authors map");
+        assert_eq!(
+            a.author_commit_days, b.author_commit_days,
+            "author_commit_days map"
+        );
         assert_eq!(a.files, b.files, "files map");
         assert_eq!(a.commit_days, b.commit_days, "commit_days map");
         assert_eq!(a.todo_days, b.todo_days, "todo_days map");
@@ -970,12 +1016,14 @@ mod tests {
         assert_eq!(agg.authors.len(), 2);
         assert_eq!(agg.authors["a@b.c"].commits, 2);
         assert_eq!(agg.authors["d@e.f"].commits, 1);
+        let day0 = at(0).date_naive();
+        let day1 = at(86_500).date_naive();
+        assert_eq!(agg.author_commit_days[&("a@b.c".to_string(), day0)], 1);
+        assert_eq!(agg.author_commit_days[&("a@b.c".to_string(), day1)], 1);
         // f1 touched by 2 commits (1 of them a fix).
         assert_eq!(agg.files["f1"].commits, 2);
         assert_eq!(agg.files["f1"].fix_commits, 1);
         // commit_days: day0 has 2 commits, day1 has 1.
-        let day0 = at(0).date_naive();
-        let day1 = at(86_500).date_naive();
         assert_eq!(agg.commit_days[&day0], 2);
         assert_eq!(agg.commit_days[&day1], 1);
         // todo_days: day0 sums added=3, removed=1; day1 added=2.
@@ -1009,6 +1057,7 @@ mod tests {
     fn aggregate_empty_is_empty() {
         let agg = aggregate_commits(&[]);
         assert!(agg.authors.is_empty());
+        assert!(agg.author_commit_days.is_empty());
         assert!(agg.files.is_empty());
         assert!(agg.commit_days.is_empty());
         assert!(agg.todo_days.is_empty());

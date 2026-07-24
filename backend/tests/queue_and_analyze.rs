@@ -32,7 +32,7 @@ use tokio::sync::Mutex;
 static SCHEMA_READY: OnceLock<()> = OnceLock::new();
 static SCHEMA_LOCK: Mutex<()> = Mutex::const_new(());
 static STAR_CLAIM_LOCK: Mutex<()> = Mutex::const_new(());
-const CURRENT_ANALYSIS_REVISION: i32 = 3;
+const CURRENT_ANALYSIS_REVISION: i32 = 4;
 
 /// Returns a connected `Db` if a test database is configured, else `None`
 /// (the test then no-ops). Keeps the suite green where no DB exists.
@@ -72,6 +72,10 @@ async fn cleanup(db: &Db, prefix: &str) {
         .execute(&db.pool)
         .await;
     let _ = sqlx::query("DELETE FROM repo_author_stats WHERE repo LIKE $1")
+        .bind(&like)
+        .execute(&db.pool)
+        .await;
+    let _ = sqlx::query("DELETE FROM repo_author_commit_days WHERE repo LIKE $1")
         .bind(&like)
         .execute(&db.pool)
         .await;
@@ -866,6 +870,19 @@ async fn repo_analysis_commit_and_merge_head_advance_atomically() {
             .await
             .unwrap();
     assert_eq!(paths, vec!["src/new.rs"]);
+    let author_days: Vec<(String, i64)> = sqlx::query_as(
+        "SELECT author_email, commits FROM repo_author_commit_days \
+         WHERE repo = $1 ORDER BY author_email",
+    )
+    .bind(&repo)
+    .fetch_all(&db.pool)
+    .await
+    .unwrap();
+    assert_eq!(
+        author_days,
+        vec![("replacement@example.com".to_string(), 1)],
+        "atomic replacement must remove stale per-author streak days"
+    );
 
     cleanup(&db, prefix).await;
 }

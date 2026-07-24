@@ -93,7 +93,10 @@ pub fn themed_logo_mark(x: f32, y: f32, width: f32, theme: &Theme) -> String {
 /// the existing right-anchored footer labels.
 pub fn footer_lockup(right_x: f32, baseline_y: f32, theme: &Theme) -> String {
     const MARK_W: f32 = 20.0;
-    let mark_x = right_x - 65.0;
+    // The monospace wordmark occupies roughly 48 units at 11px. Leave a
+    // deliberate 10-unit gutter so the robot never collides with the `g`,
+    // even when a renderer substitutes a slightly wider system monospace.
+    let mark_x = right_x - 78.0;
     // Centre the glyph on the wordmark's x-height rather than its baseline.
     let mark_y = baseline_y - 4.0 - mark_height(MARK_W) / 2.0;
     format!(
@@ -393,7 +396,7 @@ mod tests {
         let (mismatch, ink) = mark_fidelity(
             &svg,
             MarkBox {
-                x: 844.0 - 65.0,
+                x: 844.0 - 78.0,
                 y: 188.0 - 4.0 - mark_height(20.0) / 2.0,
                 width: 20.0,
                 scale: 2.0,

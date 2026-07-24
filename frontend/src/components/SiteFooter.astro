@@ -2,9 +2,21 @@
 import { CATEGORIES } from "@/data/categories";
 import Brand from "@/components/Brand.astro";
 import { FooterAsciiMark } from "@/components/FooterAsciiMark";
+import PageInsightSection from "@/components/PageInsightSection.astro";
 import logoSource from "../../../assets/gitdebt-logo.svg?raw";
+import { pageInsightForPath } from "@/lib/signal-art";
+
+interface Props {
+  /** Optional page data makes the route-specific signal field quantitative. */
+  signalValues?: number[];
+}
 
 const year = new Date().getFullYear();
+const { signalValues } = Astro.props;
+const routeInsight = pageInsightForPath(Astro.url.pathname);
+const pageInsight = signalValues?.some(Number.isFinite)
+  ? { ...routeInsight, values: signalValues }
+  : routeInsight;
 
 const robot = logoSource.match(/fill="url\(#gitdebt-dither\)"\s+d="([^"]+)"/);
 if (!robot) {
@@ -39,6 +51,9 @@ const legalLinks = [
 <footer class="relative isolate overflow-hidden border-t border-border/60">
   <FooterAsciiMark client:visible path={ROBOT_PATH} />
   <div class="relative mx-auto max-w-6xl px-4 pt-12 pb-14 sm:px-6 sm:pt-14 sm:pb-20">
+    <div class="pb-12 sm:pb-14">
+      <PageInsightSection insight={pageInsight} />
+    </div>
     <div class="grid gap-10 lg:grid-cols-[minmax(0,1fr)_auto] lg:gap-16">
       <div class="max-w-sm space-y-3">
         <a

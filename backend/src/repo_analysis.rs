@@ -27,7 +27,10 @@ const DEFAULT_MAX_PENDING_ANALYSES: i64 = 500;
 const DEFAULT_ANALYSIS_FRESH_HOURS: i64 = 24;
 const ENQUEUE_LOCK_ID: i64 = 6_794_738_132_977;
 pub const INTERACTIVE_PRIORITY: i64 = 1_000_000_000_000;
-pub const CURRENT_ANALYSIS_REVISION: i32 = 3;
+// v4 adds per-author/day buckets for truthful profile commit streaks. Older
+// completed clones are re-walked once so awards never infer a person's
+// activity from repository-wide daily totals.
+pub const CURRENT_ANALYSIS_REVISION: i32 = 4;
 
 #[derive(Clone)]
 pub struct AnalysisCtx {

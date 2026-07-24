@@ -365,6 +365,18 @@ ALTER TABLE repo_author_stats ADD COLUMN IF NOT EXISTS enrich_attempted_at TIMES
 CREATE INDEX IF NOT EXISTS idx_repo_author_login
     ON repo_author_stats (LOWER(github_login)) WHERE github_login IS NOT NULL;
 
+-- Per-author/day commit counts. This is the minimum extra grain required for
+-- truthful profile streaks: repository-wide daily totals cannot prove that a
+-- particular person committed on that day. The author email already exists in
+-- repo_author_stats; this table stores no additional identity or payload.
+CREATE TABLE IF NOT EXISTS repo_author_commit_days (
+    repo          TEXT NOT NULL,
+    author_email  TEXT NOT NULL,
+    day           DATE NOT NULL,
+    commits       BIGINT NOT NULL DEFAULT 0,
+    PRIMARY KEY (repo, author_email, day)
+);
+
 -- Per-day commit count for the heatmap.
 CREATE TABLE IF NOT EXISTS repo_commit_days (
     repo     TEXT NOT NULL,
@@ -806,6 +818,15 @@ mod tests {
         assert!(
             SCHEMA.contains("IF NOT EXISTS"),
             "schema must stay idempotent"
+        );
+    }
+
+    #[test]
+    fn schema_keeps_idempotent_author_day_storage_for_profile_streaks() {
+        assert!(SCHEMA.contains("CREATE TABLE IF NOT EXISTS repo_author_commit_days"));
+        assert!(
+            SCHEMA.contains("PRIMARY KEY (repo, author_email, day)"),
+            "author-day lookups need an indexed, idempotent key"
         );
     }
 

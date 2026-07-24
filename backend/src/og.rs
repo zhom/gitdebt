@@ -783,8 +783,8 @@ mod tests {
         assert!(svg.contains("207.0k stars"));
         assert!(svg.contains("234.0k stars"));
         // Both series colors (dark palette index 0 + 1).
-        assert!(svg.contains("#fafafa"));
-        assert!(svg.contains("#e5e5e5"));
+        assert!(svg.contains("#358ff3"));
+        assert!(svg.contains("#966eff"));
     }
 
     /// Extract every `<text …>content</text>` element as `(x, y, content)`.

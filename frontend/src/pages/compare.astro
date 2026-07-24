@@ -56,8 +56,8 @@ const title = hasSelection
   ? `${repos.join(" vs ")} — star history · gitdebt`
   : "Compare GitHub star history · gitdebt";
 const description = hasSelection
-  ? `Star history of ${repos.join(", ")} overlaid on one chart — compare trajectories and copy an embeddable README chart.`
-  : "Compare up to eight GitHub repositories on one star-history chart, or open a curated category with rankings, growth, and repository-health reports.";
+  ? `Compare ${repos.join(", ")} by animated star history, languages, codebase size, maintenance cadence, ownership concentration, and change pressure.`
+  : "Compare up to eight GitHub repositories by animated star history, codebase scale, maintenance cadence, ownership concentration, and change pressure.";
 
 const ogImage = hasSelection
   ? `${apiBase}/api/og.png?repos=${encodeURIComponent(reposParam)}`
@@ -106,7 +106,7 @@ const suggestionRepos = Array.from(
     <div class="isolate flex min-h-dvh flex-col">
       <SiteHeader />
 
-      <main id="main-content" class="mx-auto w-full max-w-6xl flex-1 px-6 py-12">
+      <main id="main-content" class="mx-auto min-w-0 w-full max-w-6xl flex-1 px-6 py-12">
         <nav aria-label="Breadcrumb" class="font-mono text-[11px] text-muted-foreground">
           <a
             href="/"
@@ -121,8 +121,9 @@ const suggestionRepos = Array.from(
           <h1 class={TITLE}>Compare star history across repositories</h1>
           <p class:list={["mt-3 max-w-[68ch] text-[15px]", BODY]}>
             Compare up to eight repos by calendar date or days since their
-            first star. Use the builder for any combination, or open a curated
-            field with rankings and project-health reports.
+            first star, then inspect languages, codebase scale, maintenance
+            cadence, ownership resilience, and debt signals. Use the builder
+            for any combination, or open a curated field.
           </p>
         </header>
 

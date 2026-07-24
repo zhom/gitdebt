@@ -16,8 +16,8 @@ import {
 } from "@/lib/dither";
 
 /** One ring lives long enough for the next to begin just before it disappears. */
-const PULSE_LIFETIME = 0.92;
-const PULSE_INTERVAL = 0.7;
+const PULSE_LIFETIME = 1.104;
+const PULSE_INTERVAL = 0.84;
 
 export type DitherSurfaceOptions = {
   /** Stable module-level tuple: the paint effect keys off its identity. */
@@ -90,7 +90,8 @@ export function useDitherSurface(opts: DitherSurfaceOptions) {
           );
           const eased = 1 - (1 - progress) ** 3;
           // Fast rise, long dissolve. Adjacent one-shot rings overlap for
-          // ~220ms and retain their own cursor positions.
+          // ~264ms and retain their own cursor positions. The 1.2× timing
+          // leaves room to read the handoff without turning it into a loop.
           const envelope =
             Math.min(1, progress / 0.14) * (1 - progress) ** 0.72;
           stampPulse(buf, fill, {

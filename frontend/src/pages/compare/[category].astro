@@ -7,7 +7,8 @@ import BaseHead from "@/components/BaseHead.astro";
 import Seo from "@/components/Seo.astro";
 import SiteHeader from "@/components/SiteHeader.astro";
 import SiteFooter from "@/components/SiteFooter.astro";
-import { ChartViewer } from "@/components/ChartViewer";
+import { DitherComparisonChart } from "@/components/DitherComparisonChart";
+import { RepoComparisonMatrix } from "@/components/RepoComparisonMatrix";
 import { WarmRepos } from "@/components/WarmRepos";
 import {
   BODY,
@@ -55,6 +56,9 @@ const results = await Promise.all(
 type MemberRow = {
   slug: string;
   stars: number;
+  createdAt: string | null;
+  history: { date: string; stars: number }[];
+  pending: boolean;
   gained90: number | null;
   firstYear: number | null;
   hasHistory: boolean;
@@ -69,6 +73,9 @@ for (let i = 0; i < category.repos.length; i++) {
   members.push({
     slug: category.repos[i],
     stars: d.total_stars,
+    createdAt: d.created_at,
+    history: d.history,
+    pending: Boolean(d.pending || d.backfilling),
     gained90: gainedInTrailingDays(d.history, 90),
     firstYear: firstStarYear(d.history),
     hasHistory: d.history.length > 0,
@@ -104,6 +111,16 @@ const description = leader
 
 const reposParam = category.repos.join(",");
 const overlayPath = `/api/chart.svg?repos=${encodeURIComponent(reposParam)}`;
+const chartSeries = members
+  .filter((member) => member.history.length >= 2)
+  .map((member) => ({ slug: member.slug, points: member.history }));
+const comparisonInitial = members.map((member) => ({
+  slug: member.slug,
+  total_stars: member.stars,
+  created_at: member.createdAt,
+  history: member.history,
+  pending: member.pending,
+}));
 const ogImage = `${apiBase}/api/og.png?repos=${encodeURIComponent(
   category.repos.slice(0, 4).join(","),
 )}`;
@@ -199,7 +216,7 @@ if (faqs.length > 0 && hasCurrentRanking) {
 }
 
 const thClass =
-  "py-3 pr-4 font-mono text-[10px] font-medium tracking-[0.14em] text-muted-foreground/70 uppercase whitespace-nowrap";
+  "py-3 pr-4 font-mono text-[0.6875rem] font-medium text-muted-foreground/70 whitespace-nowrap";
 const rowClass = "border-b border-border/40 last:border-0";
 ---
 
@@ -221,7 +238,7 @@ const rowClass = "border-b border-border/40 last:border-0";
     <div class="isolate flex min-h-dvh flex-col">
       <SiteHeader />
 
-      <main id="main-content" class="mx-auto w-full max-w-5xl flex-1 px-6 py-12">
+      <main id="main-content" class="mx-auto min-w-0 w-full max-w-6xl flex-1 px-6 py-12">
         <nav aria-label="Breadcrumb" class="font-mono text-[11px] text-muted-foreground">
           <a
             href="/"
@@ -251,14 +268,14 @@ const rowClass = "border-b border-border/40 last:border-0";
 
         {loadedEnough && (
           <div class="mt-12">
-            <ChartViewer
+            <DitherComparisonChart
               client:load
               apiBase={apiBase}
               path={overlayPath}
-              alt={`Star history overlay of ${category.repos.join(", ")}`}
               caption={`${category.name} — star history`}
               embedLink={canonical}
               label={category.name}
+              series={chartSeries}
             />
           </div>
         )}
@@ -331,6 +348,13 @@ const rowClass = "border-b border-border/40 last:border-0";
                 </div>
               </div>
             </section>
+
+            <RepoComparisonMatrix
+              client:visible
+              apiBase={apiBase}
+              repos={members.map((member) => member.slug)}
+              initial={comparisonInitial}
+            />
 
             {pairs.length > 0 && (
               <section class="mt-16 scroll-mt-24 border-t border-border/60 pt-12">

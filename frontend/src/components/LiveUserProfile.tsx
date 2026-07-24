@@ -1,4 +1,10 @@
-import { useEffect, useMemo, useState, type ReactNode } from "react";
+import {
+  useEffect,
+  useMemo,
+  useState,
+  type CSSProperties,
+  type ReactNode,
+} from "react";
 import { ExternalLink, Loader2 } from "lucide-react";
 import { motion, useReducedMotion } from "motion/react";
 
@@ -8,7 +14,10 @@ import { DitherAreaChart } from "@/components/DitherAreaChart";
 import { EmbedSnippet } from "@/components/EmbedSnippet";
 import { ProfileCardPreview } from "@/components/ProfileCardPreview";
 import { StatCard } from "@/components/StatCard";
-import { useDitherSurface } from "@/components/ui/dither-surface";
+import {
+  DitherSurface,
+  useDitherSurface,
+} from "@/components/ui/dither-surface";
 import {
   BODY,
   CAPTION,
@@ -23,7 +32,7 @@ import {
   TITLE,
 } from "@/components/style-tokens";
 import { MEDIA_RENDER_REVISION } from "@/lib/media";
-import { INK } from "@/lib/dither";
+import { BRAND, INK } from "@/lib/dither";
 import { SPRING } from "@/lib/motion";
 import { useRenderedTheme } from "@/lib/rendered-theme";
 import {
@@ -67,6 +76,21 @@ export type VisionaryRepo = {
   owned: boolean;
 };
 
+export type CommitStreakTier = {
+  key: string;
+  label: string;
+  days: number;
+  description: string;
+  earned: boolean;
+};
+
+export type CommitStreak = {
+  current_days: number;
+  longest_days: number;
+  latest_active_date: string | null;
+  tiers: CommitStreakTier[];
+};
+
 /** Mirrors the backend `GET /api/users/:login/stats.json` contract. */
 export type UserStats = {
   login: string;
@@ -97,6 +121,7 @@ export type UserStats = {
   top_repos: UserRepoRow[];
   active_repos: UserRepoRow[];
   commit_days: { date: string; value: number }[];
+  commit_streak?: CommitStreak;
 };
 
 type Props = {
@@ -242,6 +267,148 @@ function AchievementCard({ achievement }: { achievement: VisionaryRepo }) {
   );
 }
 
+function StreakAchievementCard({
+  tier,
+  longestDays,
+}: {
+  tier: CommitStreakTier;
+  longestDays: number;
+}) {
+  const reducedMotion = useReducedMotion();
+  const { surface, handlers } = useDitherSurface({
+    fill: BRAND,
+    variant: "hatched",
+    edge: 0.7,
+    alpha: 0.3,
+    pulse: true,
+  });
+
+  return (
+    <motion.a
+      href="#code-signals"
+      initial="rest"
+      whileHover={reducedMotion ? undefined : "hover"}
+      whileTap={reducedMotion ? undefined : { scale: 0.992 }}
+      variants={{
+        rest: { y: 0 },
+        hover: { y: -3 },
+      }}
+      transition={SPRING.snappy}
+      className={cn(
+        PANEL,
+        "dither-fallback group relative isolate overflow-hidden p-4 outline-none focus-visible:ring-2 focus-visible:ring-accent/30",
+      )}
+      {...handlers}
+    >
+      {surface}
+      <motion.p
+        aria-hidden="true"
+        variants={{
+          rest: { x: 0, opacity: 0.15 },
+          hover: { x: -8, opacity: 0.32 },
+        }}
+        transition={SPRING.snappy}
+        className="pointer-events-none absolute top-3 right-3 font-mono text-[0.625rem] tracking-[0.16em] text-foreground"
+      >
+        {tier.days.toString(16).toUpperCase().padStart(3, "0")}D
+        <br />
+        + + + +
+      </motion.p>
+      <div className="relative pr-16">
+        <p className="font-mono text-[0.625rem] font-semibold tracking-[0.16em] text-[var(--swatch-blue)] uppercase">
+          [+] Streak // {tier.days} days
+        </p>
+        <p className="mt-2 font-mono text-[0.8125rem] text-foreground">
+          {tier.label}
+        </p>
+        <p className={cn(CAPTION, "mt-2")}>
+          {tier.description} Personal best: {num(longestDays)} days.
+        </p>
+      </div>
+    </motion.a>
+  );
+}
+
+function LockedStreakCard({
+  tier,
+  currentDays,
+  longestDays,
+}: {
+  tier: CommitStreakTier;
+  currentDays: number;
+  longestDays: number;
+}) {
+  const reducedMotion = useReducedMotion();
+  const progress = Math.min(100, Math.round((currentDays / tier.days) * 100));
+  const remaining = Math.max(0, tier.days - currentDays);
+  const nextAction =
+    currentDays > 0
+      ? `Keep the run alive for ${num(remaining)} more consecutive ${remaining === 1 ? "day" : "days"}.`
+      : "Land activity in a tracked project today to begin a new run.";
+
+  return (
+    <motion.div
+      initial={reducedMotion ? false : { opacity: 0, y: 6 }}
+      whileInView={reducedMotion ? undefined : { opacity: 1, y: 0 }}
+      viewport={{ once: true, amount: 0.35 }}
+      transition={SPRING.snappy}
+      className={cn(
+        PANEL,
+        "dither-fallback relative isolate overflow-hidden p-4",
+      )}
+    >
+      <DitherSurface
+        fill={INK}
+        variant="hatched"
+        edge={0.34}
+        alpha={0.12}
+      />
+      <div className="relative">
+        <div className="flex items-start justify-between gap-4">
+          <div className="min-w-0">
+            <p className="font-mono text-[0.625rem] font-semibold tracking-[0.16em] text-muted-foreground uppercase">
+              [ ] Locked // {tier.days}D
+            </p>
+            <p className="mt-2 font-mono text-[0.8125rem] text-foreground">
+              {tier.label}
+            </p>
+          </div>
+          <p className="shrink-0 font-mono text-[0.75rem] tabular-nums text-muted-foreground">
+            {num(currentDays)} / {num(tier.days)}
+          </p>
+        </div>
+        <div
+          className="mt-4 h-2 overflow-hidden rounded-[1px] border border-border/50 bg-background/70"
+          aria-label={`${progress}% progress toward ${tier.label}`}
+          aria-valuemax={tier.days}
+          aria-valuemin={0}
+          aria-valuenow={currentDays}
+          role="progressbar"
+        >
+          <div
+            className="relative isolate h-full w-(--streak-progress) overflow-hidden"
+            style={
+              {
+                "--streak-progress": `${progress}%`,
+              } as CSSProperties
+            }
+          >
+            <DitherSurface
+              fill={BRAND}
+              variant="gradient"
+              edge={null}
+              alpha={0.72}
+            />
+          </div>
+        </div>
+        <p className={cn(CAPTION, "mt-3")}>
+          {nextAction} Historical best: {num(longestDays)} days.
+        </p>
+      </div>
+    </motion.div>
+  );
+}
+
 async function fetchJson<T>(url: string): Promise<T | null> {
   try {
     const response = await fetch(url, {
@@ -286,7 +453,10 @@ export function LiveUserProfile({
   const [error, setError] = useState<string | null>(null);
 
   useEffect(() => {
-    if (!session || knownLogin) return;
+    // Resolve the viewer even on a public `/{login}` page. The known route
+    // login still wins as the report target; this identity is used only to
+    // reveal that account's private achievement roadmap.
+    if (!session && !knownLogin) return;
     const controller = new AbortController();
     void fetch(`${apiBase}/api/me`, {
       credentials: "include",
@@ -542,6 +712,13 @@ export function LiveUserProfile({
             ...activeRepos.map((row) => row.repo),
           ]),
         ];
+  const commitStreak = stats?.commit_streak;
+  const streakTiers = commitStreak?.tiers ?? [];
+  const earnedStreakTiers = streakTiers.filter((tier) => tier.earned);
+  const lockedStreakTiers = streakTiers.filter((tier) => !tier.earned);
+  const isOwnProfile = sessionLogin?.toLowerCase() === login.toLowerCase();
+  const hasEarnedAchievements =
+    visionaryRepos.length > 0 || earnedStreakTiers.length > 0;
 
   const kpis = [
     {
@@ -833,24 +1010,67 @@ export function LiveUserProfile({
             />
           </div>
 
-          {visionaryRepos.length > 0 && (
-            <div className="mt-8">
-              <h3 className={EYEBROW}>Earned achievements</h3>
-              <div className="mt-3 grid gap-3 sm:grid-cols-2">
-                {visionaryRepos.map((achievement) => (
-                  <AchievementCard
-                    key={achievement.repo}
-                    achievement={achievement}
-                  />
-                ))}
-              </div>
-              <p className={cn(BODY, "mt-3 max-w-[70ch]")}>
-                Visionary is earned when a complete star history proves a
-                contribution happened before a project grew beyond five times
-                that star count and crossed 512 stars.
-              </p>
+        </section>
+      )}
+
+      {hasEarnedAchievements && (
+        <section className="mt-16 scroll-mt-24" id="achievements">
+          <div className={SECTION_HEADER}>
+            <h2 className={HEADING}>Earned achievements</h2>
+            <p className="font-mono text-[11px] text-muted-foreground">
+              proven by cached history
+            </p>
+          </div>
+          <div className="mt-6 grid gap-3 sm:grid-cols-2">
+            {earnedStreakTiers.map((tier) => (
+              <StreakAchievementCard
+                key={tier.key}
+                tier={tier}
+                longestDays={commitStreak?.longest_days ?? 0}
+              />
+            ))}
+            {visionaryRepos.map((achievement) => (
+              <AchievementCard
+                key={achievement.repo}
+                achievement={achievement}
+              />
+            ))}
+          </div>
+          <p className={cn(BODY, "mt-3 max-w-[70ch]")}>
+            Streak awards use consecutive calendar days authored by this
+            resolved GitHub login across analyzed public repositories.
+            Visionary uses complete star history to prove a contribution landed
+            before a project grew beyond five times that star count and crossed
+            512 stars.
+          </p>
+        </section>
+      )}
+
+      {isOwnProfile && lockedStreakTiers.length > 0 && (
+        <section className="mt-16 scroll-mt-24" id="locked-achievements">
+          <div className={SECTION_HEADER}>
+            <h2 className={HEADING}>Locked achievements</h2>
+            <p className="font-mono text-[11px] text-muted-foreground">
+              only visible to you
+            </p>
+          </div>
+          <p className={cn(BODY, "mt-2 max-w-[70ch]")}>
+            Keep contributing on consecutive calendar days to unlock more
+            profile decorations. Progress comes from cached activity in your
+            analyzed public repositories; no contributor profiles are stored.
+          </p>
+          <div className="@container mt-6">
+            <div className="grid gap-3 @xl:grid-cols-2">
+              {lockedStreakTiers.map((tier) => (
+                <LockedStreakCard
+                  key={tier.key}
+                  tier={tier}
+                  currentDays={commitStreak?.current_days ?? 0}
+                  longestDays={commitStreak?.longest_days ?? 0}
+                />
+              ))}
             </div>
-          )}
+          </div>
         </section>
       )}
 
@@ -899,7 +1119,7 @@ export function LiveUserProfile({
           <dl
             className={cn(
               PANEL,
-              "mt-6 grid grid-cols-2 divide-border/40 p-3.5 sm:grid-cols-4 sm:divide-x",
+              "mt-6 grid grid-cols-2 divide-border/40 p-3.5 lg:grid-cols-5 lg:divide-x",
             )}
           >
             <div className="min-w-0 px-3.5 py-2">
@@ -929,6 +1149,19 @@ export function LiveUserProfile({
               </dd>
               <p className={cn(CAPTION, "mt-2")}>
                 landed across owned repos in the last 52 weeks
+              </p>
+            </div>
+            <div className="min-w-0 px-3.5 py-2">
+              <dt className={EYEBROW}>Active streak</dt>
+              <dd className={cn("mt-2", KPI, "text-foreground")}>
+                {commitStreak
+                  ? `${num(commitStreak.current_days)}d`
+                  : "—"}
+              </dd>
+              <p className={cn(CAPTION, "mt-2")}>
+                {commitStreak
+                  ? `${num(commitStreak.longest_days)} day best across resolved public contributions`
+                  : "not scored yet"}
               </p>
             </div>
             <div className="min-w-0 px-3.5 py-2">

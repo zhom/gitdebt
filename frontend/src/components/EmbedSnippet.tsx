@@ -13,7 +13,6 @@ import { createPortal } from "react-dom";
 import { CodeBlock } from "@/components/CodeBlock";
 import { CAPTION, EYEBROW, PANEL } from "@/components/style-tokens";
 import { Button } from "@/components/ui/button";
-import { DitherSwitch } from "@/components/ui/dither-switch";
 import { CONTROL, POPOVER } from "@/components/ui/dither-surface";
 import {
   DURATION,
@@ -71,10 +70,9 @@ type Mode = "markdown" | "html";
 type Format = "svg" | "gif" | "png" | "webp";
 type ThemeChoice = "auto" | "light" | "dark";
 
-const STATIC_FORMATS: Format[] = ["svg", "png", "webp"];
 /** Surfaces with real raster motion that survives GitHub's SVG sanitizer. */
 const GIF_ASSET_RE =
-  /^\/api\/(?:repos\/[^/]+\/[^/]+\/chart|users\/[^/]+\/(?:chart|card|stats\/[^/?]+))\.svg(?:\?|$)/;
+  /^\/api\/(?:(?:repos\/[^/]+\/[^/]+|users\/[^/]+)\/chart|chart|(?:repos\/[^/]+\/[^/]+|users\/[^/]+)\/(?:card|stats\/[^/?]+))\.svg(?:\?|$)/;
 const THEMES: { id: ThemeChoice; label: string }[] = [
   { id: "auto", label: "Auto" },
   { id: "light", label: "Light" },
@@ -126,12 +124,7 @@ export function EmbedSnippet({
   variant = "panel",
 }: Props) {
   const [mode, setMode] = useState<Mode>("markdown");
-  // README assets remain static until the author explicitly chooses GIF or
-  // enables SVG motion. GitHub-safe GIF is available wherever the renderer can
-  // preserve a complete final frame while moving only the decorative dither.
-  const [format, setFormat] = useState<Format>("svg");
   const [theme, setTheme] = useState<ThemeChoice>("auto");
-  const [animatedSvg, setAnimatedSvg] = useState(false);
   const [open, setOpen] = useState(false);
   const rootRef = useRef<HTMLDivElement>(null);
   const triggerRef = useRef<HTMLButtonElement>(null);
@@ -187,13 +180,12 @@ export function EmbedSnippet({
   }, [open, variant]);
 
   const supportsGif = GIF_ASSET_RE.test(chartPath);
-  const formats: readonly Format[] = supportsGif
-    ? (["svg", "gif", "png", "webp"] as const)
-    : STATIC_FORMATS;
-  const selectedFormat = formats.includes(format) ? format : "svg";
+  // The share workflow always chooses the motion-preserving representation.
+  // Raw SVG/PNG/WebP endpoints remain available as stable API contracts, but
+  // the product no longer asks people to accidentally export a dull frame.
+  const selectedFormat: Format = supportsGif ? "gif" : "svg";
 
-  const formatParams =
-    selectedFormat === "svg" ? [`animate=${animatedSvg ? "1" : "0"}`] : [];
+  const formatParams = selectedFormat === "svg" ? ["animate=1"] : [];
   const base = appendParams(
     `${apiBase}${withFormat(chartPath, selectedFormat)}`,
     [...stateParams(state), ...formatParams, `render=${MEDIA_RENDER_REVISION}`],
@@ -221,7 +213,7 @@ export function EmbedSnippet({
   const snippet = mode === "markdown" ? markdown : html;
 
   const controls = (
-    <div className="grid grid-cols-3 gap-2">
+    <div className="grid grid-cols-2 gap-2">
       <label className={`${EYEBROW} grid gap-1.5`}>
         Theme
         <SelectField
@@ -237,15 +229,6 @@ export function EmbedSnippet({
         </SelectField>
       </label>
       <label className={`${EYEBROW} grid gap-1.5`}>
-        Image
-        <SelectField
-          value={selectedFormat}
-          onChange={(event) => setFormat(event.target.value as Format)}
-        >
-          {formats.map((value) => <option key={value} value={value}>{value.toUpperCase()}</option>)}
-        </SelectField>
-      </label>
-      <label className={`${EYEBROW} grid gap-1.5`}>
         Snippet
         <SelectField
           value={mode}
@@ -255,21 +238,12 @@ export function EmbedSnippet({
           <option value="html">HTML</option>
         </SelectField>
       </label>
-      {selectedFormat === "svg" && (
-        <div className="col-span-3 flex items-center gap-2">
-          <DitherSwitch
-            checked={animatedSvg}
-            onCheckedChange={setAnimatedSvg}
-            aria-labelledby={`${controlId}-animated`}
-          />
-          <span
-            id={`${controlId}-animated`}
-            className="font-mono text-[12px] text-muted-foreground"
-          >
-            {animatedSvg ? "Animated SVG" : "Static SVG"}
-          </span>
-        </div>
-      )}
+      <span
+        id={`${controlId}-animated`}
+        className="col-span-2 font-mono text-[11px] uppercase tracking-[0.12em] text-muted-foreground"
+      >
+        {supportsGif ? "Animated GIF · GitHub-safe motion" : "Animated SVG"}
+      </span>
     </div>
   );
 

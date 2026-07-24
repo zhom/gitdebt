@@ -166,10 +166,38 @@ fn surface_size(svg: &str) -> (f32, f32) {
 /// Reusable pattern fill id for area and bar renderers.
 pub const FILL: &str = "url(#gd-pixel-fill)";
 
-/// The dense signal-fill cell set (13/16 lit, wave-gradient ink) for
-/// renderers that need a phase-shifted variant of `gd-pixel-fill`.
-pub(crate) fn dense_cells() -> String {
-    pattern_cells("url(#gd-dither-wave)", 13)
+/// Dense Bayer cells in one concrete ink. Star-history exports use this to
+/// match the interactive app's blue surface instead of inheriting the
+/// purple→pink decorative gradient used by generic signal artwork.
+pub(crate) fn dense_cells_with(color: &str) -> String {
+    pattern_cells(color, 13)
+}
+
+/// A 64×8 ordered-dither strip whose threshold follows a seeded sine across
+/// the x-axis. Animated GIF frames rebuild this strip at successive phases,
+/// producing the same traveling density wave as the interactive canvas while
+/// leaving the exact data contour untouched.
+pub(crate) fn wave_cells_with(color: &str, frame: usize, frames: usize, seed: u32) -> String {
+    let cycle = if frames == 0 {
+        0.0
+    } else {
+        frame as f32 / frames as f32
+    };
+    let seed_phase = (seed & 0xffff) as f32 / 65_535.0;
+    let mut cells = String::new();
+    for x in 0..32 {
+        let u = x as f32 / 32.0;
+        let phase = std::f32::consts::TAU * (cycle + u * 1.75 + seed_phase);
+        let threshold = (11.0 + phase.sin() * 3.4).round().clamp(7.0, 15.0) as u8;
+        for (y, row) in BAYER_4.iter().enumerate() {
+            if row[x % 4] < threshold {
+                cells.push_str(&format!(
+                    "<rect x=\"{x}\" y=\"{y}\" width=\"1\" height=\"1\" fill=\"{color}\" />"
+                ));
+            }
+        }
+    }
+    cells
 }
 
 fn pattern_cells(color: &str, threshold: u8) -> String {
@@ -283,5 +311,19 @@ mod tests {
             tier_pattern("#dea584", 2.0, 11)
         );
         assert_eq!(a, tier_pattern_ns("gd-lang0", "#dea584", 2.0, 11));
+    }
+
+    #[test]
+    fn wave_cells_are_loop_safe_seeded_and_change_density_phase() {
+        let first = wave_cells_with("#358ff3", 0, 14, 42);
+        let same = wave_cells_with("#358ff3", 0, 14, 42);
+        let next = wave_cells_with("#358ff3", 1, 14, 42);
+        let wrapped = wave_cells_with("#358ff3", 14, 14, 42);
+        assert_eq!(first, same);
+        assert_eq!(first, wrapped);
+        assert_ne!(first, next);
+        assert_ne!(first, wave_cells_with("#358ff3", 0, 14, 42_000));
+        assert!(first.contains("x=\"31\""));
+        assert!(!first.contains("var(--"));
     }
 }

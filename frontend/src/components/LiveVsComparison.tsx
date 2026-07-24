@@ -1,6 +1,10 @@
 import { useEffect, useMemo, useState } from "react";
 
-import { ChartViewer } from "@/components/ChartViewer";
+import { DitherComparisonChart } from "@/components/DitherComparisonChart";
+import {
+  RepoComparisonMatrix,
+  type ComparisonInitialRepo,
+} from "@/components/RepoComparisonMatrix";
 import {
   BODY,
   EYEBROW,
@@ -135,8 +139,32 @@ export function LiveVsComparison({
   const initializing = Boolean(
     left?.pending || left?.backfilling || right?.pending || right?.backfilling,
   );
-  const thClass =
-    "py-3 pr-4 font-mono text-[10px] font-medium tracking-[0.14em] text-muted-foreground/70 uppercase whitespace-nowrap";
+  const comparisonInitial = useMemo<ComparisonInitialRepo[]>(
+    () =>
+      [
+        ...(left
+          ? [{
+              slug: slug1,
+              total_stars: left.total_stars,
+              created_at: left.created_at,
+              history: left.history,
+              pending: left.pending,
+              backfilling: left.backfilling,
+            }]
+          : []),
+        ...(right
+          ? [{
+              slug: slug2,
+              total_stars: right.total_stars,
+              created_at: right.created_at,
+              history: right.history,
+              pending: right.pending,
+              backfilling: right.backfilling,
+            }]
+          : []),
+      ],
+    [left, right, slug1, slug2],
+  );
 
   if (unavailable) {
     return (
@@ -173,13 +201,16 @@ export function LiveVsComparison({
 
       {ready ? (
         <div className="mt-12">
-          <ChartViewer
+          <DitherComparisonChart
             apiBase={apiBase}
             path={overlayPath}
-            alt={`Star history overlay of ${slug1} and ${slug2}`}
             caption="Star history overlay"
             embedLink={canonical}
             label={`${slug1} vs ${slug2}`}
+            series={[
+              { slug: slug1, points: left?.history ?? [] },
+              { slug: slug2, points: right?.history ?? [] },
+            ]}
           />
         </div>
       ) : (
@@ -193,9 +224,8 @@ export function LiveVsComparison({
         </section>
       )}
 
-      <section className="mt-16 scroll-mt-24 border-t border-border/60 pt-12">
+      <section className="mt-12 flex justify-end">
         <div className={SECTION_HEADER}>
-          <h2 className={HEADING}>Summary</h2>
           <a
             href={`/compare?repos=${encodeURIComponent(`${slug1},${slug2}`)}`}
             className={SECTION_ACTION}
@@ -203,40 +233,13 @@ export function LiveVsComparison({
             add a third repo <span aria-hidden="true">→</span>
           </a>
         </div>
-        <div className="-mx-6 mt-6 overflow-x-auto">
-          <div className="inline-block min-w-full px-6 py-2 align-middle">
-            <table className="w-full text-left text-base sm:text-sm">
-              <thead>
-                <tr className="border-b border-border">
-                  <th className={thClass}>Metric</th>
-                  <th className={`${thClass} text-right`}>{slug1}</th>
-                  <th className={`${thClass} text-right`}>{slug2}</th>
-                </tr>
-              </thead>
-              <tbody className="tabular-nums">
-                <tr className="border-b border-border/40">
-                  <td className="py-3 pr-4 text-muted-foreground">Total stars</td>
-                  <td className="py-3 pr-4 text-right">
-                    {heroLeft.totalStars.toLocaleString()}
-                  </td>
-                  <td className="py-3 text-right">
-                    {heroRight.totalStars.toLocaleString()}
-                  </td>
-                </tr>
-                <tr>
-                  <td className="py-3 pr-4 text-muted-foreground">First star</td>
-                  <td className="py-3 pr-4 text-right text-muted-foreground">
-                    {heroLeft.firstStarYear ?? "—"}
-                  </td>
-                  <td className="py-3 text-right text-muted-foreground">
-                    {heroRight.firstStarYear ?? "—"}
-                  </td>
-                </tr>
-              </tbody>
-            </table>
-          </div>
-        </div>
       </section>
+
+      <RepoComparisonMatrix
+        apiBase={apiBase}
+        repos={[slug1, slug2]}
+        initial={comparisonInitial}
+      />
     </>
   );
 }

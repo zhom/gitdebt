@@ -184,6 +184,7 @@ const CARD_STYLE: &str = "  <style><![CDATA[ \
 .ey { font: 700 9px ui-monospace, SFMono-Regular, monospace; letter-spacing: 1.1px; } \
 .ml { font: 600 9px ui-monospace, SFMono-Regular, monospace; letter-spacing: 0.7px; } \
 .mv { font: 600 22px ui-sans-serif, system-ui, sans-serif; letter-spacing: -0.5px; } \
+.hv { font: 700 31px ui-sans-serif, system-ui, sans-serif; letter-spacing: -1.2px; } \
 .rt { font: 600 15px ui-sans-serif, system-ui, sans-serif; } \
 .l { font: 400 14px ui-sans-serif, system-ui, sans-serif; } \
 .v { font: 600 14px ui-sans-serif, system-ui, sans-serif; } \
@@ -468,6 +469,7 @@ enum UserRow {
         glyph: GlyphKind,
         label: &'static str,
         value: String,
+        magnitude: u64,
     },
     Langs(Vec<String>),
 }
@@ -492,26 +494,31 @@ fn user_rows(data: &UserCardData, opts: &UserCardOptions) -> Vec<UserRow> {
                 glyph: GlyphKind::Star,
                 label: "Total Stars Earned",
                 value: fmt(data.stars),
+                magnitude: data.stars,
             }),
             UserMetric::Commits => rows.push(UserRow::Stat {
                 glyph: GlyphKind::Commit,
                 label: "Commits Found",
                 value: lower_bound(data.commits),
+                magnitude: data.commits,
             }),
             UserMetric::Contribs => rows.push(UserRow::Stat {
                 glyph: GlyphKind::Branch,
                 label: "Contributed To",
                 value: lower_bound(data.contribs),
+                magnitude: data.contribs,
             }),
             UserMetric::Repos => rows.push(UserRow::Stat {
                 glyph: GlyphKind::Repo,
                 label: "Repos Tracked",
                 value: fmt(data.repos_tracked),
+                magnitude: data.repos_tracked,
             }),
             UserMetric::Forks => rows.push(UserRow::Stat {
                 glyph: GlyphKind::Fork,
                 label: "Total Forks",
                 value: fmt(data.forks),
+                magnitude: data.forks,
             }),
             UserMetric::Since => {
                 if let Some(year) = data.since_year {
@@ -519,6 +526,10 @@ fn user_rows(data: &UserCardData, opts: &UserCardOptions) -> Vec<UserRow> {
                         glyph: GlyphKind::Clock,
                         label: "Contributing Since",
                         value: year.to_string(),
+                        // The year is a label, not an activity volume; keep it
+                        // visible without pretending it is comparable to the
+                        // star/commit magnitude bars.
+                        magnitude: 1,
                     });
                 }
             }
@@ -544,8 +555,8 @@ fn user_rows(data: &UserCardData, opts: &UserCardOptions) -> Vec<UserRow> {
 pub fn user_card_height(rows: usize, hide_title: bool, hide_rank: bool) -> u32 {
     let _ = hide_rank;
     let header: u32 = if hide_title { 58 } else { 74 };
-    let metric_rows = (rows as u32).div_ceil(2);
-    (header + metric_rows * 58 + 38).max(184)
+    let compact_rows = rows.saturating_sub(1).div_ceil(2) as u32;
+    (header + 76 + compact_rows * 50 + 40).max(196)
 }
 
 /// A deterministic, playful profile title derived only from the card's
@@ -610,49 +621,153 @@ pub fn render_user_card(
     }
 
     let grid_y = if opts.hide_title { 58.0 } else { 74.0 };
-    let gap = 12.0;
+    let gap = 10.0;
     let cell_w = (w - 48.0 - gap) / 2.0;
+    let series_inks = if theme.dark {
+        ["#358ff3", "#966eff", "#f05abe", "#28d26e", "#ff9632"]
+    } else {
+        ["#087fea", "#7c4dff", "#d729a9", "#0a8f55", "#d06a00"]
+    };
+    let magnitude = |row: &UserRow| match row {
+        UserRow::Stat { magnitude, .. } => *magnitude,
+        UserRow::Langs(_) => data
+            .langs
+            .iter()
+            .filter_map(|(_, lines)| u64::try_from(*lines).ok())
+            .sum(),
+    };
+    let max_log = rows
+        .iter()
+        .map(|row| (magnitude(row) as f64 + 1.0).ln())
+        .fold(1.0_f64, f64::max);
+
+    // The first selected metric is the card's headline. Defaults make this
+    // total stars; custom selections still retain a real hierarchy instead
+    // of turning every number into an equally loud tile.
+    let hero_y = grid_y;
+    let (hero_open, hero_close) = anim_group(opts.animate, 0);
+    body.push_str(&hero_open);
+    body.push_str(&format!(
+        "    <rect x=\"24\" y=\"{hero_y:.1}\" width=\"{hero_w:.1}\" height=\"66\" rx=\"9\" fill=\"{track}\" opacity=\"0.28\" />\n    <rect x=\"24\" y=\"{hero_y:.1}\" width=\"{hero_w:.1}\" height=\"66\" rx=\"9\" fill=\"url(#gd-t2)\" fill-opacity=\"0.16\" />\n",
+        hero_w = w - 48.0,
+        track = theme.track,
+    ));
+    match &rows[0] {
+        UserRow::Stat {
+            glyph,
+            label,
+            value,
+            ..
+        } => {
+            if opts.show_icons {
+                body.push_str(&glyph_svg(*glyph, 36.0, hero_y + 12.0, series_inks[0]));
+            }
+            body.push_str(&format!(
+                "    <text class=\"ml\" x=\"{label_x:.1}\" y=\"{label_y:.1}\" fill=\"{muted}\">{label}</text>\n    <text class=\"hv\" x=\"36\" y=\"{value_y:.1}\" fill=\"{fg}\">{value}</text>\n",
+                label_x = if opts.show_icons { 58.0 } else { 36.0 },
+                label_y = hero_y + 23.0,
+                value_y = hero_y + 55.0,
+                muted = theme.muted,
+                fg = theme.fg,
+                value = escape_xml(value),
+            ));
+        }
+        UserRow::Langs(names) => {
+            let joined = truncate_chars(
+                &names
+                    .iter()
+                    .take(3)
+                    .cloned()
+                    .collect::<Vec<_>>()
+                    .join(" · "),
+                28,
+            );
+            body.push_str(&glyph_svg(
+                GlyphKind::Code,
+                36.0,
+                hero_y + 12.0,
+                series_inks[0],
+            ));
+            body.push_str(&format!(
+                "    <text class=\"ml\" x=\"58\" y=\"{label_y:.1}\" fill=\"{muted}\">TOP LANGUAGES</text>\n    <text class=\"rt\" x=\"36\" y=\"{value_y:.1}\" fill=\"{fg}\">{joined}</text>\n",
+                label_y = hero_y + 23.0,
+                value_y = hero_y + 53.0,
+                muted = theme.muted,
+                fg = theme.fg,
+                joined = escape_xml(&joined),
+            ));
+        }
+    }
+
+    // A compact, honest distribution chart: bar heights are log-normalized
+    // visible metric magnitudes (stars, commits, repos, forks). It adds useful
+    // shape without manufacturing a time series the database does not have.
+    let chart_x = (w * 0.49).max(224.0);
+    let chart_w = (w - chart_x - 38.0).max(120.0);
+    let bar_gap = 5.0;
+    let bar_w = ((chart_w - bar_gap * (rows.len().saturating_sub(1) as f32)) / rows.len() as f32)
+        .clamp(8.0, 34.0);
+    let used_w = bar_w * rows.len() as f32 + bar_gap * rows.len().saturating_sub(1) as f32;
+    let bars_x = chart_x + (chart_w - used_w).max(0.0);
+    body.push_str(&format!(
+        "    <text class=\"ey\" x=\"{chart_x:.1}\" y=\"{label_y:.1}\" fill=\"{muted}\">SIGNAL MIX</text>\n",
+        label_y = hero_y + 16.0,
+        muted = theme.muted,
+    ));
     for (i, row) in rows.iter().enumerate() {
-        let col = (i % 2) as f32;
-        let row_index = (i / 2) as f32;
-        let x = 24.0 + col * (cell_w + gap);
-        let y = grid_y + row_index * 58.0;
-        let (open, close) = anim_group(opts.animate, i);
-        body.push_str(&open);
+        let frac = (((magnitude(row) as f64 + 1.0).ln() / max_log) as f32).clamp(0.08, 1.0);
+        let bar_h = 8.0 + 31.0 * frac;
+        let x = bars_x + i as f32 * (bar_w + bar_gap);
+        let y = hero_y + 56.0 - bar_h;
+        let ink = series_inks[i % series_inks.len()];
         body.push_str(&format!(
-            "    <rect x=\"{x:.1}\" y=\"{y:.1}\" width=\"{cell_w:.1}\" height=\"46\" rx=\"7\" fill=\"{track}\" opacity=\"0.22\" />\n",
+            "    <rect x=\"{x:.1}\" y=\"{base:.1}\" width=\"{bar_w:.1}\" height=\"39\" rx=\"2\" fill=\"{track}\" opacity=\"0.42\" />\n    <rect x=\"{x:.1}\" y=\"{y:.1}\" width=\"{bar_w:.1}\" height=\"{bar_h:.1}\" rx=\"2\" fill=\"{ink}\" opacity=\"0.84\" />\n    <rect x=\"{x:.1}\" y=\"{y:.1}\" width=\"{bar_w:.1}\" height=\"{bar_h:.1}\" rx=\"2\" fill=\"url(#gd-pixel-fill)\" opacity=\"0.48\" />\n",
+            base = hero_y + 17.0,
             track = theme.track,
         ));
+    }
+    body.push_str(hero_close);
+
+    // Secondary metrics are deliberately smaller, with a real relative
+    // magnitude rail replacing the old equal-weight blocks.
+    for (compact_i, row) in rows.iter().skip(1).enumerate() {
+        let col = (compact_i % 2) as f32;
+        let row_index = (compact_i / 2) as f32;
+        let x = 24.0 + col * (cell_w + gap);
+        let y = grid_y + 76.0 + row_index * 50.0;
+        let (open, close) = anim_group(opts.animate, compact_i + 1);
+        let frac = (((magnitude(row) as f64 + 1.0).ln() / max_log) as f32).clamp(0.06, 1.0);
+        let ink = series_inks[(compact_i + 1) % series_inks.len()];
+        body.push_str(&open);
         body.push_str(&format!(
-            "    <rect x=\"{x:.1}\" y=\"{y:.1}\" width=\"3\" height=\"46\" rx=\"1.5\" fill=\"url(#gd-pixel-fill)\" opacity=\"0.78\" />\n"
+            "    <rect x=\"{x:.1}\" y=\"{y:.1}\" width=\"{cell_w:.1}\" height=\"40\" rx=\"6\" fill=\"{track}\" opacity=\"0.18\" />\n    <rect x=\"{x:.1}\" y=\"{rail_y:.1}\" width=\"{rail_w:.1}\" height=\"3\" rx=\"1.5\" fill=\"{ink}\" opacity=\"0.9\" />\n",
+            track = theme.track,
+            rail_y = y + 37.0,
+            rail_w = (cell_w * frac).max(5.0),
         ));
         match row {
             UserRow::Stat {
                 glyph,
                 label,
                 value,
+                ..
             } => {
-                let mut label_x = x + 12.0;
+                let mut label_x = x + 10.0;
                 if opts.show_icons {
-                    body.push_str(&glyph_svg(*glyph, label_x, y + 7.0, pal0));
-                    label_x += 21.0;
+                    body.push_str(&glyph_svg(*glyph, label_x, y + 6.0, ink));
+                    label_x += 20.0;
                 }
                 body.push_str(&format!(
                     "    <text class=\"ml\" x=\"{label_x:.1}\" y=\"{label_y:.1}\" fill=\"{muted}\">{label}</text><text class=\"mv\" x=\"{value_x:.1}\" y=\"{value_y:.1}\" text-anchor=\"end\" fill=\"{fg}\">{value}</text>\n",
-                    label_y = y + 18.0,
-                    value_x = x + cell_w - 12.0,
-                    value_y = y + 36.0,
+                    label_y = y + 17.0,
+                    value_x = x + cell_w - 10.0,
+                    value_y = y + 31.0,
                     fg = theme.fg,
                     muted = theme.muted,
                     value = escape_xml(value),
                 ));
             }
             UserRow::Langs(names) => {
-                let mut label_x = x + 12.0;
-                if opts.show_icons {
-                    body.push_str(&glyph_svg(GlyphKind::Code, label_x, y + 7.0, pal0));
-                    label_x += 21.0;
-                }
                 let joined = truncate_chars(
                     &names
                         .iter()
@@ -662,11 +777,13 @@ pub fn render_user_card(
                         .join(" · "),
                     24,
                 );
+                body.push_str(&glyph_svg(GlyphKind::Code, x + 10.0, y + 6.0, ink));
                 body.push_str(&format!(
                     "    <text class=\"ml\" x=\"{label_x:.1}\" y=\"{label_y:.1}\" fill=\"{muted}\">TOP LANGUAGES</text><text class=\"rv\" x=\"{value_x:.1}\" y=\"{value_y:.1}\" text-anchor=\"end\" fill=\"{fg}\">{joined}</text>\n",
-                    label_y = y + 18.0,
-                    value_x = x + cell_w - 12.0,
-                    value_y = y + 36.0,
+                    label_x = x + 30.0,
+                    label_y = y + 17.0,
+                    value_x = x + cell_w - 10.0,
+                    value_y = y + 31.0,
                     muted = theme.muted,
                     fg = theme.fg,
                     joined = escape_xml(&joined),
@@ -676,7 +793,8 @@ pub fn render_user_card(
         body.push_str(close);
     }
 
-    let footer_y = grid_y + rows.len().div_ceil(2) as f32 * 58.0;
+    let compact_rows = rows.len().saturating_sub(1).div_ceil(2) as f32;
+    let footer_y = grid_y + 76.0 + compact_rows * 50.0;
 
     body.push_str(&format!(
         "  <a href=\"https://gitdebt.com/{login}\" target=\"_blank\" rel=\"noopener\"><text class=\"m\" x=\"24\" y=\"{y:.1}\" fill=\"{muted}\">gitdebt.com/{login} ↗</text></a>\n",
@@ -1410,7 +1528,7 @@ mod tests {
         assert!(user_card_height(3, true, false) < user_card_height(3, false, false));
         assert!(repo_card_height(4, false, false) > repo_card_height(1, false, false));
         assert!(repo_card_height(1, false, true) > repo_card_height(1, false, false));
-        assert_eq!(user_card_height(0, false, false), 184);
+        assert_eq!(user_card_height(0, false, false), 196);
     }
 
     #[test]

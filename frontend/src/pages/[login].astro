@@ -162,7 +162,14 @@ const jsonLd: Record<string, unknown>[] = [
         </div>
       </main>
 
-      <SiteFooter />
+      <SiteFooter
+        signalValues={[
+          data?.total_stars ?? 0,
+          data?.repos_included ?? 0,
+          stats?.authored_commits ?? 0,
+          stats?.contributed_repos ?? 0,
+        ]}
+      />
     </div>
   </body>
 </html>

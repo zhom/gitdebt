@@ -254,16 +254,23 @@ fn count_placement<'a>(
 
 // Commit heatmap
 
+/// Render the commit heatmap.
+///
+/// `analyzed_from` is the first day the analysis window actually covers, when
+/// that window is capped. Days before it have no observation behind them, so
+/// they must not be labelled "0 commits" — for a repository above the commit
+/// limit that is a confident assertion about history the analysis never read.
 pub fn render_heatmap(
     repo: &str,
     subtitle_label: &str,
     start: NaiveDate,
     end: NaiveDate,
     days: &[DayCount],
+    analyzed_from: Option<NaiveDate>,
     theme: &Theme,
 ) -> String {
     crate::texture::decorate(
-        render_heatmap_inner(repo, subtitle_label, start, end, days, theme),
+        render_heatmap_inner(repo, subtitle_label, start, end, days, analyzed_from, theme),
         theme,
     )
 }
@@ -274,6 +281,7 @@ fn render_heatmap_inner(
     start: NaiveDate,
     end: NaiveDate,
     days: &[DayCount],
+    analyzed_from: Option<NaiveDate>,
     theme: &Theme,
 ) -> String {
     use std::collections::BTreeMap;
@@ -337,10 +345,16 @@ fn render_heatmap_inner(
             "https://github.com/{repo}/commits?since={day}T00%3A00%3A00Z&amp;until={day}T23%3A59%3A59Z",
             day = day_iter,
         );
+        let label = if analyzed_from.is_some_and(|from| day_iter < from) {
+            format!("{day_iter} · outside the analyzed window · open on GitHub")
+        } else {
+            let plural = if count == 1 { "" } else { "s" };
+            format!("{day_iter} · {count} commit{plural} · open on GitHub")
+        };
         cells.push_str(&format!(
             r##"<a class="day-link" href="{href}" target="_blank" rel="noopener" aria-label="Open commits from {day}">
   <rect class="cell" x="{x}" y="{y}" width="{cell}" height="{cell}" rx="2" fill="{track}">
-    <title>{day} · {count} commit{plural} · open on GitHub</title>
+    <title>{label}</title>
   </rect>{ink}
 </a>
 "##,
@@ -351,8 +365,7 @@ fn render_heatmap_inner(
             track = theme.track,
             ink = heat_ink(x as f32, y as f32, cell as f32, level),
             day = day_iter,
-            count = count,
-            plural = if count == 1 { "" } else { "s" },
+            label = label,
         ));
         let Some(next) = day_iter.succ_opt() else {
             break;
@@ -796,6 +809,12 @@ pub fn render_languages(repo: &str, rows: &[LanguageBar], theme: &Theme) -> Stri
 
 fn render_languages_inner(repo: &str, rows: &[LanguageBar], theme: &Theme) -> String {
     let width = 1100u32;
+    if rows.is_empty() {
+        // A repository whose whole tree is assets, data, or vendored content
+        // has no classified source. Say so, rather than emitting a header
+        // over an empty plot area that reads as a rendering failure.
+        return empty_chart(width, 200, "no recognized source files in HEAD", theme);
+    }
     let row_h = 32u32;
     let header_h = 96u32;
     let footer_h = 32u32;
@@ -1717,6 +1736,37 @@ mod tests {
             .join("\n")
     }
 
+    /// A capped analysis window must not assert "0 commits" for days it
+    /// never read. The cells are still drawn (the grid keeps its shape) but
+    /// they say what they actually know.
+    #[test]
+    fn heatmap_does_not_claim_zero_for_unanalyzed_days() {
+        let start = NaiveDate::from_ymd_opt(2026, 1, 1).unwrap();
+        let end = NaiveDate::from_ymd_opt(2026, 1, 31).unwrap();
+        let analyzed_from = NaiveDate::from_ymd_opt(2026, 1, 20).unwrap();
+        let days = vec![DayCount {
+            day: analyzed_from,
+            commits: 3,
+        }];
+
+        let disclosed = render_heatmap(
+            "o/r",
+            "Commits",
+            start,
+            end,
+            &days,
+            Some(analyzed_from),
+            &theme::LIGHT,
+        );
+        assert!(disclosed.contains("2026-01-05 · outside the analyzed window"));
+        assert!(disclosed.contains("2026-01-20 · 3 commits"));
+        assert!(!disclosed.contains("2026-01-05 · 0 commits"));
+
+        // A complete window keeps asserting a real zero.
+        let complete = render_heatmap("o/r", "Commits", start, end, &days, None, &theme::LIGHT);
+        assert!(complete.contains("2026-01-05 · 0 commits"));
+    }
+
     #[test]
     fn every_repo_chart_surface_embeds_the_logo() {
         let start = NaiveDate::from_ymd_opt(2026, 1, 1).unwrap();
@@ -1724,7 +1774,15 @@ mod tests {
         let charts = [
             render_bug_magnets("o/r", &[], &theme::LIGHT),
             render_top_changed("o/r", &[], &theme::LIGHT),
-            render_heatmap("o/r", "Commit activity", start, end, &[], &theme::LIGHT),
+            render_heatmap(
+                "o/r",
+                "Commit activity",
+                start,
+                end,
+                &[],
+                None,
+                &theme::LIGHT,
+            ),
             render_contributors("o/r", &[], &theme::LIGHT),
             render_languages("o/r", &[], &theme::LIGHT),
             render_todo_trend("o/r", &[], &theme::LIGHT),
@@ -1823,6 +1881,7 @@ mod tests {
             start,
             end,
             &days,
+            None,
             &theme::LIGHT,
         );
         assert!(svg.contains("class=\"cell"));
@@ -1850,7 +1909,7 @@ mod tests {
         let start = NaiveDate::from_ymd_opt(2026, 3, 1).unwrap();
         let end = NaiveDate::from_ymd_opt(2026, 3, 7).unwrap();
         for theme in [&theme::LIGHT, &theme::DARK] {
-            let svg = render_heatmap("foo/bar", "Commit activity", start, end, &days, theme);
+            let svg = render_heatmap("foo/bar", "Commit activity", start, end, &days, None, theme);
             assert!(svg.contains("data-gitdebt-heat-defs=\"true\""));
             assert!(svg.contains("class=\"heat-ink\""));
             assert!(svg.contains("shape-rendering=\"crispEdges\""));
@@ -1875,7 +1934,7 @@ mod tests {
             }
             assert_eq!(
                 svg,
-                render_heatmap("foo/bar", "Commit activity", start, end, &days, theme)
+                render_heatmap("foo/bar", "Commit activity", start, end, &days, None, theme)
             );
         }
     }
@@ -1912,7 +1971,15 @@ mod tests {
             ),
             (
                 "commit activity",
-                render_heatmap("o/r", "Commit activity", start, end, &days, &theme::DARK),
+                render_heatmap(
+                    "o/r",
+                    "Commit activity",
+                    start,
+                    end,
+                    &days,
+                    None,
+                    &theme::DARK,
+                ),
             ),
             (
                 "contributors",
@@ -2015,6 +2082,7 @@ mod tests {
             start,
             end,
             &[],
+            None,
             &theme::LIGHT,
         );
         assert!(svg.contains("Commits in the last 52 weeks"));
@@ -2110,6 +2178,7 @@ mod tests {
             start,
             start + chrono::Duration::days(30),
             &[],
+            None,
             &theme::LIGHT,
         );
         assert_eq!(heat.matches("<animate ").count(), 1);
@@ -2541,6 +2610,7 @@ mod tests {
             NaiveDate::from_ymd_opt(2026, 3, 1).unwrap(),
             NaiveDate::from_ymd_opt(2026, 3, 7).unwrap(),
             &days,
+            None,
             &theme::LIGHT,
         ));
         assert!(!heatmap.contains("class=\"cell\"") || heatmap.contains("opacity=\"1\""));

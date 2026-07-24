@@ -2,7 +2,6 @@
 export const prerender = true;
 
 import "@/styles/globals.css";
-import { AppWindow, Globe } from "lucide-react";
 
 import BaseHead from "@/components/BaseHead.astro";
 import Seo from "@/components/Seo.astro";
@@ -32,10 +31,6 @@ import {
   TILE_TITLE,
 } from "@/components/style-tokens";
 import { CATEGORIES } from "@/data/categories";
-import {
-  EXTENSION_CHROME_URL,
-  EXTENSION_FIREFOX_URL,
-} from "@/lib/extension-links";
 import { staticApiBase } from "@/lib/static-api-base";
 
 const apiBase = staticApiBase();
@@ -379,37 +374,6 @@ const landingWarmRepos = Array.from(
             </div>
           </section>
 
-          <section
-            id="extension"
-            class="mt-16 scroll-mt-24 border-t border-border/60 pt-12"
-          >
-            <div class={SECTION_HEADER}>
-              <h2 class={HEADING}>Read gitdebt without leaving GitHub</h2>
-            </div>
-            <p class:list={["mt-2 max-w-[64ch]", BODY]}>
-              The browser extension places star history and repository health
-              on the GitHub pages you already use. It follows GitHub’s light or
-              dark appearance and requires no gitdebt account.
-            </p>
-            <div class="mt-6 flex flex-wrap gap-3">
-              <a
-                href={EXTENSION_CHROME_URL}
-                rel="noopener"
-                class={buttonVariants({ variant: "outline" })}
-              >
-                Chrome
-                <AppWindow className="size-4" strokeWidth={1.5} aria-hidden="true" />
-              </a>
-              <a
-                href={EXTENSION_FIREFOX_URL}
-                rel="noopener"
-                class={buttonVariants({ variant: "outline" })}
-              >
-                Firefox
-                <Globe className="size-4" strokeWidth={1.5} aria-hidden="true" />
-              </a>
-            </div>
-          </section>
         </div>
 
         <section class="relative isolate overflow-hidden border-t border-border/60">
@@ -439,7 +403,7 @@ const landingWarmRepos = Array.from(
         <WarmRepos client:load apiBase={apiBase} repos={landingWarmRepos} />
       </main>
 
-      <SiteFooter />
+      <SiteFooter showExtensionLink={false} />
     </div>
   </body>
 </html>

@@ -92,6 +92,40 @@ impl RepoHandle {
     }
 }
 
+/// Thread cap handed to every git invocation. `index-pack` defaults to one
+/// thread per visible core, so N concurrent clones oversubscribe the host by a
+/// factor of N while Postgres runs beside them. Dividing the cores by the pool
+/// size keeps the whole pool inside one host's CPU budget.
+fn pack_threads_config() -> &'static str {
+    static CONFIG: std::sync::OnceLock<String> = std::sync::OnceLock::new();
+    CONFIG.get_or_init(|| {
+        let cores = std::thread::available_parallelism()
+            .map(|value| value.get())
+            .unwrap_or(2);
+        let threads =
+            (cores / crate::repo_analysis::configured_analysis_workers().max(1)).clamp(1, 8);
+        format!("pack.threads={threads}")
+    })
+}
+
+/// Every git invocation goes through here. `kill_on_drop` is the load-bearing
+/// part: a dropped future (job timeout, shutdown) must reap the subprocess
+/// instead of orphaning a clone that keeps writing to the volume.
+fn git() -> Command {
+    let mut command = Command::new("git");
+    command
+        .args(["-c", pack_threads_config()])
+        .kill_on_drop(true);
+    command
+}
+
+/// [`git`] scoped to a repository directory.
+fn git_in(path: &Path) -> Command {
+    let mut command = git();
+    command.arg("-C").arg(path);
+    command
+}
+
 /// Open the bare clone if present, otherwise clone fresh from GitHub.
 /// Idempotent — repeated calls fast-fetch updates rather than re-cloning.
 /// The complete commit graph is retained even after aggregate analysis is
@@ -153,7 +187,7 @@ async fn clone_bare(repo: &str, path: &Path) -> Result<()> {
     // Fetch the complete commit graph and trees so exact totals and path-only
     // history scans stay local. Historical file bodies remain promisor objects
     // and are hydrated only for the small TODO patch window.
-    let output = Command::new("git")
+    let output = git()
         .args([
             "clone",
             "--bare",
@@ -173,9 +207,7 @@ async fn clone_bare(repo: &str, path: &Path) -> Result<()> {
             String::from_utf8_lossy(&output.stderr)
         );
     }
-    let config = Command::new("git")
-        .arg("-C")
-        .arg(path)
+    let config = git_in(path)
         .args(["config", "gitdebt.cacheFormat", CACHE_FORMAT_VERSION])
         .output()
         .await
@@ -186,13 +218,33 @@ async fn clone_bare(repo: &str, path: &Path) -> Result<()> {
             String::from_utf8_lossy(&config.stderr)
         );
     }
+    write_commit_graph(path).await;
     Ok(())
 }
 
+/// Write (or extend) the commit-graph.
+///
+/// Every analysis run counts reachable commits, which without a commit-graph
+/// parses every commit object out of the pack — seconds of CPU per run on a
+/// large repository, paid to refresh one integer. Best-effort: a failure only
+/// means the next count is slower.
+async fn write_commit_graph(path: &Path) {
+    match git_in(path)
+        .args(["commit-graph", "write", "--reachable", "--split"])
+        .output()
+        .await
+    {
+        Ok(output) if output.status.success() => {}
+        Ok(output) => tracing::debug!(
+            stderr = %String::from_utf8_lossy(&output.stderr),
+            "commit-graph write failed"
+        ),
+        Err(error) => tracing::debug!(%error, "commit-graph write could not run"),
+    }
+}
+
 async fn cache_format_is_current(path: &Path) -> bool {
-    let Ok(output) = Command::new("git")
-        .arg("-C")
-        .arg(path)
+    let Ok(output) = git_in(path)
         .args(["config", "--get", "gitdebt.cacheFormat"])
         .output()
         .await
@@ -217,11 +269,8 @@ async fn fetch_updates(path: &Path) -> Result<()> {
     let tree_less = partial_clone_filter(path)
         .await?
         .is_some_and(|filter| filter == "tree:0");
-    let mut command = Command::new("git");
-    command
-        .arg("-C")
-        .arg(path)
-        .args(["fetch", "--no-tags", "--filter=blob:none"]);
+    let mut command = git_in(path);
+    command.args(["fetch", "--no-tags", "--filter=blob:none"]);
     if shallow {
         command.arg("--unshallow");
     } else if tree_less {
@@ -243,6 +292,7 @@ async fn fetch_updates(path: &Path) -> Result<()> {
             String::from_utf8_lossy(&output.stderr)
         );
     }
+    write_commit_graph(path).await;
     Ok(())
 }
 
@@ -250,9 +300,7 @@ async fn fetch_updates(path: &Path) -> Result<()> {
 /// (e.g. `main`). Used to build the explicit fetch refspec so a
 /// single-branch bare clone's branch ref actually advances on refresh.
 async fn default_branch(path: &Path) -> Result<String> {
-    let output = Command::new("git")
-        .arg("-C")
-        .arg(path)
+    let output = git_in(path)
         .args(["symbolic-ref", "--short", "HEAD"])
         .output()
         .await
@@ -271,9 +319,7 @@ async fn default_branch(path: &Path) -> Result<String> {
 }
 
 async fn rev_parse_head(path: &Path) -> Result<String> {
-    let output = Command::new("git")
-        .arg("-C")
-        .arg(path)
+    let output = git_in(path)
         // Plain `rev-parse HEAD` prints the literal string `HEAD` with a zero
         // exit status in an unborn repository. Verification is required to
         // prove that the name resolves to a commit object.
@@ -297,9 +343,7 @@ async fn rev_parse_head(path: &Path) -> Result<String> {
 /// cannot be resolved. `rev-list --all` succeeds with no output for an empty
 /// repo, while malformed object databases still surface as an error.
 async fn repository_has_any_commit(path: &Path) -> Result<bool> {
-    let output = Command::new("git")
-        .arg("-C")
-        .arg(path)
+    let output = git_in(path)
         .args(["rev-list", "--all", "--max-count=1"])
         .output()
         .await
@@ -335,6 +379,73 @@ pub struct CommitInfo {
 /// raw stdout on this byte string cleanly delimits commits even when a
 /// patch body or commit subject contains arbitrary text.
 const COMMIT_SENTINEL: &[u8] = b"\x00\x00GDCOMMIT\x00";
+
+/// Pathspecs excluded from the TODO/FIXME patch walk: media, archives,
+/// fonts, compiled artifacts, and generated or vendored text. None of them
+/// can contain a TODO comment worth counting, and every one of them is
+/// expensive to diff — a partial clone must download the whole blob first.
+pub(crate) const NON_TEXT_PATHSPECS: &[&str] = &[
+    ":(exclude,icase)*.png",
+    ":(exclude,icase)*.jpg",
+    ":(exclude,icase)*.jpeg",
+    ":(exclude,icase)*.gif",
+    ":(exclude,icase)*.webp",
+    ":(exclude,icase)*.avif",
+    ":(exclude,icase)*.bmp",
+    ":(exclude,icase)*.tiff",
+    ":(exclude,icase)*.psd",
+    ":(exclude,icase)*.ico",
+    ":(exclude,icase)*.icns",
+    ":(exclude,icase)*.mp4",
+    ":(exclude,icase)*.mov",
+    ":(exclude,icase)*.webm",
+    ":(exclude,icase)*.avi",
+    ":(exclude,icase)*.mp3",
+    ":(exclude,icase)*.wav",
+    ":(exclude,icase)*.ogg",
+    ":(exclude,icase)*.flac",
+    ":(exclude,icase)*.pdf",
+    ":(exclude,icase)*.zip",
+    ":(exclude,icase)*.gz",
+    ":(exclude,icase)*.tar",
+    ":(exclude,icase)*.bz2",
+    ":(exclude,icase)*.xz",
+    ":(exclude,icase)*.7z",
+    ":(exclude,icase)*.rar",
+    ":(exclude,icase)*.jar",
+    ":(exclude,icase)*.war",
+    ":(exclude,icase)*.wasm",
+    ":(exclude,icase)*.exe",
+    ":(exclude,icase)*.dll",
+    ":(exclude,icase)*.so",
+    ":(exclude,icase)*.dylib",
+    ":(exclude,icase)*.a",
+    ":(exclude,icase)*.o",
+    ":(exclude,icase)*.class",
+    ":(exclude,icase)*.pyc",
+    ":(exclude,icase)*.woff",
+    ":(exclude,icase)*.woff2",
+    ":(exclude,icase)*.ttf",
+    ":(exclude,icase)*.otf",
+    ":(exclude,icase)*.eot",
+    ":(exclude,icase)*.bin",
+    ":(exclude,icase)*.dat",
+    ":(exclude,icase)*.parquet",
+    ":(exclude,icase)*.min.js",
+    ":(exclude,icase)*.min.css",
+    ":(exclude,icase)*.map",
+    ":(exclude)package-lock.json",
+    ":(exclude)pnpm-lock.yaml",
+    ":(exclude)yarn.lock",
+    ":(exclude)Cargo.lock",
+    ":(exclude)go.sum",
+    ":(exclude)composer.lock",
+    ":(exclude)Gemfile.lock",
+    ":(exclude)poetry.lock",
+    ":(exclude)node_modules/**",
+    ":(exclude)vendor/**",
+    ":(exclude)third_party/**",
+];
 
 /// Cap on the per-commit patch bytes scanned for TODO/FIXME deltas. A
 /// chromium-merge-class commit with 100k changed lines would otherwise
@@ -386,9 +497,7 @@ pub(crate) async fn plan_recent_commits(
     let bounded = limit.max(1);
     let probe = bounded.saturating_add(1);
     let max_count = format!("--max-count={probe}");
-    let output = Command::new("git")
-        .arg("-C")
-        .arg(&handle.path)
+    let output = git_in(&handle.path)
         .args(["rev-list", "--no-merges", &max_count, &range])
         .output()
         .await
@@ -414,9 +523,7 @@ pub(crate) async fn plan_recent_commits(
 }
 
 async fn is_shallow_repository(path: &Path) -> Result<bool> {
-    let output = Command::new("git")
-        .arg("-C")
-        .arg(path)
+    let output = git_in(path)
         .args(["rev-parse", "--is-shallow-repository"])
         .output()
         .await
@@ -431,9 +538,7 @@ async fn is_shallow_repository(path: &Path) -> Result<bool> {
 }
 
 async fn partial_clone_filter(path: &Path) -> Result<Option<String>> {
-    let output = Command::new("git")
-        .arg("-C")
-        .arg(path)
+    let output = git_in(path)
         .args(["config", "--get", "remote.origin.partialclonefilter"])
         .output()
         .await
@@ -458,9 +563,7 @@ pub(crate) async fn reachable_commit_count(handle: &RepoHandle) -> Result<usize>
     if handle.is_empty() {
         return Ok(0);
     }
-    let output = Command::new("git")
-        .arg("-C")
-        .arg(&handle.path)
+    let output = git_in(&handle.path)
         .args(["rev-list", "--count", "HEAD"])
         .output()
         .await
@@ -510,9 +613,7 @@ async fn walk_new_commits_batched(
         None => "HEAD".to_string(),
     };
 
-    let output = Command::new("git")
-        .arg("-C")
-        .arg(&handle.path)
+    let output = git_in(&handle.path)
         .args(["rev-list", "--reverse", "--no-merges", &range])
         .output()
         .await
@@ -539,6 +640,12 @@ async fn walk_new_commits_batched(
     Ok(commits)
 }
 
+/// Patch-level walk for the TODO/FIXME signal.
+///
+/// Non-text and generated paths are excluded (see [`NON_TEXT_PATHSPECS`]), so
+/// the `paths_changed` this returns is deliberately narrower than the commit's
+/// real path set. The per-file and per-author aggregates take their paths from
+/// [`walk_commit_metadata_batch`], which applies no pathspec.
 pub(crate) async fn walk_commit_batch(
     handle: &RepoHandle,
     shas: &[String],
@@ -551,8 +658,8 @@ pub(crate) async fn walk_commit_batch(
     // iso8601 · %s subject. `%P` identifies the root commit, whose content
     // contributes TODO deltas but no changed-path aggregate.
     let log_format = "%x00%x00GDCOMMIT%x00%H%x00%P%x00%ae%x00%an%x00%aI%x00%s%x00";
-    let mut command = Command::new("git");
-    command.arg("-C").arg(&handle.path).args([
+    let mut command = git_in(&handle.path);
+    command.args([
         "log",
         "--no-walk=unsorted",
         "--numstat",
@@ -562,6 +669,12 @@ pub(crate) async fn walk_commit_batch(
         &format!("--format={log_format}"),
     ]);
     command.args(shas).arg("--");
+    // Exclude paths that cannot carry a TODO before git diffs them. This is
+    // not only noise control: on a `--filter=blob:none` clone `git log -p`
+    // hydrates both sides of every changed file from the remote, so without
+    // this a commit that touches a video or a generated bundle downloads it
+    // in full to produce the line "Binary files ... differ".
+    command.args(NON_TEXT_PATHSPECS);
     let output = command.output().await.context("batched git log")?;
     if !output.status.success() {
         bail!(
@@ -585,8 +698,8 @@ pub(crate) async fn walk_commit_metadata_batch(
     }
     validate_shas(shas)?;
     let log_format = "%x00%x00GDCOMMIT%x00%H%x00%P%x00%ae%x00%an%x00%aI%x00%s%x00";
-    let mut command = Command::new("git");
-    command.arg("-C").arg(&handle.path).args([
+    let mut command = git_in(&handle.path);
+    command.args([
         "log",
         "--no-walk=unsorted",
         "--name-only",
@@ -838,7 +951,12 @@ fn scan_todos(patch: &[u8]) -> (u32, u32) {
     } else {
         patch
     };
-    let text = std::str::from_utf8(bytes).unwrap_or("");
+    // Lossy, not strict: a patch that touches one Latin-1 or UTF-16 source
+    // file alongside twenty UTF-8 ones is not UTF-8 as a whole, and treating
+    // that as "no TODO churn in this commit" silently zeroed the signal for
+    // every other file in the same commit.
+    let text = String::from_utf8_lossy(bytes);
+    let text = text.as_ref();
     let (mut todo_added, mut todo_removed) = (0u32, 0u32);
     for line in text.lines() {
         if line.starts_with("+++") || line.starts_with("---") {
@@ -905,7 +1023,13 @@ fn count_todo_words(s: &str) -> u32 {
 fn is_fix_message(msg: &str) -> bool {
     let lower = msg.to_lowercase();
     for needle in ["fix", "bug", "hotfix", "patch"] {
-        if let Some(idx) = lower.find(needle) {
+        // Every occurrence, not just the first: `find` returning a hit that
+        // happens to sit inside a longer word ("prefix", "debug") classified
+        // the whole subject as not-a-fix even when a standalone occurrence
+        // followed it. This is the only input to the bug-magnet chart.
+        let mut start = 0;
+        while let Some(offset) = lower[start..].find(needle) {
+            let idx = start + offset;
             let before_ok = idx
                 .checked_sub(1)
                 .and_then(|i| lower.as_bytes().get(i).copied())
@@ -920,6 +1044,7 @@ fn is_fix_message(msg: &str) -> bool {
             if before_ok && after_ok {
                 return true;
             }
+            start = idx + needle.len();
         }
     }
     false
@@ -996,6 +1121,16 @@ pub async fn evict_clone(path: &Path) -> Result<()> {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    /// A keyword buried in a longer word must not hide a real one later in
+    /// the same subject.
+    #[test]
+    fn fix_detection_scans_every_occurrence() {
+        assert!(is_fix_message("prefix rewrite: fix the parser"));
+        assert!(is_fix_message("debug tooling and bug repro"));
+        assert!(!is_fix_message("prefix rewrite for the debugger"));
+        assert!(is_fix_message("fix: off-by-one"));
+    }
 
     #[test]
     fn fix_message_word_boundary() {
@@ -1558,6 +1693,7 @@ mod tests {
 
             let metadata = walk_commit_metadata_batch(&handle, &shas).await.unwrap();
             assert_eq!(metadata.len(), new_commits.len());
+            let mut saw_binary_in_metadata = false;
             for (fast, complete) in metadata.iter().zip(new_commits.iter()) {
                 assert_eq!(fast.sha, complete.sha);
                 assert_eq!(fast.author_email, complete.author_email);
@@ -1565,13 +1701,30 @@ mod tests {
                 assert_eq!(fast.committed_at, complete.committed_at);
                 assert_eq!(fast.message_first_line, complete.message_first_line);
                 assert_eq!(fast.is_fix, complete.is_fix);
+                // The metadata walk sees every changed path; the patch walk
+                // excludes non-text paths (it exists only to scan diffs for
+                // TODO markers, and diffing a binary on a partial clone means
+                // downloading it). So the patch walk's path set is a subset.
                 let mut fast_paths = fast.paths_changed.clone();
                 let mut complete_paths = complete.paths_changed.clone();
                 fast_paths.sort();
                 complete_paths.sort();
-                assert_eq!(fast_paths, complete_paths);
+                assert!(
+                    complete_paths.iter().all(|path| fast_paths.contains(path)),
+                    "patch-walk paths {complete_paths:?} must be a subset of {fast_paths:?}"
+                );
+                assert!(
+                    !complete_paths.iter().any(|path| path.ends_with(".dat")),
+                    "non-text paths are excluded from the patch walk"
+                );
+                saw_binary_in_metadata |= fast_paths.iter().any(|path| path.ends_with(".dat"));
                 assert_eq!((fast.todo_added, fast.todo_removed), (0, 0));
             }
+
+            assert!(
+                saw_binary_in_metadata,
+                "the metadata walk still reports non-text changed paths"
+            );
 
             assert_eq!(
                 new_commits.len(),
@@ -1589,11 +1742,16 @@ mod tests {
                 // rename-OFF `diff-tree`, but the SET is identical.
                 let mut new_sorted = new.paths_changed.clone();
                 new_sorted.sort();
-                let mut old_sorted = old_paths.clone();
+                let mut old_sorted: Vec<String> = old_paths
+                    .iter()
+                    .filter(|path| !path.ends_with(".dat"))
+                    .cloned()
+                    .collect();
                 old_sorted.sort();
                 assert_eq!(
                     new_sorted, old_sorted,
-                    "path set for {sha} matches old diff-tree --name-only"
+                    "path set for {sha} matches old diff-tree --name-only, \
+                     minus the non-text paths the patch walk excludes"
                 );
                 assert_eq!(new.todo_added, old_add, "todo_added for {sha}");
                 assert_eq!(new.todo_removed, old_rem, "todo_removed for {sha}");
@@ -1603,12 +1761,14 @@ mod tests {
             // Commit 2 is the only "fix" commit.
             let fix_count = new_commits.iter().filter(|c| c.is_fix).count();
             assert_eq!(fix_count, 1, "exactly one fix commit");
-            // Binary file is present in commit 4's paths (old behavior).
+            // The patch walk skips the binary and keeps the text file it was
+            // committed with, so a commit that mixes the two still yields its
+            // real TODO churn without downloading the binary.
             let c4 = new_commits
                 .iter()
                 .find(|c| c.message_first_line == "add binary and text")
                 .unwrap();
-            assert!(c4.paths_changed.contains(&"bin.dat".to_string()));
+            assert!(!c4.paths_changed.contains(&"bin.dat".to_string()));
             assert!(c4.paths_changed.contains(&"t.txt".to_string()));
             // Rename commit shows BOTH a.txt and c.txt (no rename detection).
             let c3 = new_commits

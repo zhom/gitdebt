@@ -198,6 +198,24 @@ impl HourlyArchiveSink for PostgresHourlyArchive {
             .map_err(sink_error)?;
         }
 
+        // Coverage, not activity: a committed hour proves the follower saw
+        // every WatchEvent in it, so every tracked archive-backed repository
+        // is current through that hour — including the ones that gained no
+        // stars. Stamping only the repositories that appeared in the hour left
+        // the long tail permanently "stale", so every view of them re-enqueued
+        // a history fetch that had nothing to do. The staleness bound keeps
+        // this to a fraction of the rows per pass instead of rewriting the
+        // whole table every hour.
+        sqlx::query(
+            "UPDATE repos SET archive_fetched_at = NOW() \
+             WHERE archive_complete AND history_source = 'gh_archive' AND NOT missing \
+               AND (archive_fetched_at IS NULL \
+                    OR archive_fetched_at < NOW() - INTERVAL '6 hours')",
+        )
+        .execute(&mut *tx)
+        .await
+        .map_err(sink_error)?;
+
         sqlx::query(
             "INSERT INTO gh_archive_hours \
                 (archive_hour, status, attempts, event_count, processed_at, last_error) \
@@ -304,6 +322,16 @@ fn config_from_env() -> Result<HourlyFollowerConfig, HourlyArchiveError> {
     }
     if let Some(value) = env_usize("GH_ARCHIVE_HOURLY_MAX_EVENTS")? {
         config.max_matching_events = value;
+    }
+    // The size ceilings are what an unusually large hour runs into. Without an
+    // escape they are a permanent stall: the follower re-downloads and
+    // re-inflates the same hour forever, never checkpoints past it, and
+    // forward star ingestion stops for every repository.
+    if let Some(value) = env_usize("GH_ARCHIVE_HOURLY_MAX_DECODED_BYTES")? {
+        config.max_decoded_bytes = value;
+    }
+    if let Some(value) = env_usize("GH_ARCHIVE_HOURLY_MAX_LINE_BYTES")? {
+        config.max_line_bytes = value;
     }
     config.validate()?;
     Ok(config)

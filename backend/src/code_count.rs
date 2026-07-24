@@ -1,17 +1,21 @@
 //! In-house lines-of-code aggregator.
 //!
-//! Walks an extracted HEAD tree, classifies each file by extension /
-//! basename, and counts blank / comment / code lines per language.
+//! Reads HEAD's tree listing, classifies each blob by extension / basename,
+//! and counts blank / comment / code lines per language for the blobs that
+//! can hold code.
 //!
-//! Why hand-rolled instead of `tokei`:
-//!   1. Tokei is a 100+ language behemoth pulling in clap, regex, and a
-//!      heap of language definitions we don't need. We only render the
-//!      top ~12 in the chart, so most of that surface is dead weight.
-//!   2. Tokei follows symlinks by default. Hostile repos with a symlink
-//!      to `/etc` or a runaway loop would walk host filesystem state.
-//!      `walkdir::WalkDir::new(...).follow_links(false)` makes that
-//!      impossible — we never traverse anything outside the extracted
-//!      tarball.
+//! **Nothing materializes the working tree.** Clones are
+//! `--filter=blob:none`, so any command that needs blob *content* — `git
+//! archive`, a checkout, `ls-tree --long` — makes git lazily fetch the whole
+//! tree from the remote, including every image, video, font and archive the
+//! repository commits. This module therefore selects the paths worth counting
+//! from the tree listing alone (local, no network), fetches exactly those
+//! objects in one bounded request, and reads them with lazy fetching disabled
+//! so a missed object is an error instead of a silent second download.
+//!
+//! Why hand-rolled instead of `tokei`: it is a 100+ language dependency for
+//! the ~12 languages this renders, and it counts a working directory, which
+//! is the thing this module exists not to create.
 //!
 //! Comment classification is a per-language single-pass state machine.
 //! No string-literal tracking (tokei has it, we skip it). The error
@@ -20,16 +24,15 @@
 //! and code buckets — irrelevant at the order of magnitude this chart
 //! shows.
 
+use std::collections::HashMap;
+use std::io::{BufRead, BufReader, Read, Write};
 use std::path::Path;
 use std::process::Stdio;
-use std::{collections::HashMap, time::Duration};
 
 use anyhow::{Context, Result, bail};
 use chrono::Utc;
-use tempfile::TempDir;
 use tokio::process::Command;
 use tokio::task;
-use walkdir::WalkDir;
 
 use crate::db::Db;
 
@@ -43,15 +46,24 @@ const MAX_FILE_BYTES: u64 = 2 * 1024 * 1024;
 /// support don't contain NULs.
 const BINARY_SNIFF_BYTES: usize = 8 * 1024;
 
-/// Avoid hydrating the complete HEAD of very large blobless clones. The tree
-/// still gives us an exact, current language/file census without downloading
-/// gigabytes of blobs; the UI and embed renderer explicitly label that
-/// fallback in files rather than pretending it is a line count.
+/// Countable files above which the exact count is skipped in favour of the
+/// census. A property of the tree, so the same repository always resolves the
+/// same way — the choice must never depend on how a particular run raced a
+/// clock, or one repository's stored metric flips between runs.
 const DEFAULT_EXACT_LINE_COUNT_MAX_FILES: usize = 20_000;
 // Exact lines are a refinement over the cheap, always-saved language census.
 // Do not let that refinement hold an otherwise complete interactive report
 // open for tens of seconds.
 const DEFAULT_EXACT_LINE_COUNT_TIMEOUT_SECS: u64 = 8;
+
+/// Ceiling on the bytes one exact count may hydrate from the remote. Only
+/// countable source files are ever requested, so this is reached by
+/// repositories that commit very large generated or vendored text.
+const DEFAULT_EXACT_LINE_COUNT_MAX_BYTES: u64 = 512 * 1024 * 1024;
+
+/// Objects requested per hydrate round trip. Bounds how far past the byte
+/// budget a single round trip can overshoot.
+const HYDRATE_CHUNK: usize = 512;
 
 #[derive(Debug, Clone)]
 pub struct LanguageCount {
@@ -62,28 +74,24 @@ pub struct LanguageCount {
     pub lines_comment: i64,
 }
 
-/// Walk HEAD of a bare clone, count lines per language. Returns
-/// languages with non-zero total lines, sorted by `lines_code` desc.
-pub async fn count_lines(repo_path: &Path) -> Result<Vec<LanguageCount>> {
-    let extracted = extract_head(repo_path).await?;
-    let extracted_path = extracted.path().to_path_buf();
-    // The walk + parse is sync + cpu-bound; spawn_blocking keeps it off
-    // the runtime so we don't starve workers during a big repo.
-    let counts = task::spawn_blocking(move || walk_and_count(&extracted_path))
-        .await
-        .context("line-count task")??;
-    drop(extracted);
-    Ok(counts)
+/// One blob of HEAD's tree.
+#[derive(Debug, Clone)]
+struct TreeBlob {
+    oid: String,
+    path: String,
 }
 
-/// Return exact language file counts from the committed HEAD tree without
-/// materializing blobs. The second value is the total number of files in the
-/// tree, including file types that gitdebt does not classify.
-pub async fn language_file_census(repo_path: &Path) -> Result<(Vec<LanguageCount>, usize)> {
+/// HEAD's blobs, straight from the tree listing.
+///
+/// `--long` would add each blob's size, which is exactly what must be avoided:
+/// the size lives in the object header, not the tree, so on a partial clone
+/// git lazily fetches every blob in the repository to answer it. Symlinks
+/// (mode 120000) and submodule gitlinks (type `commit`) are dropped here.
+async fn head_blobs(repo_path: &Path) -> Result<Vec<TreeBlob>> {
     let output = Command::new("git")
         .arg("-C")
         .arg(repo_path)
-        .args(["ls-tree", "-rz", "--name-only", "HEAD"])
+        .args(["ls-tree", "-rz", "HEAD"])
         .kill_on_drop(true)
         .output()
         .await
@@ -91,26 +99,51 @@ pub async fn language_file_census(repo_path: &Path) -> Result<(Vec<LanguageCount
     if !output.status.success() {
         bail!("git ls-tree exited {}", output.status);
     }
-
-    Ok(language_file_census_from_paths(&output.stdout))
+    Ok(parse_tree_listing(&output.stdout))
 }
 
-fn language_file_census_from_paths(paths: &[u8]) -> (Vec<LanguageCount>, usize) {
-    let mut total_files = 0usize;
-    let mut files_by_language: HashMap<&'static str, i64> = HashMap::new();
-    for raw_path in paths.split(|byte| *byte == 0) {
-        if raw_path.is_empty() {
+/// Parse `git ls-tree -rz` records: `<mode> SP <type> SP <oid> TAB <path>`,
+/// NUL-separated.
+fn parse_tree_listing(stdout: &[u8]) -> Vec<TreeBlob> {
+    let mut blobs = Vec::new();
+    for record in stdout.split(|byte| *byte == 0) {
+        if record.is_empty() {
             continue;
         }
-        total_files = total_files.saturating_add(1);
-        let Ok(path) = std::str::from_utf8(raw_path) else {
+        let Ok(record) = std::str::from_utf8(record) else {
             continue;
         };
-        let path = Path::new(path);
-        if path
-            .components()
-            .any(|component| component.as_os_str().to_str().is_some_and(is_ignored_dir))
-        {
+        let Some((meta, path)) = record.split_once('\t') else {
+            continue;
+        };
+        let mut fields = meta.split_whitespace();
+        let (Some(mode), Some(kind), Some(oid)) = (fields.next(), fields.next(), fields.next())
+        else {
+            continue;
+        };
+        if kind != "blob" || mode == "120000" {
+            continue;
+        }
+        blobs.push(TreeBlob {
+            oid: oid.to_string(),
+            path: path.to_string(),
+        });
+    }
+    blobs
+}
+
+/// Language file counts over the committed HEAD tree. The second value is the
+/// total number of files in the tree, including types gitdebt cannot classify
+/// — the denominator that makes the classified count honest.
+pub async fn language_file_census(repo_path: &Path) -> Result<(Vec<LanguageCount>, usize)> {
+    Ok(census_from_blobs(&head_blobs(repo_path).await?))
+}
+
+fn census_from_blobs(blobs: &[TreeBlob]) -> (Vec<LanguageCount>, usize) {
+    let mut files_by_language: HashMap<&'static str, i64> = HashMap::new();
+    for blob in blobs {
+        let path = Path::new(&blob.path);
+        if is_excluded_path(path) {
             continue;
         }
         let Some(hit) = detect_language(path) else {
@@ -130,105 +163,204 @@ fn language_file_census_from_paths(paths: &[u8]) -> (Vec<LanguageCount>, usize) 
         })
         .collect();
     counts.sort_by_key(|row| std::cmp::Reverse(row.files));
-    (counts, total_files)
+    (counts, blobs.len())
 }
 
-pub fn exact_line_count_max_files() -> usize {
-    std::env::var("REPO_LINE_COUNT_MAX_FILES")
-        .ok()
-        .and_then(|value| value.parse().ok())
-        .filter(|value| *value > 0)
-        .unwrap_or(DEFAULT_EXACT_LINE_COUNT_MAX_FILES)
+/// Exact per-language line counts over HEAD.
+///
+/// `None` means the repository's countable content is outside the budget and
+/// the caller should persist the census instead. That decision is a pure
+/// function of the tree, so a repository does not switch metrics between runs.
+pub async fn count_lines(repo_path: &Path) -> Result<Option<Vec<LanguageCount>>> {
+    let blobs = head_blobs(repo_path).await?;
+    count_lines_for(repo_path, &blobs).await
 }
 
-pub fn exact_line_count_timeout() -> Duration {
-    Duration::from_secs(
-        std::env::var("REPO_LINE_COUNT_TIMEOUT_SECONDS")
-            .ok()
-            .and_then(|value| value.parse().ok())
-            .filter(|value| *value > 0)
-            .unwrap_or(DEFAULT_EXACT_LINE_COUNT_TIMEOUT_SECS),
-    )
+async fn count_lines_for(
+    repo_path: &Path,
+    blobs: &[TreeBlob],
+) -> Result<Option<Vec<LanguageCount>>> {
+    let candidates: Vec<TreeBlob> = blobs
+        .iter()
+        .filter(|blob| {
+            let path = Path::new(&blob.path);
+            !is_excluded_path(path) && detect_language(path).is_some()
+        })
+        .cloned()
+        .collect();
+    if candidates.is_empty() || candidates.len() > exact_line_count_max_files() {
+        return Ok(None);
+    }
+    if !hydrate_blobs(repo_path, &candidates).await? {
+        return Ok(None);
+    }
+    let repo_path = repo_path.to_path_buf();
+    // Reading and counting is local I/O plus a per-file scan; keep it off the
+    // runtime threads.
+    task::spawn_blocking(move || read_and_count(&repo_path, &candidates))
+        .await
+        .context("line-count task")?
+        .map(Some)
 }
 
-/// Materialize HEAD into a tempdir as `git archive HEAD > tar; tar -xf tar`.
-/// Two-step (write tar, extract tar) instead of a piped one-shot — keeps
-/// us off tokio's pipe-stdio dance and the intermediate `.tar` is
-/// removed before the walker sees the dir.
-async fn extract_head(repo_path: &Path) -> Result<TempDir> {
-    let tmp = tempfile::Builder::new()
-        .prefix("gitdebt-loc-")
-        .tempdir()
-        .context("create tempdir")?;
-    let tar_path = tmp.path().join(".gitdebt-HEAD.tar");
-
-    let archive_out = std::fs::File::create(&tar_path).context("create tar file")?;
-    let archive_status = Command::new("git")
+/// Object ids missing from the local store, without fetching anything.
+fn missing_objects(repo_path: &Path, blobs: &[TreeBlob]) -> Result<Vec<String>> {
+    let mut child = std::process::Command::new("git")
         .arg("-C")
         .arg(repo_path)
-        .args(["archive", "--format=tar", "HEAD"])
-        .stdout(archive_out)
-        .stderr(Stdio::piped())
-        .kill_on_drop(true)
-        .status()
-        .await
-        .context("git archive")?;
-    if !archive_status.success() {
-        bail!("git archive exited {archive_status}");
+        .args([
+            "cat-file",
+            "--batch-check=%(objectname) %(objecttype) %(objectsize)",
+        ])
+        .env("GIT_NO_LAZY_FETCH", "1")
+        .stdin(Stdio::piped())
+        .stdout(Stdio::piped())
+        .stderr(Stdio::null())
+        .spawn()
+        .context("spawn git cat-file --batch-check")?;
+    let mut stdin = child.stdin.take().context("cat-file stdin")?;
+    let oids: Vec<String> = blobs.iter().map(|blob| blob.oid.clone()).collect();
+    let writer = std::thread::spawn(move || {
+        for oid in &oids {
+            if writeln!(stdin, "{oid}").is_err() {
+                break;
+            }
+        }
+    });
+    let stdout = child.stdout.take().context("cat-file stdout")?;
+    let mut missing = Vec::new();
+    for line in BufReader::new(stdout).lines() {
+        let line = line.context("read cat-file --batch-check")?;
+        if let Some(oid) = line.split_whitespace().next()
+            && line.contains("missing")
+        {
+            missing.push(oid.to_string());
+        }
     }
-
-    let tar_status = Command::new("tar")
-        .arg("-xf")
-        .arg(&tar_path)
-        .arg("-C")
-        .arg(tmp.path())
-        .stdout(Stdio::null())
-        .stderr(Stdio::piped())
-        .kill_on_drop(true)
-        .status()
-        .await
-        .context("tar -xf")?;
-    if !tar_status.success() {
-        bail!("tar exited {tar_status}");
-    }
-    let _ = tokio::fs::remove_file(&tar_path).await;
-    Ok(tmp)
+    let _ = writer.join();
+    let _ = child.wait();
+    Ok(missing)
 }
 
-fn walk_and_count(dir: &Path) -> Result<Vec<LanguageCount>> {
-    use std::collections::HashMap;
+/// Fetch the selected objects — and only those — from the promisor remote.
+///
+/// Returns `false` when the hydrated volume exceeds the byte budget, i.e. the
+/// caller should fall back to the census. Chunking bounds the overshoot to one
+/// round trip, and the fetch is a direct child so a cancelled analysis reaps it
+/// instead of leaving git pulling a multi-gigabyte pack in the background.
+async fn hydrate_blobs(repo_path: &Path, blobs: &[TreeBlob]) -> Result<bool> {
+    let repo = repo_path.to_path_buf();
+    let candidates = blobs.to_vec();
+    let missing = task::spawn_blocking(move || missing_objects(&repo, &candidates)).await??;
+    if missing.is_empty() {
+        return Ok(true);
+    }
+    let budget = exact_line_count_max_bytes();
+    let before = crate::repo_history::clone_size_bytes(repo_path);
+    for chunk in missing.chunks(HYDRATE_CHUNK) {
+        let mut child = Command::new("git")
+            .arg("-C")
+            .arg(repo_path)
+            .args([
+                "fetch",
+                "origin",
+                "--no-tags",
+                "--no-write-fetch-head",
+                "--recurse-submodules=no",
+                "--filter=blob:none",
+                "--stdin",
+            ])
+            .stdin(Stdio::piped())
+            .stdout(Stdio::null())
+            .stderr(Stdio::piped())
+            .kill_on_drop(true)
+            .spawn()
+            .context("spawn selective blob fetch")?;
+        {
+            use tokio::io::AsyncWriteExt;
+            let mut stdin = child.stdin.take().context("fetch stdin")?;
+            for oid in chunk {
+                stdin.write_all(oid.as_bytes()).await?;
+                stdin.write_all(b"\n").await?;
+            }
+            stdin.shutdown().await?;
+        }
+        let output = child.wait_with_output().await.context("selective fetch")?;
+        if !output.status.success() {
+            bail!(
+                "selective blob fetch failed: {}",
+                String::from_utf8_lossy(&output.stderr)
+            );
+        }
+        if crate::repo_history::clone_size_bytes(repo_path).saturating_sub(before) > budget {
+            tracing::info!(
+                budget,
+                "exact line count exceeded its hydration budget; using the file census"
+            );
+            return Ok(false);
+        }
+    }
+    Ok(true)
+}
+
+/// Stream the selected blobs out of the local object store and count them.
+/// Lazy fetching is disabled: after [`hydrate_blobs`] every object is present,
+/// and an unexpected miss must surface rather than trigger another download.
+fn read_and_count(repo_path: &Path, blobs: &[TreeBlob]) -> Result<Vec<LanguageCount>> {
+    let mut child = std::process::Command::new("git")
+        .arg("-C")
+        .arg(repo_path)
+        .args(["cat-file", "--batch"])
+        .env("GIT_NO_LAZY_FETCH", "1")
+        .stdin(Stdio::piped())
+        .stdout(Stdio::piped())
+        .stderr(Stdio::null())
+        .spawn()
+        .context("spawn git cat-file --batch")?;
+    let mut stdin = child.stdin.take().context("cat-file stdin")?;
+    let requested: Vec<TreeBlob> = blobs.to_vec();
+    let feed = requested.clone();
+    let writer = std::thread::spawn(move || {
+        for blob in &feed {
+            if writeln!(stdin, "{}", blob.oid).is_err() {
+                break;
+            }
+        }
+    });
+
+    let mut reader = BufReader::new(child.stdout.take().context("cat-file stdout")?);
     let mut totals: HashMap<&'static str, LanguageCount> = HashMap::new();
-
-    // `follow_links(false)` is the security boundary: hostile repos
-    // could include a symlink to `/etc/passwd` or a self-referential
-    // loop, both of which would let us walk outside the extracted tar
-    // if we honored them. We don't.
-    let walker = WalkDir::new(dir)
-        .follow_links(false)
-        .into_iter()
-        .filter_entry(|e| !is_ignored_dir(e.file_name().to_str().unwrap_or("")));
-
-    for entry in walker.filter_map(Result::ok) {
-        if !entry.file_type().is_file() {
-            continue;
+    let mut header = String::new();
+    let mut content = Vec::new();
+    for blob in &requested {
+        header.clear();
+        if reader.read_line(&mut header)? == 0 {
+            break;
         }
-        let path = entry.path();
-        let Some(lang) = detect_language(path) else {
+        let mut fields = header.split_whitespace();
+        let (_oid, kind, size) = (fields.next(), fields.next(), fields.next());
+        let Some(size) = kind
+            .filter(|kind| *kind == "blob")
+            .and(size)
+            .and_then(|size| size.parse::<usize>().ok())
+        else {
+            // `<oid> missing` carries no body to skip.
             continue;
         };
-        let Ok(meta) = entry.metadata() else { continue };
-        if meta.len() > MAX_FILE_BYTES {
+        content.clear();
+        content.resize(size, 0);
+        reader.read_exact(&mut content)?;
+        // cat-file writes a trailing newline after each object body.
+        let mut trailer = [0u8; 1];
+        reader.read_exact(&mut trailer)?;
+        if size > MAX_FILE_BYTES as usize || looks_binary(&content) {
             continue;
         }
-        let Ok(bytes) = std::fs::read(path) else {
+        let Ok(text) = std::str::from_utf8(&content) else {
             continue;
         };
-        if looks_binary(&bytes) {
+        let Some(lang) = detect_language(Path::new(&blob.path)) else {
             continue;
-        }
-        let text = match std::str::from_utf8(&bytes) {
-            Ok(s) => s,
-            Err(_) => continue, // not UTF-8; treat as binary/foreign
         };
         let spec = LANG_SPECS[lang.spec_idx];
         let (blank, comment, code) = count_lines_in_text(spec, text);
@@ -244,19 +376,51 @@ fn walk_and_count(dir: &Path) -> Result<Vec<LanguageCount>> {
         row.lines_comment += comment;
         row.lines_code += code;
     }
+    let _ = writer.join();
+    let _ = child.wait();
 
     let mut out: Vec<LanguageCount> = totals
         .into_values()
-        .filter(|l| l.lines_code + l.lines_comment + l.lines_blank > 0)
+        .filter(|lang| lang.lines_code + lang.lines_comment + lang.lines_blank > 0)
         .collect();
     out.sort_by_key(|row| std::cmp::Reverse(row.lines_code));
     Ok(out)
 }
 
+pub fn exact_line_count_max_files() -> usize {
+    std::env::var("REPO_LINE_COUNT_MAX_FILES")
+        .ok()
+        .and_then(|value| value.parse().ok())
+        .filter(|value| *value > 0)
+        .unwrap_or(DEFAULT_EXACT_LINE_COUNT_MAX_FILES)
+}
+
+pub fn exact_line_count_max_bytes() -> u64 {
+    std::env::var("REPO_LINE_COUNT_MAX_BYTES")
+        .ok()
+        .and_then(|value| value.parse().ok())
+        .filter(|value| *value > 0)
+        .unwrap_or(DEFAULT_EXACT_LINE_COUNT_MAX_BYTES)
+}
+
+pub fn exact_line_count_timeout() -> std::time::Duration {
+    std::time::Duration::from_secs(
+        std::env::var("REPO_LINE_COUNT_TIMEOUT_SECONDS")
+            .ok()
+            .and_then(|value| value.parse().ok())
+            .filter(|value| *value > 0)
+            .unwrap_or(DEFAULT_EXACT_LINE_COUNT_TIMEOUT_SECS),
+    )
+}
+
 /// Replace the persisted line counts for `repo` with `counts`. Single
 /// transaction: visible state goes from "old data" → "new data" without
 /// any half-empty intermediate.
-pub async fn save(db: &Db, repo: &str, counts: &[LanguageCount]) -> Result<()> {
+///
+/// `exact` records which metric these rows are. A census carries file counts
+/// with zero lines, and readers must be able to tell that apart from a
+/// repository that genuinely has no code.
+pub async fn save(db: &Db, repo: &str, counts: &[LanguageCount], exact: bool) -> Result<()> {
     let mut tx = db.pool.begin().await?;
     sqlx::query("DELETE FROM repo_lines WHERE repo = $1")
         .bind(repo)
@@ -264,8 +428,9 @@ pub async fn save(db: &Db, repo: &str, counts: &[LanguageCount]) -> Result<()> {
         .await?;
     for c in counts {
         sqlx::query(
-            "INSERT INTO repo_lines (repo, language, files, lines_code, lines_blank, lines_comment) \
-             VALUES ($1, $2, $3, $4, $5, $6)",
+            "INSERT INTO repo_lines \
+                (repo, language, files, lines_code, lines_blank, lines_comment, lines_exact) \
+             VALUES ($1, $2, $3, $4, $5, $6, $7)",
         )
         .bind(repo)
         .bind(&c.language)
@@ -273,6 +438,7 @@ pub async fn save(db: &Db, repo: &str, counts: &[LanguageCount]) -> Result<()> {
         .bind(c.lines_code)
         .bind(c.lines_blank)
         .bind(c.lines_comment)
+        .bind(exact)
         .execute(&mut *tx)
         .await?;
     }
@@ -404,7 +570,7 @@ fn match_extension(ext: &str) -> Option<(&'static str, usize)> {
 }
 
 /// Directories containing vendored output, generated artifacts, or
-/// frequently changing tool caches.
+/// frequently changing tool caches, at any depth.
 fn is_ignored_dir(name: &str) -> bool {
     matches!(
         name,
@@ -414,6 +580,8 @@ fn is_ignored_dir(name: &str) -> bool {
             | "build"
             | "out"
             | "vendor"
+            | "third_party"
+            | "thirdparty"
             | ".git"
             | ".svn"
             | ".hg"
@@ -428,7 +596,6 @@ fn is_ignored_dir(name: &str) -> bool {
             | ".cache"
             | ".turbo"
             | ".parcel-cache"
-            | "bin"
             | "obj"
             | ".idea"
             | ".vscode"
@@ -436,6 +603,87 @@ fn is_ignored_dir(name: &str) -> bool {
             | "Pods"
             | ".gradle"
     )
+}
+
+/// Directories ignored only at the repository root. `bin` is the reason this
+/// distinction exists: it is a build-output directory at the root and an
+/// ordinary source directory anywhere else — `src/bin/*.rs` is where Cargo
+/// keeps a crate's extra binaries, and pruning it by name at any depth
+/// deleted real source from every such repository's counts.
+fn is_root_only_ignored_dir(name: &str) -> bool {
+    matches!(name, "bin")
+}
+
+/// Committed but not authored: lockfiles, minified bundles, source maps, and
+/// generated client code. Counting them makes a language breakdown describe a
+/// package manager rather than the project.
+fn is_generated_file(name: &str) -> bool {
+    const LOCKFILES: &[&str] = &[
+        "package-lock.json",
+        "npm-shrinkwrap.json",
+        "yarn.lock",
+        "pnpm-lock.yaml",
+        "bun.lockb",
+        "Cargo.lock",
+        "composer.lock",
+        "Gemfile.lock",
+        "poetry.lock",
+        "Pipfile.lock",
+        "go.sum",
+        "pubspec.lock",
+        "packages.lock.json",
+        "mix.lock",
+        "flake.lock",
+    ];
+    const GENERATED_SUFFIXES: &[&str] = &[
+        ".min.js",
+        ".min.css",
+        ".map",
+        ".pb.go",
+        "_pb2.py",
+        "_pb2_grpc.py",
+        ".pb.cc",
+        ".pb.h",
+        ".g.dart",
+        ".freezed.dart",
+        ".generated.ts",
+        ".generated.cs",
+        ".designer.cs",
+    ];
+    LOCKFILES.contains(&name)
+        || GENERATED_SUFFIXES
+            .iter()
+            .any(|suffix| name.ends_with(suffix))
+}
+
+/// The single exclusion policy for both the census and the exact count. They
+/// must agree: the two numbers are rendered under the same labels, so a path
+/// counted by one and not the other silently changes what a repository's
+/// language breakdown means between runs.
+fn is_excluded_path(path: &Path) -> bool {
+    if path
+        .file_name()
+        .and_then(|name| name.to_str())
+        .is_some_and(is_generated_file)
+    {
+        return true;
+    }
+    let directories: Vec<&str> = path
+        .parent()
+        .map(|parent| {
+            parent
+                .components()
+                .filter_map(|component| component.as_os_str().to_str())
+                .collect()
+        })
+        .unwrap_or_default();
+    if directories
+        .first()
+        .is_some_and(|name| is_root_only_ignored_dir(name))
+    {
+        return true;
+    }
+    directories.iter().any(|name| is_ignored_dir(name))
 }
 
 fn looks_binary(bytes: &[u8]) -> bool {
@@ -752,11 +1000,42 @@ mod tests {
         assert_eq!((b, c, code), (2, 0, 1));
     }
 
+    /// Build a tree listing the way `git ls-tree -rz HEAD` emits it.
+    fn listing(entries: &[(&str, &str)]) -> Vec<u8> {
+        let mut out = Vec::new();
+        for (mode_and_kind, path) in entries {
+            out.extend_from_slice(
+                format!("{mode_and_kind} 0000000000000000000000000000000000000000\t{path}")
+                    .as_bytes(),
+            );
+            out.push(0);
+        }
+        out
+    }
+
     #[test]
-    fn language_file_census_is_exact_and_ignores_unknown_types() {
-        let (rows, total_files) = language_file_census_from_paths(
-            b"src/main.rs\0src/lib.rs\0web/app.ts\0assets/logo.bin\0Makefile\0node_modules/vendor.js\0",
-        );
+    fn tree_listing_keeps_blobs_and_drops_symlinks_and_submodules() {
+        let blobs = parse_tree_listing(&listing(&[
+            ("100644 blob", "src/main.rs"),
+            ("120000 blob", "link-to-elsewhere"),
+            ("160000 commit", "vendored-submodule"),
+            ("100755 blob", "scripts/run.sh"),
+        ]));
+        let paths: Vec<&str> = blobs.iter().map(|blob| blob.path.as_str()).collect();
+        assert_eq!(paths, vec!["src/main.rs", "scripts/run.sh"]);
+    }
+
+    #[test]
+    fn census_counts_classified_files_and_reports_the_whole_tree() {
+        let blobs = parse_tree_listing(&listing(&[
+            ("100644 blob", "src/main.rs"),
+            ("100644 blob", "src/lib.rs"),
+            ("100644 blob", "web/app.ts"),
+            ("100644 blob", "assets/logo.bin"),
+            ("100644 blob", "Makefile"),
+            ("100644 blob", "node_modules/vendor.js"),
+        ]));
+        let (rows, total_files) = census_from_blobs(&blobs);
         assert_eq!(total_files, 6);
         assert_eq!(rows.iter().map(|row| row.files).sum::<i64>(), 4);
         assert_eq!(rows[0].language, "Rust");
@@ -766,5 +1045,23 @@ mod tests {
                 row.lines_code == 0 && row.lines_blank == 0 && row.lines_comment == 0
             })
         );
+    }
+
+    /// `bin` is a build-output directory at the root and a source directory
+    /// anywhere else; Cargo keeps a crate's extra binaries in `src/bin`.
+    #[test]
+    fn bin_is_ignored_only_at_the_repository_root() {
+        assert!(is_excluded_path(Path::new("bin/tool.rs")));
+        assert!(!is_excluded_path(Path::new("src/bin/server.rs")));
+        assert!(is_excluded_path(Path::new("web/node_modules/pkg/index.js")));
+        assert!(!is_excluded_path(Path::new("src/main.rs")));
+    }
+
+    #[test]
+    fn generated_and_locked_files_are_excluded() {
+        assert!(is_excluded_path(Path::new("package-lock.json")));
+        assert!(is_excluded_path(Path::new("web/static/app.min.js")));
+        assert!(is_excluded_path(Path::new("api/service.pb.go")));
+        assert!(!is_excluded_path(Path::new("web/src/app.js")));
     }
 }

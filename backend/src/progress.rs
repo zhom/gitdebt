@@ -405,11 +405,7 @@ fn bounded_position(position: Option<i64>) -> Option<u32> {
 }
 
 fn configured_analysis_workers() -> usize {
-    std::env::var("REPO_ANALYSIS_WORKERS")
-        .ok()
-        .and_then(|value| value.parse().ok())
-        .unwrap_or(2)
-        .clamp(1, 4)
+    crate::repo_analysis::configured_analysis_workers()
 }
 
 fn archive_month_progress(cursor: Option<NaiveDate>) -> (Option<u64>, Option<u64>, Option<u8>) {
@@ -469,13 +465,6 @@ async fn load_snapshot(state: &ApiState, repo: &str) -> Result<ProgressSnapshot,
                   AND (ahead.priority > analysis.priority OR \
                        (ahead.priority = analysis.priority AND ahead.enqueued_at < analysis.enqueued_at)) \
             ) END AS analysis_position, \
-            COALESCE(( \
-                SELECT AVG(sample.analysis_duration_ms)::BIGINT FROM ( \
-                    SELECT analysis_duration_ms FROM repo_history \
-                    WHERE analysis_duration_ms IS NOT NULL \
-                    ORDER BY last_analyzed_at DESC NULLS LAST LIMIT 20 \
-                ) sample \
-            ), 300000) AS analysis_average_ms, \
             (history.last_analyzed_at IS NOT NULL) AS analysis_complete, \
             history.analysis_scope_commits, \
             COALESCE(history.analysis_truncated, FALSE) AS analysis_truncated \
@@ -488,6 +477,7 @@ async fn load_snapshot(state: &ApiState, repo: &str) -> Result<ProgressSnapshot,
     .bind(repo)
     .fetch_one(&state.analyzer.cache.db().pool)
     .await?;
+    let analysis_average_ms = fleet_analysis_average_ms(state).await;
     Ok(ProgressSnapshot::from_raw(
         repo.to_string(),
         RawProgress {
@@ -512,12 +502,49 @@ async fn load_snapshot(state: &ApiState, repo: &str) -> Result<ProgressSnapshot,
             analysis_started_at: row.try_get("analysis_started_at")?,
             analysis_total_units: row.try_get("analysis_total_units")?,
             analysis_completed_units: row.try_get("analysis_completed_units")?,
-            analysis_average_ms: row.try_get("analysis_average_ms")?,
+            analysis_average_ms,
             analysis_complete: row.try_get("analysis_complete")?,
             analysis_scope_commits: row.try_get("analysis_scope_commits")?,
             analysis_truncated: row.try_get("analysis_truncated")?,
         },
     ))
+}
+
+/// Fallback ETA when no analysis has ever been timed.
+const DEFAULT_ANALYSIS_AVERAGE_MS: i64 = 300_000;
+/// How long the fleet-wide average is reused before it is re-measured.
+const ANALYSIS_AVERAGE_TTL: Duration = Duration::from_secs(60);
+
+/// Mean duration of the most recent analysis runs, cached per process.
+///
+/// This is a fleet-wide constant, not a per-repository value, but it used to
+/// ride along in the per-poll progress query — where it read `repo_history`
+/// (one row per repository ever analyzed) with a sort that no index serves,
+/// once per stream per two seconds. Measuring it on its own schedule keeps
+/// the poll to primary-key lookups.
+async fn fleet_analysis_average_ms(state: &ApiState) -> i64 {
+    static CACHED: OnceLock<Mutex<Option<(Instant, i64)>>> = OnceLock::new();
+    let cell = CACHED.get_or_init(|| Mutex::new(None));
+    let now = Instant::now();
+    if let Some((measured_at, value)) =
+        *cell.lock().unwrap_or_else(|poisoned| poisoned.into_inner())
+        && now.duration_since(measured_at) < ANALYSIS_AVERAGE_TTL
+    {
+        return value;
+    }
+    let measured: Option<i64> = sqlx::query_scalar(
+        "SELECT AVG(sample.analysis_duration_ms)::BIGINT FROM ( \
+             SELECT analysis_duration_ms FROM repo_history \
+             WHERE analysis_duration_ms IS NOT NULL \
+             ORDER BY last_analyzed_at DESC NULLS LAST LIMIT 20 \
+         ) sample",
+    )
+    .fetch_one(&state.analyzer.cache.db().pool)
+    .await
+    .unwrap_or(None);
+    let value = measured.unwrap_or(DEFAULT_ANALYSIS_AVERAGE_MS).max(1);
+    *cell.lock().unwrap_or_else(|poisoned| poisoned.into_inner()) = Some((now, value));
+    value
 }
 
 async fn load_snapshot_bounded(state: &ApiState, repo: &str) -> Result<ProgressSnapshot, ApiError> {

@@ -13,8 +13,13 @@ use std::sync::OnceLock;
 use axum::extract::ConnectInfo;
 use axum_extra::extract::cookie::CookieJar;
 
+use axum::error_handling::HandleErrorLayer;
 use axum::middleware::Next;
 use moka::future::Cache as MokaCache;
+use tower::BoxError;
+use tower::limit::GlobalConcurrencyLimitLayer;
+use tower::load_shed::LoadShedLayer;
+use tower_http::compression::CompressionLayer;
 use tower_http::cors::{Any, CorsLayer};
 use tower_http::limit::RequestBodyLimitLayer;
 use tower_http::timeout::TimeoutLayer;
@@ -450,13 +455,51 @@ pub fn router(state: ApiState) -> Router {
         .layer(TimeoutLayer::with_status_code(
             StatusCode::GATEWAY_TIMEOUT,
             Duration::from_secs(60),
-        ));
+        ))
+        // Text bodies only: the default predicate skips already-compressed
+        // image types and event streams, so rasters are never re-encoded on
+        // a CPU-constrained host. SVG charts, analyze JSON, and the CSV/JSON
+        // exports compress several-fold, and the extension fetches the
+        // analyze body on every repository page a user opens.
+        .layer(CompressionLayer::new());
 
     Router::new()
         .merge(timed)
         .merge(progress)
         .with_state(state)
+        // Shed load instead of queueing it. A saturated raster path otherwise
+        // accumulates accepted requests for the full 60-second timeout, each
+        // holding its rendered body; the queue, not the CPU, is what turns a
+        // burst into an out-of-memory restart.
+        .layer(
+            tower::ServiceBuilder::new()
+                .layer(HandleErrorLayer::new(|_: BoxError| async {
+                    let mut headers = HeaderMap::new();
+                    headers.insert(header::RETRY_AFTER, HeaderValue::from_static("2"));
+                    (StatusCode::SERVICE_UNAVAILABLE, headers, "server busy")
+                }))
+                .layer(LoadShedLayer::new())
+                .layer(GlobalConcurrencyLimitLayer::new(max_inflight_requests())),
+        )
         .layer(TraceLayer::new_for_http())
+}
+
+/// Ceiling on requests being served at once, above which the tier sheds
+/// rather than queues. Sized from the visible CPUs by default because the
+/// expensive request classes are CPU-bound (rasterization) or
+/// Postgres-bound, and both degrade worse when oversubscribed than when
+/// callers are told to retry.
+fn max_inflight_requests() -> usize {
+    std::env::var("MAX_INFLIGHT_REQUESTS")
+        .ok()
+        .and_then(|value| value.parse::<usize>().ok())
+        .filter(|value| *value > 0)
+        .unwrap_or_else(|| {
+            std::thread::available_parallelism()
+                .map(|cpus| cpus.get() * 64)
+                .unwrap_or(512)
+        })
+        .clamp(32, 8_192)
 }
 
 /// Admission middleware shared by the four rate-limited route classes.
@@ -660,6 +703,14 @@ async fn load_pipeline_signals(db: &crate::db::Db) -> Result<PipelineSignals, sq
 /// Postgres pool. It also reports pipeline degradation without taking the
 /// read API offline: queued/retrying states must remain visible while a
 /// provider recovers. 503 is reserved for a database/schema failure.
+/// Readiness for orchestrator probes: can this process reach Postgres.
+///
+/// Deliberately a single primary-key-free `SELECT 1` rather than the pipeline
+/// aggregate it used to run. Probes fire on a fixed cadence from every
+/// replica and from any external monitor, so a probe that costs several
+/// aggregate scans gets slower exactly when the database is loaded, and takes
+/// the deployment down at the moment it is least able to absorb it. The
+/// pipeline detail lives on the token-gated `/metrics`.
 async fn ready(State(state): State<ApiState>) -> impl IntoResponse {
     let db = state.analyzer.cache.db();
     let no_store = {
@@ -667,21 +718,14 @@ async fn ready(State(state): State<ApiState>) -> impl IntoResponse {
         h.insert(header::CACHE_CONTROL, HeaderValue::from_static("no-store"));
         h
     };
-    match load_pipeline_signals(db).await {
-        Ok(pipeline) => {
-            let degraded = pipeline.degraded();
-            (
-                StatusCode::OK,
-                no_store,
-                Json(serde_json::json!({
-                    "ready": true,
-                    "degraded": degraded,
-                    "pipeline": pipeline,
-                })),
-            )
-        }
+    match sqlx::query("SELECT 1").execute(&db.pool).await {
+        Ok(_) => (
+            StatusCode::OK,
+            no_store,
+            Json(serde_json::json!({ "ready": true })),
+        ),
         Err(e) => {
-            tracing::error!(error = %e, "readiness check failed: database/schema unavailable");
+            tracing::error!(error = %e, "readiness check failed: database unavailable");
             (
                 StatusCode::SERVICE_UNAVAILABLE,
                 no_store,
@@ -767,11 +811,22 @@ async fn metrics(
         "avatar_max": AVATAR_CACHE_MAX_BYTES,
     });
 
+    let db_pool = serde_json::json!({
+        "max": db.pool.options().get_max_connections(),
+        "size": db.pool.size(),
+        "idle": db.pool.num_idle(),
+    });
+
     let body = serde_json::json!({
         "github_budget": github_budget,
         "star_fetch_queue": star_queue,
         "repo_analysis_queue": analysis_queue,
+        "degraded": pipeline.degraded(),
         "pipeline": pipeline,
+        // Pool saturation is the failure mode a co-tenant database reaches
+        // first, and it is invisible from the outside: every surface just
+        // starts returning 500 when `acquire` times out.
+        "db_pool": db_pool,
         "raster": {
             "permits_total": RASTER_CONCURRENCY,
             "permits_available": raster_available,
@@ -1093,10 +1148,21 @@ async fn user_analyze(
         return Err(ApiError::bad_request("invalid login"));
     }
     let json = if query.enqueue == Some(0) {
-        let agg = aggregate::build_readonly(&state.analyzer, &login)
-            .await
-            .map_err(map_aggregate_err)?;
-        serde_json::to_string(&agg.to_json())?
+        // Memoized like the enqueueing branch, under a distinct key. The
+        // aggregate build is the heaviest read in the codebase (a bucketed
+        // GROUP BY across a login's repositories), and this variant is what
+        // the static build and any crawler walking `?enqueue=0` links hits.
+        let key = format!("user-readonly:{}", login.to_ascii_lowercase());
+        if let Some(json) = state.analyze_cache.get(&key).await {
+            json
+        } else {
+            let agg = aggregate::build_readonly(&state.analyzer, &login)
+                .await
+                .map_err(map_aggregate_err)?;
+            let json = serde_json::to_string(&agg.to_json())?;
+            state.analyze_cache.insert(key, json.clone()).await;
+            json
+        }
     } else {
         let key = format!("user:{}", login.to_ascii_lowercase());
         if let Some(json) = state.analyze_cache.get(&key).await {
@@ -1733,6 +1799,10 @@ async fn load_user_language_bars(
     if repos.is_empty() {
         return Ok(Vec::new());
     }
+    // Repositories whose breakdown is a file census are excluded when any
+    // exact-counted repository exists: summing file counts and line counts
+    // into one bar renders a language with thousands of lines next to one
+    // with nine files under a single "lines" label.
     let rows = sqlx::query(
         "SELECT lines.language AS language, \
                 SUM(lines.files)::BIGINT AS files, \
@@ -1741,6 +1811,10 @@ async fn load_user_language_bars(
                 SUM(lines.lines_comment)::BIGINT AS comment \
          FROM repo_lines lines \
          WHERE lines.repo = ANY($1::text[]) \
+           AND (lines.lines_exact OR NOT EXISTS ( \
+               SELECT 1 FROM repo_lines exact_rows \
+               WHERE exact_rows.repo = ANY($1::text[]) AND exact_rows.lines_exact \
+           )) \
          GROUP BY lines.language \
          HAVING SUM(lines.lines_code + lines.lines_blank + lines.lines_comment) > 0 \
              OR SUM(lines.files) > 0 \
@@ -2000,6 +2074,10 @@ async fn render_user_stat_svg(
                 from,
                 to,
                 &days,
+                // A profile spans many repositories with different analysis
+                // windows, so there is no single day before which nothing was
+                // observed.
+                None,
                 theme,
             )
         }
@@ -2243,7 +2321,12 @@ async fn ensure_user_chart_svg(
     let spec = q.range_spec()?;
     let login = login.to_ascii_lowercase();
     let theme_key = if theme.dark { "dark" } else { "light" };
-    let key = format!("user:{login}|{theme_key}|{}|{}", q.opts_key(), spec.key());
+    let key = format!(
+        "user:{login}|{theme_key}|{}|{}|{}",
+        q.opts_key(),
+        spec.key(),
+        user_data_revision(state, &login).await?
+    );
     if let Some(cached) = state.svg_cache.get(&key).await {
         return Ok(RenderedCard {
             svg: cached,
@@ -2299,10 +2382,11 @@ async fn ensure_user_chart_raster(
     let theme_key = if theme.dark { "dark" } else { "light" };
     let fmt_key = raster_fmt_key(format);
     let key = format!(
-        "user:{}|{theme_key}|{}|{}|{fmt_key}",
+        "user:{}|{theme_key}|{}|{}|{}|{fmt_key}",
         login.to_ascii_lowercase(),
         q.opts_key(),
-        spec.key()
+        spec.key(),
+        user_data_revision(state, &login.to_ascii_lowercase()).await?
     );
     if let Some(cached) = state.raster_cache.get(&key).await {
         return Ok((cached, false));
@@ -2883,9 +2967,44 @@ async fn ensure_chart_gif(
     .await
 }
 
+/// Data version of a repository's star history, folded into every media memo
+/// key that plots it.
+///
+/// The render caches are TTL-only — nothing invalidates them, and the Redis
+/// invalidation bus reaches only the analyze/aggregate JSON caches — so a key
+/// that does not depend on the data pins a README embed at whatever the
+/// series looked like when it was first rendered. Each of these components
+/// moves in the same transaction that appends new stars
+/// (`archive_hourly_db::commit_hour`) or refreshes metadata, and none of them
+/// moves while the data is unchanged, so quiet repositories keep their memo.
+fn star_data_revision(summary: Option<&crate::cache::RepoSummary>) -> String {
+    match summary {
+        Some(summary) => format!(
+            "d:{}:{}:{}",
+            summary
+                .stargazers_fetched_at
+                .map(|value| value.timestamp_millis())
+                .unwrap_or(0),
+            summary.history_observed_count.unwrap_or(-1),
+            summary.star_count.unwrap_or(-1),
+        ),
+        None => "d:cold".to_string(),
+    }
+}
+
+/// Which physical history a repository's series comes from. Part of the memo
+/// key because it also selects the rendered metric label.
+fn history_source_key(summary: Option<&crate::cache::RepoSummary>) -> &'static str {
+    match summary.and_then(|value| value.history_source.as_deref()) {
+        Some("gh_archive") => "archive",
+        _ => "github",
+    }
+}
+
 /// Render-or-fetch the single-repo star-history SVG. Memoized in
-/// `svg_cache` keyed by repo + theme + axis/log + date-range so the
-/// raster handlers don't have to re-walk the analyze pipeline.
+/// `svg_cache` keyed by repo + theme + axis/log + date-range + the star data
+/// revision so the raster handlers don't have to re-walk the analyze
+/// pipeline and no variant can outlive its data.
 async fn ensure_chart_svg(
     state: &ApiState,
     owner: &str,
@@ -2908,15 +3027,12 @@ async fn ensure_chart_svg(
     let archive_activity = summary
         .as_ref()
         .is_some_and(|value| value.history_source.as_deref() == Some("gh_archive"));
-    let source_key = if archive_activity {
-        "archive"
-    } else {
-        "github"
-    };
+    let source_key = history_source_key(summary.as_ref());
     let key = format!(
-        "{repo_full}|{theme_key}|{source_key}|{}|{}",
+        "{repo_full}|{theme_key}|{source_key}|{}|{}|{}",
         q.opts_key(),
-        spec.key()
+        spec.key(),
+        star_data_revision(summary.as_ref())
     );
     single_flight_card(&state.svg_cache, key, async {
         let series = star_series(&owner, &repo, &state.analyzer)
@@ -2969,12 +3085,18 @@ async fn ensure_chart_raster(
     let spec = q.range_spec()?;
     let theme_key = if theme.dark { "dark" } else { "light" };
     let fmt_key = raster_fmt_key(format);
+    let repo_full = crate::analyzer::repo_key(owner, repo);
+    // One indexed single-row read so the raster memo carries the same source
+    // and data revision as the SVG it encodes. Without it a PNG embed could
+    // hold a curve — and a metric label — that the SVG variant had already
+    // replaced.
+    let summary = state.analyzer.cache.get_repo_summary(&repo_full).await?;
     let key = format!(
-        "chart:{}/{}|{theme_key}|{}|{}|{fmt_key}",
-        owner.to_ascii_lowercase(),
-        repo.to_ascii_lowercase(),
+        "chart:{repo_full}|{theme_key}|{}|{}|{}|{}|{fmt_key}",
+        history_source_key(summary.as_ref()),
         q.opts_key(),
-        spec.key()
+        spec.key(),
+        star_data_revision(summary.as_ref())
     );
     if let Some(cached) = state.raster_cache.get(&key).await {
         return Ok((cached, false));
@@ -3096,19 +3218,44 @@ fn parse_overlay_repos(repos: Option<&str>) -> Result<Vec<(String, String)>, Api
     Ok(out)
 }
 
+/// Data version for an overlay: one indexed read covering every requested
+/// slug, so a comparison embed cannot keep showing the moment one project
+/// pulled ahead after the other has caught up.
+async fn overlay_revision(
+    state: &ApiState,
+    pairs: &[(String, String)],
+) -> Result<String, ApiError> {
+    let slugs: Vec<String> = pairs
+        .iter()
+        .map(|(owner, repo)| crate::analyzer::repo_key(owner, repo))
+        .collect();
+    let row: (i64, i64, i64) = sqlx::query_as(
+        "SELECT COUNT(*)::BIGINT, \
+                COALESCE(MAX(EXTRACT(EPOCH FROM stargazers_fetched_at)), 0)::BIGINT, \
+                COALESCE(SUM(GREATEST(history_observed_count, 0)), 0)::BIGINT \
+         FROM repos WHERE repo = ANY($1)",
+    )
+    .bind(&slugs)
+    .fetch_one(&state.analyzer.cache.db().pool)
+    .await?;
+    Ok(format!("d:{}:{}:{}", row.0, row.1, row.2))
+}
+
 /// Stable cache key for an overlay request: the normalized slug set +
-/// theme + axis/log + date-range. The slug order is preserved (it
-/// drives colors), so reordering produces a distinct, correct key.
+/// theme + axis/log + date-range + the data revision. The slug order is
+/// preserved (it drives colors), so reordering produces a distinct,
+/// correct key.
 fn overlay_key(
     pairs: &[(String, String)],
     theme: &crate::theme::Theme,
     q: &ChartQuery,
     spec: &RangeSpec,
+    revision: &str,
 ) -> String {
     let slugs: Vec<String> = pairs.iter().map(|(o, r)| format!("{o}/{r}")).collect();
     let theme_key = if theme.dark { "dark" } else { "light" };
     format!(
-        "multi:{}|{theme_key}|{}|{}",
+        "multi:{}|{theme_key}|{}|{}|{revision}",
         slugs.join(","),
         q.opts_key(),
         spec.key()
@@ -3129,7 +3276,8 @@ async fn ensure_multi_svg(
 ) -> Result<RenderedCard, ApiError> {
     let spec = q.range_spec()?;
     let pairs = parse_overlay_repos(q.repos.as_deref())?;
-    let key = overlay_key(&pairs, theme, q, &spec);
+    let revision = overlay_revision(state, &pairs).await?;
+    let key = overlay_key(&pairs, theme, q, &spec, &revision);
     single_flight_card(&state.svg_cache, key, async {
         // Build each repo's daily cumulative series via the same pipeline as
         // the single chart. Done sequentially to keep one large overlay from
@@ -3178,11 +3326,18 @@ async fn ensure_multi_raster(
     let spec = q.range_spec()?;
     let pairs = parse_overlay_repos(q.repos.as_deref())?;
     let fmt_key = raster_fmt_key(format);
-    let key = format!("{}|{fmt_key}", overlay_key(&pairs, theme, q, &spec));
+    // Encode memo keyed on the rendered SVG, like the animated variant: the
+    // SVG memo already absorbs the per-repo series loads, and a content key
+    // cannot drift from the bytes it encodes.
+    let card = ensure_multi_svg(state, theme, q).await?;
+    let key = format!(
+        "{}|{fmt_key}|svg:{}",
+        overlay_key(&pairs, theme, q, &spec, ""),
+        svg_digest(&card.svg)
+    );
     if let Some(cached) = state.raster_cache.get(&key).await {
         return Ok((cached, false));
     }
-    let card = ensure_multi_svg(state, theme, q).await?;
     if card.short_ttl {
         return Ok((rasterize_uncached(card.svg, format).await?, true));
     }
@@ -3205,7 +3360,7 @@ async fn ensure_multi_gif(
     let pairs = parse_overlay_repos(q.repos.as_deref())?;
     let key = format!(
         "{}|gif|svg:{}|{RENDER_REVISION}",
-        overlay_key(&pairs, theme, q, &spec),
+        overlay_key(&pairs, theme, q, &spec, ""),
         svg_digest(&card.svg),
     );
     let short_ttl = card.short_ttl;
@@ -3458,13 +3613,14 @@ async fn ensure_usage_svg(
     let spec = q.range_spec()?;
     let theme_key = if theme.dark { "dark" } else { "light" };
     let source_key = q.source.as_deref().unwrap_or("auto");
+    let repo_full = crate::analyzer::repo_key(owner, repo);
+    let summary = state.analyzer.cache.get_repo_summary(&repo_full).await?;
     let key = format!(
-        "usage:{}/{}|{theme_key}|{}|src:{source_key}|{}|{}",
-        owner.to_ascii_lowercase(),
-        repo.to_ascii_lowercase(),
+        "usage:{repo_full}|{theme_key}|{}|src:{source_key}|{}|{}|{}",
         q.opts_key(),
         q.overrides_key(),
         spec.key(),
+        star_data_revision(summary.as_ref()),
     );
     single_flight_card(&state.svg_cache, key, async {
         let bundle = build_usage(state, owner, repo, q).await?;
@@ -3525,22 +3681,17 @@ async fn ensure_usage_raster(
     q: &UsageQuery,
     format: crate::raster::RasterFormat,
 ) -> Result<(std::sync::Arc<Vec<u8>>, bool), ApiError> {
-    let spec = q.range_spec()?;
     let theme_key = if theme.dark { "dark" } else { "light" };
     let fmt_key = raster_fmt_key(format);
-    let source_key = q.source.as_deref().unwrap_or("auto");
+    let card = ensure_usage_svg(state, owner, repo, theme, q).await?;
     let key = format!(
-        "usage:{}/{}|{theme_key}|{}|src:{source_key}|{}|{}|{fmt_key}",
-        owner.to_ascii_lowercase(),
-        repo.to_ascii_lowercase(),
-        q.opts_key(),
-        q.overrides_key(),
-        spec.key(),
+        "usage:{}|{theme_key}|{fmt_key}|svg:{}",
+        crate::analyzer::repo_key(owner, repo),
+        svg_digest(&card.svg)
     );
     if let Some(cached) = state.raster_cache.get(&key).await {
         return Ok((cached, false));
     }
-    let card = ensure_usage_svg(state, owner, repo, theme, q).await?;
     if card.short_ttl {
         return Ok((rasterize_uncached(card.svg, format).await?, true));
     }
@@ -5027,7 +5178,9 @@ async fn load_owner_top_langs(
         return Ok(Vec::new());
     }
     let rows = sqlx::query(
-        "SELECT lines.language, SUM(lines.lines_code)::BIGINT AS lines \
+        "SELECT lines.language, \
+                CASE WHEN SUM(lines.lines_code) > 0 THEN SUM(lines.lines_code) \
+                     ELSE SUM(lines.files) END::BIGINT AS lines \
          FROM repo_lines lines \
          WHERE lines.repo = ANY($1::text[]) \
          GROUP BY lines.language ORDER BY lines DESC, lines.language LIMIT 5",
@@ -5044,7 +5197,9 @@ async fn load_repo_top_langs(
     repo: &str,
 ) -> Result<Vec<(String, i64)>, ApiError> {
     let rows = sqlx::query(
-        "SELECT lines.language, SUM(lines.lines_code)::BIGINT AS lines \
+        "SELECT lines.language, \
+                CASE WHEN SUM(lines.lines_code) > 0 THEN SUM(lines.lines_code) \
+                     ELSE SUM(lines.files) END::BIGINT AS lines \
          FROM repo_lines lines \
          JOIN repos public_repo ON public_repo.repo = lines.repo \
          WHERE lines.repo = $1 \
@@ -5155,13 +5310,16 @@ async fn load_repo_card_data(
         None
     };
 
-    // Tokei lines (SUM over zero rows is NULL → None, exactly the
-    // "unavailable" semantics the renderer wants).
-    let lines_total: Option<i64> =
-        sqlx::query_scalar("SELECT SUM(lines_code)::BIGINT FROM repo_lines WHERE repo = $1")
-            .bind(repo_full)
-            .fetch_one(&db.pool)
-            .await?;
+    // Total lines, or `None` when the repository only has a file census —
+    // its line columns are zero because the count was not run, and printing
+    // that as a confident "0 lines of code" is what every large or
+    // asset-heavy repository used to render.
+    let lines_total: Option<i64> = sqlx::query_scalar(
+        "SELECT SUM(lines_code)::BIGINT FROM repo_lines          WHERE repo = $1 AND lines_exact",
+    )
+    .bind(repo_full)
+    .fetch_one(&db.pool)
+    .await?;
 
     // Trailing 30 days of commit activity, anchored on the last observed
     // commit day (determinism — no wall clock).
@@ -5191,6 +5349,50 @@ async fn load_repo_card_data(
     })
 }
 
+/// Data version for a repository card. Beyond the star series it reports
+/// commits, contributors and line counts, so it also tracks the analysis head
+/// and the public-metadata stamp (which is what clears a tombstone).
+async fn repo_card_revision(
+    state: &ApiState,
+    repo_full: &str,
+    summary: Option<&crate::cache::RepoSummary>,
+) -> Result<String, ApiError> {
+    let analysis_sha: Option<String> =
+        sqlx::query_scalar("SELECT last_analyzed_sha FROM repo_history WHERE repo = $1")
+            .bind(repo_full)
+            .fetch_optional(&state.analyzer.cache.db().pool)
+            .await?
+            .flatten();
+    Ok(format!(
+        "{}|m:{}|a:{}",
+        star_data_revision(summary),
+        summary
+            .and_then(|value| value.metadata_fetched_at)
+            .map(|value| value.timestamp_millis())
+            .unwrap_or(0),
+        analysis_sha.as_deref().unwrap_or("-"),
+    ))
+}
+
+/// Data version for a profile surface: how many of the login's repositories
+/// are analyzed, when the newest pass landed, and the star totals behind it.
+/// One indexed aggregate — cheap enough for a memo key, and it moves whenever
+/// anything the profile renders moves.
+async fn user_data_revision(state: &ApiState, login: &str) -> Result<String, ApiError> {
+    let row: (i64, i64, i64) = sqlx::query_as(
+        "SELECT COUNT(*)::BIGINT, \
+                COALESCE(MAX(EXTRACT(EPOCH FROM repos.stargazers_fetched_at)), 0)::BIGINT, \
+                COALESCE(SUM(GREATEST(repos.star_count, 0)), 0)::BIGINT \
+         FROM login_repos \
+         JOIN repos ON repos.repo = login_repos.repo \
+         WHERE login_repos.login = $1",
+    )
+    .bind(login)
+    .fetch_one(&state.analyzer.cache.db().pool)
+    .await?;
+    Ok(format!("u:{}:{}:{}", row.0, row.1, row.2))
+}
+
 /// Render-or-fetch the user profile card. Full cards memoize in
 /// `stat_svg_cache`; the "no data yet" card is short-TTL and uncached.
 async fn ensure_user_card_svg(
@@ -5203,7 +5405,11 @@ async fn ensure_user_card_svg(
         return Err(ApiError::bad_request("invalid login"));
     }
     let login = login.to_ascii_lowercase();
-    let key = format!("card:user:{login}|{}", q.key_fragment(theme));
+    let key = format!(
+        "card:user:{login}|{}|{}",
+        q.key_fragment(theme),
+        user_data_revision(state, &login).await?
+    );
     if let Some(svg) = state.stat_svg_cache.get(&key).await {
         return Ok(RenderedCard {
             svg,
@@ -5252,21 +5458,29 @@ async fn ensure_repo_card_svg(
         owner.to_ascii_lowercase(),
         repo.to_ascii_lowercase()
     );
-    let key = format!("card:repo:{repo_full}|{}", q.key_fragment(theme));
+    // Load the card's inputs *before* the memo probe: every number on this
+    // card moves underneath a slug-only key, and nothing invalidates the
+    // media caches, so the key has to carry the data version.
+    let summary = state.analyzer.cache.get_repo_summary(&repo_full).await?;
+    let key = format!(
+        "card:repo:{repo_full}|{}|{}",
+        q.key_fragment(theme),
+        repo_card_revision(state, &repo_full, summary.as_ref()).await?
+    );
     if let Some(svg) = state.stat_svg_cache.get(&key).await {
         return Ok(RenderedCard {
             svg,
             short_ttl: false,
         });
     }
-    let summary = state.analyzer.cache.get_repo_summary(&repo_full).await?;
     if summary.as_ref().is_some_and(|s| s.missing) {
-        // Terminal tombstone → standard TTL is safe.
-        let svg = cards::render_repo_missing_card(&repo_full, theme);
-        state.stat_svg_cache.insert(key, svg.clone()).await;
+        // A tombstone is reversible — a repository can be made public again,
+        // and the metadata write clears the flag — so it rides the same
+        // self-healing short TTL as the pending card instead of the four-hour
+        // edge policy.
         return Ok(RenderedCard {
-            svg,
-            short_ttl: false,
+            svg: cards::render_repo_missing_card(&repo_full, theme),
+            short_ttl: true,
         });
     }
     let Some(summary) = summary else {
@@ -5608,6 +5822,13 @@ async fn sitemap_repos(
 
     let cache = &state.analyzer.cache;
     let total = cache.count_sitemap_repos().await?;
+    // An unbounded `page` is an unbounded cache-key space in front of a
+    // COUNT plus a sorted scan: every distinct value misses the edge and
+    // costs a full pass at the origin. Pages past the end have no content to
+    // serve, so they are a client error rather than an expensive empty page.
+    if offset > 0 && offset >= total {
+        return Err(ApiError::bad_request("page beyond the last page"));
+    }
     let rows = cache.list_sitemap_repos(per, offset).await?;
     let repos: Vec<serde_json::Value> = rows
         .into_iter()
@@ -5666,10 +5887,10 @@ const LEADERBOARD_WINDOW_DEFAULT: i64 = 7;
 const LEADERBOARD_WINDOWS: &[i64] = &[1, 7, 30];
 /// Default + max page size. The default matches the contract (`per=50`).
 const LEADERBOARD_PER_DEFAULT: i64 = 50;
-const LEADERBOARD_PER_MAX: i64 = 100;
+pub(crate) const LEADERBOARD_PER_MAX: i64 = 100;
 /// Deep pagination is a scraper pattern, not a reader pattern. Capping
 /// `page` bounds the OFFSET the DB is asked to scan past.
-const LEADERBOARD_PAGE_MAX: i64 = 200;
+pub(crate) const LEADERBOARD_PAGE_MAX: i64 = 200;
 
 #[derive(Debug, Default, Clone, Deserialize)]
 struct LeaderboardQuery {
@@ -5936,8 +6157,10 @@ const RASTER_CONCURRENCY: usize = 4;
 /// Process-wide raster concurrency permits. Hoisted to a module-level
 /// static (from a fn-local one) so `/metrics` can report available permits
 /// — the key saturation signal for the CPU-bound raster path.
-pub(crate) static RASTER_PERMITS: tokio::sync::Semaphore =
-    tokio::sync::Semaphore::const_new(RASTER_CONCURRENCY);
+pub(crate) static RASTER_PERMITS: std::sync::LazyLock<std::sync::Arc<tokio::sync::Semaphore>> =
+    std::sync::LazyLock::new(|| {
+        std::sync::Arc::new(tokio::sync::Semaphore::new(RASTER_CONCURRENCY))
+    });
 
 /// Run one CPU-bound render/encode on the blocking pool under a
 /// [`RASTER_PERMITS`] permit. Every raster-class workload — resvg
@@ -5949,13 +6172,23 @@ where
     T: Send + 'static,
     F: FnOnce() -> T + Send + 'static,
 {
-    let _permit = RASTER_PERMITS
-        .acquire()
+    // The permit is moved INTO the blocking closure, so it is released when
+    // the CPU work finishes rather than when this future is dropped. A
+    // `spawn_blocking` body cannot be cancelled: with the permit held by the
+    // caller's future, a timed-out request handed its permit to the next
+    // request while its own encode kept running, and the cap stopped bounding
+    // anything precisely during the bursts it exists for.
+    let permit = RASTER_PERMITS
+        .clone()
+        .acquire_owned()
         .await
         .expect("raster semaphore is never closed");
-    tokio::task::spawn_blocking(work)
-        .await
-        .map_err(|e| ApiError::from(anyhow::anyhow!("raster task: {e}")))
+    tokio::task::spawn_blocking(move || {
+        let _permit = permit;
+        work()
+    })
+    .await
+    .map_err(|e| ApiError::from(anyhow::anyhow!("raster task: {e}")))
 }
 
 /// The single choke point every raster path (charts, cards, OG, stat
@@ -6334,6 +6567,85 @@ mod tests {
 
     fn test_string_cache() -> MokaCache<String, String> {
         MokaCache::builder().max_capacity(64).build()
+    }
+
+    /// Every media memo key must carry a data revision.
+    ///
+    /// These caches are TTL-only: nothing invalidates them, and the Redis
+    /// invalidation bus reaches only the analyze/aggregate JSON caches. A key
+    /// made of presentation options alone therefore pins a README embed to
+    /// whatever the data was when it was first rendered — for a full day at
+    /// the origin, and longer once the edge policy is layered on top. The
+    /// revision has to move when the data moves and stay put when it does
+    /// not, so a quiet repository keeps its memo.
+    #[test]
+    fn star_data_revision_tracks_the_series_and_nothing_else() {
+        let at = |millis: i64| chrono::DateTime::from_timestamp_millis(millis).unwrap();
+        let base = crate::cache::RepoSummary {
+            missing: false,
+            github_id: Some(1),
+            stargazers_complete: true,
+            stargazers_fetched_at: Some(at(1_000)),
+            metadata_fetched_at: Some(at(1_000)),
+            star_count: Some(42),
+            history_source: Some("gh_archive".to_string()),
+            history_observed_count: Some(40),
+            history_coverage_start: None,
+            history_coverage_end: None,
+            created_at: None,
+            view_count: 7,
+        };
+
+        let unchanged = star_data_revision(Some(&base));
+        assert_eq!(
+            unchanged,
+            star_data_revision(Some(&base.clone())),
+            "identical data must produce an identical key"
+        );
+
+        // Each of these moves in the same transaction that appends stars or
+        // refreshes public metadata.
+        let mut newer_stars = base.clone();
+        newer_stars.history_observed_count = Some(41);
+        assert_ne!(unchanged, star_data_revision(Some(&newer_stars)));
+
+        let mut refreshed = base.clone();
+        refreshed.stargazers_fetched_at = Some(at(2_000));
+        assert_ne!(unchanged, star_data_revision(Some(&refreshed)));
+
+        let mut restarred = base.clone();
+        restarred.star_count = Some(43);
+        assert_ne!(unchanged, star_data_revision(Some(&restarred)));
+
+        // A repository nothing is known about must not share a key with one
+        // that has data.
+        assert_ne!(unchanged, star_data_revision(None));
+    }
+
+    /// The metric label and the underlying table both follow
+    /// `history_source`, so it belongs in the key of every variant — the
+    /// raster key used to omit what the SVG key included, which let a PNG
+    /// embed keep a curve and a label the SVG had already replaced.
+    #[test]
+    fn history_source_is_part_of_the_render_identity() {
+        let mut summary = crate::cache::RepoSummary {
+            missing: false,
+            github_id: None,
+            stargazers_complete: true,
+            stargazers_fetched_at: None,
+            metadata_fetched_at: None,
+            star_count: None,
+            history_source: Some("gh_archive".to_string()),
+            history_observed_count: None,
+            history_coverage_start: None,
+            history_coverage_end: None,
+            created_at: None,
+            view_count: 0,
+        };
+        assert_eq!(history_source_key(Some(&summary)), "archive");
+        summary.history_source = Some("github_api".to_string());
+        assert_eq!(history_source_key(Some(&summary)), "github");
+        assert_eq!(history_source_key(None), "github");
     }
 
     /// The two TTL classes are distinct: pending/empty renders get the

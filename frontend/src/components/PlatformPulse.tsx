@@ -89,10 +89,18 @@ export function PlatformPulse({ apiBase }: { apiBase: string }) {
       }
     }
     void refresh();
-    const timer = window.setInterval(refresh, 60_000);
+    const timer = window.setInterval(() => {
+      // A hidden tab renders nothing; polling it forever is pure origin load.
+      if (document.visibilityState === "visible") void refresh();
+    }, 60_000);
+    const onVisible = () => {
+      if (document.visibilityState === "visible") void refresh();
+    };
+    document.addEventListener("visibilitychange", onVisible);
     return () => {
       active = false;
       window.clearInterval(timer);
+      document.removeEventListener("visibilitychange", onVisible);
     };
   }, [apiBase]);
 
@@ -111,6 +119,10 @@ export function PlatformPulse({ apiBase }: { apiBase: string }) {
     setStarProgress(null);
     const selected = repos.find((entry) => entry.repo === selectedRepo);
     if (!selected || selected.history_ready) return;
+    // The rotation changes every 6 seconds; opening a stream per rotation
+    // churned connections against a process-wide cap that the report pages
+    // actually need. Only stream while the tab is in front.
+    if (document.visibilityState !== "visible") return;
     const events = new EventSource(
       `${apiBase}/api/repos/${selected.repo}/progress`,
     );

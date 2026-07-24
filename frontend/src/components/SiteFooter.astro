@@ -9,10 +9,12 @@ import { pageInsightForPath } from "@/lib/signal-art";
 interface Props {
   /** Optional page data makes the route-specific signal field quantitative. */
   signalValues?: number[];
+  /** Landing pages may hide products that are not ready to publish. */
+  showExtensionLink?: boolean;
 }
 
 const year = new Date().getFullYear();
-const { signalValues } = Astro.props;
+const { signalValues, showExtensionLink = true } = Astro.props;
 const routeInsight = pageInsightForPath(Astro.url.pathname);
 const pageInsight = signalValues?.some(Number.isFinite)
   ? { ...routeInsight, values: signalValues }
@@ -30,7 +32,9 @@ const footerLinks = [
   { label: "Compare repos", href: "/compare" },
   { label: "Repo leaderboard", href: "/leaderboard" },
   { label: "README badges", href: "/badges" },
-  { label: "Browser extension", href: "/#extension" },
+  ...(showExtensionLink
+    ? [{ label: "Browser extension", href: "/#extension" }]
+    : []),
 ];
 
 const categoryLinks = [
@@ -49,6 +53,14 @@ const legalLinks = [
 ---
 
 <footer class="relative isolate overflow-hidden border-t border-border/60">
+  <div
+    class="pointer-events-none absolute inset-0 -z-20 overflow-hidden bg-background"
+    aria-hidden="true"
+  >
+    <div class="absolute inset-0 bg-linear-to-b from-background via-background to-card/55"></div>
+    <div class="absolute -top-48 -left-40 size-96 rounded-full bg-[var(--swatch-blue)] opacity-[0.055] blur-3xl"></div>
+    <div class="absolute -right-40 -bottom-56 size-[30rem] rounded-full bg-[var(--swatch-pink)] opacity-[0.045] blur-3xl"></div>
+  </div>
   <FooterAsciiMark client:visible path={ROBOT_PATH} />
   <div class="relative mx-auto max-w-6xl px-4 pt-12 pb-14 sm:px-6 sm:pt-14 sm:pb-20">
     <div class="pb-12 sm:pb-14">

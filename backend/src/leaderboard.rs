@@ -58,6 +58,13 @@ pub async fn refresh_if_stale(db: &Db) -> Result<bool> {
     Ok(true)
 }
 
+/// Deepest rank any request can reach: the page-size ceiling times one past
+/// the page ceiling in `api::leaderboard_params`. Ranks past it are
+/// unreachable, and materializing them wrote (and re-wrote, daily) one row per
+/// tracked repository per metric and window — the great majority of a table
+/// that only ever serves its first few pages.
+const MAX_STORED_RANK: i64 = 20_100;
+
 async fn refresh(tx: &mut Transaction<'_, Postgres>) -> Result<()> {
     sqlx::query("DELETE FROM leaderboard_snapshots")
         .execute(&mut **tx)
@@ -99,17 +106,24 @@ async fn refresh(tx: &mut Transaction<'_, Postgres>) -> Result<()> {
          INSERT INTO leaderboard_snapshots \
              (metric, window_days, rank, repo, stars, velocity, computed_at) \
          SELECT 'stars', 1, stars_rank, repo, stars, gained_1d, NOW() FROM ranked \
+             WHERE stars_rank <= $1 \
          UNION ALL \
          SELECT 'stars', 7, stars_rank, repo, stars, gained_7d, NOW() FROM ranked \
+             WHERE stars_rank <= $1 \
          UNION ALL \
          SELECT 'stars', 30, stars_rank, repo, stars, gained_30d, NOW() FROM ranked \
+             WHERE stars_rank <= $1 \
          UNION ALL \
-         SELECT 'velocity', 1, rank_1d, repo, stars, gained_1d, NOW() FROM ranked WHERE gained_1d > 0 \
+         SELECT 'velocity', 1, rank_1d, repo, stars, gained_1d, NOW() FROM ranked \
+             WHERE gained_1d > 0 AND rank_1d <= $1 \
          UNION ALL \
-         SELECT 'velocity', 7, rank_7d, repo, stars, gained_7d, NOW() FROM ranked WHERE gained_7d > 0 \
+         SELECT 'velocity', 7, rank_7d, repo, stars, gained_7d, NOW() FROM ranked \
+             WHERE gained_7d > 0 AND rank_7d <= $1 \
          UNION ALL \
-         SELECT 'velocity', 30, rank_30d, repo, stars, gained_30d, NOW() FROM ranked WHERE gained_30d > 0",
+         SELECT 'velocity', 30, rank_30d, repo, stars, gained_30d, NOW() FROM ranked \
+             WHERE gained_30d > 0 AND rank_30d <= $1",
     )
+    .bind(MAX_STORED_RANK)
     .execute(&mut **tx)
     .await
     .context("build leaderboard snapshot")?;
@@ -126,11 +140,23 @@ async fn refresh(tx: &mut Transaction<'_, Postgres>) -> Result<()> {
 
 #[cfg(test)]
 mod tests {
+    use super::MAX_STORED_RANK;
     use super::{REFRESH_EVERY_HOURS, REFRESH_LOCK_ID};
 
     #[test]
     fn refresh_cadence_and_lock_are_stable() {
         assert_eq!(REFRESH_EVERY_HOURS, 24);
         assert_ne!(REFRESH_LOCK_ID, 0);
+    }
+    /// The snapshot stores only the ranks a request can actually ask for. If
+    /// the request-side paging ceilings ever grow past this, the extra pages
+    /// would silently come back empty.
+    #[test]
+    fn stored_ranks_cover_every_reachable_page() {
+        let deepest = crate::api::LEADERBOARD_PER_MAX * (crate::api::LEADERBOARD_PAGE_MAX + 1);
+        assert!(
+            MAX_STORED_RANK >= deepest,
+            "the snapshot must cover rank {deepest}, the deepest a request can reach"
+        );
     }
 }

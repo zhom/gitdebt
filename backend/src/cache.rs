@@ -202,6 +202,15 @@ pub struct PlatformActivity {
 
 type PlatformActivityRow = (String, i64, i64, DateTime<Utc>, bool, bool, i64, i64);
 
+/// Recently-viewed repositories with their 7/30-day star gains.
+///
+/// The `starred_at >= NOW() - INTERVAL '30 days'` bound inside the LATERAL is
+/// not redundant with the per-row FILTERs: without it the subquery reads every
+/// star row a repository has ever had, and the planner evaluates it for every
+/// candidate row rather than only the ones the LIMIT returns. With the bound
+/// (and `idx_repos_last_viewed` ordering the outer scan) both become bounded
+/// index range scans. `NOW()` is stable within a statement, so rows outside
+/// the window contribute 0 to both counters and the result is unchanged.
 const PLATFORM_ACTIVITY_SQL: &str = "SELECT r.repo, COALESCE(r.star_count, 0), r.view_count, \
             r.last_viewed_at, r.history_complete, \
             (h.last_analyzed_at IS NOT NULL), \
@@ -211,7 +220,9 @@ const PLATFORM_ACTIVITY_SQL: &str = "SELECT r.repo, COALESCE(r.star_count, 0), r
      LEFT JOIN LATERAL ( \
          SELECT COUNT(*) FILTER (WHERE starred_at >= NOW() - INTERVAL '7 days')::BIGINT AS gained_7d, \
                 COUNT(*) FILTER (WHERE starred_at >= NOW() - INTERVAL '30 days')::BIGINT AS gained_30d \
-         FROM active_repo_star_history stars WHERE stars.repo = r.repo \
+         FROM active_repo_star_history stars \
+         WHERE stars.repo = r.repo \
+           AND stars.starred_at >= NOW() - INTERVAL '30 days' \
      ) g ON TRUE \
      WHERE r.last_viewed_at IS NOT NULL AND NOT r.missing \
        AND r.metadata_fetched_at IS NOT NULL \
@@ -1319,5 +1330,26 @@ mod tests {
         assert!(PLATFORM_ACTIVITY_SQL.contains("h.last_analyzed_at IS NOT NULL"));
         assert!(PLATFORM_ACTIVITY_SQL.contains("ORDER BY r.last_viewed_at DESC"));
         assert!(!PLATFORM_ACTIVITY_SQL.to_ascii_lowercase().contains("actor"));
+    }
+
+    /// The activity pulse is polled by every open landing page. Both halves
+    /// of its bounded plan are load-bearing: the star-window predicate makes
+    /// the per-repo counts index range scans instead of reads of a
+    /// repository's entire star history, and `idx_repos_last_viewed` makes
+    /// the outer scan ordered so the LATERAL runs only for the returned rows.
+    /// Without them this single query reads the whole star corpus per request.
+    #[test]
+    fn platform_activity_counts_are_bounded_to_the_reported_window() {
+        assert!(
+            PLATFORM_ACTIVITY_SQL.contains("stars.starred_at >= NOW() - INTERVAL '30 days'"),
+            "the LATERAL must bound its scan to the widest window it reports"
+        );
+    }
+
+    /// The activity query and the index that serves it live in different
+    /// files; this is the assertion that keeps them together.
+    #[test]
+    fn platform_activity_has_its_ordering_index() {
+        assert!(crate::db::schema_sql().contains("idx_repos_last_viewed"));
     }
 }

@@ -117,7 +117,21 @@ export function FooterAsciiMark({ path }: Props) {
       context.textAlign = "center";
       context.textBaseline = "middle";
       context.font = font;
-      context.fillStyle = getComputedStyle(root).color;
+      const styles = getComputedStyle(document.documentElement);
+      const blue =
+        styles.getPropertyValue("--swatch-blue").trim() || "rgb(53, 143, 243)";
+      const pink =
+        styles.getPropertyValue("--swatch-pink").trim() || "rgb(240, 90, 190)";
+      const gradient = context.createLinearGradient(
+        width * 0.12,
+        height * 0.18,
+        width * 0.88,
+        height * 0.82,
+      );
+      gradient.addColorStop(0, blue);
+      gradient.addColorStop(0.52, getComputedStyle(root).color);
+      gradient.addColorStop(1, pink);
+      context.fillStyle = gradient;
 
       drawFrame = (time: number) => {
         if (!visible) return;
@@ -186,7 +200,7 @@ export function FooterAsciiMark({ path }: Props) {
   return (
     <div
       ref={rootRef}
-      className="pointer-events-none absolute inset-0 -z-10 overflow-hidden text-foreground opacity-[0.16] select-none"
+      className="pointer-events-none absolute inset-0 -z-10 overflow-hidden text-foreground opacity-[0.19] select-none"
       aria-hidden="true"
     >
       <div

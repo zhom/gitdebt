@@ -191,6 +191,7 @@ export function RepoHero({ owner, repo, apiBase, initialData }: Props) {
     }
 
     let events: EventSource | null = null;
+    let lastProgressKey: string | null = null;
     function applyProgress(next: RepoProgress, isLive: boolean) {
       if (cancelled) return;
       setProgress(next);
@@ -198,11 +199,38 @@ export function RepoHero({ owner, repo, apiBase, initialData }: Props) {
       window.dispatchEvent(
         new CustomEvent("gitdebt:repo-progress", { detail: next }),
       );
-      void tick(false);
+      // Only re-read /analyze when something it reports actually moved.
+      // Refetching on every frame turned one open report into a second,
+      // uncacheable request stream against the analyze path — the busier the
+      // queues, the more frames, the more load.
+      const key = `${next.terminal}|${next.stars.phase}|${next.analysis.phase}`;
+      if (key !== lastProgressKey) {
+        lastProgressKey = key;
+        void tick(false);
+      }
+    }
+
+    let progressFailures = 0;
+    function scheduleProgressPoll() {
+      if (cancelled) return;
+      // Exponential backoff with jitter after a failure: without it every
+      // open tab retries on the same fixed interval, so a restarting API tier
+      // is met by a synchronized retry wave from every client at once.
+      const base =
+        progressFailures === 0
+          ? PROGRESS_POLL_MS
+          : Math.min(PROGRESS_POLL_MS * 2 ** progressFailures, 60_000);
+      const delay = base * (0.85 + Math.random() * 0.3);
+      progressTimer = setTimeout(() => void pollProgress(), delay);
     }
 
     async function pollProgress(schedule = true): Promise<RepoProgress | null> {
       if (cancelled) return null;
+      // A backgrounded tab has nothing to show; resume on visibilitychange.
+      if (document.visibilityState !== "visible") {
+        if (schedule) scheduleProgressPoll();
+        return null;
+      }
       try {
         const response = await fetch(
           `${apiBase}/api/repos/${owner}/${repo}/progress.json`,
@@ -214,14 +242,16 @@ export function RepoHero({ owner, repo, apiBase, initialData }: Props) {
         );
         if (!response.ok) throw new Error(`progress ${response.status}`);
         const next = (await response.json()) as RepoProgress;
+        progressFailures = 0;
         applyProgress(next, false);
         if (next.terminal) return next;
-        if (schedule) progressTimer = setTimeout(pollProgress, PROGRESS_POLL_MS);
+        if (schedule) scheduleProgressPoll();
         return next;
       } catch {
+        progressFailures += 1;
         setLiveProgress(false);
       }
-      if (schedule) progressTimer = setTimeout(pollProgress, PROGRESS_POLL_MS);
+      if (schedule) scheduleProgressPoll();
       return null;
     }
 
@@ -271,11 +301,10 @@ export function RepoHero({ owner, repo, apiBase, initialData }: Props) {
         });
       });
     } else {
-      void enqueueAnalysis().finally(() => {
-        void pollProgress(false).then((snapshot) => {
-          if (!snapshot?.terminal) connectProgress();
-        });
-      });
+      // Already complete: nothing to enqueue and nothing to watch. Crawlers
+      // that render JS walk thousands of these pages, and each avoided
+      // enqueue+stream is durable queue work and a live connection saved.
+      setProgress(null);
     }
     return () => {
       cancelled = true;

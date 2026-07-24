@@ -28,6 +28,7 @@ use std::time::Duration;
 
 use anyhow::Result;
 use async_trait::async_trait;
+use chrono::Utc;
 use tokio::time::sleep;
 
 use crate::cache::{Cache, StargazerEvent};
@@ -128,6 +129,88 @@ pub async fn sweep_missing_metadata(db: &Db) -> Result<Vec<String>> {
         enqueued.push(repo);
     }
     Ok(enqueued)
+}
+
+/// How stale a tracked repository's public metadata may get before the worker
+/// refreshes it.
+const METADATA_REFRESH_TTL: chrono::Duration = chrono::Duration::hours(24);
+/// Repositories one refresh pass may touch. One GitHub metadata call each,
+/// so this is also the per-pass budget spend.
+const METADATA_REFRESH_BATCH: i64 = 120;
+const METADATA_REFRESH_INTERVAL: Duration = Duration::from_secs(15 * 60);
+
+/// One pass of the public-metadata refresh sweep.
+///
+/// `repos.star_count` / `forks_count` are what badges, cards, and OG images
+/// print. Until this sweep existed they were written only by the `/analyze`
+/// request path, so a repository nobody ever opens on the site — the normal
+/// case for a project that embeds a badge in its README and never visits —
+/// kept serving whatever numbers its first ingestion happened to see.
+///
+/// Popularity-first and bounded per pass, and it stops as soon as the shared
+/// GitHub budget runs dry, so it can never crowd out ingestion.
+pub async fn sweep_stale_metadata(cache: &Cache, github: &Arc<GithubClient>) -> Result<usize> {
+    let cutoff = Utc::now() - METADATA_REFRESH_TTL;
+    let candidates: Vec<String> = sqlx::query_scalar(
+        "SELECT repo FROM repos \
+         WHERE missing = FALSE \
+           AND metadata_fetched_at IS NOT NULL \
+           AND metadata_fetched_at < $1 \
+         ORDER BY view_count DESC, metadata_fetched_at \
+         LIMIT $2",
+    )
+    .bind(cutoff)
+    .bind(METADATA_REFRESH_BATCH)
+    .fetch_all(&cache.db().pool)
+    .await?;
+
+    let mut refreshed = 0usize;
+    for repo in candidates {
+        if !github.has_budget().await {
+            break;
+        }
+        let Some((owner, name)) = repo.split_once('/') else {
+            continue;
+        };
+        match github.repo_metadata(owner, name).await {
+            Ok(Some(metadata)) => {
+                cache
+                    .put_repo_metadata(
+                        &repo,
+                        metadata.id,
+                        metadata.stargazers_count,
+                        metadata.forks_count,
+                        metadata.created_at,
+                    )
+                    .await?;
+                refreshed += 1;
+            }
+            // A repository that has become private or was deleted is
+            // tombstoned exactly as the ingestion path would tombstone it.
+            Ok(None) => cache.mark_repo_missing(&repo).await?,
+            Err(error) => {
+                tracing::warn!(%repo, %error, "metadata refresh failed");
+                break;
+            }
+        }
+    }
+    Ok(refreshed)
+}
+
+/// Spawn the periodic public-metadata refresh (startup + every 15 minutes).
+pub fn spawn_metadata_refresh(cache: Cache, github: Arc<GithubClient>) {
+    tokio::spawn(async move {
+        loop {
+            match sweep_stale_metadata(&cache, &github).await {
+                Ok(0) => {}
+                Ok(refreshed) => {
+                    tracing::info!(refreshed, "public metadata refreshed for tracked repos")
+                }
+                Err(error) => tracing::warn!(%error, "metadata refresh sweep failed"),
+            }
+            sleep(METADATA_REFRESH_INTERVAL).await;
+        }
+    });
 }
 
 /// Spawn the periodic metadata backfill sweep (startup + hourly). Runs in

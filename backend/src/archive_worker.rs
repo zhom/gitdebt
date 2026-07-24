@@ -24,7 +24,17 @@ use crate::queue;
 
 const ARCHIVE_START: NaiveDate =
     NaiveDate::from_ymd_opt(2011, 2, 12).expect("GH Archive start date is valid");
-const DEFAULT_BATCH_SIZE: usize = 5_000;
+/// Repositories one coordinator pass claims and holds events for.
+///
+/// A pass materializes every star event of every repository in the batch
+/// before committing any of them, and the regrouping step briefly doubles
+/// that. The batch exists to share one BigQuery corpus scan across many
+/// repositories, so a larger value is cheaper per repository — but the peak
+/// is unbounded in the data, and a batch that lands on popular repositories
+/// is several gigabytes on a host that also runs Postgres. This default
+/// keeps the worst case in the hundreds of megabytes; `GH_ARCHIVE_BATCH_SIZE`
+/// raises it where the memory is available.
+const DEFAULT_BATCH_SIZE: usize = 1_500;
 const MAX_BATCH_SIZE: usize = 5_000;
 
 /// Session advisory lock electing the single BigQuery coordinator across

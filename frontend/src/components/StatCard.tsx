@@ -70,20 +70,28 @@ export function StatCard({
   useEffect(() => {
     const targetRepo = liveRepo;
     if (!targetRepo) return;
+    // Edge-triggered: refresh when analysis *becomes* complete, not on every
+    // frame that reports it complete. Each bump appends a fresh `_=N`, which
+    // is a brand-new CDN key, so a repeating trigger re-rendered every card at
+    // the origin for the rest of the star backfill.
+    let wasComplete = false;
     function refresh(event: Event) {
       if (!targetRepo) return;
       const detail = (event as CustomEvent<{
         repo?: string;
         analysis?: { phase?: string; complete?: boolean };
       }>).detail;
-      if (
-        detail?.repo?.toLowerCase() === targetRepo.toLowerCase() &&
-        (detail.analysis?.phase === "complete" ||
-          detail.analysis?.complete === true)
-      ) {
+      if (detail?.repo?.toLowerCase() !== targetRepo.toLowerCase()) return;
+      const complete =
+        detail.analysis?.phase === "complete" ||
+        detail.analysis?.complete === true;
+      if (complete && !wasComplete) {
+        wasComplete = true;
         if (timerRef.current) clearTimeout(timerRef.current);
         setPhase("gathering");
         setAttempt((value) => value + 1);
+      } else if (!complete) {
+        wasComplete = false;
       }
     }
     window.addEventListener("gitdebt:repo-progress", refresh);

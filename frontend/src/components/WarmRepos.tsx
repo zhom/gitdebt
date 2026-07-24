@@ -104,10 +104,12 @@ async function pump(lane: Lane) {
       try {
         const response = await runTask(task);
         await response.arrayBuffer();
+        // 429 is deliberately absent: a rate limiter's answer is "stop",
+        // not "try again immediately". Retrying it turned every limited
+        // warm-up into three requests instead of one.
         const retryable =
           response.status === 408 ||
           response.status === 425 ||
-          response.status === 429 ||
           response.status >= 500;
         if (retryable && task.attempts < 2) {
           retryTask(task, key);

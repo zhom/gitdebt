@@ -29,6 +29,11 @@ fn pool_options(max_connections: u32) -> PgPoolOptions {
 /// `CREATE INDEX CONCURRENTLY`, creating a deadlock cycle.
 const SCHEMA_MIGRATION_LOCK_ID: i64 = 0x6769_7464_6562_7401;
 
+/// Attempts at the schema transaction before startup fails. The statements
+/// are idempotent; retrying absorbs a `lock_timeout` abort caused by a
+/// long-running transaction that happens to be open during a deploy.
+const SCHEMA_MIGRATION_ATTEMPTS: u32 = 4;
+
 /// Schema applied on every startup. Idempotent — uses IF NOT EXISTS.
 ///
 /// Completeness invariant: a `repos` row's selected history is only readable
@@ -161,6 +166,15 @@ CREATE INDEX IF NOT EXISTS idx_repos_repo_prefix ON repos (repo text_pattern_ops
 -- metric=stars). Partial over exactly the rows that ranking selects, with
 -- the query's ORDER BY baked in, so the top-N page is an ordered index
 -- scan + LIMIT instead of sorting every tracked repo per cache miss.
+-- Landing-page activity pulse: `WHERE last_viewed_at IS NOT NULL AND NOT
+-- missing AND metadata_fetched_at IS NOT NULL ORDER BY last_viewed_at DESC`.
+CREATE INDEX IF NOT EXISTS idx_repos_last_viewed
+    ON repos (last_viewed_at DESC, repo ASC)
+    WHERE last_viewed_at IS NOT NULL AND NOT missing AND metadata_fetched_at IS NOT NULL;
+-- Public-metadata refresh sweep: popularity-first over stale rows.
+CREATE INDEX IF NOT EXISTS idx_repos_metadata_staleness
+    ON repos (view_count DESC, metadata_fetched_at)
+    WHERE missing = FALSE AND metadata_fetched_at IS NOT NULL;
 CREATE INDEX IF NOT EXISTS idx_repos_history_star_count
     ON repos (star_count DESC, repo ASC)
     WHERE history_complete AND NOT missing AND star_count IS NOT NULL;
@@ -319,6 +333,12 @@ ALTER TABLE repo_history ADD COLUMN IF NOT EXISTS analysis_duration_ms BIGINT;
 ALTER TABLE repo_history ADD COLUMN IF NOT EXISTS analysis_scope_commits BIGINT;
 ALTER TABLE repo_history ADD COLUMN IF NOT EXISTS analysis_truncated BOOLEAN NOT NULL DEFAULT FALSE;
 ALTER TABLE repo_history ADD COLUMN IF NOT EXISTS analysis_revision INTEGER NOT NULL DEFAULT 0;
+-- Fleet-wide "how long does an analysis take" sample (progress ETAs). The
+-- partial predicate matches the query exactly, so the LIMIT 20 is an ordered
+-- index scan instead of a scan-and-sort of every analyzed repository.
+CREATE INDEX IF NOT EXISTS idx_repo_history_duration_recent
+    ON repo_history (last_analyzed_at DESC NULLS LAST)
+    WHERE analysis_duration_ms IS NOT NULL;
 
 -- Per-file aggregates. fix_commits = commit count where the message
 -- matches /\b(fix|bug|hotfix|patch)\b/i; commits = total commits touching
@@ -333,6 +353,10 @@ CREATE TABLE IF NOT EXISTS repo_file_stats (
 );
 CREATE INDEX IF NOT EXISTS idx_repo_file_fix ON repo_file_stats(repo, fix_commits DESC);
 CREATE INDEX IF NOT EXISTS idx_repo_file_recent ON repo_file_stats(repo, last_modified_at DESC);
+-- "Files carrying the churn" reads `WHERE repo = $1 ORDER BY commits DESC`.
+-- Without this the report path sorted every path row of the repository
+-- (a large monorepo has hundreds of thousands) on every cache miss.
+CREATE INDEX IF NOT EXISTS idx_repo_file_commits ON repo_file_stats(repo, commits DESC, path);
 
 -- Per-author aggregates for the contributors chart.
 --
@@ -429,6 +453,33 @@ CREATE INDEX IF NOT EXISTS idx_repo_queue_available
     ON repo_analysis_queue(status, next_attempt_at, enqueued_at);
 CREATE INDEX IF NOT EXISTS idx_repo_queue_priority_available
     ON repo_analysis_queue(status, next_attempt_at, priority DESC, enqueued_at);
+-- Both queue tables take many UPDATEs per job (claim, lease heartbeat every
+-- 30s, phase/progress writes, completion). They are small and hot, and share
+-- autovacuum workers with the multi-million-row star tables whose vacuums run
+-- for minutes — so they need their own aggressive schedule, plus free space
+-- per page to keep those updates HOT (no index maintenance per version).
+-- Applied once: `ALTER TABLE ... SET` takes a table lock even when the value
+-- is unchanged, and this runs on every process start.
+DO $$
+DECLARE
+    queue_table TEXT;
+BEGIN
+    FOREACH queue_table IN ARRAY ARRAY['repo_analysis_queue', 'star_fetch_queue']
+    LOOP
+        IF NOT EXISTS (
+            SELECT 1 FROM pg_class
+            WHERE relname = queue_table
+              AND reloptions::TEXT LIKE '%autovacuum_vacuum_scale_factor=0.02%'
+        ) THEN
+            EXECUTE format(
+                'ALTER TABLE %I SET (autovacuum_vacuum_scale_factor = 0.02, '
+                'autovacuum_vacuum_threshold = 50, '
+                'autovacuum_analyze_scale_factor = 0.05, fillfactor = 70)',
+                queue_table
+            );
+        END IF;
+    END LOOP;
+END$$;
 
 -- Tokei lines-of-code aggregates per repo. One row per language.
 -- Replaced wholesale on each analysis run (truncate-then-insert in one
@@ -443,6 +494,11 @@ CREATE TABLE IF NOT EXISTS repo_lines (
     lines_comment   BIGINT NOT NULL DEFAULT 0,
     PRIMARY KEY (repo, language)
 );
+-- `lines_exact = FALSE` marks a file census: `files` is meaningful, the line
+-- columns are zero because the count was not run, not because the repository
+-- has no code. Readers that cannot tell the two apart print a confident
+-- "0 lines of code" for every large or asset-heavy repository.
+ALTER TABLE repo_lines ADD COLUMN IF NOT EXISTS lines_exact BOOLEAN NOT NULL DEFAULT TRUE;
 CREATE INDEX IF NOT EXISTS idx_repo_lines_code ON repo_lines(repo, lines_code DESC);
 -- Profile language totals stopped scanning this table by owner prefix: the
 -- profile resolves a bounded owned-repo set from `repos` first and reads
@@ -663,6 +719,13 @@ const CONCURRENT_INDEXES: &[(&str, &str)] = &[
     ),
 ];
 
+/// The startup schema, exposed so tests in other modules can assert that the
+/// index a query depends on is actually created.
+#[cfg(test)]
+pub(crate) fn schema_sql() -> &'static str {
+    SCHEMA
+}
+
 /// Thin wrapper around sqlx's `PgPool`. Cheap to clone (PgPool is internally
 /// `Arc<...>`), so workers and request handlers each hold their own copy.
 #[derive(Clone)]
@@ -722,12 +785,19 @@ impl Db {
             tokio::time::sleep(std::time::Duration::from_millis(50)).await;
         }
 
-        let migration_result = me.migrate(&mut connection).await;
-        if migration_result.is_ok() {
-            // Complete index maintenance before accepting traffic so
-            // expensive public queries never launch without their required
-            // indexes.
-            me.ensure_concurrent_indexes(&mut connection).await;
+        // A lock timeout is a transient condition, not a broken schema.
+        let mut migration_result = me.migrate(&mut connection).await;
+        for attempt in 1..SCHEMA_MIGRATION_ATTEMPTS {
+            if migration_result.is_ok() {
+                break;
+            }
+            tracing::warn!(
+                attempt,
+                error = %migration_result.as_ref().err().map(|e| e.to_string()).unwrap_or_default(),
+                "schema migration attempt failed; retrying"
+            );
+            tokio::time::sleep(std::time::Duration::from_secs(2 * attempt as u64)).await;
+            migration_result = me.migrate(&mut connection).await;
         }
         let unlock_result = sqlx::query("SELECT pg_advisory_unlock($1)")
             .bind(SCHEMA_MIGRATION_LOCK_ID)
@@ -738,7 +808,50 @@ impl Db {
         migration_result?;
         unlock_result?;
         close_result?;
+        me.spawn_index_maintenance(database_url.to_string());
         Ok(me)
+    }
+
+    /// Build the large-table indexes in the background.
+    ///
+    /// A first-time (or post-invalid-rebuild) `CREATE INDEX CONCURRENTLY` on
+    /// the star tables takes minutes, and it holds the schema lock while every
+    /// other replica polls for it. Doing that before binding a listener meant
+    /// health probes got a refused connection rather than a response, so an
+    /// orchestrator killed the replicas that were waiting on the build. Index
+    /// absence is a performance condition, not a correctness one, so the
+    /// process serves traffic while this proceeds.
+    fn spawn_index_maintenance(&self, database_url: String) {
+        let db = self.clone();
+        tokio::spawn(async move {
+            let mut connection = match PgConnection::connect(&database_url).await {
+                Ok(connection) => connection,
+                Err(error) => {
+                    tracing::warn!(%error, "index maintenance: connect failed");
+                    return;
+                }
+            };
+            loop {
+                match sqlx::query_scalar::<_, bool>("SELECT pg_try_advisory_lock($1)")
+                    .bind(SCHEMA_MIGRATION_LOCK_ID)
+                    .fetch_one(&mut connection)
+                    .await
+                {
+                    Ok(true) => break,
+                    Ok(false) => tokio::time::sleep(std::time::Duration::from_secs(5)).await,
+                    Err(error) => {
+                        tracing::warn!(%error, "index maintenance: lock attempt failed");
+                        return;
+                    }
+                }
+            }
+            db.ensure_concurrent_indexes(&mut connection).await;
+            let _ = sqlx::query("SELECT pg_advisory_unlock($1)")
+                .bind(SCHEMA_MIGRATION_LOCK_ID)
+                .execute(&mut connection)
+                .await;
+            let _ = connection.close().await;
+        });
     }
 
     async fn migrate(&self, connection: &mut PgConnection) -> Result<()> {
@@ -746,6 +859,16 @@ impl Db {
             .begin()
             .await
             .context("begin schema transaction")?;
+        // The schema takes ACCESS EXCLUSIVE on tables every request path
+        // reads. Postgres queues lock waiters ahead of new readers, so a DDL
+        // statement blocked behind one long-running transaction stalls every
+        // reader behind it too. Failing fast turns that into a retried boot
+        // instead of a site-wide stall, and every statement here is
+        // idempotent, so a retry costs nothing.
+        sqlx::raw_sql("SET LOCAL lock_timeout = '3s'")
+            .execute(&mut *transaction)
+            .await
+            .context("set schema lock timeout")?;
         sqlx::raw_sql(SCHEMA)
             .execute(&mut *transaction)
             .await
@@ -799,6 +922,57 @@ impl Db {
 #[cfg(test)]
 mod tests {
     use super::{CONCURRENT_INDEXES, SCHEMA, SCHEMA_MIGRATION_LOCK_ID};
+
+    /// Indexes added for queries that are executed on a fixed cadence rather
+    /// than by a person: the progress poll's fleet-wide duration sample, the
+    /// landing-page activity pulse, the public-metadata refresh sweep, and the
+    /// report's churn ranking. Each one replaces a scan-and-sort of a table
+    /// that grows with every repository the product has ever seen, so their
+    /// absence is not a slow page — it is a database that saturates on
+    /// background traffic alone.
+    #[test]
+    fn schema_indexes_the_recurring_background_queries() {
+        for index in [
+            "idx_repo_history_duration_recent",
+            "idx_repos_last_viewed",
+            "idx_repos_metadata_staleness",
+            "idx_repo_file_commits",
+        ] {
+            assert!(SCHEMA.contains(index), "missing index {index}");
+        }
+    }
+
+    /// A file census stores file counts with zero lines. Readers must be able
+    /// to tell that apart from a repository that genuinely has no code, or
+    /// every large or asset-heavy repository renders "0 lines of code".
+    #[test]
+    fn schema_records_whether_line_counts_are_exact() {
+        assert!(
+            SCHEMA.contains("ADD COLUMN IF NOT EXISTS lines_exact BOOLEAN NOT NULL DEFAULT TRUE")
+        );
+    }
+
+    /// The schema runs on every process start against a live database and
+    /// takes ACCESS EXCLUSIVE on tables every request path reads, so it is
+    /// bounded by a `lock_timeout` — and a bounded statement must be retried,
+    /// or an ordinary long-running transaction during a deploy turns into a
+    /// failed boot.
+    #[test]
+    fn blocked_schema_statements_are_retried_rather_than_fatal() {
+        const { assert!(super::SCHEMA_MIGRATION_ATTEMPTS > 1) };
+    }
+
+    /// The queue tables take many row versions per job. Their storage
+    /// parameters must be applied conditionally: `ALTER TABLE ... SET` locks
+    /// the table even when nothing changes, and this runs on every start.
+    #[test]
+    fn queue_autovacuum_settings_are_applied_only_when_absent() {
+        assert!(SCHEMA.contains("autovacuum_vacuum_scale_factor = 0.02"));
+        assert!(
+            SCHEMA.contains("IF NOT EXISTS (\n            SELECT 1 FROM pg_class"),
+            "the storage-parameter change must be guarded by a catalog check"
+        );
+    }
 
     /// The profile-card login index must stay in the idempotent schema
     /// (no migration files in this repo) and must stay partial — a full

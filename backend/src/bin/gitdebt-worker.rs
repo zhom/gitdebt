@@ -32,21 +32,7 @@ async fn main() -> Result<()> {
     // ceiling prevents a bad env value from launching an unbounded number of
     // git subprocesses.
     let storage = Arc::new(gitdebt::repo_history::RepoStorage::from_env());
-    let default_analysis_workers = std::thread::available_parallelism()
-        .map(|cpus| cpus.get().div_ceil(2).clamp(1, 8))
-        .unwrap_or(2);
-    let requested_analysis_workers: usize = std::env::var("REPO_ANALYSIS_WORKERS")
-        .ok()
-        .and_then(|s| s.parse().ok())
-        .unwrap_or(default_analysis_workers);
-    let analysis_workers = requested_analysis_workers.clamp(1, 8);
-    if requested_analysis_workers != analysis_workers {
-        tracing::warn!(
-            requested = requested_analysis_workers,
-            effective = analysis_workers,
-            "REPO_ANALYSIS_WORKERS capped to protect git subprocess and thread capacity"
-        );
-    }
+    let analysis_workers = gitdebt::repo_analysis::configured_analysis_workers();
     let reset = gitdebt::repo_analysis::reset_inflight_on_startup(&db).await?;
     if reset > 0 {
         tracing::info!(
@@ -87,6 +73,20 @@ async fn main() -> Result<()> {
         );
     }
 
+    // Resolve the configuration that can be fatal BEFORE any work is claimed
+    // or enqueued. Constructing this after the pools were running meant a bad
+    // or briefly unavailable credential produced a restart loop in which every
+    // iteration re-ran the startup sweeps and abandoned a handful of freshly
+    // claimed jobs to their lease timeout.
+    let archive_client = gitdebt::gh_archive::GhArchiveBigQueryClient::from_env()
+        .await
+        .context("GH Archive BigQuery configuration/authentication failed")?;
+    if archive_client.is_none() && !cfg!(debug_assertions) {
+        anyhow::bail!(
+            "GH_ARCHIVE_ENABLED=1 and valid BigQuery credentials are required in release deployments"
+        );
+    }
+
     // Deployment bootstrap: the comparison catalog is embedded from the
     // frontend's single source of truth. Offer every curated repo to both
     // durable queues before starting the pools, so a fresh deployment begins
@@ -116,6 +116,10 @@ async fn main() -> Result<()> {
     // the star-fetch claim path writes the metadata. Runs in archive and
     // fallback modes alike.
     gitdebt::worker::spawn_metadata_backfill(db.clone());
+    // Keep the numbers on README-embedded badges, cards, and OG images
+    // current for repositories that are only ever seen through an embed and
+    // therefore never hit the site's own refresh path.
+    gitdebt::worker::spawn_metadata_refresh(cache.clone(), services.github.clone());
     // Orphaned-clone sweep. Clone paths derive purely from the slug, so N
     // replicas store repo X at the same path string while sharing ONE
     // repo_history row; when another replica evicts X it NULLs that row and
@@ -124,9 +128,6 @@ async fn main() -> Result<()> {
     // passes delete local bare-clone dirs no clone_path row references
     // (a 24h mtime guard protects in-flight clones).
     gitdebt::repo_stats::spawn_orphan_clone_sweep(db.clone(), storage.clone());
-    let archive_client = gitdebt::gh_archive::GhArchiveBigQueryClient::from_env()
-        .await
-        .context("GH Archive BigQuery configuration/authentication failed")?;
     if let Some(archive_client) = archive_client {
         let revived = gitdebt::queue::revive_retryable_for_archive(&db).await?;
         if revived > 0 {
@@ -147,7 +148,7 @@ async fn main() -> Result<()> {
             metadata_concurrency = worker_count,
             "GH Archive historical coordinator and hourly follower contending for leadership"
         );
-    } else if cfg!(debug_assertions) {
+    } else {
         gitdebt::worker::spawn_pool(
             gitdebt::worker::WorkerCtx::new(services.github.clone(), cache.clone()),
             worker_count,
@@ -155,10 +156,6 @@ async fn main() -> Result<()> {
         tracing::warn!(
             worker_count,
             "GH Archive disabled; using the restricted GitHub stargazer-list fallback"
-        );
-    } else {
-        anyhow::bail!(
-            "GH_ARCHIVE_ENABLED=1 and valid BigQuery credentials are required in release deployments"
         );
     }
 

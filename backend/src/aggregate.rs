@@ -484,8 +484,7 @@ async fn build_from_repos(
                 if enqueue && enqueued < star_enqueue_limit {
                     if user_id.is_some() {
                         if let Err(error) =
-                            crate::queue::enqueue(db, slug, repo_analysis::INTERACTIVE_PRIORITY)
-                                .await
+                            crate::queue::enqueue(db, slug, repo_analysis::WARM_PRIORITY).await
                         {
                             tracing::warn!(repo = %slug, %error, "interactive star enqueue failed");
                         }
@@ -512,16 +511,22 @@ async fn build_from_repos(
     // asynchronously in the existing worker pool.
     if enqueue {
         if let Some(user_id) = user_id {
-            for repo in &analysis_candidates {
+            // Bounded exactly like the anonymous branch below: a profile with
+            // hundreds of repositories must not convert one page view into
+            // hundreds of durable clone jobs.
+            for repo in analysis_candidates
+                .iter()
+                .take(MAX_ANALYSIS_ENQUEUES_PER_BUILD)
+            {
                 if let Err(error) = repo_analysis::enqueue_prioritized(
                     db,
                     repo,
-                    repo_analysis::INTERACTIVE_PRIORITY,
+                    repo_analysis::WARM_PRIORITY,
                     Some(user_id),
                 )
                 .await
                 {
-                    tracing::warn!(login, %repo, %error, "interactive profile analysis enqueue failed");
+                    tracing::warn!(login, %repo, %error, "profile analysis enqueue failed");
                 }
             }
         } else if let Err(error) =

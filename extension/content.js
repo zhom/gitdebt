@@ -35,7 +35,9 @@
 
   const POLL_BASE_MS = 4000;
   const POLL_MAX_MS = 8000;
-  const POLL_MAX_ATTEMPTS = 60;
+  // The panel reaches a truthful terminal state ("still gathering — open the
+  // full report") on its own, so a long tail of polls buys nothing.
+  const POLL_MAX_ATTEMPTS = 12;
   const MOUNT_WAIT_MS = 8000;
   const ANALYZE_TIMEOUT_MS = 15000;
 
@@ -224,9 +226,13 @@
     } catch (_) { /* ignore */ }
   }
 
-  async function fetchAnalyze(apiBase, owner, repo, signal) {
+  // `enqueue=0` reads the same snapshot without offering queue work. Only
+  // the first read of a repository needs to enqueue; the polls that follow
+  // are waiting for that job, and re-offering it on every one of them is
+  // what made one page visit dozens of enqueue-capable requests.
+  async function fetchAnalyze(apiBase, owner, repo, signal, readOnly) {
     const url = apiBase + "/api/repos/" + encodeURIComponent(owner) + "/" +
-      encodeURIComponent(repo) + "/analyze";
+      encodeURIComponent(repo) + "/analyze" + (readOnly ? "?enqueue=0" : "");
     const requestAbort = new AbortController();
     const abortFromRun = () => requestAbort.abort();
     let timedOut = false;
@@ -687,7 +693,8 @@
           handles.ctx.apiBase,
           handles.ctx.owner,
           handles.ctx.repo,
-          signal
+          signal,
+          attempt > 0
         );
         failures = 0;
       } catch (err) {
@@ -747,6 +754,11 @@
         "loading"
       );
       await sleep(Math.min(POLL_BASE_MS + attempt * 500, POLL_MAX_MS), signal);
+      // A background tab is not showing the panel; wait for it to come back
+      // rather than polling from every tab a user left open.
+      while (document.hidden) {
+        await sleep(POLL_MAX_MS, signal);
+      }
     }
   }
 

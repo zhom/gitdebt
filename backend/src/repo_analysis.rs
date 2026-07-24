@@ -24,9 +24,18 @@ use crate::repo_history::{self, RepoHandle, RepoStorage};
 use crate::repo_stats;
 
 const DEFAULT_MAX_PENDING_ANALYSES: i64 = 500;
+/// How far above the ordinary ceiling interactive work may push the queue.
+const INTERACTIVE_CAPACITY_FACTOR: i64 = 4;
 const DEFAULT_ANALYSIS_FRESH_HOURS: i64 = 24;
 const ENQUEUE_LOCK_ID: i64 = 6_794_738_132_977;
+/// Priority for work a person is waiting on right now: exactly one repository
+/// per request, from a surface that is rendering its report.
 pub const INTERACTIVE_PRIORITY: i64 = 1_000_000_000_000;
+/// Priority for bulk warm-up (sign-in discovery, profile aggregate builds).
+/// Above popularity-driven catalog work, below anything with a live viewer —
+/// warming a login's whole starred list must never outrank the report the
+/// next visitor is actually watching.
+pub const WARM_PRIORITY: i64 = 1_000_000;
 // v4 adds per-author/day buckets for truthful profile commit streaks. Older
 // completed clones are re-walked once so awards never infer a person's
 // activity from repository-wide daily totals.
@@ -204,7 +213,16 @@ pub async fn enqueue_prioritized(
     )
     .fetch_one(&mut *tx)
     .await?;
-    if active >= max_pending_analyses() && priority < INTERACTIVE_PRIORITY {
+    // Interactive work jumps the ordinary ceiling — someone is watching — but
+    // not an unlimited one. Without the outer bound the ceiling constrained
+    // anonymous traffic only, and signed-in bursts could grow the queue past
+    // any drain time worth reporting as an ETA.
+    let ceiling = if priority >= INTERACTIVE_PRIORITY {
+        max_pending_analyses().saturating_mul(INTERACTIVE_CAPACITY_FACTOR)
+    } else {
+        max_pending_analyses()
+    };
+    if active >= ceiling {
         tx.commit().await?;
         return Ok(EnqueueOutcome::AtCapacity);
     }
@@ -280,22 +298,47 @@ pub async fn reset_inflight_on_startup(db: &Db) -> Result<u64> {
 }
 
 /// Revive jobs parked by older releases after a fixed number of transient
-/// clone/process failures. New releases keep those failures pending with a
-/// durable backoff, so this is a one-way startup repair.
+/// clone/process failures. Rows this release parked itself carry
+/// [`TERMINAL_MARKER`] and stay parked — reviving them on every restart would
+/// undo the ceiling and let permanently-failing repositories reoccupy the
+/// queue's capacity after each deploy.
 pub async fn revive_retryable_on_startup(db: &Db) -> Result<u64> {
     let res = sqlx::query(
         "UPDATE repo_analysis_queue SET status = 'pending', attempts = 0, \
             phase = 'queued', next_attempt_at = NOW(), worker_id = NULL, \
             claimed_at = NULL, started_at = NULL, updated_at = NOW() \
          WHERE status = 'dead' \
+           AND (last_error IS NULL OR last_error NOT LIKE $1) \
            AND NOT EXISTS ( \
                SELECT 1 FROM repos \
                WHERE repos.repo = repo_analysis_queue.repo AND repos.missing = TRUE \
            )",
     )
+    .bind(format!("{TERMINAL_MARKER}%"))
     .execute(&db.pool)
     .await?;
     Ok(res.rows_affected())
+}
+
+/// Hard ceiling on pool size. Each worker holds one git subprocess at a
+/// time, so this bounds concurrent clones per replica; the default stays
+/// conservative and `REPO_ANALYSIS_WORKERS` raises it for hosts that can
+/// absorb the disk and network concurrency.
+const MAX_ANALYSIS_WORKERS: usize = 32;
+
+/// Pool size for this process. **The** single definition: the worker binary
+/// sizes its pool with it and the progress surface divides queue positions by
+/// it, so a divergence here shows users an ETA that is wrong by the ratio of
+/// the two numbers.
+pub fn configured_analysis_workers() -> usize {
+    let default = std::thread::available_parallelism()
+        .map(|cpus| cpus.get().div_ceil(2).clamp(1, 8))
+        .unwrap_or(2);
+    std::env::var("REPO_ANALYSIS_WORKERS")
+        .ok()
+        .and_then(|value| value.parse().ok())
+        .unwrap_or(default)
+        .clamp(1, MAX_ANALYSIS_WORKERS)
 }
 
 pub fn spawn_pool(ctx: AnalysisCtx, count: usize) {
@@ -347,7 +390,18 @@ async fn run_worker(worker_id: String, ctx: AnalysisCtx) {
         tracing::info!(repo = %job.repo, interactive = job.requested_by_user_id.is_some(), "analysis run started");
         let heartbeat_stop =
             spawn_lease_heartbeat(ctx.db.clone(), job.repo.clone(), worker_id.clone());
-        let outcome = process(&job, &ctx).await;
+        // Worker slots are the scarcest resource in the pool, and the lease
+        // heartbeat guarantees no peer will ever steal a job from a wedged
+        // one. A bound turns "this repository hangs forever" into an ordinary
+        // durable retry; `kill_on_drop` on the git commands reaps the
+        // subprocess when the timeout drops the future.
+        let outcome = match tokio::time::timeout(job_timeout(), process(&job, &ctx)).await {
+            Ok(outcome) => outcome,
+            Err(_) => Err(anyhow::anyhow!(
+                "analysis exceeded the {}s job budget",
+                job_timeout().as_secs()
+            )),
+        };
         let _ = heartbeat_stop.send(true);
         match outcome {
             Ok(commits_applied) => {
@@ -371,7 +425,10 @@ async fn run_worker(worker_id: String, ctx: AnalysisCtx) {
                 if let Err(e2) = fail(&ctx.db, &job.repo, &msg).await {
                     tracing::warn!(repo = %job.repo, error = %e2, "queue fail failed");
                 }
-                sleep(Duration::from_secs(30)).await;
+                // No sleep here: `fail` already parked this row behind a
+                // durable `next_attempt_at`, so the worker cannot re-claim it.
+                // Sleeping instead idled the whole slot, which turned a broad
+                // upstream outage into a throughput collapse across the pool.
             }
         }
     }
@@ -442,14 +499,26 @@ async fn complete(db: &Db, repo: &str) -> Result<()> {
     Ok(())
 }
 
+/// Transient failures a job may accumulate before it is parked terminally.
+/// Without a ceiling, a repository that can never be cloned retries at the
+/// one-hour floor forever while still counting against the queue's capacity
+/// ceiling — enough of them and no new work can be admitted at all.
+const MAX_ANALYSIS_ATTEMPTS: i64 = 8;
+
+/// Marks a row parked by [`MAX_ANALYSIS_ATTEMPTS`]. Startup revival re-opens
+/// jobs parked by older releases, which had no terminal state; rows carrying
+/// this prefix were parked deliberately and must stay parked.
+pub const TERMINAL_MARKER: &str = "terminal:";
+
 async fn fail(db: &Db, repo: &str, err: &str) -> Result<()> {
     sqlx::query(
         "UPDATE repo_analysis_queue SET \
             attempts = attempts + 1, \
-            last_error = $1, \
+            last_error = CASE WHEN attempts + 1 >= $3 \
+                              THEN $4 || ' ' || $1 ELSE $1 END, \
             worker_id = NULL, \
             claimed_at = NULL, \
-            status = 'pending', \
+            status = CASE WHEN attempts + 1 >= $3 THEN 'dead' ELSE 'pending' END, \
             phase = 'retrying', \
             updated_at = NOW(), \
             next_attempt_at = NOW() + CASE \
@@ -466,9 +535,21 @@ async fn fail(db: &Db, repo: &str, err: &str) -> Result<()> {
     )
     .bind(err)
     .bind(repo)
+    .bind(MAX_ANALYSIS_ATTEMPTS)
+    .bind(TERMINAL_MARKER)
     .execute(&db.pool)
     .await?;
     Ok(())
+}
+
+/// Wall-clock ceiling for one analysis run (clone/fetch + walk + counts).
+fn job_timeout() -> Duration {
+    let secs = std::env::var("REPO_ANALYSIS_JOB_TIMEOUT_SECONDS")
+        .ok()
+        .and_then(|value| value.parse::<u64>().ok())
+        .filter(|value| *value > 0)
+        .unwrap_or(20 * 60);
+    Duration::from_secs(secs)
 }
 
 fn compact_error(error: &anyhow::Error) -> String {
@@ -540,7 +621,7 @@ async fn process(job: &AnalysisJob, ctx: &AnalysisCtx) -> Result<usize> {
     if handle.is_empty() {
         update_work_progress(&ctx.db, repo, "saving_history", Some(0), 0).await?;
         repo_stats::replace_commits_at_head(&ctx.db, repo, &[], &handle.head_sha, 0).await?;
-        code_count::save(&ctx.db, repo, &[]).await?;
+        code_count::save(&ctx.db, repo, &[], true).await?;
         repo_stats::record_analysis_details(
             &ctx.db,
             repo,
@@ -556,17 +637,27 @@ async fn process(job: &AnalysisJob, ctx: &AnalysisCtx) -> Result<usize> {
         && analysis_revision >= CURRENT_ANALYSIS_REVISION
     {
         // Nothing to walk: commit aggregates and line counts are already at
-        // this head under the current revision. Return immediately so the
-        // caller dequeues the job. Author enrichment is explicitly NOT run
-        // here — it is presentation-only metadata owned by
+        // this head under the current revision. Stamp the run before
+        // returning — `last_analyzed_at` is what [`ANALYSIS_IS_CURRENT_SQL`]
+        // reads, so without it a repository whose HEAD never moves can never
+        // become `Fresh` again and every view re-enqueues a job that fetches
+        // the remote just to rediscover the same head. Author enrichment is
+        // explicitly NOT run here — it is presentation-only metadata owned by
         // [`sweep_author_enrichment`], and doing GitHub work on this path is
         // what let a repeatedly re-enqueued no-op job burn budget forever.
+        repo_stats::touch_analyzed_at(&ctx.db, repo).await?;
         return Ok(0);
     }
 
     let limit = repo_history::analysis_commit_limit();
+    // `was_truncated` deliberately does NOT force a rebuild. It records that
+    // the stored window starts later than the repository's first commit —
+    // permanently true for any repository above the commit limit — while the
+    // cursor itself is still coherent at the head the last run reached. Using
+    // it here made every run of every large repository re-walk the whole
+    // window and rewrite every aggregate table. A window that genuinely
+    // cannot be extended incrementally is caught below by `plan.truncated`.
     let mut replace = analysis_revision < CURRENT_ANALYSIS_REVISION
-        || was_truncated
         || last_sha.as_deref() == Some(repo_history::EMPTY_REPOSITORY_HEAD);
     let mut plan = repo_history::plan_recent_commits(
         &handle,
@@ -658,12 +749,32 @@ async fn process(job: &AnalysisJob, ctx: &AnalysisCtx) -> Result<usize> {
     if let Err(e) = run_line_counts(&ctx.db, &handle, repo).await {
         tracing::warn!(repo, error = %e, "line counts failed");
     }
+    // Re-measure: the walks above hydrate promisor blobs, so the size taken
+    // right after the clone can understate what is actually on disk by orders
+    // of magnitude for a repository that commits large files. The quota
+    // accountant sums this column, so a stale value means eviction never
+    // fires for exactly the repositories that fill the volume.
+    repo_stats::record_clone(
+        &ctx.db,
+        repo,
+        &handle.path,
+        repo_history::clone_size_bytes(&handle.path),
+    )
+    .await?;
+    // An incremental run appends to the window it inherited, so it stays
+    // truncated exactly as long as the run that built it was; a rebuild from
+    // HEAD re-decides it.
+    let scope_truncated = if replace {
+        plan.truncated
+    } else {
+        was_truncated
+    };
     repo_stats::record_analysis_details(
         &ctx.db,
         repo,
         i64::try_from(started.elapsed().as_millis()).unwrap_or(i64::MAX),
         n,
-        plan.truncated,
+        scope_truncated,
     )
     .await?;
     Ok(n)
@@ -713,32 +824,29 @@ async fn update_work_progress(
     Ok(())
 }
 
+/// Persist the repository's language breakdown.
+///
+/// Two metrics can end up in `repo_lines`: exact line counts, or a file
+/// census when the countable content is outside the hydration budget. They are
+/// stored with a discriminator rather than being told apart by "all the line
+/// columns are zero" — readers rendered that as a confident `0 lines of code`,
+/// and profile aggregates summed file counts and line counts into one number.
 async fn run_line_counts(db: &Db, handle: &RepoHandle, repo: &str) -> Result<()> {
     let (file_census, tree_files) = code_count::language_file_census(&handle.path).await?;
-    if tree_files > code_count::exact_line_count_max_files() {
-        code_count::save(db, repo, &file_census).await?;
-        tracing::info!(
-            repo,
-            tree_files,
-            languages = file_census.len(),
-            "large repository language file census updated"
-        );
-        return Ok(());
-    }
-
-    match tokio::time::timeout(
+    // The timeout is a backstop against a pathological local read, not the
+    // thing that decides which metric is stored: `count_lines` returns `None`
+    // by its own deterministic budget, so a repository does not flip between
+    // metrics because one run happened to be slower than another.
+    let exact = match tokio::time::timeout(
         code_count::exact_line_count_timeout(),
         code_count::count_lines(&handle.path),
     )
     .await
     {
-        Ok(Ok(counts)) => {
-            code_count::save(db, repo, &counts).await?;
-            tracing::info!(repo, languages = counts.len(), "line counts updated");
-        }
+        Ok(Ok(counts)) => counts,
         Ok(Err(error)) => {
             tracing::warn!(repo, %error, "exact line count failed; using file census");
-            code_count::save(db, repo, &file_census).await?;
+            None
         }
         Err(_) => {
             tracing::warn!(
@@ -746,7 +854,23 @@ async fn run_line_counts(db: &Db, handle: &RepoHandle, repo: &str) -> Result<()>
                 tree_files,
                 "exact line count timed out; using file census"
             );
-            code_count::save(db, repo, &file_census).await?;
+            None
+        }
+    };
+    match exact {
+        Some(counts) if !counts.is_empty() => {
+            let languages = counts.len();
+            code_count::save(db, repo, &counts, true).await?;
+            tracing::info!(repo, languages, "line counts updated");
+        }
+        _ => {
+            code_count::save(db, repo, &file_census, false).await?;
+            tracing::info!(
+                repo,
+                tree_files,
+                languages = file_census.len(),
+                "language file census updated"
+            );
         }
     }
     Ok(())

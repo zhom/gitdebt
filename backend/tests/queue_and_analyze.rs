@@ -1255,3 +1255,126 @@ async fn clone_quota_sum_decodes_as_bigint() {
 
     cleanup(&db, prefix).await;
 }
+
+/// A repository whose HEAD has not moved must still count as freshly
+/// analyzed.
+///
+/// The worker returns early when the stored cursor already equals HEAD, and
+/// nothing on that path used to record that the run happened. Freshness is
+/// read from `last_analyzed_at`, so such a repository could never become
+/// `Fresh` again: every view re-queued it, the worker fetched the remote,
+/// rediscovered the same head, and returned — forever, for the majority of
+/// tracked repositories, which are the ones that do not change daily.
+#[tokio::test]
+async fn confirming_an_unchanged_head_keeps_the_analysis_fresh() {
+    let Some(db) = test_db().await else {
+        eprintln!("skipping: set GITDEBT_TEST_DATABASE_URL to run");
+        return;
+    };
+    let prefix = "gitdebt-test-noop-analysis/";
+    cleanup(&db, prefix).await;
+    let repo = format!("{prefix}unchanged");
+
+    // A completed analysis that has since aged past the freshness window.
+    sqlx::query(
+        "INSERT INTO repo_history \
+            (repo, last_analyzed_sha, last_analyzed_at, head_sha, analysis_revision) \
+         VALUES ($1, 'a1b2c3', NOW() - INTERVAL '30 days', 'a1b2c3', $2)",
+    )
+    .bind(&repo)
+    .bind(repo_analysis::CURRENT_ANALYSIS_REVISION)
+    .execute(&db.pool)
+    .await
+    .unwrap();
+    assert!(
+        !repo_analysis::analysis_is_current(&db, &repo)
+            .await
+            .unwrap(),
+        "a 30-day-old analysis is outside the freshness window"
+    );
+
+    // What the worker does when it finds HEAD unchanged.
+    repo_stats::touch_analyzed_at(&db, &repo).await.unwrap();
+
+    assert!(
+        repo_analysis::analysis_is_current(&db, &repo)
+            .await
+            .unwrap(),
+        "confirming the stored head must refresh the analysis window"
+    );
+    assert_eq!(
+        repo_analysis::enqueue(&db, &repo).await.unwrap(),
+        repo_analysis::EnqueueOutcome::Fresh,
+        "and the next view must not re-queue the same no-op run"
+    );
+
+    cleanup(&db, prefix).await;
+}
+
+/// A job that can never succeed must stop consuming queue capacity, and must
+/// stay stopped across restarts.
+///
+/// Every failure used to return the row to `pending` with at most an hour of
+/// backoff, so a repository that cannot be cloned retried forever while still
+/// counting against the ceiling that admits new work. Startup revival exists
+/// for rows parked by releases that had no terminal state, so it must not
+/// resurrect the rows this release parks deliberately.
+#[tokio::test]
+async fn permanently_failing_analyses_are_parked_and_stay_parked() {
+    let Some(db) = test_db().await else {
+        eprintln!("skipping: set GITDEBT_TEST_DATABASE_URL to run");
+        return;
+    };
+    let prefix = "gitdebt-test-analysis-terminal/";
+    cleanup(&db, prefix).await;
+    let repo = format!("{prefix}hopeless");
+
+    repo_analysis::enqueue(&db, &repo).await.unwrap();
+    sqlx::query(
+        "UPDATE repo_analysis_queue \
+         SET status = 'dead', attempts = 8, last_error = $2 \
+         WHERE repo = $1",
+    )
+    .bind(&repo)
+    .bind(format!("{} clone failed", repo_analysis::TERMINAL_MARKER))
+    .execute(&db.pool)
+    .await
+    .unwrap();
+
+    repo_analysis::revive_retryable_on_startup(&db)
+        .await
+        .unwrap();
+    let status: String =
+        sqlx::query_scalar("SELECT status FROM repo_analysis_queue WHERE repo = $1")
+            .bind(&repo)
+            .fetch_one(&db.pool)
+            .await
+            .unwrap();
+    assert_eq!(
+        status, "dead",
+        "a deliberately parked job must survive a restart"
+    );
+
+    // A row parked by an older release carries no marker and is still revived.
+    let legacy = format!("{prefix}legacy");
+    sqlx::query(
+        "INSERT INTO repo_analysis_queue (repo, status, enqueued_at, last_error) \
+         VALUES ($1, 'dead', NOW(), 'clone failed')",
+    )
+    .bind(&legacy)
+    .execute(&db.pool)
+    .await
+    .unwrap();
+    repo_analysis::revive_retryable_on_startup(&db)
+        .await
+        .unwrap();
+    let legacy_status: String =
+        sqlx::query_scalar("SELECT status FROM repo_analysis_queue WHERE repo = $1")
+            .bind(&legacy)
+            .fetch_one(&db.pool)
+            .await
+            .unwrap();
+    assert_eq!(legacy_status, "pending");
+
+    cleanup(&db, prefix).await;
+}

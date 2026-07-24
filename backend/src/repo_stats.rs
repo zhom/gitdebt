@@ -288,7 +288,6 @@ async fn write_commits_at_head(
     if replace {
         for table in [
             "repo_author_commit_days",
-            "repo_author_stats",
             "repo_commit_days",
             "repo_todo_deltas",
             "repo_file_stats",
@@ -300,6 +299,20 @@ async fn write_commits_at_head(
                 .await
                 .with_context(|| format!("replace {table}"))?;
         }
+        // `repo_author_stats` is rebuilt in place rather than deleted: it also
+        // carries the GitHub identity enrichment (login, avatar, and the
+        // negative-cache stamp that keeps unresolvable authors from being
+        // re-queried). Deleting the rows discarded all of it and made the next
+        // enrichment sweep re-resolve every author of the repository from
+        // scratch. Zeroing the commit-derived columns lets the upsert below
+        // rebuild them exactly as a fresh insert would.
+        sqlx::query(
+            "UPDATE repo_author_stats              SET commits = 0, first_commit_at = NULL, last_commit_at = NULL              WHERE repo = $1",
+        )
+        .bind(repo)
+        .execute(&mut *tx)
+        .await
+        .context("reset author commit aggregates")?;
     }
 
     // Authors
@@ -500,7 +513,32 @@ async fn write_commits_at_head(
         .context("update repo_history")?;
     }
 
+    if replace {
+        // Authors the rebuilt window no longer contains were zeroed above and
+        // never re-inserted; drop them so the contributor surfaces do not show
+        // people with no commits in the analyzed window.
+        sqlx::query("DELETE FROM repo_author_stats WHERE repo = $1 AND commits = 0")
+            .bind(repo)
+            .execute(&mut *tx)
+            .await
+            .context("drop authors outside the rebuilt window")?;
+    }
+
     tx.commit().await.context("commit tx")?;
+    Ok(())
+}
+
+/// Record that an analysis run confirmed the stored aggregates are already at
+/// the repository's current head. Only `last_analyzed_at` moves: the cursor,
+/// the head, and every aggregate are unchanged, and the row must already
+/// exist (the run opened a clone for it). Without this stamp a repository
+/// whose HEAD never moves stays permanently outside the freshness window and
+/// is re-queued and re-fetched by every view.
+pub async fn touch_analyzed_at(db: &Db, repo: &str) -> Result<()> {
+    sqlx::query("UPDATE repo_history SET last_analyzed_at = NOW() WHERE repo = $1")
+        .bind(repo)
+        .execute(&db.pool)
+        .await?;
     Ok(())
 }
 
@@ -573,6 +611,18 @@ pub async fn record_analysis_details(
 /// effectively divide the quota by the replica count.
 pub async fn evict_to_quota(db: &Db, storage: &RepoStorage) -> Result<u64> {
     let target = storage.quota_bytes * (storage.high_watermark_pct as u64) / 100;
+    // Cheap pre-check: the pass runs on the worker's critical path every N
+    // completed jobs, and the common case is "well under quota". One aggregate
+    // answers that without shipping a row per clone to the process or stat()ing
+    // each of them.
+    let recorded: i64 = sqlx::query_scalar(
+        "SELECT COALESCE(SUM(clone_size_bytes), 0)::BIGINT FROM repo_history          WHERE clone_path IS NOT NULL AND clone_size_bytes IS NOT NULL",
+    )
+    .fetch_one(&db.pool)
+    .await?;
+    if (recorded.max(0) as u64) <= target {
+        return Ok(0);
+    }
     let rows = sqlx::query_as::<
         _,
         (
@@ -615,14 +665,19 @@ pub async fn evict_to_quota(db: &Db, storage: &RepoStorage) -> Result<u64> {
     // we expect for the analysis worker.
     const MIN_AGE_HOURS: i64 = 24;
     let now = Utc::now();
+    let mut protected: Vec<(String, std::path::PathBuf, u64, Option<DateTime<Utc>>)> = Vec::new();
     let mut scored: Vec<(f64, String, std::path::PathBuf, u64)> = local
         .into_iter()
         .filter_map(|(repo, path, bytes, last_visited)| {
-            // Skip repos visited too recently — the eviction will simply
-            // pick the next-stalest candidate instead.
+            // Recently visited clones go to the back of the queue rather than
+            // out of it. Excluding them outright made the quota
+            // unenforceable exactly under load: a busy pool touches every
+            // clone it holds within the guard window, so the candidate set
+            // emptied and the pass freed nothing while the disk kept growing.
             if let Some(visited) = last_visited
                 && (now - visited).num_hours() < MIN_AGE_HOURS
             {
+                protected.push((repo, path, bytes, Some(visited)));
                 return None;
             }
             let idle_days = last_visited
@@ -647,6 +702,36 @@ pub async fn evict_to_quota(db: &Db, storage: &RepoStorage) -> Result<u64> {
         used = used.saturating_sub(bytes);
         freed = freed.saturating_add(bytes);
         tracing::info!(repo, bytes, "evicted bare clone");
+    }
+
+    if used > target && !protected.is_empty() {
+        // The working set alone exceeds the quota. Fall back to plain LRU
+        // over the protected clones: re-cloning one of them later is strictly
+        // better than letting the volume fill.
+        tracing::warn!(
+            used,
+            target,
+            protected = protected.len(),
+            "clone quota exceeded by the active working set; evicting least-recently-visited clones"
+        );
+        protected.sort_by_key(|(_, _, _, last_visited)| *last_visited);
+        for (repo, path, bytes, _) in protected {
+            if used <= target {
+                break;
+            }
+            if let Err(e) = evict_clone(&path).await {
+                tracing::warn!(repo, error = %e, "evict failed; skipping");
+                continue;
+            }
+            mark_evicted(db, &repo).await.ok();
+            used = used.saturating_sub(bytes);
+            freed = freed.saturating_add(bytes);
+            tracing::info!(
+                repo,
+                bytes,
+                "evicted recently-visited bare clone under quota pressure"
+            );
+        }
     }
     Ok(freed)
 }

@@ -62,7 +62,9 @@ export function SignalFlowGraphic({ apiBase }: { apiBase: string }) {
       }
     }
     void refresh();
-    const timer = window.setInterval(refresh, 30_000);
+    const timer = window.setInterval(() => {
+      if (document.visibilityState === "visible") void refresh();
+    }, 30_000);
     return () => {
       active = false;
       window.clearInterval(timer);

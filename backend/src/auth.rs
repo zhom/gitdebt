@@ -438,7 +438,7 @@ async fn warm_authenticated_account(
         if let Err(error) = crate::queue::enqueue(
             state.analyzer.cache.db(),
             repo,
-            repo_analysis::INTERACTIVE_PRIORITY,
+            repo_analysis::WARM_PRIORITY,
         )
         .await
         {
@@ -447,7 +447,7 @@ async fn warm_authenticated_account(
         if let Err(error) = repo_analysis::enqueue_prioritized(
             state.analyzer.cache.db(),
             repo,
-            repo_analysis::INTERACTIVE_PRIORITY,
+            repo_analysis::WARM_PRIORITY,
             Some(user_id),
         )
         .await

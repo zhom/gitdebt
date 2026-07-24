@@ -591,6 +591,15 @@ async fn stat_dispatcher(
     );
     let theme = theme_for(q.theme.as_deref());
     let Some(revision) = stat_revision(&state, &full, kind).await? else {
+        // A repo-health embed for a repository nobody has opened on the site
+        // is the only thing that will ever ask for its analysis. Offer the
+        // durable job (bounded, deduplicated, and capacity-gated inside
+        // `enqueue`) and return immediately — without this the frame told
+        // embedders that "analysis is still running" when nothing was queued
+        // and nothing ever would be.
+        if let Err(error) = crate::repo_analysis::enqueue(state.analyzer.cache.db(), &full).await {
+            tracing::warn!(repo = %full, %error, "stat embed analysis enqueue failed");
+        }
         let mut svg = render_analysis_pending(&full, theme);
         if q.in_app() {
             svg = brand::without_embed_footer(svg);
@@ -905,8 +914,24 @@ async fn ensure_heatmap_svg(
                 commits: r.try_get("commits").unwrap_or(0),
             })
             .collect();
+        // A capped analysis window starts at the oldest commit day it walked;
+        // everything before that is unobserved, not empty.
+        let analyzed_from: Option<NaiveDate> = sqlx::query_scalar(
+            "SELECT MIN(day) FROM repo_commit_days WHERE repo = $1 \
+             AND EXISTS (SELECT 1 FROM repo_history \
+                         WHERE repo = $1 AND analysis_truncated)",
+        )
+        .bind(full)
+        .fetch_one(&state.analyzer.cache.db().pool)
+        .await?;
         Ok(repo_charts::render_heatmap(
-            full, &subtitle, from, to, &days, theme,
+            full,
+            &subtitle,
+            from,
+            to,
+            &days,
+            analyzed_from,
+            theme,
         ))
     })
     .await?;
@@ -1179,13 +1204,17 @@ fn gif_response_with_policy(
 }
 
 /// Cache policy split for the stat charts. Ready charts ride the same 4h
-/// edge policy as the other media (`api::MEDIA_CACHE_CONTROL` semantics);
-/// a repo whose analysis hasn't landed yet renders a "pending" frame that
-/// must NEVER be cached anywhere (`no-store`) — the moment analysis
-/// completes, the next request must show real data.
+/// edge policy as the other media (`api::MEDIA_CACHE_CONTROL` semantics); a
+/// repo whose analysis hasn't landed yet renders a "pending" frame on a
+/// deliberately short TTL so it self-heals within one analysis cycle without
+/// making every viewer of the README re-render it at the origin.
 fn stat_cache_control(pending: bool) -> HeaderValue {
     if pending {
-        HeaderValue::from_static("no-store")
+        // Short, but positive: `no-store` meant every viewer of a README with
+        // a not-yet-analyzed embed reached the origin and re-rendered the
+        // same placeholder. Five minutes at the edge absorbs that while still
+        // self-healing well inside one analysis cycle.
+        HeaderValue::from_static("public, s-maxage=300, max-age=60")
     } else {
         HeaderValue::from_static(
             "public, max-age=3600, s-maxage=14400, stale-while-revalidate=86400",
@@ -1283,10 +1312,10 @@ mod tests {
     }
 
     #[test]
-    fn pending_stats_are_never_cached() {
+    fn pending_stats_use_the_short_self_healing_policy() {
         assert_eq!(
-            stat_cache_control(true),
-            HeaderValue::from_static("no-store")
+            stat_cache_control(true).to_str().unwrap(),
+            "public, s-maxage=300, max-age=60"
         );
         let svg = render_analysis_pending("o/r", &crate::theme::LIGHT);
         assert!(svg.contains("data-gitdebt-logo=\"true\""));
@@ -1294,7 +1323,7 @@ mod tests {
     }
 
     /// Ready stat charts ride the shared 4h edge policy; the pending frame
-    /// stays `no-store` so a finished analysis shows up on the next view.
+    /// expires in minutes so a finished analysis shows up promptly.
     #[test]
     fn ready_stats_get_the_edge_cache_policy() {
         assert_eq!(

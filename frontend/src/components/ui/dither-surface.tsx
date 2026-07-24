@@ -9,6 +9,7 @@ import {
   paintPanel,
   prefersReducedMotion,
   stampPulse,
+  supportsHoverMotion,
   type RGB,
   type SurfaceController,
   type SurfaceMotion,
@@ -127,7 +128,10 @@ export function useDitherSurface(opts: DitherSurfaceOptions) {
     };
   }, [fill, variant, edge, cell, alpha, pulse]);
 
-  const animated = (opts.animated ?? true) && !prefersReducedMotion();
+  const animated =
+    (opts.animated ?? true) &&
+    !prefersReducedMotion() &&
+    supportsHoverMotion();
   const local = (event: ReactPointerEvent<HTMLElement>) => {
     const box = event.currentTarget.getBoundingClientRect();
     return {

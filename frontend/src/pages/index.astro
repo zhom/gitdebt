@@ -4,6 +4,7 @@ export const prerender = true;
 import "@/styles/globals.css";
 
 import BaseHead from "@/components/BaseHead.astro";
+import { ButtonLink } from "@/components/ButtonLink";
 import Seo from "@/components/Seo.astro";
 import SiteHeader from "@/components/SiteHeader.astro";
 import SiteFooter from "@/components/SiteFooter.astro";
@@ -17,7 +18,6 @@ import { SignalFlowGraphic } from "@/components/SignalFlowGraphic";
 import { StatStrip } from "@/components/StatStrip";
 import { ThemeEmbedPreview } from "@/components/ThemeEmbedPreview";
 import { WarmRepos } from "@/components/WarmRepos";
-import { buttonVariants } from "@/components/ui/button";
 import {
   BODY,
   EYEBROW,
@@ -324,9 +324,14 @@ const landingWarmRepos = Array.from(
             </div>
 
             <div class="mt-8">
-              <a href="/compare" class={buttonVariants({ variant: "outline" })}>
+              <ButtonLink
+                client:visible
+                href="/compare"
+                variant="outline"
+                pulse
+              >
                 Build a comparison
-              </a>
+              </ButtonLink>
             </div>
           </section>
 
@@ -363,12 +368,14 @@ const landingWarmRepos = Array.from(
                   <li>Static by default — animation is always explicit.</li>
                 </ul>
                 <div class="mt-6">
-                  <a
+                  <ButtonLink
+                    client:visible
                     href="/badges"
-                    class={buttonVariants({ variant: "outline" })}
+                    variant="outline"
+                    pulse
                   >
                     Open the badge studio
-                  </a>
+                  </ButtonLink>
                 </div>
               </div>
             </div>
@@ -391,12 +398,15 @@ const landingWarmRepos = Array.from(
                 Free, public, open source, and ready to embed.
               </p>
             </div>
-            <a
+            <ButtonLink
+              client:visible
               href="#lookup"
-              class={buttonVariants({ variant: "outline", size: "lg" })}
+              variant="outline"
+              size="lg"
+              pulse
             >
               Analyze a repository
-            </a>
+            </ButtonLink>
           </div>
         </section>
 

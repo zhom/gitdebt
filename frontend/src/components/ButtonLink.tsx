@@ -21,22 +21,31 @@ const CANVAS_FILL: Record<string, RGB> = {
 const CANVAS_ALPHA: Record<string, number> = { soft: 0.42 };
 
 export type ButtonLinkProps = React.AnchorHTMLAttributes<HTMLAnchorElement> &
-  ButtonVariants;
+  ButtonVariants & {
+    /**
+     * Explicitly gives a quiet link the same cursor-positioned dither pulse as
+     * a primary action, without adding a filled resting surface.
+     */
+    pulse?: boolean;
+  };
 
 /**
- * An anchor wearing the button treatment. Navigation stays an `<a>`; only the
- * textured variants mount a canvas, exactly as `<Button>` does.
+ * An anchor wearing the button treatment. Navigation stays an `<a>`; textured
+ * variants mount a filled canvas, while an opted-in quiet action mounts only
+ * the transparent pulse layer.
  */
 export const ButtonLink = React.forwardRef<HTMLAnchorElement, ButtonLinkProps>(
-  ({ className, variant, size, children, ...props }, ref) => {
+  ({ className, variant, size, pulse, children, ...props }, ref) => {
     const fill = CANVAS_FILL[variant ?? "default"];
     const textured = fill !== undefined;
+    const pulseEnabled = pulse ?? textured;
+    const surfaceEnabled = textured || pulseEnabled;
     const { surface, handlers } = useDitherSurface({
-      fill: fill ?? BRAND,
+      fill: fill ?? SWATCH.blue,
       variant: "gradient",
-      animated: textured,
-      alpha: CANVAS_ALPHA[variant ?? "default"],
-      pulse: textured,
+      animated: surfaceEnabled,
+      alpha: textured ? CANVAS_ALPHA[variant ?? "default"] : 0,
+      pulse: pulseEnabled,
     });
     return (
       <a
@@ -44,9 +53,9 @@ export const ButtonLink = React.forwardRef<HTMLAnchorElement, ButtonLinkProps>(
         data-press="off"
         className={buttonVariants({ variant, size, className })}
         {...props}
-        {...(textured ? handlers : {})}
+        {...(surfaceEnabled ? handlers : {})}
       >
-        {textured ? surface : null}
+        {surfaceEnabled ? surface : null}
         <span className="relative inline-flex items-center gap-2">
           {children}
         </span>

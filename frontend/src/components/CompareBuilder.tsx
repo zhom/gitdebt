@@ -265,7 +265,7 @@ export function CompareBuilder({ apiBase, initialRepos = [] }: Props) {
         <div className="space-y-6">
           {vsHref && (
             <div>
-              <ButtonLink href={vsHref} variant="outline">
+              <ButtonLink href={vsHref} variant="outline" pulse>
                 Open the {active[0]} vs {active[1]} head-to-head page
                 <ArrowRight className="size-4 shrink-0" strokeWidth={2} aria-hidden="true" />
               </ButtonLink>

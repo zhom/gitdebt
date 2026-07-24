@@ -337,6 +337,7 @@ export function RepoHero({ owner, repo, apiBase, initialData }: Props) {
           target="_blank"
           rel="noreferrer"
           variant="outline"
+          pulse
         >
           Check on GitHub
           <ExternalLink
@@ -395,6 +396,7 @@ export function RepoHero({ owner, repo, apiBase, initialData }: Props) {
           target="_blank"
           rel="noreferrer"
           variant="outline"
+          pulse
           className="shrink-0 self-start sm:self-auto"
         >
           Open on GitHub

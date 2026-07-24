@@ -26,16 +26,16 @@ export function GitHubLoginButton({ href }: Props) {
     >
       {surface}
       <span className="relative h-4 min-w-10 overflow-hidden">
-        <span className="absolute inset-0 transition-[opacity,transform] duration-300 group-hover:-translate-y-3 group-hover:opacity-0 motion-reduce:transition-none">
+        <span className="absolute inset-0 transition-[opacity,transform] duration-200 group-hover:-translate-y-3 group-hover:opacity-0 motion-reduce:group-hover:translate-y-0 motion-reduce:group-hover:opacity-100 motion-reduce:transition-none">
           Login
         </span>
-        <span className="absolute inset-0 translate-y-3 opacity-0 transition-[opacity,transform] duration-300 group-hover:translate-y-0 group-hover:opacity-100 motion-reduce:transition-none">
+        <span className="absolute inset-0 translate-y-3 opacity-0 transition-[opacity,transform] duration-200 group-hover:translate-y-0 group-hover:opacity-100 motion-reduce:hidden motion-reduce:transition-none">
           GH::IN
         </span>
       </span>
       <svg
         viewBox="0 0 16 16"
-        className="relative size-4 transition-transform duration-300 group-hover:rotate-12 group-hover:scale-110 motion-reduce:transition-none"
+        className="relative size-4 transition-transform duration-200 group-hover:rotate-12 group-hover:scale-110 motion-reduce:group-hover:rotate-0 motion-reduce:group-hover:scale-100 motion-reduce:transition-none"
         fill="currentColor"
         aria-hidden="true"
       >

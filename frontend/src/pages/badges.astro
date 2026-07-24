@@ -3,6 +3,7 @@ export const prerender = true;
 
 import "@/styles/globals.css";
 import BaseHead from "@/components/BaseHead.astro";
+import { ButtonLink } from "@/components/ButtonLink";
 import Seo from "@/components/Seo.astro";
 import SiteHeader from "@/components/SiteHeader.astro";
 import SiteFooter from "@/components/SiteFooter.astro";
@@ -20,7 +21,6 @@ import {
   SECTION_HEADER,
   TITLE,
 } from "@/components/style-tokens";
-import { buttonVariants } from "@/components/ui/button";
 import { MEDIA_RENDER_REVISION } from "@/lib/media";
 import { staticApiBase } from "@/lib/static-api-base";
 
@@ -503,12 +503,15 @@ const jsonLd = [
             it.
           </p>
           <div class="mt-6">
-            <a
+            <ButtonLink
+              client:visible
               href={`/${exampleSlug}`}
-              class={buttonVariants({ variant: "outline", size: "lg" })}
+              variant="outline"
+              size="lg"
+              pulse
             >
               View {exampleSlug}
-            </a>
+            </ButtonLink>
           </div>
         </section>
       </main>

@@ -252,6 +252,7 @@ export function DitherComparisonChart({
           <Button
             variant={logScale ? "primary" : "outline"}
             size="sm"
+            pulse={false}
             aria-pressed={logScale}
             onClick={() => setLogScale((value) => !value)}
           >

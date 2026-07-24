@@ -184,6 +184,7 @@ export function ChartViewer({
           <Button
             variant={logScale ? "primary" : "outline"}
             size="sm"
+            pulse={false}
             aria-pressed={logScale}
             onClick={() => {
               setControlsChanged(true);

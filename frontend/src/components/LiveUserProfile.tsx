@@ -809,6 +809,7 @@ export function LiveUserProfile({
             target="_blank"
             rel="noopener noreferrer"
             variant="outline"
+            pulse
             className="shrink-0 self-start sm:self-auto"
           >
             Open GitHub profile

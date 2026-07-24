@@ -440,6 +440,11 @@ export const prefersReducedMotion = () =>
   typeof matchMedia === "function" &&
   matchMedia("(prefers-reduced-motion: reduce)").matches;
 
+/** Decorative hover motion belongs to accurate pointing devices only. */
+export const supportsHoverMotion = () =>
+  typeof matchMedia === "function" &&
+  matchMedia("(hover: hover) and (pointer: fine)").matches;
+
 export type IntensityController = {
   enter(): void;
   leave(): void;

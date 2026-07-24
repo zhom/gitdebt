@@ -11,6 +11,7 @@ import {
   makeWaves,
   paintPanel,
   stampPulse,
+  supportsHoverMotion,
   waveOffset,
 } from "../src/lib/dither.ts";
 
@@ -114,6 +115,39 @@ test("stampPulse dithers its ring rather than filling a disc", () => {
   for (let y = 0; y < 20; y++)
     for (let x = 0; x < 40; x++)
       if (alphaAt(buf, x, y) > 0) assert.ok(BAYER4[y & 3][x & 3] < 1);
+});
+
+test("a pulse-only action stays visually quiet until its ring is stamped", () => {
+  const buf = new RasterBuffer(48, 20);
+  paintPanel(buf, FILL, "gradient", 1, { alpha: 0 });
+  assert.equal(
+    buf.data.every((channel) => channel === 0),
+    true,
+    "an outlined action must not gain a resting fill",
+  );
+
+  stampPulse(buf, FILL, { x: 24, y: 10, radius: 7, energy: 1 });
+  assert.equal(
+    buf.data.some((channel) => channel > 0),
+    true,
+    "the hover ring must remain visible over a transparent bed",
+  );
+});
+
+test("hover motion is reserved for fine pointers", () => {
+  const original = globalThis.matchMedia;
+  try {
+    globalThis.matchMedia = (query) => ({
+      matches: query === "(hover: hover) and (pointer: fine)",
+    });
+    assert.equal(supportsHoverMotion(), true);
+
+    globalThis.matchMedia = () => ({ matches: false });
+    assert.equal(supportsHoverMotion(), false);
+  } finally {
+    if (original === undefined) delete globalThis.matchMedia;
+    else globalThis.matchMedia = original;
+  }
 });
 
 test("surface motion settles, pulses while hovered, and stops itself", () => {

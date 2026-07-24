@@ -10,6 +10,7 @@ import {
   type BuildAnalyzeResponse as AnalyzeResponse,
 } from "@/lib/build-repo-snapshot";
 import BaseHead from "@/components/BaseHead.astro";
+import { ButtonLink } from "@/components/ButtonLink";
 import Seo from "@/components/Seo.astro";
 import SiteHeader from "@/components/SiteHeader.astro";
 import SiteFooter from "@/components/SiteFooter.astro";
@@ -27,7 +28,6 @@ import {
   SECTION_ACTION,
   SECTION_HEADER,
 } from "@/components/style-tokens";
-import { buttonVariants } from "@/components/ui/button";
 import { categoriesForRepo, relatedRepos } from "@/data/categories";
 import {
   firstStarYear as historyFirstYear,
@@ -490,12 +490,15 @@ const vsLinks = (categoryRelated.length > 0 ? categoryRelated : FALLBACK_SUGGEST
                 vs {other}
               </a>
             ))}
-            <a
+            <ButtonLink
+              client:visible
               href={`/compare?repos=${encodeURIComponent(repoSlug)}`}
-              class={buttonVariants({ variant: "outline", size: "sm" })}
+              variant="outline"
+              size="sm"
+              pulse
             >
               Compare with any repo
-            </a>
+            </ButtonLink>
           </div>
           {repoCategories.length > 0 && (
             <p class:list={["mt-5", BODY]}>

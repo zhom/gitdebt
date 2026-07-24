@@ -292,7 +292,7 @@ export function InteractiveRepoSignals(props: Props) {
 
 function ContributorAvatar({ author, index, large = false }: { author: Author; index: number; large?: boolean }) {
   const size = large ? "size-16" : "size-13";
-  const classes = `${index === 0 ? "ml-0" : large ? "-ml-4" : "-ml-3"} relative block shrink-0 rounded-full border-2 border-background bg-muted outline-none transition-[transform,filter] duration-300 ease-out hover:z-50 hover:-translate-y-2 hover:scale-110 hover:saturate-125 focus-visible:z-50 focus-visible:-translate-y-2 focus-visible:scale-110 focus-visible:ring-2 focus-visible:ring-accent/30 motion-reduce:transition-none ${size}`;
+  const classes = `${index === 0 ? "ml-0" : large ? "-ml-4" : "-ml-3"} relative block shrink-0 rounded-full border-2 border-background bg-muted outline-none transition-[transform,filter] duration-200 ease-out hover:z-50 hover:-translate-y-2 hover:scale-110 hover:saturate-125 focus-visible:z-50 focus-visible:-translate-y-2 focus-visible:scale-110 focus-visible:ring-2 focus-visible:ring-accent/30 motion-reduce:transition-none ${size}`;
   const content = author.avatar_url
     ? <img src={author.avatar_url} alt="" loading="lazy" className="size-full rounded-full object-cover [image-rendering:auto]" />
     : <span className="grid size-full place-items-center rounded-full bg-muted font-mono font-semibold">{author.label.slice(0, 1).toUpperCase()}</span>;

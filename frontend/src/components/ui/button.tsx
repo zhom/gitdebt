@@ -70,21 +70,38 @@ const CANVAS_ALPHA: Partial<Record<ButtonVariant, number>> = {
 
 export interface ButtonProps
   extends React.ButtonHTMLAttributes<HTMLButtonElement>,
-    VariantProps<typeof button> {}
+    VariantProps<typeof button> {
+  /**
+   * Adds the cursor-positioned one-shot pulse. Textured variants opt in by
+   * default; quiet variants only pulse when an occasional action asks for it.
+   */
+  pulse?: boolean;
+}
 
 export const Button = React.forwardRef<HTMLButtonElement, ButtonProps>(
   (
-    { className, variant, size, type = "button", disabled, children, ...props },
+    {
+      className,
+      variant,
+      size,
+      type = "button",
+      disabled,
+      pulse,
+      children,
+      ...props
+    },
     ref,
   ) => {
     const fill = CANVAS_FILL[variant ?? "default"];
     const textured = fill !== undefined && !disabled;
+    const pulseEnabled = !disabled && (pulse ?? textured);
+    const surfaceEnabled = textured || pulseEnabled;
     const { surface, handlers } = useDitherSurface({
-      fill: fill ?? BRAND,
+      fill: fill ?? SWATCH.blue,
       variant: "gradient",
-      animated: textured,
-      alpha: CANVAS_ALPHA[variant ?? "default"],
-      pulse: textured,
+      animated: surfaceEnabled,
+      alpha: textured ? CANVAS_ALPHA[variant ?? "default"] : 0,
+      pulse: pulseEnabled,
     });
     return (
       <button
@@ -96,9 +113,9 @@ export const Button = React.forwardRef<HTMLButtonElement, ButtonProps>(
         data-press="off"
         className={buttonVariants({ variant, size, className })}
         {...props}
-        {...(textured ? handlers : {})}
+        {...(surfaceEnabled ? handlers : {})}
       >
-        {fill !== undefined ? surface : null}
+        {surfaceEnabled ? surface : null}
         <span className="relative inline-flex items-center gap-2">
           {children}
         </span>

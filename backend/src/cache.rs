@@ -211,6 +211,16 @@ type PlatformActivityRow = (String, i64, i64, DateTime<Utc>, bool, bool, i64, i6
 /// (and `idx_repos_last_viewed` ordering the outer scan) both become bounded
 /// index range scans. `NOW()` is stable within a statement, so rows outside
 /// the window contribute 0 to both counters and the result is unchanged.
+/// Which repositories the programmatic sitemap publishes. Shared by the page
+/// query, the count, and the predicate of `idx_repos_sitemap`, which only
+/// serves the query while all three agree.
+pub(crate) const SITEMAP_ELIGIBLE_SQL: &str =
+    "history_complete = TRUE AND missing = FALSE AND metadata_fetched_at IS NOT NULL";
+
+/// The sitemap's `lastmod`, and the expression `idx_repos_sitemap` is built on.
+pub(crate) const SITEMAP_UPDATED_AT_SQL: &str =
+    "GREATEST(archive_fetched_at, stargazers_fetched_at, metadata_fetched_at)";
+
 const PLATFORM_ACTIVITY_SQL: &str = "SELECT r.repo, COALESCE(r.star_count, 0), r.view_count, \
             r.last_viewed_at, r.history_complete, \
             (h.last_analyzed_at IS NOT NULL), \
@@ -1051,41 +1061,44 @@ impl Cache {
     /// the programmatic sitemap). Matches the row set returned by
     /// [`list_sitemap_repos`] so the caller can paginate accurately.
     pub async fn count_sitemap_repos(&self) -> Result<i64> {
-        let n: i64 = sqlx::query_scalar(
-            "SELECT COUNT(*) FROM repos \
-                 WHERE history_complete = TRUE AND missing = FALSE \
-                   AND metadata_fetched_at IS NOT NULL",
-        )
-        .fetch_one(&self.db.pool)
-        .await?;
+        let sql = format!("SELECT COUNT(*) FROM repos WHERE {SITEMAP_ELIGIBLE_SQL}");
+        let n: i64 = sqlx::query_scalar(sqlx::AssertSqlSafe(sql))
+            .fetch_one(&self.db.pool)
+            .await?;
         Ok(n)
     }
 
-    /// A page of repos with real cached star history, for the
-    /// programmatic sitemap. Returns `(slug, updated_at)` where
-    /// `updated_at` is the most recent of the stargazer / metadata fetch
-    /// timestamps (falling back to the other when one is null). Ordered
-    /// by that timestamp descending, then slug, so the ordering is stable
-    /// across calls with the same data and pages don't overlap.
+    /// A page of repos with real cached star history, for the programmatic
+    /// sitemap. Returns `(slug, updated_at)`, the most recent of the archive /
+    /// stargazer / metadata fetch timestamps, ordered by it descending then by
+    /// slug so pages are stable and non-overlapping.
+    ///
+    /// The ordering expression is exactly [`SITEMAP_UPDATED_AT_SQL`] because
+    /// `idx_repos_sitemap` is built on it — an expression index only serves an
+    /// `ORDER BY` that matches it character for character. This query used to
+    /// wrap it in `COALESCE(..., NOW())`, which was both dead code (`GREATEST`
+    /// returns NULL only when every argument is NULL, and
+    /// `metadata_fetched_at IS NOT NULL` is in the predicate) and the reason it
+    /// could not be indexed at all: `NOW()` is not immutable. Every page was a
+    /// full scan and sort of every eligible repository, and this endpoint gates
+    /// the entire static site build.
     pub async fn list_sitemap_repos(
         &self,
         limit: i64,
         offset: i64,
     ) -> Result<Vec<(String, DateTime<Utc>)>> {
-        let rows = sqlx::query(
-            "SELECT repo, \
-                    COALESCE(GREATEST(archive_fetched_at, stargazers_fetched_at, metadata_fetched_at), \
-                             archive_fetched_at, stargazers_fetched_at, metadata_fetched_at, NOW()) AS updated_at \
+        let sql = format!(
+            "SELECT repo, {SITEMAP_UPDATED_AT_SQL} AS updated_at \
              FROM repos \
-             WHERE history_complete = TRUE AND missing = FALSE \
-               AND metadata_fetched_at IS NOT NULL \
-             ORDER BY updated_at DESC, repo ASC \
-             LIMIT $1 OFFSET $2",
-        )
-        .bind(limit)
-        .bind(offset)
-        .fetch_all(&self.db.pool)
-        .await?;
+             WHERE {SITEMAP_ELIGIBLE_SQL} \
+             ORDER BY {SITEMAP_UPDATED_AT_SQL} DESC, repo ASC \
+             LIMIT $1 OFFSET $2"
+        );
+        let rows = sqlx::query(sqlx::AssertSqlSafe(sql))
+            .bind(limit)
+            .bind(offset)
+            .fetch_all(&self.db.pool)
+            .await?;
         let mut out = Vec::with_capacity(rows.len());
         for row in rows {
             let repo: String = row.try_get("repo")?;
@@ -1305,7 +1318,7 @@ impl Cache {
 
 #[cfg(test)]
 mod tests {
-    use super::PLATFORM_ACTIVITY_SQL;
+    use super::{PLATFORM_ACTIVITY_SQL, SITEMAP_ELIGIBLE_SQL, SITEMAP_UPDATED_AT_SQL};
     // The cache functions require a live Postgres pool, so they're
     // exercised by integration smoke tests rather than unit tests here.
     // What we *can* assert without a DB is the read-side completeness
@@ -1344,6 +1357,25 @@ mod tests {
             PLATFORM_ACTIVITY_SQL.contains("stars.starred_at >= NOW() - INTERVAL '30 days'"),
             "the LATERAL must bound its scan to the widest window it reports"
         );
+    }
+
+    /// An expression index only serves an `ORDER BY` that matches it exactly,
+    /// and the two live in different files. If they drift, nothing fails —
+    /// the sitemap query silently goes back to scanning and sorting every
+    /// eligible repository, and that endpoint gates the whole static build.
+    #[test]
+    fn sitemap_ordering_matches_its_expression_index() {
+        let schema = crate::db::concurrent_index_sql("idx_repos_sitemap")
+            .expect("the sitemap index must exist");
+        assert!(
+            schema.contains(SITEMAP_UPDATED_AT_SQL),
+            "index expression must match {SITEMAP_UPDATED_AT_SQL}"
+        );
+        // `GREATEST` is NULL only when every argument is NULL, and the
+        // predicate already excludes that — so no COALESCE fallback is needed,
+        // and `NOW()` in one would make the expression unindexable.
+        assert!(!SITEMAP_UPDATED_AT_SQL.contains("NOW()"));
+        assert!(SITEMAP_ELIGIBLE_SQL.contains("metadata_fetched_at IS NOT NULL"));
     }
 
     /// The activity query and the index that serves it live in different

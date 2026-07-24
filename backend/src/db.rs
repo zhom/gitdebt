@@ -353,10 +353,6 @@ CREATE TABLE IF NOT EXISTS repo_file_stats (
 );
 CREATE INDEX IF NOT EXISTS idx_repo_file_fix ON repo_file_stats(repo, fix_commits DESC);
 CREATE INDEX IF NOT EXISTS idx_repo_file_recent ON repo_file_stats(repo, last_modified_at DESC);
--- "Files carrying the churn" reads `WHERE repo = $1 ORDER BY commits DESC`.
--- Without this the report path sorted every path row of the repository
--- (a large monorepo has hundreds of thousands) on every cache miss.
-CREATE INDEX IF NOT EXISTS idx_repo_file_commits ON repo_file_stats(repo, commits DESC, path);
 
 -- Per-author aggregates for the contributors chart.
 --
@@ -713,6 +709,29 @@ const CONCURRENT_INDEXES: &[(&str, &str)] = &[
          ON repo_star_arrivals(repo, starred_at)",
     ),
     (
+        // The programmatic sitemap orders by a computed "most recently
+        // refreshed" timestamp, which no plain column index can serve. This
+        // expression index does, and it must stay character-identical to
+        // `cache::SITEMAP_UPDATED_AT_SQL`. Built concurrently because `repos`
+        // takes a write on every extension ping.
+        "idx_repos_sitemap",
+        "CREATE INDEX CONCURRENTLY IF NOT EXISTS idx_repos_sitemap \
+         ON repos ((GREATEST(archive_fetched_at, stargazers_fetched_at, metadata_fetched_at)) DESC, \
+                   repo ASC) \
+         WHERE history_complete AND NOT missing AND metadata_fetched_at IS NOT NULL",
+    ),
+    (
+        // "Files carrying the churn" reads `WHERE repo = $1 ORDER BY commits
+        // DESC`; without it the report path sorts every path row of the
+        // repository on every cache miss. Built concurrently for the same
+        // reason as the star indexes: this table holds one row per unique path
+        // per repository, the analysis workers write to it continuously, and a
+        // plain build would hold a lock against them for its whole duration.
+        "idx_repo_file_commits",
+        "CREATE INDEX CONCURRENTLY IF NOT EXISTS idx_repo_file_commits \
+         ON repo_file_stats(repo, commits DESC, path)",
+    ),
+    (
         "idx_repo_star_arrivals_source_event",
         "CREATE UNIQUE INDEX CONCURRENTLY IF NOT EXISTS idx_repo_star_arrivals_source_event \
          ON repo_star_arrivals(repo, source_event_id) WHERE source_event_id IS NOT NULL",
@@ -724,6 +743,16 @@ const CONCURRENT_INDEXES: &[(&str, &str)] = &[
 #[cfg(test)]
 pub(crate) fn schema_sql() -> &'static str {
     SCHEMA
+}
+
+/// The `CREATE INDEX` statement for a concurrently-built index, so a query's
+/// module can assert that the index serving it still matches.
+#[cfg(test)]
+pub(crate) fn concurrent_index_sql(name: &str) -> Option<&'static str> {
+    CONCURRENT_INDEXES
+        .iter()
+        .find(|(index, _)| *index == name)
+        .map(|(_, sql)| *sql)
 }
 
 /// Thin wrapper around sqlx's `PgPool`. Cheap to clone (PgPool is internally
@@ -936,10 +965,18 @@ mod tests {
             "idx_repo_history_duration_recent",
             "idx_repos_last_viewed",
             "idx_repos_metadata_staleness",
-            "idx_repo_file_commits",
         ] {
             assert!(SCHEMA.contains(index), "missing index {index}");
         }
+        // `repo_file_stats` is written continuously by the analysis pool and
+        // holds a row per unique path per repository, so its index is built
+        // out of the schema transaction like the star tables' are.
+        assert!(!SCHEMA.contains("idx_repo_file_commits"));
+        assert!(
+            CONCURRENT_INDEXES
+                .iter()
+                .any(|(name, _)| *name == "idx_repo_file_commits")
+        );
     }
 
     /// A file census stores file counts with zero lines. Readers must be able

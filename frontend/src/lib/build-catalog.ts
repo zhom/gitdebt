@@ -15,6 +15,14 @@ type SitemapResponse = {
 const SLUG_RE = /^[a-z0-9._-]+\/[a-z0-9._-]+$/;
 const DEFAULT_LIMIT = 1_000;
 const MAX_LIMIT = 8_000;
+// This build runs on push to main, which is the same event that redeploys the
+// backend, so the catalog fetch regularly lands inside a restart window. The
+// catalog is still *required* — publishing an accidentally empty one is worse
+// than failing — but it should fail because the backend is genuinely gone, not
+// because one request caught it mid-rollout.
+const CATALOG_ATTEMPTS = 5;
+const CATALOG_RETRY_BASE_MS = 3_000;
+const CATALOG_TIMEOUT_MS = 15_000;
 
 let catalogPromise: Promise<CatalogRepo[]> | undefined;
 
@@ -42,6 +50,39 @@ function curatedRepos(): CatalogRepo[] {
   return repos;
 }
 
+const sleep = (ms: number) =>
+  new Promise<void>((resolve) => setTimeout(resolve, ms));
+
+/** A gateway/timeout answer means "not right now"; a 4xx means "never". */
+function isTransient(error: unknown): boolean {
+  if (error instanceof CatalogHttpError) {
+    return error.status === 408 || error.status === 429 || error.status >= 500;
+  }
+  // Network failures and AbortSignal timeouts land here.
+  return true;
+}
+
+class CatalogHttpError extends Error {
+  constructor(readonly status: number) {
+    super(`backend returned ${status}`);
+  }
+}
+
+async function fetchCatalogOnce(endpoint: string): Promise<SitemapResponse> {
+  const response = await fetch(endpoint, {
+    headers: { accept: "application/json" },
+    signal: AbortSignal.timeout(CATALOG_TIMEOUT_MS),
+  });
+  if (!response.ok) {
+    throw new CatalogHttpError(response.status);
+  }
+  const body = (await response.json()) as SitemapResponse;
+  if (!Array.isArray(body.repos)) {
+    throw new Error("backend returned an invalid static catalog");
+  }
+  return body;
+}
+
 async function fetchCatalog(): Promise<CatalogRepo[]> {
   const limit = catalogLimit();
   const apiBase = staticApiBase();
@@ -50,18 +91,24 @@ async function fetchCatalog(): Promise<CatalogRepo[]> {
   const bySlug = new Map(curated.map((repo) => [repo.slug, repo]));
 
   try {
-    const response = await fetch(endpoint, {
-      headers: { accept: "application/json" },
-      signal: AbortSignal.timeout(10_000),
-    });
-    if (!response.ok) {
-      throw new Error(`backend returned ${response.status}`);
+    let body: SitemapResponse | undefined;
+    for (let attempt = 0; ; attempt += 1) {
+      try {
+        body = await fetchCatalogOnce(endpoint);
+        break;
+      } catch (error) {
+        const last = attempt >= CATALOG_ATTEMPTS - 1;
+        if (last || !isTransient(error)) throw error;
+        const delay = CATALOG_RETRY_BASE_MS * 2 ** attempt;
+        console.warn(
+          `Static catalog attempt ${attempt + 1}/${CATALOG_ATTEMPTS} failed ` +
+            `(${error instanceof Error ? error.message : String(error)}); ` +
+            `retrying in ${Math.round(delay / 1000)}s`,
+        );
+        await sleep(delay);
+      }
     }
-    const body = (await response.json()) as SitemapResponse;
-    if (!Array.isArray(body.repos)) {
-      throw new Error("backend returned an invalid static catalog");
-    }
-    for (const row of body.repos) {
+    for (const row of body.repos ?? []) {
       const slug = row.slug?.toLowerCase();
       if (!slug || !SLUG_RE.test(slug)) continue;
       bySlug.set(slug, {

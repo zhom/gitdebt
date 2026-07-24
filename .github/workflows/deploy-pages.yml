@@ -3,18 +3,9 @@ name: refresh static site
 on:
   push:
     branches: [main]
-    paths:
-      - "frontend/**"
-      - "package.json"
-      - "pnpm-lock.yaml"
-      - "pnpm-workspace.yaml"
-      - ".github/workflows/deploy-pages.yml"
   schedule:
-    # Avoid the top of the hour, where scheduled Actions are most likely to queue.
-    - cron: "17 * * * *"
+    - cron: "17 */2 * * *"
   workflow_dispatch:
-  repository_dispatch:
-    types: [refresh-static-pages]
 
 permissions:
   contents: read
@@ -28,7 +19,7 @@ jobs:
     name: build and deploy
     if: github.repository == 'zhom/gitdebt'
     runs-on: ubuntu-latest
-    timeout-minutes: 20
+    timeout-minutes: 30
     environment:
       name: production
       url: https://gitdebt.com

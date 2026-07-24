@@ -94,9 +94,7 @@ PUBLIC_API_BASE=http://localhost:8787 pnpm --filter gitdebt-frontend dev
 
 Configuration lives in [backend/.env.example](backend/.env.example). See
 [CONTRIBUTING.md](CONTRIBUTING.md) for setup details, quality checks, and
-project rules, [DEPLOYMENT.md](DEPLOYMENT.md) for the two-service Dokploy
-topology and production tuning, and [SECURITY.md](SECURITY.md) for reporting
-vulnerabilities.
+project rules, and [SECURITY.md](SECURITY.md) for reporting vulnerabilities.
 
 ## License
 

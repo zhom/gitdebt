@@ -41,6 +41,11 @@ export default defineConfig({
   },
   vite: {
     plugins: [tailwindcss()],
+    build: {
+      minify: "oxc",
+      cssMinify: "lightningcss",
+      sourcemap: false,
+    },
   },
   server: {
     port: 14321,

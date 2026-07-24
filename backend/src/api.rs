@@ -1299,6 +1299,15 @@ struct UserDay {
     value: i64,
 }
 
+#[derive(Debug, Clone, Serialize)]
+struct UserVisionaryRepo {
+    repo: String,
+    current_stars: i64,
+    stars_at_first_contribution: i64,
+    first_contribution_at: DateTime<Utc>,
+    owned: bool,
+}
+
 /// Everything the profile report renders, derived exclusively from
 /// Postgres: `repos`, `repo_history`, `repo_author_stats`,
 /// `repo_commit_days` and `repo_lines`. No GitHub call is on this path.
@@ -1321,6 +1330,11 @@ struct UserStats {
     authored_commits: i64,
     /// Distinct tracked repos this login authored commits in.
     contributed_repos: i64,
+    owned_contributed_repos: i64,
+    external_contributed_repos: i64,
+    owned_authored_commits: i64,
+    external_authored_commits: i64,
+    visionary_repos: Vec<UserVisionaryRepo>,
     /// Commits analyzed across the login's owned repos.
     analyzed_commits: i64,
     since_year: Option<i32>,
@@ -1365,6 +1379,106 @@ async fn load_profile_scope(pool: &sqlx::PgPool, login: &str) -> Result<Vec<Stri
     Ok(repos)
 }
 
+async fn load_visionary_repos(
+    pool: &sqlx::PgPool,
+    login: &str,
+) -> Result<Vec<UserVisionaryRepo>, ApiError> {
+    let rows = sqlx::query(
+        "WITH contributions AS ( \
+             SELECT author.repo, MIN(author.first_commit_at) AS first_at \
+             FROM repo_author_stats author \
+             JOIN repos public_repo ON public_repo.repo = author.repo \
+             WHERE LOWER(author.github_login) = $1 \
+               AND author.first_commit_at IS NOT NULL \
+               AND public_repo.missing = FALSE \
+               AND public_repo.metadata_fetched_at IS NOT NULL \
+             GROUP BY author.repo \
+         ), candidates AS ( \
+             SELECT contribution.repo, contribution.first_at, \
+                    GREATEST(public_repo.star_count, 0)::BIGINT AS current_stars, \
+                    LOWER(SPLIT_PART(contribution.repo, '/', 1)) = $1 AS owned \
+             FROM contributions contribution \
+             JOIN repos public_repo ON public_repo.repo = contribution.repo \
+             WHERE public_repo.history_complete = TRUE \
+               AND GREATEST(public_repo.star_count, 0) >= 512 \
+         ) \
+         SELECT candidate.repo, candidate.first_at, candidate.current_stars, candidate.owned, \
+                early.stars_at_first \
+         FROM candidates candidate \
+         CROSS JOIN LATERAL ( \
+             SELECT COUNT(*)::BIGINT AS stars_at_first \
+             FROM active_repo_star_history star \
+             WHERE star.repo = candidate.repo \
+               AND star.starred_at <= candidate.first_at \
+         ) early \
+         WHERE candidate.current_stars > early.stars_at_first * 5 \
+         ORDER BY candidate.current_stars DESC, candidate.repo ASC \
+         LIMIT 12",
+    )
+    .bind(login)
+    .fetch_all(pool)
+    .await?;
+    let mut out = Vec::with_capacity(rows.len());
+    for row in rows {
+        out.push(UserVisionaryRepo {
+            repo: row.try_get("repo")?,
+            current_stars: row.try_get("current_stars")?,
+            stars_at_first_contribution: row.try_get("stars_at_first")?,
+            first_contribution_at: row.try_get("first_at")?,
+            owned: row.try_get("owned")?,
+        });
+    }
+    Ok(out)
+}
+
+struct UserContributionTotals {
+    authored_commits: i64,
+    contributed_repos: i64,
+    owned_repos: i64,
+    external_repos: i64,
+    owned_commits: i64,
+    external_commits: i64,
+    first_at: Option<DateTime<Utc>>,
+}
+
+async fn load_user_contribution_totals(
+    pool: &sqlx::PgPool,
+    login: &str,
+) -> Result<UserContributionTotals, ApiError> {
+    let row = sqlx::query(
+        "SELECT COALESCE(SUM(author.commits), 0)::BIGINT AS commits, \
+                COUNT(DISTINCT author.repo) AS contribs, \
+                COUNT(DISTINCT author.repo) FILTER \
+                    (WHERE LOWER(SPLIT_PART(author.repo, '/', 1)) = $1) AS owned_contribs, \
+                COUNT(DISTINCT author.repo) FILTER \
+                    (WHERE LOWER(SPLIT_PART(author.repo, '/', 1)) <> $1) AS external_contribs, \
+                COALESCE(SUM(author.commits) FILTER \
+                    (WHERE LOWER(SPLIT_PART(author.repo, '/', 1)) = $1), 0)::BIGINT \
+                    AS owned_commits, \
+                COALESCE(SUM(author.commits) FILTER \
+                    (WHERE LOWER(SPLIT_PART(author.repo, '/', 1)) <> $1), 0)::BIGINT \
+                    AS external_commits, \
+                MIN(author.first_commit_at) AS first_at \
+         FROM repo_author_stats author \
+         JOIN repos public_repo ON public_repo.repo = author.repo \
+         WHERE LOWER(author.github_login) = $1 \
+           AND public_repo.missing = FALSE \
+           AND public_repo.metadata_fetched_at IS NOT NULL",
+    )
+    .bind(login)
+    .fetch_one(pool)
+    .await?;
+    Ok(UserContributionTotals {
+        authored_commits: row.try_get("commits")?,
+        contributed_repos: row.try_get("contribs")?,
+        owned_repos: row.try_get("owned_contribs")?,
+        external_repos: row.try_get("external_contribs")?,
+        owned_commits: row.try_get("owned_commits")?,
+        external_commits: row.try_get("external_commits")?,
+        first_at: row.try_get("first_at")?,
+    })
+}
+
 /// Aggregate the profile report from Postgres. `login` must already be
 /// [`cards::is_valid_login`]-validated: it is interpolated into a `LIKE`
 /// prefix bind, and that validation guarantees no LIKE metacharacter can
@@ -1396,22 +1510,8 @@ async fn load_user_stats(db: &crate::db::Db, login: &str) -> Result<UserStats, A
     let repos_analyzed: i64 = owned.try_get("repos_analyzed")?;
     let analyzed_commits: i64 = owned.try_get("analyzed_commits")?;
 
-    let authored = sqlx::query(
-        "SELECT COALESCE(SUM(author.commits), 0)::BIGINT AS commits, \
-                COUNT(DISTINCT author.repo) AS contribs, \
-                MIN(author.first_commit_at) AS first_at \
-         FROM repo_author_stats author \
-         JOIN repos public_repo ON public_repo.repo = author.repo \
-         WHERE LOWER(author.github_login) = $1 \
-           AND public_repo.missing = FALSE \
-           AND public_repo.metadata_fetched_at IS NOT NULL",
-    )
-    .bind(login)
-    .fetch_one(pool)
-    .await?;
-    let authored_commits: i64 = authored.try_get("commits")?;
-    let contributed_repos: i64 = authored.try_get("contribs")?;
-    let first_at: Option<DateTime<Utc>> = authored.try_get("first_at")?;
+    let contributions = load_user_contribution_totals(pool, login).await?;
+    let visionary_repos = load_visionary_repos(pool, login).await?;
 
     let languages = load_user_language_bars(pool, &scope).await?;
 
@@ -1530,16 +1630,21 @@ async fn load_user_stats(db: &crate::db::Db, login: &str) -> Result<UserStats, A
 
     Ok(UserStats {
         login: login.to_string(),
-        ready: repos_analyzed > 0,
+        ready: repos_analyzed > 0 || contributions.contributed_repos > 0,
         repos_tracked,
         repos_scanned: scope.len() as i64,
         repos_analyzed,
         total_stars,
         total_forks,
-        authored_commits,
-        contributed_repos,
+        authored_commits: contributions.authored_commits,
+        contributed_repos: contributions.contributed_repos,
+        owned_contributed_repos: contributions.owned_repos,
+        external_contributed_repos: contributions.external_repos,
+        owned_authored_commits: contributions.owned_commits,
+        external_authored_commits: contributions.external_commits,
+        visionary_repos,
         analyzed_commits,
-        since_year: first_at.map(|t| t.year()),
+        since_year: contributions.first_at.map(|t| t.year()),
         solo_maintained,
         shared_maintained: (scored - solo_maintained).max(0),
         languages,
@@ -1702,12 +1807,42 @@ async fn user_stat_revision(pool: &sqlx::PgPool, login: &str) -> Result<Option<S
     .fetch_one(pool)
     .await?;
     let analyzed: i64 = row.try_get("analyzed")?;
-    if analyzed <= 0 {
+    let contributions = sqlx::query(
+        "WITH authored AS ( \
+             SELECT author.repo, SUM(author.commits)::BIGINT AS commits, \
+                    MIN(author.first_commit_at) AS first_at \
+             FROM repo_author_stats author \
+             JOIN repos public_repo ON public_repo.repo = author.repo \
+             WHERE LOWER(author.github_login) = $1 \
+               AND public_repo.missing = FALSE \
+               AND public_repo.metadata_fetched_at IS NOT NULL \
+             GROUP BY author.repo \
+         ) \
+         SELECT COUNT(*) AS repos, \
+                COALESCE(SUM(authored.commits), 0)::BIGINT AS commits, \
+                COALESCE(SUM(GREATEST(public_repo.star_count, 0)), 0)::BIGINT AS stars, \
+                COUNT(*) FILTER (WHERE public_repo.history_complete) AS complete_histories, \
+                COALESCE(SUM(EXTRACT(EPOCH FROM authored.first_at)), 0)::BIGINT AS first_at \
+         FROM authored \
+         JOIN repos public_repo ON public_repo.repo = authored.repo",
+    )
+    .bind(login)
+    .fetch_one(pool)
+    .await?;
+    let contributed_repos: i64 = contributions.try_get("repos")?;
+    if analyzed <= 0 && contributed_repos <= 0 {
         return Ok(None);
     }
     let at: i64 = row.try_get("at")?;
     let commits: i64 = row.try_get("commits")?;
-    Ok(Some(format!("n{analyzed}:t{at}:c{commits}")))
+    let authored_commits: i64 = contributions.try_get("commits")?;
+    let contribution_stars: i64 = contributions.try_get("stars")?;
+    let complete_histories: i64 = contributions.try_get("complete_histories")?;
+    let contribution_first_at: i64 = contributions.try_get("first_at")?;
+    Ok(Some(format!(
+        "n{analyzed}:t{at}:c{commits}:x{contributed_repos}:a{authored_commits}:\
+         s{contribution_stars}:h{complete_histories}:f{contribution_first_at}"
+    )))
 }
 
 /// `GET /api/users/:login/stats.json` — the profile report's data source.
@@ -1722,27 +1857,18 @@ async fn user_stats_json(
     }
     let login = login.to_ascii_lowercase();
     let key = format!("user-stats:{login}");
-    let json = if let Some(json) = state.analyze_cache.get(&key).await {
-        json
-    } else {
+    let (json, live) = single_flight_analyze(&state.analyze_cache, key, async {
         let stats = load_user_stats(state.analyzer.cache.db(), &login).await?;
         let json = serde_json::to_string(&stats)?;
-        // Never pin a not-yet-analyzed profile: the durable analysis queue
-        // fills it in and the report must self-heal within the TTL.
-        if stats.ready {
-            state.analyze_cache.insert(key, json.clone()).await;
-        }
-        json
-    };
+        Ok((json, !stats.ready))
+    })
+    .await?;
     let mut headers = HeaderMap::new();
     headers.insert(
         header::CONTENT_TYPE,
         HeaderValue::from_static("application/json"),
     );
-    headers.insert(
-        header::CACHE_CONTROL,
-        HeaderValue::from_static("public, s-maxage=300, max-age=60"),
-    );
+    headers.insert(header::CACHE_CONTROL, analyze_cache_control(live));
     Ok((headers, json))
 }
 
@@ -1757,6 +1883,8 @@ enum UserStatKind {
     CommitTrend,
     /// Language footprint across owned repos.
     Languages,
+    /// Authored work split between owned and outside projects.
+    Contributions,
 }
 
 impl UserStatKind {
@@ -1765,6 +1893,7 @@ impl UserStatKind {
             "commit-activity" => Some(Self::CommitActivity),
             "commit-trend" => Some(Self::CommitTrend),
             "languages" => Some(Self::Languages),
+            "contributions" => Some(Self::Contributions),
             _ => None,
         }
     }
@@ -1774,6 +1903,7 @@ impl UserStatKind {
             Self::CommitActivity => "commit-activity",
             Self::CommitTrend => "commit-trend",
             Self::Languages => "languages",
+            Self::Contributions => "contributions",
         }
     }
 }
@@ -1838,6 +1968,21 @@ async fn render_user_stat_svg(
                 })
                 .collect();
             crate::repo_charts::render_languages(&label, &bars, theme)
+        }
+        UserStatKind::Contributions => {
+            let totals = load_user_contribution_totals(pool, login).await?;
+            let visionary_count = load_visionary_repos(pool, login).await?.len() as i64;
+            crate::repo_charts::render_contribution_profile(
+                &label,
+                &crate::repo_charts::ContributionProfile {
+                    owned_repos: totals.owned_repos,
+                    external_repos: totals.external_repos,
+                    owned_commits: totals.owned_commits,
+                    external_commits: totals.external_commits,
+                    visionary_count,
+                },
+                theme,
+            )
         }
     })
 }
@@ -7326,6 +7471,10 @@ mod tests {
                 Some(crate::raster::RasterFormat::Webp)
             ))
         ));
+        assert!(matches!(
+            parse_user_stat_filename("contributions.svg"),
+            Some((UserStatKind::Contributions, None))
+        ));
         // Unknown chart names and formats are 400s, never a silent default.
         assert!(parse_user_stat_filename("bus-factor.svg").is_none());
         assert!(parse_user_stat_filename("languages.gif").is_none());
@@ -7554,6 +7703,11 @@ mod tests {
         // Only the rows carrying this login count as authored work.
         assert_eq!(stats.authored_commits, 330);
         assert_eq!(stats.contributed_repos, 2);
+        assert_eq!(stats.owned_contributed_repos, 2);
+        assert_eq!(stats.external_contributed_repos, 0);
+        assert_eq!(stats.owned_authored_commits, 330);
+        assert_eq!(stats.external_authored_commits, 0);
+        assert!(stats.visionary_repos.is_empty());
         assert_eq!(stats.since_year, Some(2019));
         assert_eq!(stats.solo_maintained, 1);
         assert_eq!(stats.shared_maintained, 1);
@@ -7611,6 +7765,7 @@ mod tests {
             UserStatKind::CommitActivity,
             UserStatKind::CommitTrend,
             UserStatKind::Languages,
+            UserStatKind::Contributions,
         ] {
             let first = render_user_stat_svg(&state, &login, kind, &crate::theme::DARK)
                 .await
@@ -7623,5 +7778,119 @@ mod tests {
         }
 
         cleanup_profile_rows(&state, &format!("{login}/")).await;
+    }
+
+    #[tokio::test]
+    async fn visionary_requires_complete_history_strict_five_x_growth_and_512_stars() {
+        let Some(state) = test_db_state().await else {
+            eprintln!("skipping: set GITDEBT_TEST_DATABASE_URL to run");
+            return;
+        };
+        use chrono::TimeZone;
+
+        let login = format!("visionary{}", std::process::id());
+        let breakout = format!("outside{}/breakout", std::process::id());
+        let early = format!("outside{}/early", std::process::id());
+        let repos = vec![breakout.clone(), early.clone()];
+        let pool = &state.analyzer.cache.db().pool;
+
+        for repo in &repos {
+            for statement in [
+                "DELETE FROM repo_author_stats WHERE repo = $1",
+                "DELETE FROM repo_stargazers WHERE repo = $1",
+                "DELETE FROM repo_star_arrivals WHERE repo = $1",
+                "DELETE FROM repos WHERE repo = $1",
+            ] {
+                sqlx::query(statement)
+                    .bind(repo)
+                    .execute(pool)
+                    .await
+                    .expect("clean visionary fixture");
+            }
+        }
+
+        for (repo, current, stars_at_first) in [
+            (&breakout, 1001_i64, 200_usize),
+            (&early, 512_i64, 20_usize),
+        ] {
+            let events: Vec<crate::cache::StargazerEvent> = (0..current)
+                .map(|index| {
+                    (
+                        index + 1,
+                        Utc.timestamp_opt(1_500_000_000 + index * 86_400, 0)
+                            .unwrap(),
+                    )
+                })
+                .collect();
+            state
+                .analyzer
+                .cache
+                .put_repo_stargazers(repo, &events)
+                .await
+                .expect("seed complete history");
+            sqlx::query(
+                "UPDATE repos SET star_count = $2, metadata_fetched_at = NOW() WHERE repo = $1",
+            )
+            .bind(repo)
+            .bind(current)
+            .execute(pool)
+            .await
+            .expect("seed current stars");
+            sqlx::query(
+                "INSERT INTO repo_author_stats \
+                     (repo, author_email, github_login, commits, first_commit_at) \
+                 VALUES ($1, $2, $3, 7, $4)",
+            )
+            .bind(repo)
+            .bind(format!("{login}@example.com"))
+            .bind(&login)
+            .bind(events[stars_at_first - 1].1)
+            .execute(pool)
+            .await
+            .expect("seed attributed contribution");
+        }
+
+        let stats = load_user_stats(state.analyzer.cache.db(), &login)
+            .await
+            .expect("load visionary profile");
+        assert_eq!(stats.owned_contributed_repos, 0);
+        assert_eq!(stats.external_contributed_repos, 2);
+        assert_eq!(stats.external_authored_commits, 14);
+        assert_eq!(stats.visionary_repos.len(), 2);
+        assert_eq!(stats.visionary_repos[0].current_stars, 1001);
+        assert_eq!(stats.visionary_repos[0].stars_at_first_contribution, 200);
+        assert_eq!(stats.visionary_repos[1].current_stars, 512);
+        assert_eq!(stats.visionary_repos[1].stars_at_first_contribution, 20);
+
+        sqlx::query(
+            "UPDATE repos SET star_count = CASE repo WHEN $1 THEN 1000 ELSE 511 END \
+             WHERE repo = ANY($2::text[])",
+        )
+        .bind(&breakout)
+        .bind(&repos)
+        .execute(pool)
+        .await
+        .expect("move below award thresholds");
+        assert!(
+            load_visionary_repos(pool, &login)
+                .await
+                .expect("reload thresholds")
+                .is_empty()
+        );
+
+        for repo in &repos {
+            for statement in [
+                "DELETE FROM repo_author_stats WHERE repo = $1",
+                "DELETE FROM repo_stargazers WHERE repo = $1",
+                "DELETE FROM repo_star_arrivals WHERE repo = $1",
+                "DELETE FROM repos WHERE repo = $1",
+            ] {
+                sqlx::query(statement)
+                    .bind(repo)
+                    .execute(pool)
+                    .await
+                    .expect("remove visionary fixture");
+            }
+        }
     }
 }

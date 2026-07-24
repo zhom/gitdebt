@@ -6,11 +6,9 @@ import BaseHead from "@/components/BaseHead.astro";
 import Seo from "@/components/Seo.astro";
 import SiteFooter from "@/components/SiteFooter.astro";
 import SiteHeader from "@/components/SiteHeader.astro";
-import { LiveUserProfile } from "@/components/LiveUserProfile";
 import { staticApiBase } from "@/lib/static-api-base";
 
 const apiBase = staticApiBase();
-const site = (Astro.site ?? new URL("https://gitdebt.com")).href.replace(/\/$/, "");
 ---
 
 <!doctype html>
@@ -29,14 +27,39 @@ const site = (Astro.site ?? new URL("https://gitdebt.com")).href.replace(/\/$/, 
     <div class="isolate flex min-h-dvh flex-col">
       <SiteHeader />
       <main id="main-content" class="mx-auto w-full max-w-6xl flex-1 px-6 py-12">
-        {/*
-          The signed-in login is only known to the browser, so this route renders
-          the same report body as `/{login}` against the session instead of a
-          build-time snapshot. One component, so the two surfaces cannot drift.
-        */}
-        <LiveUserProfile client:only="react" apiBase={apiBase} session siteOrigin={site} />
+        <h1 class="text-3xl font-semibold tracking-[-0.035em] text-foreground">
+          Opening your profile report
+        </h1>
+        <p data-profile-status class="mt-3 max-w-[65ch] text-[15px] leading-7 text-muted-foreground">
+          Reading your signed-in GitHub account.
+        </p>
       </main>
       <SiteFooter />
     </div>
+    <script is:inline define:vars={{ apiBase }}>
+      const status = document.querySelector("[data-profile-status]");
+      fetch(`${apiBase}/api/me`, {
+        credentials: "include",
+        headers: { accept: "application/json" },
+      })
+        .then(async (response) =>
+          response.ok ? await response.json() : null,
+        )
+        .then((user) => {
+          const login =
+            typeof user?.login === "string" &&
+            /^[a-z0-9](?:[a-z0-9-]{0,37}[a-z0-9])?$/.test(user.login.toLowerCase())
+              ? user.login.toLowerCase()
+              : null;
+          if (login) {
+            location.replace(`/${encodeURIComponent(login)}`);
+            return;
+          }
+          if (status) status.textContent = "Sign in with GitHub to open your profile report.";
+        })
+        .catch(() => {
+          if (status) status.textContent = "Your session could not be read. Try signing in again.";
+        });
+    </script>
   </body>
 </html>

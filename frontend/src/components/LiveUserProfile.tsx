@@ -50,6 +50,14 @@ export type UserRepoRow = {
   spark: number[];
 };
 
+export type VisionaryRepo = {
+  repo: string;
+  current_stars: number;
+  stars_at_first_contribution: number;
+  first_contribution_at: string;
+  owned: boolean;
+};
+
 /** Mirrors the backend `GET /api/users/:login/stats.json` contract. */
 export type UserStats = {
   login: string;
@@ -60,6 +68,11 @@ export type UserStats = {
   total_forks: number;
   authored_commits: number;
   contributed_repos: number;
+  owned_contributed_repos: number;
+  external_contributed_repos: number;
+  owned_authored_commits: number;
+  external_authored_commits: number;
+  visionary_repos: VisionaryRepo[];
   analyzed_commits: number;
   since_year: number | null;
   solo_maintained: number;
@@ -98,6 +111,11 @@ const POLL_MS = 8_000;
  */
 const PROFILE_CHARTS = [
   {
+    name: "contributions",
+    label: "Contribution footprint",
+    blurb: "Authored work in owned projects versus other people's projects.",
+  },
+  {
     name: "languages",
     label: "Language footprint",
     blurb: "Lines of code by language across every analyzed repo you own.",
@@ -108,6 +126,10 @@ const PROFILE_CHARTS = [
     blurb: "Every commit landed in the last 52 weeks, summed across owned repos.",
   },
 ] as const;
+
+const OWNED_CODE_CHARTS = PROFILE_CHARTS.filter(
+  (chart) => chart.name !== "contributions",
+);
 
 const nf = new Intl.NumberFormat("en-US");
 const num = (value: number | null | undefined) =>
@@ -343,7 +365,30 @@ export function LiveUserProfile({
     (sum, day) => sum + day.value,
     0,
   );
-  const hasCodeSignals = Boolean(stats?.ready);
+  const hasCodeSignals = Boolean(stats && stats.repos_analyzed > 0);
+  const hasContributionSignals = Boolean(
+    stats &&
+      stats.contributed_repos > 0 &&
+      typeof stats.owned_contributed_repos === "number" &&
+      typeof stats.external_contributed_repos === "number" &&
+      Array.isArray(stats.visionary_repos),
+  );
+  const ownedContributedRepos = stats?.owned_contributed_repos ?? 0;
+  const externalContributedRepos = stats?.external_contributed_repos ?? 0;
+  const ownedAuthoredCommits = stats?.owned_authored_commits ?? 0;
+  const externalAuthoredCommits = stats?.external_authored_commits ?? 0;
+  const visionaryRepos = stats?.visionary_repos ?? [];
+  const contributionTotal = stats?.authored_commits ?? 0;
+  const externalShare =
+    contributionTotal > 0
+      ? externalAuthoredCommits / contributionTotal
+      : 0;
+  const contributionStory =
+    externalShare >= 0.68
+      ? `${login} is ecosystem-led: most attributed commits land in projects owned by other people.`
+      : externalShare <= 0.32
+        ? `${login} is builder-led: most attributed commits land in projects they own.`
+        : `${login} has a balanced footprint across owned projects and the wider open-source ecosystem.`;
   const trackedRepos =
     seedRepos.length > 0
       ? seedRepos
@@ -557,6 +602,113 @@ export function LiveUserProfile({
         </section>
       )}
 
+      {hasContributionSignals && (
+        <section className="mt-16 scroll-mt-24" id="contribution-footprint">
+          <div className={SECTION_HEADER}>
+            <h2 className={HEADING}>Contribution story</h2>
+            <p className="font-mono text-[11px] text-muted-foreground">
+              attributed public commits
+            </p>
+          </div>
+          <p className={cn(BODY, "mt-2 max-w-[70ch]")}>{contributionStory}</p>
+
+          <dl
+            className={cn(
+              PANEL,
+              "@container mt-6 grid grid-cols-2 divide-border/40 p-3.5 sm:grid-cols-4 sm:divide-x",
+            )}
+          >
+            <div className="min-w-0 px-3.5 py-2">
+              <dt className={cn(EYEBROW, "whitespace-nowrap")}>Owned repos</dt>
+              <dd className={cn("mt-2", KPI, "text-foreground")}>
+                {num(ownedContributedRepos)}
+              </dd>
+              <p className={cn(CAPTION, "mt-2")}>
+                {formatCompact(ownedAuthoredCommits)} authored commits
+              </p>
+            </div>
+            <div className="min-w-0 px-3.5 py-2">
+              <dt className={cn(EYEBROW, "whitespace-nowrap")}>Outside repos</dt>
+              <dd className={cn("mt-2", KPI, "text-foreground")}>
+                {num(externalContributedRepos)}
+              </dd>
+              <p className={cn(CAPTION, "mt-2")}>
+                {formatCompact(externalAuthoredCommits)} authored commits
+              </p>
+            </div>
+            <div className="min-w-0 px-3.5 py-2">
+              <dt className={cn(EYEBROW, "whitespace-nowrap")}>Outside share</dt>
+              <dd className={cn("mt-2", KPI, "text-foreground")}>
+                {Math.round(externalShare * 100)}%
+              </dd>
+              <p className={cn(CAPTION, "mt-2")}>of attributed commit volume</p>
+            </div>
+            <div className="min-w-0 px-3.5 py-2">
+              <dt className={cn(EYEBROW, "whitespace-nowrap")}>Visionary</dt>
+              <dd className={cn("mt-2", KPI, "text-foreground")}>
+                {num(visionaryRepos.length)}
+              </dd>
+              <p className={cn(CAPTION, "mt-2")}>breakout projects spotted early</p>
+            </div>
+          </dl>
+
+          <div className="mt-8">
+            <StatCard
+              src={`${apiBase}/api/users/${login}/stats/contributions.svg`}
+              alt={`Contribution footprint for ${login}`}
+              caption="Contribution footprint"
+              apiBase={apiBase}
+              embedLink={canonical}
+            />
+          </div>
+
+          {visionaryRepos.length > 0 && (
+            <div className="mt-8">
+              <h3 className={EYEBROW}>Earned achievements</h3>
+              <div className="mt-3 grid gap-3 sm:grid-cols-2">
+                {visionaryRepos.map((achievement) => {
+                  const early = achievement.stars_at_first_contribution;
+                  const growth =
+                    early > 0
+                      ? `${(achievement.current_stars / early).toFixed(1)}× growth`
+                      : "before the first recorded star";
+                  return (
+                    <a
+                      key={achievement.repo}
+                      href={`/${achievement.repo}`}
+                      className={cn(
+                        PANEL,
+                        "group relative overflow-hidden p-4 outline-none focus-visible:ring-2 focus-visible:ring-accent/30",
+                      )}
+                    >
+                      <span className="font-mono text-[10px] font-semibold tracking-[0.16em] text-[var(--swatch-purple)] uppercase">
+                        Visionary
+                      </span>
+                      <span className="mt-2 block truncate font-mono text-[13px] text-foreground">
+                        {achievement.repo}
+                      </span>
+                      <span className={cn(CAPTION, "mt-2 block")}>
+                        Contributed at {num(early)} stars · now{" "}
+                        {num(achievement.current_stars)} · {growth}
+                      </span>
+                      <span
+                        className="absolute inset-x-0 bottom-0 h-1 origin-left scale-x-50 bg-[linear-gradient(90deg,var(--swatch-purple),var(--swatch-blue),var(--swatch-pink))] transition-transform duration-200 group-hover:scale-x-100 motion-reduce:transition-none"
+                        aria-hidden="true"
+                      />
+                    </a>
+                  );
+                })}
+              </div>
+              <p className={cn(BODY, "mt-3 max-w-[70ch]")}>
+                Visionary is earned when a complete star history proves a
+                contribution happened before a project grew beyond five times
+                that star count and crossed 512 stars.
+              </p>
+            </div>
+          )}
+        </section>
+      )}
+
       {hasCodeSignals && (
         <section className="mt-16 scroll-mt-24" id="code-signals">
           <div className={SECTION_HEADER}>
@@ -570,7 +722,7 @@ export function LiveUserProfile({
             Each chart is embeddable — use its “Add to README”.
           </p>
           <div className="mt-6 grid gap-8">
-            {PROFILE_CHARTS.map((chart) => (
+            {OWNED_CODE_CHARTS.map((chart) => (
               <div key={chart.name}>
                 <StatCard
                   src={`${apiBase}/api/users/${login}/stats/${chart.name}.svg`}

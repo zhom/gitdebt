@@ -110,6 +110,13 @@ test("profiles live at the root and share one login source", () => {
       `${relative} still links the legacy /u profile prefix`,
     );
   }
+
+  const header = read("src/components/SiteHeader.astro");
+  const ownProfile = read("src/pages/profile.astro");
+  assert.doesNotMatch(header, /profile\?login=/);
+  assert.match(header, /profile\.href = `\/\$\{encodeURIComponent\(login\)\}`/);
+  assert.doesNotMatch(ownProfile, /LiveUserProfile|client:only/);
+  assert.match(ownProfile, /location\.replace\(`\/\$\{encodeURIComponent\(login\)\}`\)/);
 });
 
 test("the profile drops the monthly commit-volume surface", () => {

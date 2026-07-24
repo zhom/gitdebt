@@ -1,7 +1,6 @@
 ---
 import { Menu, X } from "lucide-react";
 import Brand from "@/components/Brand.astro";
-import { AuthControl } from "@/components/AuthControl";
 import { staticApiBase } from "@/lib/static-api-base";
 
 const navLinks = [
@@ -12,6 +11,7 @@ const navLinks = [
 
 const apiBase = staticApiBase();
 const returnTo = `${Astro.url.pathname}${Astro.url.search}`;
+const loginHref = `${apiBase}/auth/github/start?return_to=${encodeURIComponent(returnTo)}`;
 const currentPath = Astro.url.pathname.replace(/\/+$/, "") || "/";
 
 function isCurrent(href: string): boolean {
@@ -55,7 +55,18 @@ function isCurrent(href: string): boolean {
 
     <div class="flex shrink-0 items-center gap-1 justify-self-end sm:gap-2">
       <div data-auth-slot>
-        <AuthControl client:load apiBase={apiBase} returnTo={returnTo} />
+        <div data-auth-control data-api-base={apiBase}>
+          <a
+            href={loginHref}
+            aria-label="Login with GitHub"
+            class="dither-fallback relative isolate inline-flex min-h-10 items-center justify-center gap-2 overflow-hidden rounded-md px-4 py-2 font-mono text-xs whitespace-nowrap text-foreground outline-none transition-[opacity,scale] active:scale-[0.96] motion-reduce:transition-none focus-visible:ring-2 focus-visible:ring-accent/30 focus-visible:ring-offset-2 focus-visible:ring-offset-background"
+          >
+            <span>Login</span>
+            <svg viewBox="0 0 16 16" class="size-4" fill="currentColor" aria-hidden="true">
+              <path d="M8 0C3.58 0 0 3.64 0 8.13c0 3.59 2.29 6.63 5.47 7.7.4.08.55-.17.55-.39 0-.19-.01-.83-.01-1.51-2.01.38-2.53-.5-2.69-.96-.09-.23-.48-.96-.82-1.15-.28-.15-.68-.53-.01-.54.63-.01 1.08.59 1.23.83.72 1.23 1.87.88 2.33.67.07-.53.28-.88.51-1.08-1.78-.21-3.64-.91-3.64-4.02 0-.89.31-1.62.82-2.19-.08-.21-.36-1.04.08-2.16 0 0 .67-.22 2.2.84A7.4 7.4 0 0 1 8 3.9c.68 0 1.36.09 2 .27 1.53-1.06 2.2-.84 2.2-.84.44 1.12.16 1.95.08 2.16.51.57.82 1.3.82 2.19 0 3.12-1.87 3.81-3.65 4.02.29.25.54.74.54 1.5 0 1.08-.01 1.95-.01 2.22 0 .22.15.47.55.39A8.12 8.12 0 0 0 16 8.13C16 3.64 12.42 0 8 0Z"></path>
+            </svg>
+          </a>
+        </div>
       </div>
       <details class="relative lg:hidden" data-mobile-menu data-state="closed">
         <summary
@@ -187,4 +198,110 @@ function isCurrent(href: string): boolean {
   document
     .querySelectorAll<HTMLDetailsElement>("[data-mobile-menu]")
     .forEach(installMobileMenu);
+</script>
+
+<script>
+  type SessionUser = {
+    login?: string;
+    name?: string | null;
+    avatar_url?: string | null;
+  };
+
+  const ACCOUNT_TRIGGER =
+    "relative isolate inline-flex min-h-10 cursor-pointer list-none items-center justify-center gap-2 overflow-hidden rounded-md border border-border/60 px-3 py-2 font-mono text-xs whitespace-nowrap text-foreground outline-none transition-[opacity,scale] active:scale-[0.96] motion-reduce:transition-none focus-visible:ring-2 focus-visible:ring-accent/30 focus-visible:ring-offset-2 focus-visible:ring-offset-background [&::-webkit-details-marker]:hidden";
+  const ACCOUNT_MENU =
+    "absolute right-0 z-50 mt-2 w-72 rounded-lg border border-border/80 bg-card p-2 text-popover-foreground shadow-[0_8px_24px_rgba(0,0,0,0.32)]";
+  const ACCOUNT_ITEM =
+    "flex min-h-9 w-full items-center rounded-md px-2.5 text-left font-mono text-[12px] text-muted-foreground outline-none hover:bg-card/60 hover:text-foreground focus-visible:ring-2 focus-visible:ring-accent/30";
+
+  function element<K extends keyof HTMLElementTagNameMap>(
+    tag: K,
+    className?: string,
+  ): HTMLElementTagNameMap[K] {
+    const node = document.createElement(tag);
+    if (className) node.className = className;
+    return node;
+  }
+
+  function accountMenu(user: SessionUser, apiBase: string) {
+    const login = user.login!.toLowerCase();
+    const details = element("details", "group relative");
+    const trigger = element("summary", ACCOUNT_TRIGGER);
+    trigger.setAttribute("aria-label", `Open account menu for ${login}`);
+
+    if (user.avatar_url) {
+      const avatar = element("img", "size-6 rounded-full [image-rendering:auto]");
+      avatar.src = user.avatar_url;
+      avatar.alt = "";
+      avatar.width = 24;
+      avatar.height = 24;
+      trigger.append(avatar);
+    }
+
+    const loginText = element("span", "hidden max-w-28 truncate sm:inline");
+    loginText.textContent = login;
+    trigger.append(loginText);
+
+    const caret = element(
+      "span",
+      "hidden text-muted-foreground transition-transform duration-150 group-open:rotate-180 sm:inline",
+    );
+    caret.textContent = "⌄";
+    caret.setAttribute("aria-hidden", "true");
+    trigger.append(caret);
+
+    const menu = element("div", ACCOUNT_MENU);
+    const identity = element("div", "px-2.5 py-2");
+    const name = element("p", "truncate text-[13px]");
+    name.textContent = user.name || login;
+    const handle = element(
+      "p",
+      "truncate font-mono text-[11px] text-muted-foreground",
+    );
+    handle.textContent = `@${login}`;
+    identity.append(name, handle);
+
+    const divider = element("div", "my-1.5 h-px bg-border/40");
+    divider.setAttribute("aria-hidden", "true");
+
+    const profile = element("a", ACCOUNT_ITEM);
+    profile.href = `/${encodeURIComponent(login)}`;
+    profile.textContent = "Your profile report";
+
+    const signOut = element("button", ACCOUNT_ITEM);
+    signOut.type = "button";
+    signOut.textContent = "Sign out";
+    signOut.addEventListener("click", async () => {
+      try {
+        await fetch(`${apiBase}/auth/logout`, {
+          method: "POST",
+          credentials: "include",
+          redirect: "manual",
+        });
+      } finally {
+        location.reload();
+      }
+    });
+
+    menu.append(identity, divider, profile, signOut);
+    details.append(trigger, menu);
+    return details;
+  }
+
+  for (const root of document.querySelectorAll<HTMLElement>("[data-auth-control]")) {
+    const apiBase = root.dataset.apiBase ?? "";
+    const controller = new AbortController();
+    fetch(`${apiBase}/api/me`, {
+      credentials: "include",
+      headers: { accept: "application/json" },
+      signal: controller.signal,
+    })
+      .then(async (response) =>
+        response.ok ? ((await response.json()) as SessionUser) : null,
+      )
+      .then((user) => {
+        if (user?.login) root.replaceChildren(accountMenu(user, apiBase));
+      })
+      .catch(() => undefined);
+  }
 </script>

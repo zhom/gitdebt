@@ -54,8 +54,37 @@ pub struct LanguageBar {
     pub lines_comment: i64,
 }
 
+#[derive(Debug, Clone, Serialize)]
+pub struct ContributionProfile {
+    pub owned_repos: i64,
+    pub external_repos: i64,
+    pub owned_commits: i64,
+    pub external_commits: i64,
+    pub visionary_count: i64,
+}
+
 fn reveal_begin(index: usize) -> f32 {
-    (index as f32 * 0.04).min(0.08)
+    (index as f32 * 0.018).min(0.09)
+}
+
+fn moving_tier_pattern(ns: &str, color: &str, tier: usize, duration: f32, reverse: bool) -> String {
+    let pattern = crate::texture::tier_pattern_ns(ns, color, 2.0, tier).replacen(
+        " patternUnits=",
+        " patternTransform=\"translate(.5 .5)\" patternUnits=",
+        1,
+    );
+    let (from, to) = if reverse {
+        ("8.5 0.5", "0.5 0.5")
+    } else {
+        ("0.5 0.5", "8.5 0.5")
+    };
+    pattern.replacen(
+        "</pattern>",
+        &format!(
+            "<animateTransform class=\"motion\" attributeName=\"patternTransform\" type=\"translate\" from=\"{from}\" to=\"{to}\" dur=\"{duration:.2}s\" repeatCount=\"indefinite\" /></pattern>"
+        ),
+        1,
+    )
 }
 
 // Bug-magnet files
@@ -415,11 +444,8 @@ fn render_heatmap_inner(
 
 // Commit-activity heat levels
 //
-// The heatmap is one series, so it gets one ink and modulates ALPHA, the
-// same contract as every other dithered surface here. Each intensity
-// level is a Bayer density tier: level 0 leaves the empty track showing,
-// levels 1–4 stack a denser lit-cell pattern on top. Nothing is shaded —
-// a flat five-step gray ramp is what made this chart the odd one out.
+// Each intensity level is a Bayer density tier: level 0 leaves the empty
+// track showing, levels 1–4 stack a denser lit-cell pattern on top.
 
 /// Bayer density tier per heat level (`0` = no commits, `4` = top
 /// quartile). The top tier stops at 13/16 so even the busiest day still
@@ -433,9 +459,15 @@ const HEAT_NS: &str = "gd-heat";
 /// The tier ladder the heatmap actually references, in the theme's ink.
 fn heat_defs(theme: &Theme) -> String {
     let mut out = String::new();
-    for tier in HEAT_TIERS.iter().skip(1) {
-        out.push_str(&crate::texture::tier_pattern_ns(
-            HEAT_NS, theme.fg, 2.0, *tier,
+    let (violet, blue, pink) = crate::texture::wave_stops(theme);
+    let colors = [violet, blue, pink, theme.fg];
+    for (index, tier) in HEAT_TIERS.iter().skip(1).enumerate() {
+        out.push_str(&moving_tier_pattern(
+            HEAT_NS,
+            colors[index],
+            *tier,
+            0.58 + index as f32 * 0.08,
+            index % 2 == 1,
         ));
     }
     out
@@ -585,6 +617,176 @@ fn render_contributors_inner(repo: &str, contributors: &[ContributorRow], theme:
 
 // Lines of code by language
 
+pub fn render_contribution_profile(
+    login: &str,
+    profile: &ContributionProfile,
+    theme: &Theme,
+) -> String {
+    crate::texture::decorate(
+        render_contribution_profile_inner(login, profile, theme),
+        theme,
+    )
+}
+
+fn render_contribution_profile_inner(
+    login: &str,
+    profile: &ContributionProfile,
+    theme: &Theme,
+) -> String {
+    let width = 1100u32;
+    let height = 340u32;
+    let pad = 56.0_f32;
+    let plot_x = 280.0_f32;
+    let plot_w = 764.0_f32;
+    let lane_h = 28.0_f32;
+    let total_commits = (profile.owned_commits + profile.external_commits).max(0);
+    let lane_width = |commits: i64| {
+        if commits <= 0 || total_commits <= 0 {
+            0.0
+        } else {
+            ((commits as f32 / total_commits as f32) * plot_w)
+                .max(18.0)
+                .min(plot_w)
+        }
+    };
+    let owned_w = lane_width(profile.owned_commits);
+    let external_w = lane_width(profile.external_commits);
+    let (own_color, external_color, visionary_color) = crate::texture::wave_stops(theme);
+    let own_pattern = moving_tier_pattern("gd-contrib-own", own_color, 11, 0.68, false);
+    let external_pattern =
+        moving_tier_pattern("gd-contrib-external", external_color, 8, 0.82, true);
+    let owned_fill = if owned_w > 0.0 {
+        format!(
+            r##"<rect x="{plot_x}" y="126" width="{owned_w:.1}" height="{lane_h}" rx="5" fill="url(#gd-contrib-own-t11)" fill-opacity="0.95" stroke="{own_color}" stroke-opacity="0.8" />"##
+        )
+    } else {
+        String::new()
+    };
+    let external_fill = if external_w > 0.0 {
+        format!(
+            r##"<rect x="{plot_x}" y="202" width="{external_w:.1}" height="{lane_h}" rx="5" fill="url(#gd-contrib-external-t8)" fill-opacity="0.95" stroke="{external_color}" stroke-opacity="0.8" />"##
+        )
+    } else {
+        String::new()
+    };
+
+    let markers = |repos: i64, y: f32, lane_w: f32, color: &str| {
+        let shown = repos.clamp(0, 18) as usize;
+        if shown == 0 || lane_w <= 0.0 {
+            return String::new();
+        }
+        let mut out = String::new();
+        for index in 0..shown {
+            let fraction = (index as f32 + 0.5) / shown as f32;
+            let x = plot_x + fraction * lane_w;
+            let offset = match index % 3 {
+                0 => -5.0,
+                1 => 0.0,
+                _ => 5.0,
+            };
+            out.push_str(&format!(
+                r##"<circle cx="{x:.1}" cy="{cy:.1}" r="2.5" fill="{color}" opacity="0.92">
+  <animate class="motion" attributeName="opacity" from="0.25" to="0.92" dur="0.14s" begin="{begin:.3}s" fill="freeze" />
+</circle>"##,
+                cy = y + lane_h / 2.0 + offset,
+                begin = reveal_begin(index),
+            ));
+        }
+        out
+    };
+
+    let owned_y = 126.0_f32;
+    let external_y = 202.0_f32;
+    let owned_markers = markers(profile.owned_repos, owned_y, owned_w, own_color);
+    let external_markers = markers(
+        profile.external_repos,
+        external_y,
+        external_w,
+        external_color,
+    );
+    let style = if total_commits == 0 {
+        "No attributed commits yet"
+    } else {
+        let external_share = profile.external_commits as f64 / total_commits as f64;
+        if external_share >= 0.68 {
+            "Ecosystem-led contributor"
+        } else if external_share <= 0.32 {
+            "Builder-led contributor"
+        } else {
+            "Balanced project footprint"
+        }
+    };
+    let visionary = if profile.visionary_count > 0 {
+        format!(
+            r##"<g transform="translate({pad:.0} 276)">
+  <rect width="310" height="34" rx="17" fill="{visionary_color}" fill-opacity="0.14" stroke="{visionary_color}" stroke-opacity="0.72" />
+  <circle cx="18" cy="17" r="5" fill="{visionary_color}">
+    <animate class="motion" attributeName="r" values="4;7;4" dur="0.72s" repeatCount="indefinite" />
+  </circle>
+  <text class="visionary" x="32" y="21">VISIONARY · {count} breakout {projects}</text>
+</g>"##,
+            count = profile.visionary_count,
+            projects = if profile.visionary_count == 1 {
+                "project"
+            } else {
+                "projects"
+            },
+        )
+    } else {
+        String::new()
+    };
+
+    format!(
+        r##"<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 {width} {height}" role="img" aria-label="Contribution footprint for {login}">
+  <defs>{own_pattern}{external_pattern}</defs>
+  <style><![CDATA[
+    .title {{ fill: {fg}; font: 600 18px ui-sans-serif, system-ui, sans-serif; }}
+    .subtitle {{ fill: {muted}; font: 13px ui-sans-serif, system-ui, sans-serif; }}
+    .lane-label {{ fill: {fg}; font: 600 13px ui-sans-serif, system-ui, sans-serif; }}
+    .lane-meta {{ fill: {muted}; font: 11px ui-monospace, SFMono-Regular, monospace; }}
+    .lane-value {{ fill: {fg}; font: 600 13px ui-monospace, SFMono-Regular, monospace; }}
+    .visionary {{ fill: {fg}; font: 700 11px ui-monospace, SFMono-Regular, monospace; letter-spacing: 0.08em; }}
+    .footer-link {{ fill: {muted}; font: 600 11px ui-sans-serif, system-ui, sans-serif; text-decoration: none; letter-spacing: 0.02em; }}
+    .footer-link:hover {{ fill: {fg}; }}
+    @media (prefers-reduced-motion: reduce) {{
+      .motion {{ display: none; }}
+    }}
+  ]]></style>
+  <text class="title" x="{pad}" y="36">Contribution footprint</text>
+  <text class="subtitle" x="{pad}" y="58">{login} · {style}</text>
+
+  <text class="lane-label" x="{pad}" y="132">Owned projects</text>
+  <text class="lane-meta" x="{pad}" y="151">{owned_repos} repos</text>
+  <rect x="{plot_x}" y="{owned_y}" width="{plot_w}" height="{lane_h}" rx="5" fill="{track}" />
+  {owned_fill}
+  {owned_markers}
+  <text class="lane-value" x="{right}" y="145" text-anchor="end">{owned_commits} commits</text>
+
+  <text class="lane-label" x="{pad}" y="208">Other people's projects</text>
+  <text class="lane-meta" x="{pad}" y="227">{external_repos} repos</text>
+  <rect x="{plot_x}" y="{external_y}" width="{plot_w}" height="{lane_h}" rx="5" fill="{track}" />
+  {external_fill}
+  {external_markers}
+  <text class="lane-value" x="{right}" y="221" text-anchor="end">{external_commits} commits</text>
+
+  {visionary}
+{footer}
+</svg>"##,
+        login = escape_xml(login),
+        fg = theme.fg,
+        muted = theme.muted,
+        track = theme.track,
+        right = width as f32 - pad,
+        owned_repos = profile.owned_repos,
+        external_repos = profile.external_repos,
+        owned_commits = humanize(profile.owned_commits),
+        external_commits = humanize(profile.external_commits),
+        owned_fill = owned_fill,
+        external_fill = external_fill,
+        footer = brand::footer_lockup(width as f32 - pad, height as f32 - 12.0, theme),
+    )
+}
+
 pub fn render_languages(repo: &str, rows: &[LanguageBar], theme: &Theme) -> String {
     crate::texture::decorate(render_languages_inner(repo, rows, theme), theme)
 }
@@ -629,11 +831,12 @@ fn render_languages_inner(repo: &str, rows: &[LanguageBar], theme: &Theme) -> St
         // color. The bar then varies ALPHA (unlit tier under lit tier),
         // never shade, so the grain matches every other gitdebt surface.
         let ns = format!("gd-lang{i}");
-        lang_defs.push_str(&crate::texture::tier_pattern_ns(
+        lang_defs.push_str(&moving_tier_pattern(
             &ns,
             &color,
-            2.0,
             LANGUAGE_TIER,
+            0.64 + (i % 4) as f32 * 0.08,
+            i % 2 == 1,
         ));
         let count_text = humanize(total);
         // Contrast is judged against what the bar actually LOOKS like —
@@ -1629,10 +1832,10 @@ mod tests {
 
     /// The commit-activity heatmap used to be the one repo-stat chart with
     /// no dither at all — a flat five-step gray ramp. It must now carry the
-    /// same ordered-dither contract as everything else: one ink, density
-    /// tiers, alpha-only.
+    /// same ordered-dither contract as everything else: density tiers and
+    /// concrete theme colors.
     #[test]
-    fn commit_activity_heatmap_is_dithered_one_ink_alpha_only() {
+    fn commit_activity_heatmap_is_dithered_with_dynamic_signal_colors() {
         let mut days = Vec::new();
         for (i, commits) in [1i64, 3, 9, 40, 0, 7, 22].into_iter().enumerate() {
             days.push(DayCount {
@@ -1648,8 +1851,7 @@ mod tests {
             assert!(svg.contains("data-gitdebt-heat-defs=\"true\""));
             assert!(svg.contains("class=\"heat-ink\""));
             assert!(svg.contains("shape-rendering=\"crispEdges\""));
-            // Every referenced tier must have a matching def, and every def
-            // must be inked with the SAME single color.
+            // Every referenced tier must have a matching def.
             for tier in HEAT_TIERS.iter().skip(1) {
                 assert!(
                     svg.contains(&format!("id=\"gd-heat-t{tier}\"")),
@@ -1658,7 +1860,10 @@ mod tests {
             }
             assert!(svg.contains("fill=\"url(#gd-heat-t13)\""));
             assert!(!svg.contains(theme.heat_2), "flat gray ramp must be gone");
-            // Alpha-only modulation across the levels.
+            let (violet, blue, pink) = crate::texture::wave_stops(theme);
+            assert!(svg.contains(violet));
+            assert!(svg.contains(blue));
+            assert!(svg.contains(pink));
             for alpha in HEAT_ALPHA.iter().skip(1) {
                 assert!(
                     svg.contains(&format!("fill-opacity=\"{alpha}\"")),
@@ -1889,9 +2094,10 @@ mod tests {
         let bars = render_bug_magnets("foo/bar", &rows, &theme::LIGHT);
         assert!(!bars.contains("attributeName=\"width\""));
         assert!(bars.contains("begin=\"0.00s\""));
+        assert!(bars.contains("begin=\"0.02s\""));
         assert!(bars.contains("begin=\"0.04s\""));
-        assert!(bars.contains("begin=\"0.08s\""));
-        assert!(!bars.contains("begin=\"0.12s\""));
+        assert!(bars.contains("begin=\"0.05s\""));
+        assert!(!bars.contains("begin=\"0.08s\""));
         assert!(bars.contains("prefers-reduced-motion: reduce"));
 
         let start = NaiveDate::from_ymd_opt(2026, 1, 1).unwrap();
@@ -2413,5 +2619,45 @@ mod tests {
         assert!(!commits.contains("stroke-dashoffset"));
         assert!(commits.contains("fill=\"url(#gd-pixel-fill)\" opacity=\"0.94\""));
         assert!(commits.contains(" r=\"5\""));
+    }
+
+    #[test]
+    fn contribution_profile_is_varied_animated_and_deterministic() {
+        let profile = ContributionProfile {
+            owned_repos: 4,
+            external_repos: 9,
+            owned_commits: 120,
+            external_commits: 380,
+            visionary_count: 2,
+        };
+        let first = render_contribution_profile("@alice", &profile, &theme::DARK);
+        let second = render_contribution_profile("@alice", &profile, &theme::DARK);
+        assert_eq!(first, second);
+        assert!(first.contains("Ecosystem-led contributor"));
+        assert!(first.contains("VISIONARY · 2 breakout projects"));
+        assert!(first.contains("#9b7bff"));
+        assert!(first.contains("#46b3ff"));
+        assert!(first.contains("#ef72ff"));
+        assert!(first.matches("<animateTransform").count() >= 2);
+        assert!(first.contains("dur=\"0.68s\""));
+        assert!(first.contains("prefers-reduced-motion: reduce"));
+
+        let frozen = crate::raster::freeze_svg_animations(&first);
+        assert!(!frozen.contains("<animate"));
+        assert!(frozen.contains("120 commits"));
+        assert!(frozen.contains("380 commits"));
+
+        let one_sided = render_contribution_profile(
+            "@builder",
+            &ContributionProfile {
+                owned_repos: 2,
+                external_repos: 0,
+                owned_commits: 330,
+                external_commits: 0,
+                visionary_count: 0,
+            },
+            &theme::DARK,
+        );
+        assert!(!one_sided.contains("width=\"0.0\""));
     }
 }

@@ -520,9 +520,13 @@ fn render_contributors_inner(repo: &str, contributors: &[ContributorRow], theme:
     let pad = 44u32;
     let avatar_y = 86u32;
     let avatar_size = 62u32;
-    let column_step = 76u32;
+    let avatar_ring_overhang = 5u32;
+    let min_column_step = 76u32;
     let row_step = 82u32;
-    let columns = ((width - pad * 2) / column_step).max(1);
+    let content_width = width - pad * 2;
+    let avatar_outer_size = avatar_size + avatar_ring_overhang * 2;
+    let column_span = content_width.saturating_sub(avatar_outer_size);
+    let columns = (column_span / min_column_step + 1).max(1);
     // The endpoint already supplies a bounded, ordered author set. Rendering
     // every provided row avoids silently turning that set into a second,
     // undocumented top-16 sample.
@@ -538,7 +542,15 @@ fn render_contributors_inner(repo: &str, contributors: &[ContributorRow], theme:
     for (i, c) in shown.iter().enumerate() {
         let column = i as u32 % columns;
         let row = i as u32 / columns;
-        let x = pad + column * column_step;
+        // Distribute complete rows across the full padded content width. The
+        // avatar's dither ring extends past its image, so positioning by the
+        // image alone leaves a visibly larger gutter on the right.
+        let column_offset = if columns > 1 {
+            column * column_span / (columns - 1)
+        } else {
+            0
+        };
+        let x = pad + avatar_ring_overhang + column_offset;
         let y = avatar_y + row * row_step;
         let label = c.login.clone().unwrap_or_else(|| c.name.clone());
         let profile = c
@@ -2150,6 +2162,14 @@ mod tests {
         assert!(svg.contains("href=\"https://github.com/author-28\""));
         assert!(svg.contains("id=\"contributor-clip-28\""));
         assert!(svg.contains("29 public commit authors · analyzed commit window"));
+        assert!(
+            svg.contains("transform=\"translate(49, 86)\""),
+            "the first dither ring should begin at the 44px content gutter"
+        );
+        assert!(
+            svg.contains("transform=\"translate(989, 86)\""),
+            "the last dither ring should end at the matching 44px gutter"
+        );
         assert!(
             !svg.contains("viewBox=\"0 0 1100 208\""),
             "a multi-row set must grow the deterministic canvas"

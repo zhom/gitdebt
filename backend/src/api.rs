@@ -3924,6 +3924,74 @@ async fn load_repo_badges(
     ))
 }
 
+struct ContributorReadinessSignal {
+    present: usize,
+    total: usize,
+    ready: bool,
+}
+
+async fn load_contributor_readiness(
+    state: &ApiState,
+    repo: &str,
+) -> Result<Option<ContributorReadinessSignal>, ApiError> {
+    let row = sqlx::query(
+        "SELECT r.readme, r.security, r.cla, r.code_of_conduct, r.contributing, \
+                r.license, r.codeowners, r.changelog, r.issue_templates, \
+                r.pr_template, r.ci, r.tests, r.dependency_updates \
+         FROM repo_readiness r \
+         JOIN repo_history h ON h.repo = r.repo AND h.head_sha = r.head_sha \
+         JOIN repos public_repo ON public_repo.repo = r.repo \
+         WHERE r.repo = $1 AND public_repo.missing = FALSE \
+           AND public_repo.metadata_fetched_at IS NOT NULL",
+    )
+    .bind(repo)
+    .fetch_optional(&state.analyzer.cache.db().pool)
+    .await?;
+    let Some(row) = row else {
+        return Ok(None);
+    };
+    let values = [
+        row.try_get::<bool, _>("readme")?,
+        row.try_get::<bool, _>("security")?,
+        row.try_get::<bool, _>("cla")?,
+        row.try_get::<bool, _>("code_of_conduct")?,
+        row.try_get::<bool, _>("contributing")?,
+        row.try_get::<bool, _>("license")?,
+        row.try_get::<bool, _>("codeowners")?,
+        row.try_get::<bool, _>("changelog")?,
+        row.try_get::<bool, _>("issue_templates")?,
+        row.try_get::<bool, _>("pr_template")?,
+        row.try_get::<bool, _>("ci")?,
+        row.try_get::<bool, _>("tests")?,
+        row.try_get::<bool, _>("dependency_updates")?,
+    ];
+    let readme = values[0];
+    let security = values[1];
+    let conduct = values[3];
+    let contributing = values[4];
+    let license = values[5];
+    let issue_templates = values[8];
+    let pr_template = values[9];
+    let ci = values[10];
+    let tests = values[11];
+    let present = values.iter().filter(|value| **value).count();
+    Ok(Some(ContributorReadinessSignal {
+        present,
+        total: values.len(),
+        // A contributor should be able to understand, legally use, change,
+        // test, and submit the project. CLA is deliberately informational:
+        // many welcoming projects intentionally do not require one.
+        ready: readme
+            && contributing
+            && license
+            && conduct
+            && ci
+            && tests
+            && (issue_templates || pr_template)
+            && security,
+    }))
+}
+
 async fn earned_badges_json(
     State(state): State<ApiState>,
     Path((owner, repo)): Path<(String, String)>,
@@ -4085,6 +4153,27 @@ async fn build_badge_svg(
         repo.to_ascii_lowercase()
     );
     if let Some(signal) = q.signal.as_deref().map(str::trim).filter(|v| !v.is_empty()) {
+        if signal == "contributor-ready" {
+            let readiness = load_contributor_readiness(state, &repo_full).await?;
+            let (detail, ready) = readiness
+                .map(|value| {
+                    (
+                        format!("{}/{} project guides", value.present, value.total),
+                        value.ready,
+                    )
+                })
+                .unwrap_or_else(|| ("analysis pending".to_string(), false));
+            return Ok(RenderedCard {
+                svg: crate::badge::render_signal_badge(
+                    "contributor ready",
+                    &detail,
+                    ready,
+                    theme,
+                    q.animate(),
+                ),
+                short_ttl: true,
+            });
+        }
         let badges = load_repo_badges(state, &repo_full).await?;
         let earned = badges
             .iter()
@@ -6594,6 +6683,7 @@ mod tests {
             history_coverage_end: None,
             created_at: None,
             view_count: 7,
+            ..crate::cache::RepoSummary::default()
         };
 
         let unchanged = star_data_revision(Some(&base));
@@ -6641,6 +6731,7 @@ mod tests {
             history_coverage_end: None,
             created_at: None,
             view_count: 0,
+            ..crate::cache::RepoSummary::default()
         };
         assert_eq!(history_source_key(Some(&summary)), "archive");
         summary.history_source = Some("github_api".to_string());

@@ -22,6 +22,7 @@ use gitdebt::{
     analyzer,
     cache::{ArchiveStarEvent, Cache},
     db::Db,
+    github::RepoMetadata,
     queue, repo_analysis,
     repo_history::{CommitInfo, RepoStorage},
     repo_stats,
@@ -32,7 +33,16 @@ use tokio::sync::Mutex;
 static SCHEMA_READY: OnceLock<()> = OnceLock::new();
 static SCHEMA_LOCK: Mutex<()> = Mutex::const_new(());
 static STAR_CLAIM_LOCK: Mutex<()> = Mutex::const_new(());
-const CURRENT_ANALYSIS_REVISION: i32 = 4;
+const CURRENT_ANALYSIS_REVISION: i32 = 5;
+
+fn metadata(id: u64, stars: u64, forks: u64) -> RepoMetadata {
+    RepoMetadata {
+        id: Some(id),
+        stargazers_count: stars,
+        forks_count: forks,
+        ..RepoMetadata::default()
+    }
+}
 
 /// Returns a connected `Db` if a test database is configured, else `None`
 /// (the test then no-ops). Keeps the suite green where no DB exists.
@@ -797,6 +807,15 @@ async fn repo_analysis_commit_and_merge_head_advance_atomically() {
         message_first_line: "change".to_string(),
         is_fix: false,
         paths_changed: vec!["src/lib.rs".to_string()],
+        file_changes: vec![gitdebt::repo_history::FileChange {
+            path: "src/lib.rs".to_string(),
+            lines_added: 12,
+            lines_deleted: 3,
+            binary: false,
+        }],
+        lines_added: 12,
+        lines_deleted: 3,
+        binary_files: 0,
         todo_added: 0,
         todo_removed: 0,
     };
@@ -849,6 +868,15 @@ async fn repo_analysis_commit_and_merge_head_advance_atomically() {
         message_first_line: "replacement window".to_string(),
         is_fix: true,
         paths_changed: vec!["src/new.rs".to_string()],
+        file_changes: vec![gitdebt::repo_history::FileChange {
+            path: "src/new.rs".to_string(),
+            lines_added: 8,
+            lines_deleted: 2,
+            binary: false,
+        }],
+        lines_added: 8,
+        lines_deleted: 2,
+        binary_files: 0,
         todo_added: 1,
         todo_removed: 0,
     };
@@ -917,7 +945,7 @@ async fn analyze_fresh_complete_repo_returns_history_not_pending() {
         .map(|i| (i + 1, base + Duration::seconds(i)))
         .collect();
     cache
-        .put_repo_metadata(&full, Some(101), 5, 0, None)
+        .put_repo_metadata(&full, &metadata(101, 5, 0))
         .await
         .unwrap();
     cache.put_repo_stargazers(&full, &items).await.unwrap();
@@ -964,6 +992,19 @@ async fn analyze_fresh_complete_repo_returns_history_not_pending() {
     assert_eq!(res.total_stars, 5);
     assert_eq!(res.history.len(), 1, "same-day stars aggregate in SQL");
     assert_eq!(res.history[0].stars, 5);
+    let insights = res
+        .star_history_insights
+        .expect("complete Postgres history derives report insights");
+    assert_eq!(
+        insights.largest_day.map(|record| record.stars_gained),
+        Some(5)
+    );
+    assert!(
+        insights
+            .milestones
+            .iter()
+            .all(|milestone| milestone.reached_at.is_none())
+    );
 
     cleanup(&db, prefix).await;
 }
@@ -985,7 +1026,7 @@ async fn incremental_append_through_cache() {
         .map(|i| (i + 1, base + Duration::seconds(i)))
         .collect();
     cache
-        .put_repo_metadata(&full, Some(102), 3, 0, None)
+        .put_repo_metadata(&full, &metadata(102, 3, 0))
         .await
         .unwrap();
     cache.put_repo_stargazers(&full, &initial).await.unwrap();
@@ -1036,7 +1077,7 @@ async fn completed_history_is_hidden_until_public_metadata_is_recorded() {
     assert_eq!(cache.get_repo_star_count(&full).await.unwrap(), None);
 
     cache
-        .put_repo_metadata(&full, Some(104), 1, 0, None)
+        .put_repo_metadata(&full, &metadata(104, 1, 0))
         .await
         .unwrap();
     assert_eq!(
@@ -1064,7 +1105,7 @@ async fn partial_fetch_leaves_incomplete() {
     let base = Utc.timestamp_opt(1_700_000_000, 0).unwrap();
     let stale = vec![(99, base - Duration::seconds(1))];
     cache
-        .put_repo_metadata(&full, Some(103), 1, 0, None)
+        .put_repo_metadata(&full, &metadata(103, 1, 0))
         .await
         .unwrap();
     cache.put_repo_stargazers(&full, &stale).await.unwrap();
@@ -1155,7 +1196,7 @@ async fn archive_windows_are_hidden_until_final_commit() {
     let cache = Cache::new(db.clone());
     let full = format!("{prefix}history");
     cache
-        .put_repo_metadata(&full, Some(42), 99, 3, None)
+        .put_repo_metadata(&full, &metadata(42, 99, 3))
         .await
         .unwrap();
     let base = Utc.timestamp_opt(1_700_000_000, 0).unwrap();

@@ -236,15 +236,7 @@ async fn prepare_job(
             let (owner, name) = split_slug(&repo)?;
             match ctx.github.repo_metadata(owner, name).await? {
                 Some(metadata) => {
-                    ctx.cache
-                        .put_repo_metadata(
-                            &repo,
-                            metadata.id,
-                            metadata.stargazers_count,
-                            metadata.forks_count,
-                            metadata.created_at,
-                        )
-                        .await?;
+                    ctx.cache.put_repo_metadata(&repo, &metadata).await?;
                 }
                 None => {
                     ctx.cache.mark_repo_missing(&repo).await?;

@@ -39,7 +39,7 @@ pub const WARM_PRIORITY: i64 = 1_000_000;
 // v4 adds per-author/day buckets for truthful profile commit streaks. Older
 // completed clones are re-walked once so awards never infer a person's
 // activity from repository-wide daily totals.
-pub const CURRENT_ANALYSIS_REVISION: i32 = 4;
+pub const CURRENT_ANALYSIS_REVISION: i32 = 5;
 
 #[derive(Clone)]
 pub struct AnalysisCtx {
@@ -579,15 +579,7 @@ async fn process(job: &AnalysisJob, ctx: &AnalysisCtx) -> Result<usize> {
         let github = user_scoped_github(job, ctx).await;
         match github.repo_metadata(owner, name).await? {
             Some(metadata) => {
-                cache
-                    .put_repo_metadata(
-                        repo,
-                        metadata.id,
-                        metadata.stargazers_count,
-                        metadata.forks_count,
-                        metadata.created_at,
-                    )
-                    .await?;
+                cache.put_repo_metadata(repo, &metadata).await?;
             }
             None => {
                 cache.mark_repo_missing(repo).await?;
@@ -622,6 +614,13 @@ async fn process(job: &AnalysisJob, ctx: &AnalysisCtx) -> Result<usize> {
         update_work_progress(&ctx.db, repo, "saving_history", Some(0), 0).await?;
         repo_stats::replace_commits_at_head(&ctx.db, repo, &[], &handle.head_sha, 0).await?;
         code_count::save(&ctx.db, repo, &[], true).await?;
+        code_count::save_repository_readiness(
+            &ctx.db,
+            repo,
+            &handle.head_sha,
+            &code_count::RepositoryReadiness::default(),
+        )
+        .await?;
         repo_stats::record_analysis_details(
             &ctx.db,
             repo,
@@ -832,6 +831,8 @@ async fn update_work_progress(
 /// columns are zero" — readers rendered that as a confident `0 lines of code`,
 /// and profile aggregates summed file counts and line counts into one number.
 async fn run_line_counts(db: &Db, handle: &RepoHandle, repo: &str) -> Result<()> {
+    let readiness = code_count::repository_readiness(&handle.path).await?;
+    code_count::save_repository_readiness(db, repo, &handle.head_sha, &readiness).await?;
     let (file_census, tree_files) = code_count::language_file_census(&handle.path).await?;
     // The timeout is a backstop against a pathological local read, not the
     // thing that decides which metric is stored: `count_lines` returns `None`

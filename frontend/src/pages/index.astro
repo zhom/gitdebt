@@ -38,7 +38,7 @@ const site = (Astro.site ?? new URL("https://gitdebt.com")).href.replace(/\/$/, 
 
 const title = "GitHub star history & repository health charts | gitdebt";
 const description =
-  "Get GitHub repository stats in one live report: star history, growth, churn, contributors, bus factor, bug magnets, package usage, and README-ready charts.";
+  "Get GitHub repository stats in one live report: star history, file change frequency, contributors, bus factor, fix-labelled changes, package usage, and README-ready charts.";
 const ogImage = `${apiBase}/api/og.png`;
 
 const jsonLd = [
@@ -89,7 +89,7 @@ const reportLayers = [
   {
     graphic: "health" as const,
     title: "Repository health",
-    desc: "Find churn, bug magnets, bus factor, contributor concentration, and TODO drift on any report.",
+    desc: "Find file change frequency, fix-labelled changes, bus factor, contributor concentration, and recent TODO/FIXME movement.",
     link: "/facebook/react",
   },
   {
@@ -166,8 +166,9 @@ const landingWarmRepos = Array.from(
                   class="reveal mt-5 max-w-[54ch] text-[15px] leading-relaxed text-pretty text-muted-foreground"
                   style="--reveal-delay:180ms"
                 >
-                  Star history, growth, churn, contributors, bus factor, and
-                  bug magnets—live, shareable, and README-ready.
+                  Star history, growth, change frequency, contributors, bus
+                  factor, and fix-labelled changes—live, shareable, and
+                  README-ready.
                 </p>
 
                 <div

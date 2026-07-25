@@ -18,11 +18,11 @@
 //! the cache only when `stargazers_complete` is set, and the worker only
 //! sets that flag inside the same transaction that committed the rows.
 
-use std::collections::HashSet;
+use std::collections::{BTreeMap, HashSet};
 use std::sync::{Arc, Mutex, OnceLock};
 
 use anyhow::Result;
-use chrono::{DateTime, Utc};
+use chrono::{DateTime, NaiveDate, Utc};
 use serde::Serialize;
 use tokio::sync::Semaphore;
 
@@ -61,6 +61,111 @@ pub fn repo_key(owner: &str, repo: &str) -> String {
         owner.to_ascii_lowercase(),
         repo.to_ascii_lowercase()
     )
+}
+
+const STAR_MILESTONES: [u32; 4] = [100, 1_000, 10_000, 100_000];
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize)]
+pub struct StarMilestone {
+    pub stars: u32,
+    pub reached_at: Option<NaiveDate>,
+    pub days_from_creation: Option<u32>,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize)]
+pub struct StarWindowRecord {
+    pub stars_gained: u64,
+    pub from: NaiveDate,
+    pub to: NaiveDate,
+    /// `1`, `7`, or `30`. Week/month records are rolling calendar windows,
+    /// not ISO-week or variable-length calendar-month buckets.
+    pub window_days: u16,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize)]
+pub struct StarHistoryInsights {
+    pub milestones: Vec<StarMilestone>,
+    pub largest_day: Option<StarWindowRecord>,
+    pub largest_week: Option<StarWindowRecord>,
+    pub largest_month: Option<StarWindowRecord>,
+}
+
+/// Pure milestone and growth-record derivation over a complete cumulative
+/// daily series. Inputs are normalized by UTC date and decreasing totals are
+/// clamped, so repeated or malformed points cannot invent star gains.
+pub fn derive_star_history_insights(
+    created_at: Option<DateTime<Utc>>,
+    points: &[Point],
+) -> StarHistoryInsights {
+    let mut cumulative_by_day: BTreeMap<NaiveDate, u32> = BTreeMap::new();
+    for point in points {
+        cumulative_by_day
+            .entry(point.at.date_naive())
+            .and_modify(|stars| *stars = (*stars).max(point.stars))
+            .or_insert(point.stars);
+    }
+
+    let milestones = STAR_MILESTONES
+        .into_iter()
+        .map(|threshold| {
+            let reached_at = cumulative_by_day
+                .iter()
+                .find_map(|(date, stars)| (*stars >= threshold).then_some(*date));
+            let days_from_creation = created_at.zip(reached_at).and_then(|(created, reached)| {
+                let days = (reached - created.date_naive()).num_days();
+                u32::try_from(days.max(0)).ok()
+            });
+            StarMilestone {
+                stars: threshold,
+                reached_at,
+                days_from_creation,
+            }
+        })
+        .collect();
+
+    let mut previous = 0_u32;
+    let daily: Vec<(NaiveDate, u64)> = cumulative_by_day
+        .into_iter()
+        .map(|(date, cumulative)| {
+            let delta = cumulative.saturating_sub(previous);
+            previous = previous.max(cumulative);
+            (date, u64::from(delta))
+        })
+        .collect();
+
+    StarHistoryInsights {
+        milestones,
+        largest_day: largest_star_window(&daily, 1),
+        largest_week: largest_star_window(&daily, 7),
+        largest_month: largest_star_window(&daily, 30),
+    }
+}
+
+fn largest_star_window(daily: &[(NaiveDate, u64)], window_days: u16) -> Option<StarWindowRecord> {
+    let mut start = 0_usize;
+    let mut running = 0_u64;
+    let mut best: Option<StarWindowRecord> = None;
+    for (end, (to, gained)) in daily.iter().enumerate() {
+        running = running.saturating_add(*gained);
+        let from = *to - chrono::Duration::days(i64::from(window_days) - 1);
+        while start <= end && daily[start].0 < from {
+            running = running.saturating_sub(daily[start].1);
+            start += 1;
+        }
+        if running > 0
+            && best
+                .as_ref()
+                .is_none_or(|record| running > record.stars_gained)
+        {
+            best = Some(StarWindowRecord {
+                stars_gained: running,
+                from,
+                to: *to,
+                window_days,
+            });
+        }
+    }
+    best
 }
 
 /// Result of a star-history lookup. Shape matches the `/analyze` JSON
@@ -108,6 +213,10 @@ pub struct AnalysisResult {
     /// (private/deleted/typo'd). The frontend renders a clear "not public or
     /// not found" state; the backend does NOT re-enqueue a tombstone.
     pub not_found: bool,
+    /// Milestone timing and largest rolling growth windows. `None` until the
+    /// complete-history gate opens; records are never derived from partial
+    /// cache rows.
+    pub star_history_insights: Option<StarHistoryInsights>,
     /// Cumulative total-stars series, downsampled to ≤ MAX_HISTORY_POINTS
     /// points (even sampling, always includes first + last). Empty until
     /// the first fetch completes.
@@ -178,6 +287,7 @@ async fn analyze_repo_with_enqueue(
             history_status: "not_public",
             history_unavailable: false,
             not_found: true,
+            star_history_insights: None,
             history: Vec::new(),
         });
     }
@@ -255,6 +365,9 @@ async fn analyze_repo_with_enqueue(
         .as_ref()
         .filter(|_| public)
         .and_then(|s| s.created_at);
+    let star_history_insights = cached
+        .as_deref()
+        .map(|points| derive_star_history_insights(created_at, points));
 
     Ok(AnalysisResult {
         repo: repo_full,
@@ -303,6 +416,7 @@ async fn analyze_repo_with_enqueue(
         },
         history_unavailable: false,
         not_found: false,
+        star_history_insights,
         history,
     })
 }
@@ -470,16 +584,7 @@ fn maybe_refresh_metadata(owner: &str, repo: &str, ctx: &AnalyzerCtx) {
         }
         match github.repo_metadata(&owner_s, &repo_s).await {
             Ok(Some(m)) => {
-                if let Err(e) = cache
-                    .put_repo_metadata(
-                        &repo_full,
-                        m.id,
-                        m.stargazers_count,
-                        m.forks_count,
-                        m.created_at,
-                    )
-                    .await
-                {
+                if let Err(e) = cache.put_repo_metadata(&repo_full, &m).await {
                     tracing::warn!(repo = %repo_full, error = %e, "put_repo_metadata");
                 }
             }
@@ -522,6 +627,13 @@ mod tests {
             history_status: "ready",
             history_unavailable: false,
             not_found: false,
+            star_history_insights: Some(derive_star_history_insights(
+                Some(Utc.timestamp_opt(1_546_300_800, 0).unwrap()),
+                &[Point {
+                    at: Utc.timestamp_opt(1_614_556_800, 0).unwrap(),
+                    stars: 10,
+                }],
+            )),
             history: vec![Point {
                 at: Utc.timestamp_opt(1_614_556_800, 0).unwrap(),
                 stars: 10,
@@ -543,6 +655,11 @@ mod tests {
         assert_eq!(v["backfilling"], false);
         assert_eq!(v["history_unavailable"], false);
         assert_eq!(v["not_found"], false);
+        assert_eq!(v["star_history_insights"]["milestones"][0]["stars"], 100);
+        assert_eq!(
+            v["star_history_insights"]["largest_day"]["stars_gained"],
+            10
+        );
         // history entries are { "date", "stars" } — `at` is renamed.
         assert_eq!(v["history"][0]["date"], "2021-03-01T00:00:00Z");
         assert_eq!(v["history"][0]["stars"], 10);
@@ -581,12 +698,14 @@ mod tests {
             history_status: "queued",
             history_unavailable: false,
             not_found: false,
+            star_history_insights: None,
             history: vec![],
         };
         let v: serde_json::Value = serde_json::to_value(&result).unwrap();
         assert_eq!(v["pending"], true);
         assert_eq!(v["history_complete"], false);
         assert_eq!(v["queued"], 3);
+        assert!(v["star_history_insights"].is_null());
         assert!(v["history"].as_array().unwrap().is_empty());
     }
 
@@ -610,6 +729,7 @@ mod tests {
             history_status: "queued",
             history_unavailable: false,
             not_found: false,
+            star_history_insights: Some(derive_star_history_insights(None, &[])),
             history: vec![],
         };
         let v: serde_json::Value = serde_json::to_value(&result).unwrap();
@@ -636,6 +756,7 @@ mod tests {
             history_status: "not_public",
             history_unavailable: false,
             not_found: true,
+            star_history_insights: None,
             history: vec![],
         };
         let v: serde_json::Value = serde_json::to_value(&result).unwrap();
@@ -677,9 +798,134 @@ mod tests {
             history_status: "queued",
             history_unavailable: false,
             not_found: false,
+            star_history_insights: Some(derive_star_history_insights(None, &[])),
             history: vec![],
         };
         let v: serde_json::Value = serde_json::to_value(&result).unwrap();
         assert!(v["created_at"].is_null());
+    }
+
+    #[test]
+    fn star_history_milestones_measure_from_repository_creation() {
+        let created = Utc.with_ymd_and_hms(2020, 1, 1, 0, 0, 0).unwrap();
+        let points = [(4_i64, 100_u32), (20, 1_000), (200, 10_000), (500, 100_000)]
+            .into_iter()
+            .map(|(days, stars)| Point {
+                at: created + chrono::Duration::days(days),
+                stars,
+            })
+            .collect::<Vec<_>>();
+        let insights = derive_star_history_insights(Some(created), &points);
+        assert_eq!(
+            insights
+                .milestones
+                .iter()
+                .map(|milestone| (
+                    milestone.stars,
+                    milestone.days_from_creation,
+                    milestone.reached_at
+                ))
+                .collect::<Vec<_>>(),
+            vec![
+                (
+                    100,
+                    Some(4),
+                    Some(created.date_naive() + chrono::Duration::days(4))
+                ),
+                (
+                    1_000,
+                    Some(20),
+                    Some(created.date_naive() + chrono::Duration::days(20))
+                ),
+                (
+                    10_000,
+                    Some(200),
+                    Some(created.date_naive() + chrono::Duration::days(200))
+                ),
+                (
+                    100_000,
+                    Some(500),
+                    Some(created.date_naive() + chrono::Duration::days(500))
+                ),
+            ]
+        );
+    }
+
+    #[test]
+    fn star_history_records_use_rolling_day_week_and_thirty_day_windows() {
+        let at = |day: u32| Utc.with_ymd_and_hms(2026, 1, day, 0, 0, 0).unwrap();
+        let points = vec![
+            Point {
+                at: at(1),
+                stars: 5,
+            },
+            Point {
+                at: at(2),
+                stars: 25,
+            },
+            Point {
+                at: at(8),
+                stars: 125,
+            },
+            Point {
+                at: at(9),
+                stars: 175,
+            },
+        ];
+        let insights = derive_star_history_insights(None, &points);
+        let day = insights.largest_day.unwrap();
+        assert_eq!(day.stars_gained, 100);
+        assert_eq!(day.from, at(8).date_naive());
+        assert_eq!(day.to, at(8).date_naive());
+        assert_eq!(day.window_days, 1);
+
+        let week = insights.largest_week.unwrap();
+        assert_eq!(week.stars_gained, 150);
+        assert_eq!(week.from, at(3).date_naive());
+        assert_eq!(week.to, at(9).date_naive());
+        assert_eq!(week.window_days, 7);
+
+        let month = insights.largest_month.unwrap();
+        assert_eq!(month.stars_gained, 175);
+        assert_eq!(month.to, at(9).date_naive());
+        assert_eq!(month.window_days, 30);
+    }
+
+    #[test]
+    fn star_history_insights_normalize_duplicate_days_and_decreasing_totals() {
+        let at = |day: u32| Utc.with_ymd_and_hms(2026, 2, day, 0, 0, 0).unwrap();
+        let insights = derive_star_history_insights(
+            None,
+            &[
+                Point {
+                    at: at(2),
+                    stars: 90,
+                },
+                Point {
+                    at: at(1),
+                    stars: 100,
+                },
+                Point {
+                    at: at(2),
+                    stars: 80,
+                },
+            ],
+        );
+        assert_eq!(
+            insights
+                .largest_day
+                .as_ref()
+                .map(|record| record.stars_gained),
+            Some(100)
+        );
+        assert_eq!(
+            insights
+                .largest_week
+                .as_ref()
+                .map(|record| record.stars_gained),
+            Some(100),
+            "a decreasing cumulative total cannot invent additional stars"
+        );
+        assert_eq!(insights.milestones[0].reached_at, Some(at(1).date_naive()));
     }
 }

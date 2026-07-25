@@ -32,12 +32,23 @@ use std::sync::OnceLock;
 use std::time::{Duration, SystemTime};
 
 use chrono::{TimeZone, Utc};
-use gitdebt::{cache::Cache, db::Db, queue, repo_history::RepoStorage, repo_stats, worker};
+use gitdebt::{
+    cache::Cache, db::Db, github::RepoMetadata, queue, repo_history::RepoStorage, repo_stats,
+    worker,
+};
 use sqlx::postgres::PgPoolOptions;
 use tokio::sync::Mutex;
 
 static SCHEMA_READY: OnceLock<()> = OnceLock::new();
 static SCHEMA_LOCK: Mutex<()> = Mutex::const_new(());
+
+fn metadata(id: u64, stars: u64) -> RepoMetadata {
+    RepoMetadata {
+        id: Some(id),
+        stargazers_count: stars,
+        ..RepoMetadata::default()
+    }
+}
 
 /// Returns a connected `Db` if a test database is configured, else `None`
 /// (the test then no-ops). Keeps the suite green where no DB exists.
@@ -145,7 +156,7 @@ async fn metadata_backfill_sweep_heals_legacy_complete_repos() {
         .await
         .unwrap();
     cache
-        .put_repo_metadata(&healed, Some(9002), 1, 0, None)
+        .put_repo_metadata(&healed, &metadata(9002, 1))
         .await
         .unwrap();
     let tombstoned = format!("{prefix}tombstoned");
@@ -209,7 +220,7 @@ async fn metadata_backfill_sweep_heals_legacy_complete_repos() {
     // fallback worker write metadata via `put_repo_metadata` before touching
     // any history — no stargazer pagination involved.
     cache
-        .put_repo_metadata(&legacy, Some(9001), 1, 0, None)
+        .put_repo_metadata(&legacy, &metadata(9001, 1))
         .await
         .unwrap();
     queue::complete(&db, &legacy).await.unwrap();
@@ -242,6 +253,110 @@ async fn metadata_backfill_sweep_heals_legacy_complete_repos() {
             queue::complete(&db, &repo).await.unwrap();
         }
     }
+    cleanup(&db, prefix).await;
+}
+
+#[tokio::test]
+async fn metadata_snapshot_is_atomically_replaced_and_opens_the_public_gate() {
+    let Some(db) = test_db().await else {
+        eprintln!("skipping: set GITDEBT_TEST_DATABASE_URL to run");
+        return;
+    };
+    let prefix = "gitdebt-test-metadata-snapshot/";
+    let repo = format!("{prefix}repo");
+    cleanup(&db, prefix).await;
+    let cache = Cache::new(db.clone());
+
+    sqlx::query("INSERT INTO repos (repo, missing) VALUES ($1, TRUE)")
+        .bind(&repo)
+        .execute(&db.pool)
+        .await
+        .unwrap();
+    assert!(
+        cache
+            .put_repo_metadata(
+                &repo,
+                &RepoMetadata {
+                    private: true,
+                    id: Some(77),
+                    ..RepoMetadata::default()
+                }
+            )
+            .await
+            .is_err(),
+        "the cache writer must preserve the public-only product boundary"
+    );
+    let still_closed = cache.get_repo_summary(&repo).await.unwrap().unwrap();
+    assert!(still_closed.missing);
+    assert!(still_closed.metadata_fetched_at.is_none());
+
+    let first = RepoMetadata {
+        id: Some(77),
+        stargazers_count: 900,
+        forks_count: 31,
+        created_at: Some(Utc.timestamp_opt(1_577_836_800, 0).unwrap()),
+        archived: true,
+        pushed_at: Some(Utc.timestamp_opt(1_753_358_400, 0).unwrap()),
+        updated_at: Some(Utc.timestamp_opt(1_753_444_800, 0).unwrap()),
+        default_branch: Some("main".to_string()),
+        license: Some(gitdebt::github::RepoLicense {
+            spdx_id: Some("Apache-2.0".to_string()),
+        }),
+        topics: vec!["analytics".to_string(), "rust".to_string()],
+        has_issues: true,
+        has_discussions: true,
+        has_pages: true,
+        is_template: true,
+        subscribers_count: 88,
+        open_issues_count: 23,
+        ..RepoMetadata::default()
+    };
+    cache.put_repo_metadata(&repo, &first).await.unwrap();
+
+    let summary = cache.get_repo_summary(&repo).await.unwrap().unwrap();
+    assert!(!summary.missing);
+    assert!(summary.metadata_fetched_at.is_some());
+    assert_eq!(summary.github_id, Some(77));
+    assert_eq!(summary.star_count, Some(900));
+    assert!(summary.archived);
+    assert_eq!(summary.default_branch.as_deref(), Some("main"));
+    assert_eq!(summary.license_spdx.as_deref(), Some("Apache-2.0"));
+    assert_eq!(summary.topics, vec!["analytics", "rust"]);
+    assert!(summary.has_issues);
+    assert!(summary.has_discussions);
+    assert!(summary.has_pages);
+    assert!(summary.is_template);
+    assert_eq!(summary.subscribers_count, 88);
+    assert_eq!(summary.open_issues_count, 23);
+    assert_eq!(summary.pushed_at, first.pushed_at);
+    assert_eq!(summary.updated_at, first.updated_at);
+
+    // Mutable metadata is a snapshot, not an append-only enrichment. A
+    // later GitHub response must be able to clear removed license/topics
+    // and feature flags in the same statement that advances its timestamp.
+    let second = RepoMetadata {
+        id: Some(77),
+        stargazers_count: 901,
+        forks_count: 32,
+        default_branch: Some("trunk".to_string()),
+        topics: vec!["postgres".to_string()],
+        subscribers_count: 89,
+        open_issues_count: 24,
+        ..RepoMetadata::default()
+    };
+    cache.put_repo_metadata(&repo, &second).await.unwrap();
+    let replaced = cache.get_repo_summary(&repo).await.unwrap().unwrap();
+    assert_eq!(replaced.star_count, Some(901));
+    assert!(!replaced.archived);
+    assert_eq!(replaced.default_branch.as_deref(), Some("trunk"));
+    assert_eq!(replaced.license_spdx, None);
+    assert_eq!(replaced.topics, vec!["postgres"]);
+    assert!(!replaced.has_issues);
+    assert_eq!(replaced.subscribers_count, 89);
+    assert_eq!(replaced.open_issues_count, 24);
+    // Creation time is immutable and retained when a refresh omits it.
+    assert_eq!(replaced.created_at, first.created_at);
+
     cleanup(&db, prefix).await;
 }
 

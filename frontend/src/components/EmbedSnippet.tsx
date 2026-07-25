@@ -13,6 +13,7 @@ import { createPortal } from "react-dom";
 import { CodeBlock } from "@/components/CodeBlock";
 import { CAPTION, EYEBROW, PANEL } from "@/components/style-tokens";
 import { Button } from "@/components/ui/button";
+import { DitherSwitch } from "@/components/ui/dither-switch";
 import { CONTROL, POPOVER } from "@/components/ui/dither-surface";
 import {
   DURATION,
@@ -78,6 +79,12 @@ const THEMES: { id: ThemeChoice; label: string }[] = [
   { id: "light", label: "Light" },
   { id: "dark", label: "Dark" },
 ];
+const FORMATS: { id: Format; label: string }[] = [
+  { id: "svg", label: "SVG" },
+  { id: "gif", label: "GIF" },
+  { id: "png", label: "PNG" },
+  { id: "webp", label: "WebP" },
+];
 
 const DATE_RE = /^\d{4}-\d{2}-\d{2}$/;
 
@@ -125,6 +132,8 @@ export function EmbedSnippet({
 }: Props) {
   const [mode, setMode] = useState<Mode>("markdown");
   const [theme, setTheme] = useState<ThemeChoice>("auto");
+  const [selectedFormat, setSelectedFormat] = useState<Format>("svg");
+  const [animate, setAnimate] = useState(false);
   const [open, setOpen] = useState(false);
   const rootRef = useRef<HTMLDivElement>(null);
   const triggerRef = useRef<HTMLButtonElement>(null);
@@ -180,12 +189,12 @@ export function EmbedSnippet({
   }, [open, variant]);
 
   const supportsGif = GIF_ASSET_RE.test(chartPath);
-  // The share workflow always chooses the motion-preserving representation.
-  // Raw SVG/PNG/WebP endpoints remain available as stable API contracts, but
-  // the product no longer asks people to accidentally export a dull frame.
-  const selectedFormat: Format = supportsGif ? "gif" : "svg";
+  useEffect(() => {
+    if (selectedFormat === "gif" && !supportsGif) setSelectedFormat("svg");
+  }, [selectedFormat, supportsGif]);
 
-  const formatParams = selectedFormat === "svg" ? ["animate=1"] : [];
+  const formatParams =
+    selectedFormat === "svg" && animate ? ["animate=1"] : [];
   const base = appendParams(
     `${apiBase}${withFormat(chartPath, selectedFormat)}`,
     [...stateParams(state), ...formatParams, `render=${MEDIA_RENDER_REVISION}`],
@@ -213,7 +222,7 @@ export function EmbedSnippet({
   const snippet = mode === "markdown" ? markdown : html;
 
   const controls = (
-    <div className="grid grid-cols-2 gap-2">
+    <div className="grid grid-cols-1 gap-2 sm:grid-cols-3">
       <label className={`${EYEBROW} grid gap-1.5`}>
         Theme
         <SelectField
@@ -229,6 +238,24 @@ export function EmbedSnippet({
         </SelectField>
       </label>
       <label className={`${EYEBROW} grid gap-1.5`}>
+        Format
+        <SelectField
+          name="format"
+          value={selectedFormat}
+          onChange={(event) =>
+            setSelectedFormat(event.target.value as Format)
+          }
+        >
+          {FORMATS.filter(
+            (format) => format.id !== "gif" || supportsGif,
+          ).map((format) => (
+            <option key={format.id} value={format.id}>
+              {format.label}
+            </option>
+          ))}
+        </SelectField>
+      </label>
+      <label className={`${EYEBROW} grid gap-1.5`}>
         Snippet
         <SelectField
           value={mode}
@@ -238,11 +265,28 @@ export function EmbedSnippet({
           <option value="html">HTML</option>
         </SelectField>
       </label>
+      {selectedFormat === "svg" && (
+        <div className="flex items-center justify-between gap-3 sm:col-span-3">
+          <span className={EYEBROW}>SVG motion</span>
+          <DitherSwitch
+            id={`${controlId}-motion`}
+            checked={animate}
+            onCheckedChange={setAnimate}
+            aria-label="Animate SVG where the viewer supports it"
+          />
+        </div>
+      )}
       <span
         id={`${controlId}-animated`}
-        className="col-span-2 font-mono text-[11px] uppercase tracking-[0.12em] text-muted-foreground"
+        className="font-mono text-[11px] tracking-[0.12em] text-muted-foreground uppercase sm:col-span-3"
       >
-        {supportsGif ? "Animated GIF · GitHub-safe motion" : "Animated SVG"}
+        {selectedFormat === "svg"
+          ? animate
+            ? "SVG · animated where supported"
+            : "SVG · default · static README frame"
+          : selectedFormat === "gif"
+            ? "Animated GIF · GitHub-safe motion"
+            : `${selectedFormat.toUpperCase()} · static raster`}
       </span>
     </div>
   );

@@ -1232,12 +1232,12 @@ export function LiveUserProfile({
           <div className={SECTION_HEADER}>
             <h2 className={HEADING}>Add to your README</h2>
             <p className="font-mono text-[11px] text-muted-foreground">
-              gif · svg · png · webp
+              svg · gif · png · webp
             </p>
           </div>
           <p className={cn(BODY, "mt-2 max-w-[70ch]")}>
-            Every profile asset ships an animated dither GIF plus light and
-            dark static variants behind a{" "}
+            Every profile asset defaults to animated SVG, with GitHub-safe GIF
+            and static PNG/WebP variants available behind a{" "}
             <code className="font-mono text-[12px] text-foreground">&lt;picture&gt;</code>{" "}
             element, so they follow the reader's GitHub theme. Copy a snippet and
             paste it into your profile README.
@@ -1315,7 +1315,8 @@ export function LiveUserProfile({
           </div>
           <p className={cn(BODY, "mt-3")}>
             Each repository page carries the full star-history chart plus
-            code-health signals — churn, bug magnets, bus factor and more.
+            code-health signals — file change frequency, fix-labelled changes,
+            bus factor and more.
           </p>
         </section>
       )}

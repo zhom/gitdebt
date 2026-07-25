@@ -157,7 +157,7 @@ const description = data
           : firstStarYear
             ? ` since ${firstStarYear}`
             : ""
-    }. ${archiveHistory ? "Approximate public star-activity chart" : "Full star-history chart"} plus repo health: bug-magnet files, churn, contributors, commit heatmap, TODO trend.`
+    }. ${archiveHistory ? "Approximate public star-activity chart" : "Full star-history chart"} plus repo health: fix-labelled changes, file change frequency, contributors, commit activity, and recent TODO/FIXME movement.`
   : `Star history and repo-debt insights for ${repoSlug}.`;
 
 const ogImage = `${apiBase}/api/repos/${owner}/${repo}/og.png`;
@@ -409,7 +409,7 @@ const vsLinks = (categoryRelated.length > 0 ? categoryRelated : FALLBACK_SUGGEST
 
         <section id="stats" class="mt-16 scroll-mt-24 border-t border-border/60 pt-12">
           <div class={SECTION_HEADER}>
-            <h2 class={HEADING}>Where fixes and churn concentrate</h2>
+            <h2 class={HEADING}>Where changes concentrate</h2>
             <a href="/about" class={SECTION_ACTION}>
               methodology
               <span
@@ -420,8 +420,9 @@ const vsLinks = (categoryRelated.length > 0 ? categoryRelated : FALLBACK_SUGGEST
             </a>
           </div>
           <p class:list={["mt-2 max-w-[68ch]", BODY]}>
-            Fix concentration, file churn, ownership risk, and maintenance
-            cadence for {repoSlug}, each computed from its commit history.
+            Fix-labelled changes, file change frequency, ownership risk, and
+            maintenance cadence for {repoSlug}, each computed from its analyzed
+            commit window.
           </p>
           <div class="mt-6">
             <InteractiveRepoSignals

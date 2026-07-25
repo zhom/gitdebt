@@ -368,8 +368,24 @@ pub struct CommitInfo {
     pub message_first_line: String,
     pub is_fix: bool,
     pub paths_changed: Vec<String>,
+    /// Per-path line movement from `git --numstat`. Binary files carry zero
+    /// line counts and set `binary = true`. Root commits stay excluded from
+    /// change-frequency/churn aggregates so an initial import cannot dominate
+    /// every later repository signal.
+    pub file_changes: Vec<FileChange>,
+    pub lines_added: u64,
+    pub lines_deleted: u64,
+    pub binary_files: u32,
     pub todo_added: u32,
     pub todo_removed: u32,
+}
+
+#[derive(Clone, Debug, Serialize)]
+pub struct FileChange {
+    pub path: String,
+    pub lines_added: u64,
+    pub lines_deleted: u64,
+    pub binary: bool,
 }
 
 /// Record-separator sentinel emitted at the start of each commit's
@@ -685,10 +701,12 @@ pub(crate) async fn walk_commit_batch(
     Ok(parse_log_records(&output.stdout))
 }
 
-/// Read author, date, message, and changed-path metadata without materializing
-/// historical file bodies. `--name-only --no-renames` needs commit trees but
-/// not blobs, and preserves the old path-set contract for renames (delete +
-/// add) while keeping the primary repository signals fast.
+/// Read author, date, message, changed paths, and line movement without
+/// materializing historical file bodies. `--numstat --no-renames` needs commit
+/// trees but not blobs and preserves the old path-set contract for renames
+/// (delete + add). Rename-only commits can therefore report line movement;
+/// this is intentional and documented as Git numstat churn rather than edit
+/// distance.
 pub(crate) async fn walk_commit_metadata_batch(
     handle: &RepoHandle,
     shas: &[String],
@@ -702,7 +720,7 @@ pub(crate) async fn walk_commit_metadata_batch(
     command.args([
         "log",
         "--no-walk=unsorted",
-        "--name-only",
+        "--numstat",
         "-z",
         "--no-renames",
         &format!("--format={log_format}"),
@@ -740,18 +758,33 @@ fn parse_metadata_record(record: &[u8]) -> Option<CommitInfo> {
     let committed_at = DateTime::parse_from_rfc3339(iso.trim())
         .map(|date| date.with_timezone(&Utc))
         .unwrap_or_else(|_| Utc::now());
-    let paths_changed = if is_root {
-        Vec::new()
-    } else {
-        segments
-            .map(|path| {
-                String::from_utf8_lossy(path)
-                    .trim_matches(|character| character == '\n' || character == '\r')
-                    .to_string()
-            })
-            .filter(|path| !path.is_empty())
-            .collect()
-    };
+    let mut file_changes = Vec::new();
+    if !is_root {
+        for segment in segments {
+            if segment.is_empty() {
+                continue;
+            }
+            if let NumstatEntry::Path {
+                path,
+                lines_added,
+                lines_deleted,
+                binary,
+            } = numstat_entry(segment)
+            {
+                file_changes.push(FileChange {
+                    path,
+                    lines_added,
+                    lines_deleted,
+                    binary,
+                });
+            }
+        }
+    }
+    let paths_changed = file_changes
+        .iter()
+        .map(|change| change.path.clone())
+        .collect();
+    let (lines_added, lines_deleted, binary_files) = summarize_file_changes(&file_changes);
 
     Some(CommitInfo {
         sha,
@@ -762,6 +795,10 @@ fn parse_metadata_record(record: &[u8]) -> Option<CommitInfo> {
         is_fix: is_fix_message(&message_first_line),
         message_first_line,
         paths_changed,
+        file_changes,
+        lines_added,
+        lines_deleted,
+        binary_files,
         todo_added: 0,
         todo_removed: 0,
     })
@@ -833,7 +870,7 @@ fn parse_one_record(record: &[u8]) -> Option<CommitInfo> {
     //     We push BOTH so the path set matches the OLD rename-OFF
     //     `diff-tree --name-only` (which listed add + delete). The first
     //     numstat entry carries a leading `\n` from the -z formatting.
-    let mut paths_changed = Vec::new();
+    let mut file_changes = Vec::new();
     let mut patch: &[u8] = &[];
     // Skip the leading empty segment that always follows the subject NUL.
     let mut rest: Vec<&[u8]> = segs.collect();
@@ -850,23 +887,49 @@ fn parse_one_record(record: &[u8]) -> Option<CommitInfo> {
         }
         match numstat_entry(seg) {
             // Normal entry with an inline path.
-            NumstatEntry::Path(path) => {
+            NumstatEntry::Path {
+                path,
+                lines_added,
+                lines_deleted,
+                binary,
+            } => {
                 if !is_root {
-                    paths_changed.push(path);
+                    file_changes.push(FileChange {
+                        path,
+                        lines_added,
+                        lines_deleted,
+                        binary,
+                    });
                 }
                 i += 1;
             }
             // Rename/copy: the old + new paths are the next two segments.
-            NumstatEntry::RenamePair => {
+            NumstatEntry::RenamePair {
+                lines_added,
+                lines_deleted,
+                binary,
+            } => {
                 if let (Some(old), Some(new)) = (rest.get(i + 1), rest.get(i + 2)) {
                     if !is_root {
                         let old = String::from_utf8_lossy(old).trim().to_string();
                         let new = String::from_utf8_lossy(new).trim().to_string();
                         if !old.is_empty() {
-                            paths_changed.push(old);
+                            // Preserve the historical old+new touch set without
+                            // double-counting the rename's numstat movement.
+                            file_changes.push(FileChange {
+                                path: old,
+                                lines_added: 0,
+                                lines_deleted: 0,
+                                binary,
+                            });
                         }
                         if !new.is_empty() {
-                            paths_changed.push(new);
+                            file_changes.push(FileChange {
+                                path: new,
+                                lines_added,
+                                lines_deleted,
+                                binary,
+                            });
                         }
                     }
                     i += 3; // entry + two path segments
@@ -885,6 +948,11 @@ fn parse_one_record(record: &[u8]) -> Option<CommitInfo> {
     // TODO deltas are scanned from the patch unconditionally — including
     // the root commit, whose full content the OLD `git show` path scanned.
     let (todo_added, todo_removed) = scan_todos(patch);
+    let paths_changed = file_changes
+        .iter()
+        .map(|change| change.path.clone())
+        .collect();
+    let (lines_added, lines_deleted, binary_files) = summarize_file_changes(&file_changes);
 
     Some(CommitInfo {
         sha,
@@ -895,6 +963,10 @@ fn parse_one_record(record: &[u8]) -> Option<CommitInfo> {
         message_first_line: subject,
         is_fix,
         paths_changed,
+        file_changes,
+        lines_added,
+        lines_deleted,
+        binary_files,
         todo_added,
         todo_removed,
     })
@@ -903,10 +975,19 @@ fn parse_one_record(record: &[u8]) -> Option<CommitInfo> {
 /// Classification of one `--numstat -z` segment.
 enum NumstatEntry {
     /// `<add>\t<rem>\t<path>` — a normal change with an inline path.
-    Path(String),
+    Path {
+        path: String,
+        lines_added: u64,
+        lines_deleted: u64,
+        binary: bool,
+    },
     /// `<add>\t<rem>\t` with an empty path field — a rename/copy whose old
     /// and new paths are the next two NUL segments.
-    RenamePair,
+    RenamePair {
+        lines_added: u64,
+        lines_deleted: u64,
+        binary: bool,
+    },
     /// Not a recognizable numstat entry (no two tabs) — ignore defensively.
     Skip,
 }
@@ -921,22 +1002,53 @@ enum NumstatEntry {
 fn numstat_entry(seg: &[u8]) -> NumstatEntry {
     let s = String::from_utf8_lossy(seg);
     let mut it = s.splitn(3, '\t');
-    let Some(_added) = it.next() else {
+    let Some(added) = it.next() else {
         return NumstatEntry::Skip;
     };
-    let Some(_removed) = it.next() else {
+    let Some(removed) = it.next() else {
         return NumstatEntry::Skip;
     };
     let Some(path) = it.next() else {
         // Fewer than two tabs ⇒ not a numstat entry.
         return NumstatEntry::Skip;
     };
+    let added = added.trim_start_matches(['\n', '\r']);
+    let binary = added == "-" || removed == "-";
+    let lines_added = if binary {
+        0
+    } else {
+        added.parse().unwrap_or(0)
+    };
+    let lines_deleted = if binary {
+        0
+    } else {
+        removed.parse().unwrap_or(0)
+    };
     let path = path.trim();
     if path.is_empty() {
-        NumstatEntry::RenamePair
+        NumstatEntry::RenamePair {
+            lines_added,
+            lines_deleted,
+            binary,
+        }
     } else {
-        NumstatEntry::Path(path.to_string())
+        NumstatEntry::Path {
+            path: path.to_string(),
+            lines_added,
+            lines_deleted,
+            binary,
+        }
     }
+}
+
+fn summarize_file_changes(changes: &[FileChange]) -> (u64, u64, u32) {
+    changes.iter().fold((0, 0, 0), |acc, change| {
+        (
+            acc.0.saturating_add(change.lines_added),
+            acc.1.saturating_add(change.lines_deleted),
+            acc.2.saturating_add(u32::from(change.binary)),
+        )
+    })
 }
 
 /// Count TODO/FIXME additions/removals in a `-p --unified=0` patch body,
@@ -1304,6 +1416,10 @@ mod tests {
         assert_eq!(c.message_first_line, "init");
         assert!(!c.is_fix);
         assert_eq!(c.paths_changed, vec!["a.txt"]);
+        assert_eq!(c.lines_added, 2);
+        assert_eq!(c.lines_deleted, 0);
+        assert_eq!(c.binary_files, 0);
+        assert_eq!(c.file_changes.len(), 1);
         assert_eq!(c.todo_added, 1);
         assert_eq!(c.todo_removed, 0);
         assert_eq!(c.committed_day.to_string(), "2021-01-01");
@@ -1344,6 +1460,14 @@ mod tests {
             c.paths_changed,
             vec!["bin.dat", "t.txt", "with space.txt"],
             "binary + spaced paths preserved exactly"
+        );
+        assert_eq!(c.lines_added, 2);
+        assert_eq!(c.lines_deleted, 1);
+        assert_eq!(c.binary_files, 1);
+        assert!(
+            c.file_changes
+                .iter()
+                .any(|change| change.path == "bin.dat" && change.binary)
         );
         assert_eq!(c.todo_added, 1, "one FIXME added");
         assert_eq!(c.todo_removed, 1, "one TODO removed");

@@ -304,11 +304,10 @@ impl GithubClient {
         }
     }
 
-    /// Fetch repo metadata. We only persist the fields the star-history
-    /// + usage surfaces use: the authoritative `stargazers_count`
-    ///
-    /// (sanity-checks our own pagination), `forks_count`, and the repo
-    /// `created_at`.
+    /// Fetch public repository metadata used by star-history, health and
+    /// comparison surfaces. GitHub's repository response already carries
+    /// these fields, so retaining them adds no API calls and lets report
+    /// request paths remain Postgres-only.
     pub async fn repo_metadata(
         &self,
         owner: &str,
@@ -612,11 +611,10 @@ pub struct RepoList {
     pub truncated: bool,
 }
 
-/// Slimmed repo-metadata response. GitHub returns ~100 fields on this
-/// endpoint; deserializing all of them is expensive at no benefit. We
-/// only pull what the star-history + usage surfaces use: the
-/// authoritative star count, the fork count, and the repo creation date.
-#[derive(Debug, Clone, Deserialize)]
+/// Slimmed public repository response. GitHub returns roughly one hundred
+/// fields here; these are the stable repository-level facts used by
+/// star-history, health, comparison and SEO report surfaces.
+#[derive(Debug, Clone, Default, Deserialize)]
 pub struct RepoMetadata {
     #[serde(default)]
     pub private: bool,
@@ -628,6 +626,38 @@ pub struct RepoMetadata {
     pub forks_count: u64,
     #[serde(default)]
     pub created_at: Option<DateTime<Utc>>,
+    #[serde(default)]
+    pub archived: bool,
+    #[serde(default)]
+    pub pushed_at: Option<DateTime<Utc>>,
+    #[serde(default)]
+    pub updated_at: Option<DateTime<Utc>>,
+    #[serde(default)]
+    pub default_branch: Option<String>,
+    #[serde(default)]
+    pub license: Option<RepoLicense>,
+    #[serde(default)]
+    pub topics: Vec<String>,
+    #[serde(default)]
+    pub has_issues: bool,
+    #[serde(default)]
+    pub has_discussions: bool,
+    #[serde(default)]
+    pub has_pages: bool,
+    #[serde(default)]
+    pub is_template: bool,
+    #[serde(default)]
+    pub subscribers_count: u64,
+    /// GitHub's `open_issues_count` includes open pull requests. Keep the
+    /// upstream name so consumers do not mislabel it as issue-only.
+    #[serde(default)]
+    pub open_issues_count: u64,
+}
+
+#[derive(Debug, Clone, Default, Deserialize)]
+pub struct RepoLicense {
+    #[serde(default)]
+    pub spdx_id: Option<String>,
 }
 
 /// One entry from `/users/{login}/repos`, slimmed to what the org/user
@@ -685,6 +715,51 @@ mod tests {
         assert_eq!(bot.kind(), AccountKind::User);
         let bare: User = serde_json::from_str(r#"{"login":"x","id":2}"#).unwrap();
         assert_eq!(bare.kind(), AccountKind::User);
+    }
+
+    #[test]
+    fn repo_metadata_decodes_the_retained_public_fields() {
+        let metadata: RepoMetadata = serde_json::from_str(
+            r#"{
+                "id": 1024,
+                "private": false,
+                "stargazers_count": 123,
+                "forks_count": 7,
+                "created_at": "2020-01-01T00:00:00Z",
+                "archived": true,
+                "pushed_at": "2026-07-24T12:30:00Z",
+                "updated_at": "2026-07-24T14:00:00Z",
+                "default_branch": "main",
+                "license": {"spdx_id": "Apache-2.0"},
+                "topics": ["analytics", "rust"],
+                "has_issues": true,
+                "has_discussions": true,
+                "has_pages": false,
+                "is_template": false,
+                "subscribers_count": 42,
+                "open_issues_count": 19
+            }"#,
+        )
+        .unwrap();
+        assert_eq!(metadata.id, Some(1024));
+        assert!(metadata.archived);
+        assert_eq!(metadata.default_branch.as_deref(), Some("main"));
+        assert_eq!(
+            metadata
+                .license
+                .as_ref()
+                .and_then(|license| license.spdx_id.as_deref()),
+            Some("Apache-2.0")
+        );
+        assert_eq!(metadata.topics, vec!["analytics", "rust"]);
+        assert!(metadata.has_issues);
+        assert!(metadata.has_discussions);
+        assert!(!metadata.has_pages);
+        assert!(!metadata.is_template);
+        assert_eq!(metadata.subscribers_count, 42);
+        assert_eq!(metadata.open_issues_count, 19);
+        assert!(metadata.pushed_at.is_some());
+        assert!(metadata.updated_at.is_some());
     }
 
     /// The two repos endpoints take different, non-overlapping `type`

@@ -239,7 +239,7 @@ export function pageInsightForPath(pathname: string): PageInsight {
       eyebrow: "comparison signal // dual contour",
       question: `What should you compare between ${left} and ${right}?`,
       answer:
-        "Compare the shape of star growth alongside maintenance cadence, contributor concentration, language footprint, churn and code-risk signals. Popularity shows reach; the repository-health evidence explains the maintenance cost behind it.",
+        "Compare the shape of star growth alongside maintenance cadence, contributor concentration, language footprint, file change frequency, and code signals. Popularity shows reach; repository-health evidence explains the maintenance context behind it.",
       labels: [left, right],
       values: segmentValues(segments.slice(1), seed),
     };
@@ -256,7 +256,7 @@ export function pageInsightForPath(pathname: string): PageInsight {
         ? `How should ${category} repositories be compared?`
         : "How should two GitHub repositories be compared?",
       answer:
-        "Start with star-history shape, then test whether commit cadence, ownership depth, churn and dominant languages support the same conclusion. gitdebt keeps attention signals and maintenance evidence visible together.",
+        "Start with star-history shape, then test whether commit cadence, ownership depth, file change frequency, and dominant languages support the same conclusion. gitdebt keeps attention signals and maintenance evidence visible together.",
       labels: category ? [category, "maintenance evidence"] : ["attention", "maintenance"],
       values: segmentValues(segments, seed),
     };
@@ -274,7 +274,7 @@ export function pageInsightForPath(pathname: string): PageInsight {
       seed,
       eyebrow: "repository signal // neon mosaic",
       question: `What does the ${repository} report measure?`,
-      answer: `The report combines ${repository}'s cumulative GitHub star history with commit activity, contributor concentration, churn and code-quality evidence. Use the chart for attention over time and the maintenance panels to locate where future work is likely to concentrate.`,
+      answer: `The report combines ${repository}'s cumulative GitHub star history with commit activity, contributor concentration, file change frequency, and code signals. Use the chart for attention over time and the maintenance panels to locate where future work is likely to concentrate.`,
       labels: [repository, "stars + code health"],
       values: segmentValues(segments, seed),
     };
@@ -301,7 +301,7 @@ export function pageInsightForPath(pathname: string): PageInsight {
     eyebrow: "gitdebt signal // live mosaic",
     question: "What can gitdebt tell you about a GitHub repository?",
     answer:
-      "gitdebt charts star history and pairs it with repository-health evidence: maintenance cadence, churn, contributor concentration and code-risk hotspots. Reports are designed for investigation first and README embedding second.",
+      "gitdebt charts star history and pairs it with repository-health evidence: maintenance cadence, file change frequency, contributor concentration, and fix-labelled changes. Reports are designed for investigation first and README embedding second.",
     labels: ["star history", "repository health"],
     values: segmentValues(segments.length > 0 ? segments : ["gitdebt"], seed),
   };

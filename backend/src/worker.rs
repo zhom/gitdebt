@@ -174,15 +174,7 @@ pub async fn sweep_stale_metadata(cache: &Cache, github: &Arc<GithubClient>) -> 
         };
         match github.repo_metadata(owner, name).await {
             Ok(Some(metadata)) => {
-                cache
-                    .put_repo_metadata(
-                        &repo,
-                        metadata.id,
-                        metadata.stargazers_count,
-                        metadata.forks_count,
-                        metadata.created_at,
-                    )
-                    .await?;
+                cache.put_repo_metadata(&repo, &metadata).await?;
                 refreshed += 1;
             }
             // A repository that has become private or was deleted is
@@ -488,15 +480,7 @@ async fn process(ctx: &WorkerCtx, job: &queue::Job) -> Result<Outcome> {
     {
         match ctx.github.repo_metadata(&owner, &repo).await? {
             Some(metadata) => {
-                ctx.cache
-                    .put_repo_metadata(
-                        &job.repo,
-                        metadata.id,
-                        metadata.stargazers_count,
-                        metadata.forks_count,
-                        metadata.created_at,
-                    )
-                    .await?;
+                ctx.cache.put_repo_metadata(&job.repo, &metadata).await?;
             }
             None => return Err(GithubError::NotFound(job.repo.clone()).into()),
         }
@@ -533,15 +517,7 @@ async fn process(ctx: &WorkerCtx, job: &queue::Job) -> Result<Outcome> {
     {
         return match ctx.github.repo_metadata(&owner, &repo).await? {
             Some(metadata) => {
-                ctx.cache
-                    .put_repo_metadata(
-                        &job.repo,
-                        metadata.id,
-                        metadata.stargazers_count,
-                        metadata.forks_count,
-                        metadata.created_at,
-                    )
-                    .await?;
+                ctx.cache.put_repo_metadata(&job.repo, &metadata).await?;
                 Ok(Outcome::Restricted { fetched: 0 })
             }
             None => Err(GithubError::NotFound(job.repo.clone()).into()),
@@ -615,15 +591,7 @@ async fn full_fetch<S: PageSource + Sync>(
         let (owner, name) = split_slug(repo);
         match ctx.github.repo_metadata(&owner, &name).await? {
             Some(metadata) => {
-                ctx.cache
-                    .put_repo_metadata(
-                        repo,
-                        metadata.id,
-                        metadata.stargazers_count,
-                        metadata.forks_count,
-                        metadata.created_at,
-                    )
-                    .await?;
+                ctx.cache.put_repo_metadata(repo, &metadata).await?;
                 authoritative = Some(metadata.stargazers_count as i64);
             }
             None => return Err(GithubError::NotFound(repo.to_string()).into()),

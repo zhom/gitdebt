@@ -3,6 +3,8 @@ import { useEffect, useMemo, useState } from "react";
 import { DitherAreaChart, type DitherPoint } from "@/components/DitherAreaChart";
 import { DitherMeter } from "@/components/DitherMeter";
 import { EmbedSnippet } from "@/components/EmbedSnippet";
+import { FileAgeRings } from "@/components/FileAgeRings";
+import { FileCouplingNetwork } from "@/components/FileCouplingNetwork";
 import { StatCard } from "@/components/StatCard";
 import { languageColor } from "@/components/language-colors";
 import {
@@ -12,21 +14,12 @@ import {
   KPI,
   PANEL,
 } from "@/components/style-tokens";
-import { BAYER4, INK, OFF_TIER, SWATCH } from "@/lib/dither";
+import { SWATCH } from "@/lib/dither";
+import type {
+  FileAgeBand,
+  FileCoupling,
+} from "@/lib/repo-signal-visuals";
 import { cn } from "@/lib/utils";
-
-/**
- * A heatmap day is one dither cell: the same density-to-alpha rule the charts
- * use, so the section speaks one visual language instead of three.
- */
-function heatAlpha(value: number, max: number, index: number): number {
-  const density = max > 0 ? value / max : 0;
-  const lit = density > BAYER4[index & 3][(index >> 2) & 3];
-  const alpha = (0.3 + 0.7 * density) * (lit ? 1 : OFF_TIER);
-  return Math.round(alpha * 1000) / 1000;
-}
-
-const INK_RGB = `${INK[0]}, ${INK[1]}, ${INK[2]}`;
 
 type FileSignal = { path: string; commits: number; fix_commits: number };
 type Author = { label: string; login?: string; avatar_url?: string; commits: number };
@@ -45,17 +38,19 @@ type Stats = {
   commit_days: Day[];
   todo_days: Day[];
   languages: Language[];
+  file_age_bands?: FileAgeBand[];
+  file_couplings?: FileCoupling[];
 };
 
 const FALLBACK = [
-  ["bug-magnets", "Bug-magnet files"],
-  ["top-files", "Most-changed files"],
+  ["bug-magnets", "Fix-labelled changes"],
+  ["top-files", "File change frequency"],
   ["bus-factor", "Bus factor"],
   ["commit-trend", "Maintenance pulse"],
   ["contributors", "Contributors"],
   ["lines", "Language activity"],
   ["heatmap", "Commit activity"],
-  ["todo-trend", "TODO/FIXME trend"],
+  ["todo-trend", "Recent TODO/FIXME movement"],
 ] as const;
 
 function compact(value: number): string {
@@ -124,7 +119,6 @@ type Props = { apiBase: string; slug: string; embedLink: string };
 export function InteractiveRepoSignals(props: Props) {
   const { apiBase, slug, embedLink } = props;
   const [stats, setStats] = useState<Stats | null>(null);
-  const [activeDay, setActiveDay] = useState<Day | null>(null);
 
   useEffect(() => {
     let active = true;
@@ -166,17 +160,47 @@ export function InteractiveRepoSignals(props: Props) {
     .filter((file) => file.fix_commits > 0)
     .sort((a, b) => b.fix_commits - a.fix_commits)
     .slice(0, 10);
-  const filesByChurn = [...stats.files].sort((a, b) => b.commits - a.commits).slice(0, 10);
+  const filesByFrequency = [...stats.files].sort((a, b) => b.commits - a.commits).slice(0, 10);
   const risk = stats.bus_factor <= 1 ? "Solo" : stats.bus_factor === 2 ? "High" : stats.bus_factor === 3 ? "Medium" : "Low";
   const majorAuthors = stats.authors.filter((author) => author.commits / totalAuthored >= 0.01).slice(0, 8);
-  const heatmap = stats.commit_days.slice(-364);
-  const heatMax = Math.max(1, ...heatmap.map((day) => day.value));
+  const hasFileAges = (stats.file_age_bands?.length ?? 0) > 0;
+  const hasCouplings = (stats.file_couplings?.length ?? 0) > 0;
+  const singleNewVisual = hasFileAges !== hasCouplings;
 
   return (
     <div className="space-y-10">
+      {stats.analysis_truncated && (
+        <p className="border-l-2 border-accent/70 py-1 pl-3 text-base text-muted-foreground sm:text-sm">
+          Bounded analysis window: {compact(stats.analysis_scope_commits)} of{" "}
+          {compact(stats.total_commits)} repository commits were read. Change
+          frequency, fix-labelled changes, contributors, and TODO/FIXME
+          movement below describe only that window.
+        </p>
+      )}
       <div className="grid gap-x-10 gap-y-14 sm:grid-cols-2">
-        <FileBars apiBase={apiBase} slug={slug} embedLink={embedLink} name="bug-magnets" label="Where fixes cluster" rows={filesByFix.map((file) => ({ label: file.path, value: file.fix_commits }))} />
-        <FileBars apiBase={apiBase} slug={slug} embedLink={embedLink} name="top-files" label="Files carrying the churn" rows={filesByChurn.map((file) => ({ label: file.path, value: file.commits }))} />
+        <FileBars apiBase={apiBase} slug={slug} embedLink={embedLink} name="bug-magnets" label="Fix-labelled changes" rows={filesByFix.map((file) => ({ label: file.path, value: file.fix_commits }))} />
+        <FileBars apiBase={apiBase} slug={slug} embedLink={embedLink} name="top-files" label="File change frequency" rows={filesByFrequency.map((file) => ({ label: file.path, value: file.commits }))} />
+
+        {hasFileAges && (
+          <section className={cn(PANEL, singleNewVisual && "sm:col-span-2")}>
+            <header className="border-b border-border/40 px-3.5 py-3">
+              <h3 className={EYEBROW}>File age × change frequency</h3>
+            </header>
+            <FileAgeRings bands={stats.file_age_bands ?? []} />
+          </section>
+        )}
+
+        {hasCouplings && (
+          <section className={cn(PANEL, singleNewVisual && "sm:col-span-2")}>
+            <header className="border-b border-border/40 px-3.5 py-3">
+              <h3 className={EYEBROW}>Files that change together</h3>
+            </header>
+            <FileCouplingNetwork
+              couplings={stats.file_couplings ?? []}
+              seed={`${slug}:file-couplings`}
+            />
+          </section>
+        )}
 
         <section className={PANEL}>
           <SignalHeader apiBase={apiBase} slug={slug} embedLink={embedLink} name="bus-factor" label="Ownership concentration" />
@@ -212,10 +236,31 @@ export function InteractiveRepoSignals(props: Props) {
       <div className="grid gap-x-10 gap-y-14 sm:grid-cols-2">
         <section className={cn(PANEL, "sm:col-span-2")}>
           <SignalHeader apiBase={apiBase} slug={slug} embedLink={embedLink} name="contributors" label="Contributors" />
-          <div className="overflow-x-auto px-3.5 pt-10 pb-7">
-            <div className="flex min-w-max items-center pl-3 pr-8">
-              {stats.authors.slice(0, 32).map((author, index) => <ContributorAvatar key={`${author.login}-${author.label}`} author={author} index={index} large />)}
-            </div>
+          <div className="@container p-3.5">
+            <ul
+              role="list"
+              className="grid grid-cols-[repeat(auto-fit,minmax(4.5rem,1fr))] gap-x-3 gap-y-6"
+            >
+              {stats.authors.map((author) => (
+                <li
+                  key={`${author.login}-${author.label}`}
+                  className="min-w-0 text-center"
+                >
+                  <ContributorAvatar
+                    author={author}
+                    index={0}
+                    large
+                    overlap={false}
+                  />
+                  <p
+                    className="mt-2 truncate font-mono text-[0.6875rem] text-muted-foreground"
+                    title={author.label}
+                  >
+                    {author.label}
+                  </p>
+                </li>
+              ))}
+            </ul>
           </div>
         </section>
 
@@ -244,37 +289,27 @@ export function InteractiveRepoSignals(props: Props) {
           </div>
         </section>
 
-        <section className={PANEL}>
-          <SignalHeader apiBase={apiBase} slug={slug} embedLink={embedLink} name="heatmap" label="Commit activity" />
-          <div className="p-3.5">
-            <p className="mb-4 min-h-5 font-mono text-[11px] text-muted-foreground" aria-live="polite">
-              {activeDay ? `${activeDay.date} · ${activeDay.value.toLocaleString()} commit${activeDay.value === 1 ? "" : "s"} · open on GitHub` : "Hover for the exact day. Select a square to inspect its commits."}
-            </p>
-            <div className="grid grid-flow-col grid-rows-7 gap-1 overflow-x-auto overflow-y-visible py-2" aria-label="Last 52 weeks of commit activity">
-              {heatmap.map((day, index) => (
-                <a
-                  key={day.date}
-                  href={`https://github.com/${slug}/commits?since=${day.date}T00%3A00%3A00Z&until=${day.date}T23%3A59%3A59Z`}
-                  target="_blank"
-                  rel="noopener"
-                  aria-label={`${day.date}: ${day.value} commits; open on GitHub`}
-                  title={`${day.date}: ${day.value} commits`}
-                  onPointerEnter={() => setActiveDay(day)}
-                  onFocus={() => setActiveDay(day)}
-                  onPointerLeave={() => setActiveDay(null)}
-                  onBlur={() => setActiveDay(null)}
-                  className="size-2.5 rounded-[1px] outline-none transition-transform duration-200 ease-out hover:z-10 hover:-translate-y-1 hover:scale-150 focus-visible:z-10 focus-visible:-translate-y-1 focus-visible:scale-150 focus-visible:ring-2 focus-visible:ring-accent/30 motion-reduce:transition-none"
-                  style={{
-                    backgroundColor: `rgba(${INK_RGB}, ${heatAlpha(day.value, heatMax, index)})`,
-                  }}
-                />
-              ))}
-            </div>
-          </div>
-        </section>
+        <div className="sm:col-span-2">
+          <StatCard
+            src={`${apiBase}/api/repos/${slug}/stats/heatmap.svg`}
+            alt={`Commit activity for ${slug}`}
+            caption="Commit activity"
+            apiBase={apiBase}
+            embedLink={embedLink}
+            priority={true}
+            liveRepo={slug}
+          />
+          <p className={cn(CAPTION, "mt-2.5 px-1 [text-wrap:pretty]")}>
+            Rolling 52-week calendar using the same dithered activity grammar
+            as profile reports.
+            {stats.analysis_truncated
+              ? " Earlier blank days outside the bounded analysis window are labelled unobserved."
+              : ""}
+          </p>
+        </div>
 
         <section className={cn(PANEL, "sm:col-span-2")}>
-          <SignalHeader apiBase={apiBase} slug={slug} embedLink={embedLink} name="todo-trend" label="TODO/FIXME trend" />
+          <SignalHeader apiBase={apiBase} slug={slug} embedLink={embedLink} name="todo-trend" label="Recent TODO/FIXME movement" />
           <div className="px-2 py-3 sm:px-3.5">
             <DitherAreaChart
               points={stats.todo_days}
@@ -290,9 +325,16 @@ export function InteractiveRepoSignals(props: Props) {
   );
 }
 
-function ContributorAvatar({ author, index, large = false }: { author: Author; index: number; large?: boolean }) {
+function ContributorAvatar({ author, index, large = false, overlap = true }: { author: Author; index: number; large?: boolean; overlap?: boolean }) {
   const size = large ? "size-16" : "size-13";
-  const classes = `${index === 0 ? "ml-0" : large ? "-ml-4" : "-ml-3"} relative block shrink-0 rounded-full border-2 border-background bg-muted outline-none transition-[transform,filter] duration-200 ease-out hover:z-50 hover:-translate-y-2 hover:scale-110 hover:saturate-125 focus-visible:z-50 focus-visible:-translate-y-2 focus-visible:scale-110 focus-visible:ring-2 focus-visible:ring-accent/30 motion-reduce:transition-none ${size}`;
+  const offset = overlap
+    ? index === 0
+      ? "ml-0"
+      : large
+        ? "-ml-4"
+        : "-ml-3"
+    : "mx-auto";
+  const classes = `${offset} relative block shrink-0 rounded-full border-2 border-background bg-muted outline-none transition-[transform,filter] duration-200 ease-out hover:z-50 hover:-translate-y-2 hover:scale-110 hover:saturate-125 focus-visible:z-50 focus-visible:-translate-y-2 focus-visible:scale-110 focus-visible:ring-2 focus-visible:ring-accent/30 motion-reduce:transition-none ${size}`;
   const content = author.avatar_url
     ? <img src={author.avatar_url} alt="" loading="lazy" className="size-full rounded-full object-cover [image-rendering:auto]" />
     : <span className="grid size-full place-items-center rounded-full bg-muted font-mono font-semibold">{author.label.slice(0, 1).toUpperCase()}</span>;

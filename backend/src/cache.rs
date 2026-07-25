@@ -3,6 +3,7 @@ use chrono::{DateTime, NaiveDate, Utc};
 use sqlx::{PgConnection, Row};
 
 use crate::db::Db;
+use crate::github::RepoMetadata;
 
 /// Cache repository over the Postgres schema. The star-history pipeline
 /// caches one row per stargazer per repo (`repo_stargazers`) plus a small
@@ -105,7 +106,7 @@ async fn upsert_archive_events(
 
 /// The single-row `repos` fields the `/analyze` hot path reads, fetched in
 /// one query (see [`Cache::get_repo_summary`]).
-#[derive(Debug, Clone)]
+#[derive(Debug, Clone, Default)]
 pub struct RepoSummary {
     pub missing: bool,
     pub github_id: Option<i64>,
@@ -118,23 +119,52 @@ pub struct RepoSummary {
     pub history_coverage_start: Option<DateTime<Utc>>,
     pub history_coverage_end: Option<DateTime<Utc>>,
     pub created_at: Option<DateTime<Utc>>,
+    pub archived: bool,
+    pub pushed_at: Option<DateTime<Utc>>,
+    pub updated_at: Option<DateTime<Utc>>,
+    pub default_branch: Option<String>,
+    pub license_spdx: Option<String>,
+    pub topics: Vec<String>,
+    pub has_issues: bool,
+    pub has_discussions: bool,
+    pub has_pages: bool,
+    pub is_template: bool,
+    pub subscribers_count: i64,
+    /// GitHub's upstream count includes open pull requests.
+    pub open_issues_count: i64,
     pub view_count: i64,
 }
 
-type RepoSummaryRow = (
-    bool,
-    Option<i64>,
-    bool,
-    Option<DateTime<Utc>>,
-    Option<DateTime<Utc>>,
-    Option<i64>,
-    Option<String>,
-    Option<i64>,
-    Option<DateTime<Utc>>,
-    Option<DateTime<Utc>>,
-    Option<DateTime<Utc>>,
-    i64,
-);
+impl<'row> sqlx::FromRow<'row, sqlx::postgres::PgRow> for RepoSummary {
+    fn from_row(row: &'row sqlx::postgres::PgRow) -> Result<Self, sqlx::Error> {
+        Ok(Self {
+            missing: row.try_get("missing")?,
+            github_id: row.try_get("github_id")?,
+            stargazers_complete: row.try_get("stargazers_complete")?,
+            stargazers_fetched_at: row.try_get("stargazers_fetched_at")?,
+            metadata_fetched_at: row.try_get("metadata_fetched_at")?,
+            star_count: row.try_get("star_count")?,
+            history_source: row.try_get("history_source")?,
+            history_observed_count: row.try_get("history_observed_count")?,
+            history_coverage_start: row.try_get("history_coverage_start")?,
+            history_coverage_end: row.try_get("history_coverage_end")?,
+            created_at: row.try_get("created_at")?,
+            archived: row.try_get("archived")?,
+            pushed_at: row.try_get("pushed_at")?,
+            updated_at: row.try_get("updated_at")?,
+            default_branch: row.try_get("default_branch")?,
+            license_spdx: row.try_get("license_spdx")?,
+            topics: row.try_get("topics")?,
+            has_issues: row.try_get("has_issues")?,
+            has_discussions: row.try_get("has_discussions")?,
+            has_pages: row.try_get("has_pages")?,
+            is_template: row.try_get("is_template")?,
+            subscribers_count: row.try_get("subscribers_count")?,
+            open_issues_count: row.try_get("open_issues_count")?,
+            view_count: row.try_get("view_count")?,
+        })
+    }
+}
 
 impl RepoSummary {
     /// Mirror of [`Cache::repo_stargazers_fresh_within`] over the
@@ -392,46 +422,21 @@ impl Cache {
     /// rows still come from a separate `repo_stargazers` read. Returns
     /// `None` when the repo row doesn't exist (truly cold).
     pub async fn get_repo_summary(&self, repo: &str) -> Result<Option<RepoSummary>> {
-        let row: Option<RepoSummaryRow> = sqlx::query_as(
-            "SELECT missing, github_id, history_complete, \
-                    COALESCE(archive_fetched_at, stargazers_fetched_at), \
+        let row = sqlx::query_as::<_, RepoSummary>(
+            "SELECT missing, github_id, history_complete AS stargazers_complete, \
+                    COALESCE(archive_fetched_at, stargazers_fetched_at) \
+                        AS stargazers_fetched_at, \
                     metadata_fetched_at, star_count, history_source, \
                     history_observed_count, history_coverage_start, history_coverage_end, \
-                    created_at, view_count \
+                    created_at, archived, pushed_at, updated_at, default_branch, \
+                    license_spdx, topics, has_issues, has_discussions, has_pages, \
+                    is_template, subscribers_count, open_issues_count, view_count \
              FROM repos WHERE repo = $1",
         )
         .bind(repo)
         .fetch_optional(&self.db.pool)
         .await?;
-        Ok(row.map(
-            |(
-                missing,
-                github_id,
-                complete,
-                stargazers_fetched_at,
-                metadata_fetched_at,
-                star_count,
-                history_source,
-                history_observed_count,
-                history_coverage_start,
-                history_coverage_end,
-                created_at,
-                view_count,
-            )| RepoSummary {
-                missing,
-                github_id,
-                stargazers_complete: complete,
-                stargazers_fetched_at,
-                metadata_fetched_at,
-                star_count,
-                history_source,
-                history_observed_count,
-                history_coverage_start,
-                history_coverage_end,
-                created_at,
-                view_count,
-            },
-        ))
+        Ok(row)
     }
 
     /// Whether this repo's stargazer set is complete (the read-side
@@ -961,38 +966,69 @@ impl Cache {
         Ok(row)
     }
 
-    /// Persist repo-metadata fields we actually use for the star-history +
-    /// usage surfaces: the authoritative `stargazers_count` (sanity-checks
-    /// our own pagination), `forks_count`, and the repo `created_at`.
-    /// Idempotent. COALESCE keeps any previously-known field if the new
-    /// fetch left it absent.
-    pub async fn put_repo_metadata(
-        &self,
-        repo: &str,
-        github_id: Option<u64>,
-        stargazers: u64,
-        forks: u64,
-        created_at: Option<DateTime<Utc>>,
-    ) -> Result<()> {
+    /// Persist the complete retained public-metadata snapshot in one
+    /// statement. A reader sees either the previous snapshot or the new one;
+    /// `metadata_fetched_at` is never stamped before its sibling fields.
+    pub async fn put_repo_metadata(&self, repo: &str, metadata: &RepoMetadata) -> Result<()> {
+        anyhow::ensure!(
+            !metadata.private,
+            "refusing to persist private repository metadata"
+        );
         let now = Utc::now();
-        let github_id = github_id.and_then(|value| i64::try_from(value).ok());
+        let github_id = metadata.id.and_then(|value| i64::try_from(value).ok());
+        let stars = i64::try_from(metadata.stargazers_count).unwrap_or(i64::MAX);
+        let forks = i64::try_from(metadata.forks_count).unwrap_or(i64::MAX);
+        let subscribers = i64::try_from(metadata.subscribers_count).unwrap_or(i64::MAX);
+        let open_issues = i64::try_from(metadata.open_issues_count).unwrap_or(i64::MAX);
+        let license_spdx = metadata
+            .license
+            .as_ref()
+            .and_then(|license| license.spdx_id.as_deref());
         sqlx::query(
             "INSERT INTO repos \
-                (repo, github_id, star_count, forks_count, created_at, metadata_fetched_at) \
-             VALUES ($1, $2, $3, $4, $5, $6) \
+                (repo, github_id, star_count, forks_count, created_at, archived, \
+                 pushed_at, updated_at, default_branch, license_spdx, topics, \
+                 has_issues, has_discussions, has_pages, is_template, \
+                 subscribers_count, open_issues_count, metadata_fetched_at) \
+             VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11, $12, \
+                     $13, $14, $15, $16, $17, $18) \
              ON CONFLICT (repo) DO UPDATE SET \
                 github_id = COALESCE(EXCLUDED.github_id, repos.github_id), \
-                star_count = COALESCE(EXCLUDED.star_count, repos.star_count), \
-                forks_count = COALESCE(EXCLUDED.forks_count, repos.forks_count), \
+                star_count = EXCLUDED.star_count, \
+                forks_count = EXCLUDED.forks_count, \
                 created_at = COALESCE(EXCLUDED.created_at, repos.created_at), \
+                archived = EXCLUDED.archived, \
+                pushed_at = EXCLUDED.pushed_at, \
+                updated_at = EXCLUDED.updated_at, \
+                default_branch = EXCLUDED.default_branch, \
+                license_spdx = EXCLUDED.license_spdx, \
+                topics = EXCLUDED.topics, \
+                has_issues = EXCLUDED.has_issues, \
+                has_discussions = EXCLUDED.has_discussions, \
+                has_pages = EXCLUDED.has_pages, \
+                is_template = EXCLUDED.is_template, \
+                subscribers_count = EXCLUDED.subscribers_count, \
+                open_issues_count = EXCLUDED.open_issues_count, \
                 metadata_fetched_at = EXCLUDED.metadata_fetched_at, \
                 missing = FALSE",
         )
         .bind(repo)
         .bind(github_id)
-        .bind(stargazers as i64)
-        .bind(forks as i64)
-        .bind(created_at)
+        .bind(stars)
+        .bind(forks)
+        .bind(metadata.created_at)
+        .bind(metadata.archived)
+        .bind(metadata.pushed_at)
+        .bind(metadata.updated_at)
+        .bind(metadata.default_branch.as_deref())
+        .bind(license_spdx)
+        .bind(&metadata.topics)
+        .bind(metadata.has_issues)
+        .bind(metadata.has_discussions)
+        .bind(metadata.has_pages)
+        .bind(metadata.is_template)
+        .bind(subscribers)
+        .bind(open_issues)
         .bind(now)
         .execute(&self.db.pool)
         .await

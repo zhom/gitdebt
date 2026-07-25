@@ -18,7 +18,7 @@ const apiBase = staticApiBase();
 
 const title = "About & methodology · gitdebt";
 const description =
-  "How gitdebt builds GitHub star-history charts and computes repo health from public git history, including churn, bug magnets, contributors, and TODO trends.";
+  "How gitdebt builds GitHub star-history charts and computes change frequency, fix-labelled changes, contributors, and recent TODO/FIXME movement.";
 const ogImage = `${apiBase}/api/og.png`;
 
 const stats = [
@@ -27,12 +27,12 @@ const stats = [
     desc: "We keep only the timestamp of each public star and plot the cumulative count over time. You can view it against calendar dates or aligned to days-since-first-star to compare growth shapes. Several repos can be overlaid on shared axes, and the chart embeds in a README.",
   },
   {
-    term: "Bug-magnet files",
-    desc: "From the commit history we count how often each file appears in fix-type commits (commits whose message signals a bug fix). Files at the top of that list are the parts of the codebase that keep breaking.",
+    term: "Fix-labelled changes",
+    desc: "We count how often each file appears in commits whose message matches a fix heuristic. This describes fix-labelled history; it does not prove a bug or measure code quality.",
   },
   {
-    term: "Churn — most-changed files",
-    desc: "A straight count of how many commits have touched each file across the project's life. High-churn files are where the weight and instability concentrate.",
+    term: "File change frequency",
+    desc: "A straight count of how many analyzed commits touched each file. It identifies frequently revisited files without claiming those changes were unstable or defective.",
   },
   {
     term: "Contributors",
@@ -47,8 +47,8 @@ const stats = [
     desc: "The last 52 weeks of commit activity, bucketed by day, to show how steadily (or sporadically) the project moves.",
   },
   {
-    term: "TODO / FIXME trend",
-    desc: "A running count of debt markers (TODO, FIXME, and similar) in source over time, so you can tell whether the backlog of loose ends is growing or shrinking.",
+    term: "Recent TODO / FIXME movement",
+    desc: "The recent running movement of TODO, FIXME, and similar source markers inside the analyzed commit window. It is a directional maintenance signal, not a complete backlog.",
   },
 ];
 
@@ -93,7 +93,8 @@ const jsonLd = {
           <p class:list={["mt-3 max-w-[62ch] text-[15px]", BODY]}>
             gitdebt charts the star history of any public GitHub repository
             and pairs it with health signals read from the git history itself:
-            churn, bug magnets, contributors, and TODO drift.
+            change frequency, fix-labelled changes, contributors, and recent
+            TODO/FIXME movement.
           </p>
         </header>
 

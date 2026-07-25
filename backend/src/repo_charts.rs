@@ -87,14 +87,14 @@ fn moving_tier_pattern(ns: &str, color: &str, tier: usize, duration: f32, revers
     )
 }
 
-// Bug-magnet files
+// Fix-labelled file changes
 
 pub fn render_bug_magnets(repo: &str, rows: &[FileRow], theme: &Theme) -> String {
     crate::texture::decorate(
         horizontal_bar_chart(BarChartConfig {
             repo,
-            title: "Bug-magnet files",
-            subtitle: "Files with the most fix commits",
+            title: "Fix-labelled changes",
+            subtitle: "Most fix-labelled commits in the analyzed commit window",
             rows,
             accent: theme.bug,
             accent_dim: theme.bug_dim,
@@ -104,14 +104,14 @@ pub fn render_bug_magnets(repo: &str, rows: &[FileRow], theme: &Theme) -> String
     )
 }
 
-// Top changed files
+// File change frequency
 
 pub fn render_top_changed(repo: &str, rows: &[FileRow], theme: &Theme) -> String {
     crate::texture::decorate(
         horizontal_bar_chart(BarChartConfig {
             repo,
-            title: "Most-changed files",
-            subtitle: "Files with the most commits",
+            title: "File change frequency",
+            subtitle: "Files touched most often in the analyzed commit window",
             rows,
             accent: theme.accent,
             accent_dim: theme.accent_dim,
@@ -405,6 +405,10 @@ fn render_heatmap_inner(
     let peak_text = peak_day
         .map(|d| format!("Peak: {} ({} commits)", d, max_seen))
         .unwrap_or_else(|| "No commits in this range".into());
+    let window_label = analyzed_from.map_or_else(
+        || subtitle_label.to_string(),
+        |from| format!("{subtitle_label} · bounded analysis from {from}"),
+    );
 
     format!(
         r##"<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 {width} {height}" role="img" aria-label="Commit activity for {repo}">
@@ -423,7 +427,7 @@ fn render_heatmap_inner(
     }}
   ]]></style>
   <text class="title" x="{pad_left}" y="32">{repo}</text>
-  <text class="subtitle" x="{pad_left}" y="52">{subtitle_label} · {total} total · {peak_text}</text>
+  <text class="subtitle" x="{pad_left}" y="52">{window_label} · {total} total · {peak_text}</text>
   {dow_labels}
   <g class="heat-cells" opacity="1">
     <animate class="motion" attributeName="opacity" from="0" to="1" dur="0.2s" begin="0s" fill="freeze" />
@@ -437,7 +441,7 @@ fn render_heatmap_inner(
         width = width,
         height = height,
         repo = escape_xml(repo),
-        subtitle_label = escape_xml(subtitle_label),
+        window_label = escape_xml(&window_label),
         fg = theme.fg,
         muted = theme.muted,
         border = theme.border,
@@ -514,20 +518,28 @@ pub fn render_contributors(repo: &str, contributors: &[ContributorRow], theme: &
 fn render_contributors_inner(repo: &str, contributors: &[ContributorRow], theme: &Theme) -> String {
     let width = 1100u32;
     let pad = 44u32;
-    let height = 208u32;
     let avatar_y = 86u32;
-    let avatar_size = 78u32;
-    let step = 61u32;
-    let shown: Vec<&ContributorRow> = contributors
-        .iter()
-        .filter(|row| row.commits > 0)
-        .take(16)
-        .collect();
+    let avatar_size = 62u32;
+    let column_step = 76u32;
+    let row_step = 82u32;
+    let columns = ((width - pad * 2) / column_step).max(1);
+    // The endpoint already supplies a bounded, ordered author set. Rendering
+    // every provided row avoids silently turning that set into a second,
+    // undocumented top-16 sample.
+    let shown: Vec<&ContributorRow> = contributors.iter().collect();
+    let row_count = (shown.len() as u32).div_ceil(columns);
+    let height = if row_count == 0 {
+        176
+    } else {
+        avatar_y + row_count * row_step + 40
+    };
 
     let mut rows = String::new();
     for (i, c) in shown.iter().enumerate() {
-        let x = pad + i as u32 * step;
-        let y = avatar_y;
+        let column = i as u32 % columns;
+        let row = i as u32 / columns;
+        let x = pad + column * column_step;
+        let y = avatar_y + row * row_step;
         let label = c.login.clone().unwrap_or_else(|| c.name.clone());
         let profile = c
             .login
@@ -610,7 +622,7 @@ fn render_contributors_inner(repo: &str, contributors: &[ContributorRow], theme:
     }}
   ]]></style>
   <text class="title" x="{pad}" y="36">Contributors</text>
-  <text class="subtitle" x="{pad}" y="58">Public commit authors · {repo}</text>
+  <text class="subtitle" x="{pad}" y="58">{shown_count} public commit authors · analyzed commit window · {repo}</text>
 {rows}
 {footer}
 </svg>"##,
@@ -623,6 +635,7 @@ fn render_contributors_inner(repo: &str, contributors: &[ContributorRow], theme:
         border = theme.border,
         track = theme.track,
         pad = pad,
+        shown_count = shown.len(),
         rows = rows,
         footer = brand::footer_lockup((width as f32) - pad as f32, footer_y, theme,),
     )
@@ -1187,7 +1200,7 @@ fn hsl_to_rgb(h: f32, s: f32, l: f32) -> [f32; 3] {
     [(r + m) * 255.0, (g + m) * 255.0, (b + m) * 255.0]
 }
 
-// TODO/FIXME trend
+// Recent TODO/FIXME movement
 
 pub fn render_todo_trend(repo: &str, points: &[TodoPoint], theme: &Theme) -> String {
     crate::texture::decorate(render_todo_trend_inner(repo, points, theme), theme)
@@ -1204,7 +1217,12 @@ fn render_todo_trend_inner(repo: &str, points: &[TodoPoint], theme: &Theme) -> S
     let plot_h = height as f32 - pad_t - pad_b;
 
     if points.is_empty() {
-        return empty_chart(width, height, "no TODO/FIXME data yet", theme);
+        return empty_chart(
+            width,
+            height,
+            "no TODO/FIXME movement in the analyzed commit window",
+            theme,
+        );
     }
 
     let t_min = points.first().unwrap().day;
@@ -1271,7 +1289,7 @@ fn render_todo_trend_inner(repo: &str, points: &[TodoPoint], theme: &Theme) -> S
 
     let footer_y = (height - 12) as f32;
     format!(
-        r##"<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 {width} {height}" role="img" aria-label="TODO/FIXME running total for {repo}">
+        r##"<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 {width} {height}" role="img" aria-label="Recent TODO/FIXME movement for {repo}">
   <style><![CDATA[
     .title {{ fill: {fg}; font: 600 18px ui-sans-serif, system-ui, sans-serif; }}
     .subtitle {{ fill: {muted}; font: 13px ui-sans-serif, system-ui, sans-serif; }}
@@ -1283,7 +1301,7 @@ fn render_todo_trend_inner(repo: &str, points: &[TodoPoint], theme: &Theme) -> S
     }}
   ]]></style>
   <text class="title" x="{pad_l:.0}" y="34">{repo}</text>
-  <text class="subtitle" x="{pad_l:.0}" y="56">TODO/FIXME running total · current {last_total} · peak {max_total} on {max_day}</text>
+  <text class="subtitle" x="{pad_l:.0}" y="56">Recent TODO/FIXME movement · analyzed commit window · current {last_total} · peak {max_total} on {max_day}</text>
   {y_ticks}
   <g opacity="1">
     <animate class="motion" attributeName="opacity" from="0" to="1" dur="0.2s" begin="0s" fill="freeze" />
@@ -1760,6 +1778,7 @@ mod tests {
         );
         assert!(disclosed.contains("2026-01-05 · outside the analyzed window"));
         assert!(disclosed.contains("2026-01-20 · 3 commits"));
+        assert!(disclosed.contains("bounded analysis from 2026-01-20"));
         assert!(!disclosed.contains("2026-01-05 · 0 commits"));
 
         // A complete window keeps asserting a real zero.
@@ -1819,7 +1838,8 @@ mod tests {
             },
         ];
         let svg = render_bug_magnets("foo/bar", &rows, &theme::LIGHT);
-        assert!(svg.contains("Bug-magnet"));
+        assert!(svg.contains("Fix-labelled changes"));
+        assert!(svg.contains("analyzed commit window"));
         assert!(svg.contains("src/auth.rs"));
         assert!(svg.contains("47"));
         assert!(svg.contains("<animate"));
@@ -2094,7 +2114,7 @@ mod tests {
     }
 
     #[test]
-    fn contributors_are_minimal_overlapping_linked_avatars() {
+    fn contributors_are_minimal_wrapped_linked_avatars() {
         let rows = vec![ContributorRow {
             login: Some("zhom".into()),
             name: "zhom".into(),
@@ -2105,6 +2125,7 @@ mod tests {
         assert!(svg.contains("href=\"https://github.com/zhom"));
         assert!(svg.contains("<image"));
         assert!(svg.contains("avatar-pixels"));
+        assert!(svg.contains("1 public commit authors · analyzed commit window"));
         assert!(!svg.contains("100 commits"));
         assert!(!svg.contains("class=\"commits\""));
         assert!(!svg.contains("class=\"share\""));
@@ -2115,9 +2136,30 @@ mod tests {
     }
 
     #[test]
+    fn contributors_render_every_provided_author_across_rows() {
+        let rows: Vec<ContributorRow> = (0..29)
+            .map(|index| ContributorRow {
+                login: Some(format!("author-{index}")),
+                name: format!("Author {index}"),
+                avatar_url: None,
+                commits: 29 - index,
+            })
+            .collect();
+        let svg = render_contributors("foo/bar", &rows, &theme::DARK);
+        assert_eq!(svg.matches("class=\"contributor-node\"").count(), 29);
+        assert!(svg.contains("href=\"https://github.com/author-28\""));
+        assert!(svg.contains("id=\"contributor-clip-28\""));
+        assert!(svg.contains("29 public commit authors · analyzed commit window"));
+        assert!(
+            !svg.contains("viewBox=\"0 0 1100 208\""),
+            "a multi-row set must grow the deterministic canvas"
+        );
+    }
+
+    #[test]
     fn todo_trend_handles_empty() {
         let svg = render_todo_trend("foo/bar", &[], &theme::LIGHT);
-        assert!(svg.contains("no TODO/FIXME data yet"));
+        assert!(svg.contains("no TODO/FIXME movement in the analyzed commit window"));
     }
 
     #[test]

@@ -421,8 +421,8 @@ export function buildComparisonMetrics(
     },
     {
       group: "Change signals",
-      label: "Fix density · most-changed files",
-      description: "Fix-labeled commits divided by commits across the analyzed hot-file set.",
+      label: "Fix-labelled share · frequently changed files",
+      description: "Fix-labelled commits divided by commits across the analyzed high-frequency file set.",
       higherIsBetter: false,
       values: repos.map((repo) =>
         statsValue(repo, (stats) => {
@@ -439,7 +439,7 @@ export function buildComparisonMetrics(
     },
     {
       group: "Change signals",
-      label: "TODO/FIXME debt markers",
+      label: "Recent TODO/FIXME movement",
       description: "Latest cumulative marker count and its change over the trailing 90 days.",
       higherIsBetter: false,
       values: repos.map((repo) =>

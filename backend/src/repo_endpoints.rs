@@ -250,7 +250,9 @@ async fn repo_stats_json(
     };
 
     let files = sqlx::query(
-        "SELECT path, commits, fix_commits FROM repo_file_stats \
+        "SELECT path, commits, fix_commits, lines_added, lines_deleted, \
+                binary_changes, last_modified_at \
+         FROM repo_file_stats \
          WHERE repo = $1 AND path !~ $2 \
          ORDER BY commits DESC, path ASC LIMIT 20",
     )
@@ -265,6 +267,10 @@ async fn repo_stats_json(
                 "path": row.try_get::<String, _>("path").unwrap_or_default(),
                 "commits": row.try_get::<i64, _>("commits").unwrap_or(0),
                 "fix_commits": row.try_get::<i64, _>("fix_commits").unwrap_or(0),
+                "lines_added": row.try_get::<i64, _>("lines_added").unwrap_or(0),
+                "lines_deleted": row.try_get::<i64, _>("lines_deleted").unwrap_or(0),
+                "binary_changes": row.try_get::<i64, _>("binary_changes").unwrap_or(0),
+                "last_modified_at": row.try_get::<chrono::DateTime<Utc>, _>("last_modified_at").ok(),
             })
         })
         .collect();
@@ -309,16 +315,69 @@ async fn repo_stats_json(
         .collect();
     let bus_factor = repo_charts::compute_bus_factor(&author_counts, analyzed_commits);
 
-    let commit_days: Vec<(NaiveDate, i64)> =
-        sqlx::query_as("SELECT day, commits FROM repo_commit_days WHERE repo = $1 ORDER BY day")
-            .bind(&full)
-            .fetch_all(pool)
-            .await?;
+    let commit_days: Vec<(NaiveDate, i64, i64, i64, i64, i64, i64)> = sqlx::query_as(
+        "SELECT day, commits, lines_added, lines_deleted, files_changed, \
+                binary_files, large_changes \
+         FROM repo_commit_days WHERE repo = $1 ORDER BY day",
+    )
+    .bind(&full)
+    .fetch_all(pool)
+    .await?;
     let todo_days: Vec<(NaiveDate, i64)> = sqlx::query_as(
         "SELECT day, SUM(todo_added - todo_removed) OVER (ORDER BY day)::BIGINT \
          FROM repo_todo_deltas WHERE repo = $1 ORDER BY day",
     )
     .bind(&full)
+    .fetch_all(pool)
+    .await?;
+
+    let age_counts: (i64, i64, i64, i64, i64, i64, i64, i64) = sqlx::query_as(
+        "SELECT \
+            COUNT(*) FILTER (WHERE last_modified_at >= NOW() - INTERVAL '30 days')::BIGINT, \
+            COALESCE(SUM(commits) FILTER (WHERE last_modified_at >= NOW() - INTERVAL '30 days'), 0)::BIGINT, \
+            COUNT(*) FILTER (WHERE last_modified_at < NOW() - INTERVAL '30 days' \
+                              AND last_modified_at >= NOW() - INTERVAL '1 year')::BIGINT, \
+            COALESCE(SUM(commits) FILTER (WHERE last_modified_at < NOW() - INTERVAL '30 days' \
+                                          AND last_modified_at >= NOW() - INTERVAL '1 year'), 0)::BIGINT, \
+            COUNT(*) FILTER (WHERE last_modified_at < NOW() - INTERVAL '1 year' \
+                              AND last_modified_at >= NOW() - INTERVAL '3 years')::BIGINT, \
+            COALESCE(SUM(commits) FILTER (WHERE last_modified_at < NOW() - INTERVAL '1 year' \
+                                          AND last_modified_at >= NOW() - INTERVAL '3 years'), 0)::BIGINT, \
+            COUNT(*) FILTER (WHERE last_modified_at < NOW() - INTERVAL '3 years')::BIGINT, \
+            COALESCE(SUM(commits) FILTER (WHERE last_modified_at < NOW() - INTERVAL '3 years'), 0)::BIGINT \
+         FROM repo_file_stats WHERE repo = $1",
+    )
+    .bind(&full)
+    .fetch_one(pool)
+    .await?;
+    let file_age_bands = if age_counts.0 + age_counts.2 + age_counts.4 + age_counts.6 > 0 {
+        [
+            ("this_month", age_counts.0, age_counts.1),
+            ("within_year", age_counts.2, age_counts.3),
+            ("two_to_three_years", age_counts.4, age_counts.5),
+            ("older", age_counts.6, age_counts.7),
+        ]
+        .into_iter()
+        .map(|(range, files, changes)| {
+            serde_json::json!({
+                "range": range,
+                "files": files.max(0),
+                "changes": changes.max(0),
+            })
+        })
+        .collect::<Vec<_>>()
+    } else {
+        Vec::new()
+    };
+
+    let coupling_rows: Vec<(String, String, i64, i64)> = sqlx::query_as(
+        "SELECT path_a, path_b, cochanges, fix_commits \
+         FROM repo_file_couplings \
+         WHERE repo = $1 AND path_a !~ $2 AND path_b !~ $2 \
+         ORDER BY (cochanges + fix_commits) DESC, path_a, path_b LIMIT 40",
+    )
+    .bind(&full)
+    .bind(DEPENDENCY_FILE_REGEX)
     .fetch_all(pool)
     .await?;
     let languages: Vec<(String, i64, i64, i64, i64)> = sqlx::query_as(
@@ -346,8 +405,23 @@ async fn repo_stats_json(
         "bus_factor": bus_factor,
         "files": file_rows,
         "authors": authors,
-        "commit_days": commit_days.into_iter().map(|(date, value)| serde_json::json!({"date": date, "value": value})).collect::<Vec<_>>(),
+        "commit_days": commit_days.into_iter().map(|(date, value, lines_added, lines_deleted, files_changed, binary_files, large_changes)| serde_json::json!({
+            "date": date,
+            "value": value.max(0),
+            "lines_added": lines_added.max(0),
+            "lines_deleted": lines_deleted.max(0),
+            "files_changed": files_changed.max(0),
+            "binary_files": binary_files.max(0),
+            "large_changes": large_changes.max(0),
+        })).collect::<Vec<_>>(),
         "todo_days": todo_days.into_iter().map(|(date, value)| serde_json::json!({"date": date, "value": value.max(0)})).collect::<Vec<_>>(),
+        "file_age_bands": file_age_bands,
+        "file_couplings": coupling_rows.into_iter().map(|(source, target, cochanges, fix_commits)| serde_json::json!({
+            "source": source,
+            "target": target,
+            "cochanges": cochanges.max(0),
+            "fix_commits": fix_commits.max(0),
+        })).collect::<Vec<_>>(),
         "languages": languages.into_iter().map(|(language, files, code, blank, comment)| serde_json::json!({
             "language": language, "files": files, "code": code, "blank": blank, "comment": comment,
         })).collect::<Vec<_>>(),
@@ -967,11 +1041,8 @@ async fn ensure_contributors_svg(
                 commits: r.try_get("commits").unwrap_or(0),
             })
             .collect();
-        let avatar_urls: Vec<Option<String>> = rows
-            .iter()
-            .take(16)
-            .map(|row| row.avatar_url.clone())
-            .collect();
+        let avatar_urls: Vec<Option<String>> =
+            rows.iter().map(|row| row.avatar_url.clone()).collect();
         let avatars = self_contained_avatars(state, avatar_urls).await;
         for (row, avatar) in rows.iter_mut().zip(avatars) {
             row.avatar_url = avatar;

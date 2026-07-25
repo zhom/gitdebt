@@ -79,7 +79,26 @@ struct AuthorAgg {
 struct FileAgg {
     commits: i64,
     fix_commits: i64,
+    lines_added: i64,
+    lines_deleted: i64,
+    binary_changes: i64,
     last_modified_at: DateTime<Utc>,
+}
+
+/// Per-day code movement collected from Git's `--numstat` output.
+#[derive(Clone, Debug, Default, PartialEq)]
+struct ChangeDayAgg {
+    lines_added: i64,
+    lines_deleted: i64,
+    files_changed: i64,
+    binary_files: i64,
+    large_changes: i64,
+}
+
+#[derive(Clone, Debug, Default, PartialEq)]
+struct CouplingAgg {
+    cochanges: i64,
+    fix_commits: i64,
 }
 
 /// Per-day TODO delta for one batch.
@@ -100,8 +119,14 @@ struct BatchAggregates {
     author_commit_days: HashMap<(String, NaiveDate), i64>,
     files: HashMap<String, FileAgg>,
     commit_days: HashMap<NaiveDate, i64>,
+    change_days: HashMap<NaiveDate, ChangeDayAgg>,
+    couplings: HashMap<(String, String), CouplingAgg>,
     todo_days: HashMap<NaiveDate, TodoAgg>,
 }
+
+const LARGE_CHANGE_LINES: u64 = 1_000;
+const MAX_COUPLING_FILES_PER_COMMIT: usize = 12;
+const MAX_STORED_COUPLINGS: i64 = 2_000;
 
 /// Pure reduction of a commit batch into per-author / per-file / per-day
 /// aggregates. Order-sensitive only where the OLD code was: author name
@@ -114,6 +139,8 @@ fn aggregate_commits(commits: &[CommitInfo]) -> BatchAggregates {
     let mut author_commit_days: HashMap<(String, NaiveDate), i64> = HashMap::new();
     let mut files: HashMap<String, FileAgg> = HashMap::new();
     let mut commit_days: HashMap<NaiveDate, i64> = HashMap::new();
+    let mut change_days: HashMap<NaiveDate, ChangeDayAgg> = HashMap::new();
+    let mut couplings: HashMap<(String, String), CouplingAgg> = HashMap::new();
     let mut todo_days: HashMap<NaiveDate, TodoAgg> = HashMap::new();
 
     for commit in commits {
@@ -155,6 +182,24 @@ fn aggregate_commits(commits: &[CommitInfo]) -> BatchAggregates {
             .entry((commit.author_email.clone(), day))
             .or_insert(0) += 1;
         *commit_days.entry(day).or_insert(0) += 1;
+        let change_day = change_days.entry(day).or_default();
+        change_day.lines_added = change_day
+            .lines_added
+            .saturating_add(i64::try_from(commit.lines_added).unwrap_or(i64::MAX));
+        change_day.lines_deleted = change_day
+            .lines_deleted
+            .saturating_add(i64::try_from(commit.lines_deleted).unwrap_or(i64::MAX));
+        change_day.files_changed = change_day
+            .files_changed
+            .saturating_add(i64::try_from(commit.paths_changed.len()).unwrap_or(i64::MAX));
+        change_day.binary_files = change_day
+            .binary_files
+            .saturating_add(i64::from(commit.binary_files));
+        if commit.lines_added.saturating_add(commit.lines_deleted) >= LARGE_CHANGE_LINES
+            || commit.paths_changed.len() >= 50
+        {
+            change_day.large_changes += 1;
+        }
 
         if commit.todo_added > 0 || commit.todo_removed > 0 {
             let t = todo_days.entry(day).or_default();
@@ -163,12 +208,41 @@ fn aggregate_commits(commits: &[CommitInfo]) -> BatchAggregates {
         }
 
         let fix_inc: i64 = if commit.is_fix { 1 } else { 0 };
-        for path in &commit.paths_changed {
+        // Tests and older callers may provide only the compatibility path
+        // list. Real analysis uses file_changes populated by --numstat.
+        let changes = if commit.file_changes.is_empty() {
+            commit
+                .paths_changed
+                .iter()
+                .map(|path| (path, 0_u64, 0_u64, false))
+                .collect::<Vec<_>>()
+        } else {
+            commit
+                .file_changes
+                .iter()
+                .map(|change| {
+                    (
+                        &change.path,
+                        change.lines_added,
+                        change.lines_deleted,
+                        change.binary,
+                    )
+                })
+                .collect::<Vec<_>>()
+        };
+        for (path, lines_added, lines_deleted, binary) in changes {
             files
                 .entry(path.clone())
                 .and_modify(|f| {
                     f.commits += 1;
                     f.fix_commits += fix_inc;
+                    f.lines_added = f
+                        .lines_added
+                        .saturating_add(i64::try_from(lines_added).unwrap_or(i64::MAX));
+                    f.lines_deleted = f
+                        .lines_deleted
+                        .saturating_add(i64::try_from(lines_deleted).unwrap_or(i64::MAX));
+                    f.binary_changes += i64::from(binary);
                     if committed_at > f.last_modified_at {
                         f.last_modified_at = committed_at;
                     }
@@ -176,8 +250,26 @@ fn aggregate_commits(commits: &[CommitInfo]) -> BatchAggregates {
                 .or_insert_with(|| FileAgg {
                     commits: 1,
                     fix_commits: fix_inc,
+                    lines_added: i64::try_from(lines_added).unwrap_or(i64::MAX),
+                    lines_deleted: i64::try_from(lines_deleted).unwrap_or(i64::MAX),
+                    binary_changes: i64::from(binary),
                     last_modified_at: committed_at,
                 });
+        }
+
+        let mut coupled_paths = commit.paths_changed.clone();
+        coupled_paths.sort_unstable();
+        coupled_paths.dedup();
+        if (2..=MAX_COUPLING_FILES_PER_COMMIT).contains(&coupled_paths.len()) {
+            for left in 0..coupled_paths.len() - 1 {
+                for right in left + 1..coupled_paths.len() {
+                    let coupling = couplings
+                        .entry((coupled_paths[left].clone(), coupled_paths[right].clone()))
+                        .or_default();
+                    coupling.cochanges += 1;
+                    coupling.fix_commits += fix_inc;
+                }
+            }
         }
     }
 
@@ -186,6 +278,8 @@ fn aggregate_commits(commits: &[CommitInfo]) -> BatchAggregates {
         author_commit_days,
         files,
         commit_days,
+        change_days,
+        couplings,
         todo_days,
     }
 }
@@ -291,6 +385,7 @@ async fn write_commits_at_head(
             "repo_commit_days",
             "repo_todo_deltas",
             "repo_file_stats",
+            "repo_file_couplings",
         ] {
             let sql = format!("DELETE FROM {table} WHERE repo = $1");
             sqlx::query(sqlx::AssertSqlSafe(sql))
@@ -397,19 +492,43 @@ async fn write_commits_at_head(
     for chunk in day_rows.chunks(UPSERT_CHUNK) {
         let mut days: Vec<NaiveDate> = Vec::with_capacity(chunk.len());
         let mut counts: Vec<i64> = Vec::with_capacity(chunk.len());
+        let mut lines_added: Vec<i64> = Vec::with_capacity(chunk.len());
+        let mut lines_deleted: Vec<i64> = Vec::with_capacity(chunk.len());
+        let mut files_changed: Vec<i64> = Vec::with_capacity(chunk.len());
+        let mut binary_files: Vec<i64> = Vec::with_capacity(chunk.len());
+        let mut large_changes: Vec<i64> = Vec::with_capacity(chunk.len());
         for (day, c) in chunk {
             days.push(**day);
             counts.push(**c);
+            let changes = agg.change_days.get(day).cloned().unwrap_or_default();
+            lines_added.push(changes.lines_added);
+            lines_deleted.push(changes.lines_deleted);
+            files_changed.push(changes.files_changed);
+            binary_files.push(changes.binary_files);
+            large_changes.push(changes.large_changes);
         }
         sqlx::query(
-            "INSERT INTO repo_commit_days (repo, day, commits) \
-             SELECT $1, d, c FROM UNNEST($2::date[], $3::bigint[]) AS t(d, c) \
+            "INSERT INTO repo_commit_days \
+                (repo, day, commits, lines_added, lines_deleted, files_changed, binary_files, large_changes) \
+             SELECT $1, d, c, a, x, f, b, l \
+             FROM UNNEST($2::date[], $3::bigint[], $4::bigint[], $5::bigint[], \
+                         $6::bigint[], $7::bigint[], $8::bigint[]) AS t(d, c, a, x, f, b, l) \
              ON CONFLICT (repo, day) DO UPDATE SET \
-                commits = repo_commit_days.commits + EXCLUDED.commits",
+                commits = repo_commit_days.commits + EXCLUDED.commits, \
+                lines_added = repo_commit_days.lines_added + EXCLUDED.lines_added, \
+                lines_deleted = repo_commit_days.lines_deleted + EXCLUDED.lines_deleted, \
+                files_changed = repo_commit_days.files_changed + EXCLUDED.files_changed, \
+                binary_files = repo_commit_days.binary_files + EXCLUDED.binary_files, \
+                large_changes = repo_commit_days.large_changes + EXCLUDED.large_changes",
         )
         .bind(repo)
         .bind(&days)
         .bind(&counts)
+        .bind(&lines_added)
+        .bind(&lines_deleted)
+        .bind(&files_changed)
+        .bind(&binary_files)
+        .bind(&large_changes)
         .execute(&mut *tx)
         .await
         .context("upsert commit days")?;
@@ -448,32 +567,92 @@ async fn write_commits_at_head(
         let mut paths: Vec<String> = Vec::with_capacity(chunk.len());
         let mut counts: Vec<i64> = Vec::with_capacity(chunk.len());
         let mut fixes: Vec<i64> = Vec::with_capacity(chunk.len());
+        let mut lines_added: Vec<i64> = Vec::with_capacity(chunk.len());
+        let mut lines_deleted: Vec<i64> = Vec::with_capacity(chunk.len());
+        let mut binary_changes: Vec<i64> = Vec::with_capacity(chunk.len());
         let mut modified: Vec<DateTime<Utc>> = Vec::with_capacity(chunk.len());
         for (path, f) in chunk {
             paths.push((*path).clone());
             counts.push(f.commits);
             fixes.push(f.fix_commits);
+            lines_added.push(f.lines_added);
+            lines_deleted.push(f.lines_deleted);
+            binary_changes.push(f.binary_changes);
             modified.push(f.last_modified_at);
         }
         sqlx::query(
-            "INSERT INTO repo_file_stats (repo, path, commits, fix_commits, last_modified_at) \
-             SELECT $1, p, c, fx, m \
-             FROM UNNEST($2::text[], $3::bigint[], $4::bigint[], $5::timestamptz[]) \
-                  AS t(p, c, fx, m) \
+            "INSERT INTO repo_file_stats \
+                (repo, path, commits, fix_commits, lines_added, lines_deleted, binary_changes, last_modified_at) \
+             SELECT $1, p, c, fx, a, d, b, m \
+             FROM UNNEST($2::text[], $3::bigint[], $4::bigint[], $5::bigint[], \
+                         $6::bigint[], $7::bigint[], $8::timestamptz[]) \
+                  AS t(p, c, fx, a, d, b, m) \
              ON CONFLICT (repo, path) DO UPDATE SET \
                 commits = repo_file_stats.commits + EXCLUDED.commits, \
                 fix_commits = repo_file_stats.fix_commits + EXCLUDED.fix_commits, \
+                lines_added = repo_file_stats.lines_added + EXCLUDED.lines_added, \
+                lines_deleted = repo_file_stats.lines_deleted + EXCLUDED.lines_deleted, \
+                binary_changes = repo_file_stats.binary_changes + EXCLUDED.binary_changes, \
                 last_modified_at = GREATEST(repo_file_stats.last_modified_at, EXCLUDED.last_modified_at)",
         )
         .bind(repo)
         .bind(&paths)
         .bind(&counts)
         .bind(&fixes)
+        .bind(&lines_added)
+        .bind(&lines_deleted)
+        .bind(&binary_changes)
         .bind(&modified)
         .execute(&mut *tx)
         .await
         .context("upsert file stats")?;
     }
+
+    // Strongest file-coupling relationships: each count is the number of
+    // bounded commits in which the two files changed together.
+    let coupling_rows: Vec<(&(String, String), &CouplingAgg)> = agg.couplings.iter().collect();
+    for chunk in coupling_rows.chunks(UPSERT_CHUNK) {
+        let mut paths_a = Vec::with_capacity(chunk.len());
+        let mut paths_b = Vec::with_capacity(chunk.len());
+        let mut cochanges = Vec::with_capacity(chunk.len());
+        let mut fix_commits = Vec::with_capacity(chunk.len());
+        for ((path_a, path_b), coupling) in chunk {
+            paths_a.push(path_a.clone());
+            paths_b.push(path_b.clone());
+            cochanges.push(coupling.cochanges);
+            fix_commits.push(coupling.fix_commits);
+        }
+        sqlx::query(
+            "INSERT INTO repo_file_couplings (repo, path_a, path_b, cochanges, fix_commits) \
+             SELECT $1, a, b, c, f \
+             FROM UNNEST($2::text[], $3::text[], $4::bigint[], $5::bigint[]) AS t(a, b, c, f) \
+             ON CONFLICT (repo, path_a, path_b) DO UPDATE SET \
+                cochanges = repo_file_couplings.cochanges + EXCLUDED.cochanges, \
+                fix_commits = repo_file_couplings.fix_commits + EXCLUDED.fix_commits",
+        )
+        .bind(repo)
+        .bind(&paths_a)
+        .bind(&paths_b)
+        .bind(&cochanges)
+        .bind(&fix_commits)
+        .execute(&mut *tx)
+        .await
+        .context("upsert file couplings")?;
+    }
+    sqlx::query(
+        "DELETE FROM repo_file_couplings \
+         WHERE repo = $1 AND (path_a, path_b) IN ( \
+             SELECT path_a, path_b FROM repo_file_couplings \
+             WHERE repo = $1 \
+             ORDER BY cochanges DESC, fix_commits DESC, path_a, path_b \
+             OFFSET $2 \
+         )",
+    )
+    .bind(repo)
+    .bind(MAX_STORED_COUPLINGS)
+    .execute(&mut *tx)
+    .await
+    .context("bound stored file couplings")?;
 
     // Bump cumulative commit count + last_analyzed metadata on repo_history.
     if let Some(total) = exact_total {
@@ -933,6 +1112,18 @@ mod tests {
             },
             is_fix,
             paths_changed: paths.iter().map(|s| s.to_string()).collect(),
+            file_changes: paths
+                .iter()
+                .map(|path| crate::repo_history::FileChange {
+                    path: (*path).to_string(),
+                    lines_added: 3,
+                    lines_deleted: 1,
+                    binary: false,
+                })
+                .collect(),
+            lines_added: 3 * paths.len() as u64,
+            lines_deleted: paths.len() as u64,
+            binary_files: 0,
             todo_added,
             todo_removed,
         }
@@ -947,6 +1138,8 @@ mod tests {
         let mut author_commit_days: HashMap<(String, NaiveDate), i64> = HashMap::new();
         let mut files: HashMap<String, FileAgg> = HashMap::new();
         let mut commit_days: HashMap<NaiveDate, i64> = HashMap::new();
+        let mut change_days: HashMap<NaiveDate, ChangeDayAgg> = HashMap::new();
+        let mut couplings: HashMap<(String, String), CouplingAgg> = HashMap::new();
         let mut todo_days: HashMap<NaiveDate, TodoAgg> = HashMap::new();
         for c in commits {
             let avatar = avatar_for_email(&c.author_email);
@@ -979,12 +1172,23 @@ mod tests {
                 .entry((c.author_email.clone(), c.committed_day))
                 .or_insert(0) += 1;
             *commit_days.entry(c.committed_day).or_insert(0) += 1;
+            let change_day = change_days.entry(c.committed_day).or_default();
+            change_day.lines_added += i64::try_from(c.lines_added).unwrap_or(i64::MAX);
+            change_day.lines_deleted += i64::try_from(c.lines_deleted).unwrap_or(i64::MAX);
+            change_day.files_changed += i64::try_from(c.paths_changed.len()).unwrap_or(i64::MAX);
+            change_day.binary_files += i64::from(c.binary_files);
+            if c.lines_added.saturating_add(c.lines_deleted) >= LARGE_CHANGE_LINES
+                || c.paths_changed.len() >= 50
+            {
+                change_day.large_changes += 1;
+            }
             if c.todo_added > 0 || c.todo_removed > 0 {
                 let t = todo_days.entry(c.committed_day).or_default();
                 t.added += c.todo_added as i64;
                 t.removed += c.todo_removed as i64;
             }
-            for p in &c.paths_changed {
+            for change in &c.file_changes {
+                let p = &change.path;
                 let fix_inc = if c.is_fix { 1 } else { 0 };
                 match files.get_mut(p) {
                     None => {
@@ -993,6 +1197,9 @@ mod tests {
                             FileAgg {
                                 commits: 1,
                                 fix_commits: fix_inc,
+                                lines_added: change.lines_added as i64,
+                                lines_deleted: change.lines_deleted as i64,
+                                binary_changes: i64::from(change.binary),
                                 last_modified_at: c.committed_at,
                             },
                         );
@@ -1000,7 +1207,24 @@ mod tests {
                     Some(f) => {
                         f.commits += 1;
                         f.fix_commits += fix_inc;
+                        f.lines_added += change.lines_added as i64;
+                        f.lines_deleted += change.lines_deleted as i64;
+                        f.binary_changes += i64::from(change.binary);
                         f.last_modified_at = f.last_modified_at.max(c.committed_at);
+                    }
+                }
+            }
+            let mut paths = c.paths_changed.clone();
+            paths.sort_unstable();
+            paths.dedup();
+            if (2..=MAX_COUPLING_FILES_PER_COMMIT).contains(&paths.len()) {
+                for left in 0..paths.len() - 1 {
+                    for right in left + 1..paths.len() {
+                        let coupling = couplings
+                            .entry((paths[left].clone(), paths[right].clone()))
+                            .or_default();
+                        coupling.cochanges += 1;
+                        coupling.fix_commits += i64::from(c.is_fix);
                     }
                 }
             }
@@ -1010,6 +1234,8 @@ mod tests {
             author_commit_days,
             files,
             commit_days,
+            change_days,
+            couplings,
             todo_days,
         }
     }
@@ -1024,6 +1250,8 @@ mod tests {
         );
         assert_eq!(a.files, b.files, "files map");
         assert_eq!(a.commit_days, b.commit_days, "commit_days map");
+        assert_eq!(a.change_days, b.change_days, "change_days map");
+        assert_eq!(a.couplings, b.couplings, "couplings map");
         assert_eq!(a.todo_days, b.todo_days, "todo_days map");
     }
 
@@ -1039,7 +1267,16 @@ mod tests {
         // x.rs: 2 commits, 1 fix; y.rs: 1 commit, 0 fix.
         assert_eq!(agg.files["x.rs"].commits, 2);
         assert_eq!(agg.files["x.rs"].fix_commits, 1);
+        assert_eq!(agg.files["x.rs"].lines_added, 6);
+        assert_eq!(agg.files["x.rs"].lines_deleted, 2);
         assert_eq!(agg.files["y.rs"].commits, 1);
+        assert_eq!(
+            agg.couplings[&("x.rs".to_string(), "y.rs".to_string())],
+            CouplingAgg {
+                cochanges: 1,
+                fix_commits: 0,
+            }
+        );
         // Author name takes the LAST (newest) commit's value.
         assert_eq!(agg.authors["a@b.c"].name, "Alice Renamed");
         assert_eq!(agg.authors["a@b.c"].commits, 2);
@@ -1145,6 +1382,8 @@ mod tests {
         assert!(agg.author_commit_days.is_empty());
         assert!(agg.files.is_empty());
         assert!(agg.commit_days.is_empty());
+        assert!(agg.change_days.is_empty());
+        assert!(agg.couplings.is_empty());
         assert!(agg.todo_days.is_empty());
     }
 

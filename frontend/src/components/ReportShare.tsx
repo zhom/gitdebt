@@ -18,13 +18,11 @@ export function ReportShare({
 }: Props) {
   const slug = `${owner}/${repo}`;
   const attributedPage = `${pageUrl}?ref=readme`;
-  // The looping wave GIF is the shareable that actually animates in a README —
-  // GitHub strips SMIL from SVG, so a raster carries the dithered wave motion.
-  const chartBase = `${apiBase}/api/repos/${slug}/chart.gif`;
+  const chartBase = `${apiBase}/api/repos/${slug}/chart.svg?animate=0`;
   const chartEmbed = `<a href="${attributedPage}">
   <picture>
-    <source media="(prefers-color-scheme: dark)" srcset="${chartBase}?theme=dark" />
-    <img alt="${slug} star history" src="${chartBase}?theme=light" />
+    <source media="(prefers-color-scheme: dark)" srcset="${chartBase}&theme=dark" />
+    <img alt="${slug} star history" src="${chartBase}&theme=light" />
   </picture>
 </a>`;
   const badgeBase = `${apiBase}/api/repos/${slug}/badge.svg?metrics=stars,forks&style=modern&animate=0`;
@@ -65,7 +63,7 @@ export function ReportShare({
           />
           <ShareOption
             title="Star-history chart"
-            description="Looping dithered-wave animation, light and dark."
+            description="Dithered SVG by default, with light and dark variants."
             value={chartEmbed}
             label="Copy README embed"
             language="html"

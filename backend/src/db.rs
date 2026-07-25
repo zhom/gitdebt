@@ -115,6 +115,19 @@ CREATE TABLE IF NOT EXISTS repos (
     archive_cursor        DATE,
     forks_count           BIGINT,
     created_at            TIMESTAMPTZ,
+    archived              BOOLEAN NOT NULL DEFAULT FALSE,
+    pushed_at             TIMESTAMPTZ,
+    updated_at            TIMESTAMPTZ,
+    default_branch        TEXT,
+    license_spdx          TEXT,
+    topics                TEXT[] NOT NULL DEFAULT ARRAY[]::TEXT[],
+    has_issues            BOOLEAN NOT NULL DEFAULT FALSE,
+    has_discussions       BOOLEAN NOT NULL DEFAULT FALSE,
+    has_pages             BOOLEAN NOT NULL DEFAULT FALSE,
+    is_template           BOOLEAN NOT NULL DEFAULT FALSE,
+    subscribers_count     BIGINT NOT NULL DEFAULT 0,
+    -- GitHub includes open pull requests in open_issues_count.
+    open_issues_count     BIGINT NOT NULL DEFAULT 0,
     metadata_fetched_at   TIMESTAMPTZ,
     -- Popularity signal driven by the browser-extension `/api/ext/ping`
     -- endpoint (and any analyze hit). view_count is a cheap monotonic
@@ -136,6 +149,58 @@ ALTER TABLE repos ADD COLUMN IF NOT EXISTS github_id              BIGINT;
 ALTER TABLE repos ADD COLUMN IF NOT EXISTS history_complete       BOOLEAN NOT NULL DEFAULT FALSE;
 ALTER TABLE repos ADD COLUMN IF NOT EXISTS forks_count         BIGINT;
 ALTER TABLE repos ADD COLUMN IF NOT EXISTS created_at          TIMESTAMPTZ;
+ALTER TABLE repos ADD COLUMN IF NOT EXISTS archived            BOOLEAN NOT NULL DEFAULT FALSE;
+ALTER TABLE repos ADD COLUMN IF NOT EXISTS pushed_at           TIMESTAMPTZ;
+ALTER TABLE repos ADD COLUMN IF NOT EXISTS updated_at          TIMESTAMPTZ;
+ALTER TABLE repos ADD COLUMN IF NOT EXISTS default_branch      TEXT;
+ALTER TABLE repos ADD COLUMN IF NOT EXISTS license_spdx        TEXT;
+ALTER TABLE repos ADD COLUMN IF NOT EXISTS topics              TEXT[] NOT NULL DEFAULT ARRAY[]::TEXT[];
+ALTER TABLE repos ADD COLUMN IF NOT EXISTS has_issues          BOOLEAN NOT NULL DEFAULT FALSE;
+ALTER TABLE repos ADD COLUMN IF NOT EXISTS has_discussions     BOOLEAN NOT NULL DEFAULT FALSE;
+ALTER TABLE repos ADD COLUMN IF NOT EXISTS has_pages           BOOLEAN NOT NULL DEFAULT FALSE;
+ALTER TABLE repos ADD COLUMN IF NOT EXISTS is_template         BOOLEAN NOT NULL DEFAULT FALSE;
+ALTER TABLE repos ADD COLUMN IF NOT EXISTS subscribers_count   BIGINT NOT NULL DEFAULT 0;
+ALTER TABLE repos ADD COLUMN IF NOT EXISTS open_issues_count   BIGINT NOT NULL DEFAULT 0;
+-- Repair partially-deployed versions of these columns. `ADD COLUMN IF NOT
+-- EXISTS` does not add a default or NOT NULL constraint when the name already
+-- exists, and a NULL would make the typed cache summary unreadable. The
+-- catalog guard makes the table rewrite/lock a one-time repair.
+DO $$
+DECLARE
+    repairs TEXT[][] := ARRAY[
+        ['archived', 'FALSE'],
+        ['topics', 'ARRAY[]::TEXT[]'],
+        ['has_issues', 'FALSE'],
+        ['has_discussions', 'FALSE'],
+        ['has_pages', 'FALSE'],
+        ['is_template', 'FALSE'],
+        ['subscribers_count', '0'],
+        ['open_issues_count', '0']
+    ];
+    repair TEXT[];
+BEGIN
+    FOREACH repair SLICE 1 IN ARRAY repairs
+    LOOP
+        IF EXISTS (
+            SELECT 1 FROM information_schema.columns
+            WHERE table_name = 'repos' AND column_name = repair[1]
+              AND (is_nullable = 'YES' OR column_default IS NULL)
+        ) THEN
+            EXECUTE format(
+                'UPDATE repos SET %I = %s WHERE %I IS NULL',
+                repair[1], repair[2], repair[1]
+            );
+            EXECUTE format(
+                'ALTER TABLE repos ALTER COLUMN %I SET DEFAULT %s',
+                repair[1], repair[2]
+            );
+            EXECUTE format(
+                'ALTER TABLE repos ALTER COLUMN %I SET NOT NULL',
+                repair[1]
+            );
+        END IF;
+    END LOOP;
+END $$;
 ALTER TABLE repos ADD COLUMN IF NOT EXISTS metadata_fetched_at TIMESTAMPTZ;
 ALTER TABLE repos ADD COLUMN IF NOT EXISTS view_count          BIGINT NOT NULL DEFAULT 0;
 ALTER TABLE repos ADD COLUMN IF NOT EXISTS last_viewed_at      TIMESTAMPTZ;
@@ -340,6 +405,28 @@ CREATE INDEX IF NOT EXISTS idx_repo_history_duration_recent
     ON repo_history (last_analyzed_at DESC NULLS LAST)
     WHERE analysis_duration_ms IS NOT NULL;
 
+-- Repository setup/readiness facts derived from a completed clone analysis.
+-- Writers replace the row for an observed head SHA; readers can therefore
+-- reject a stale readiness snapshot when repo_history advances.
+CREATE TABLE IF NOT EXISTS repo_readiness (
+    repo                TEXT PRIMARY KEY NOT NULL,
+    head_sha            TEXT NOT NULL,
+    readme              BOOLEAN NOT NULL DEFAULT FALSE,
+    security            BOOLEAN NOT NULL DEFAULT FALSE,
+    cla                 BOOLEAN NOT NULL DEFAULT FALSE,
+    code_of_conduct     BOOLEAN NOT NULL DEFAULT FALSE,
+    contributing        BOOLEAN NOT NULL DEFAULT FALSE,
+    license             BOOLEAN NOT NULL DEFAULT FALSE,
+    codeowners          BOOLEAN NOT NULL DEFAULT FALSE,
+    changelog           BOOLEAN NOT NULL DEFAULT FALSE,
+    issue_templates     BOOLEAN NOT NULL DEFAULT FALSE,
+    pr_template         BOOLEAN NOT NULL DEFAULT FALSE,
+    ci                  BOOLEAN NOT NULL DEFAULT FALSE,
+    tests               BOOLEAN NOT NULL DEFAULT FALSE,
+    dependency_updates  BOOLEAN NOT NULL DEFAULT FALSE,
+    updated_at          TIMESTAMPTZ NOT NULL DEFAULT NOW()
+);
+
 -- Per-file aggregates. fix_commits = commit count where the message
 -- matches /\b(fix|bug|hotfix|patch)\b/i; commits = total commits touching
 -- that path. Stays bounded by unique paths (chromium ~700k).
@@ -348,11 +435,32 @@ CREATE TABLE IF NOT EXISTS repo_file_stats (
     path               TEXT NOT NULL,
     commits            BIGINT NOT NULL DEFAULT 0,
     fix_commits        BIGINT NOT NULL DEFAULT 0,
+    lines_added        BIGINT NOT NULL DEFAULT 0,
+    lines_deleted      BIGINT NOT NULL DEFAULT 0,
+    binary_changes     BIGINT NOT NULL DEFAULT 0,
     last_modified_at   TIMESTAMPTZ,
     PRIMARY KEY (repo, path)
 );
+ALTER TABLE repo_file_stats ADD COLUMN IF NOT EXISTS lines_added BIGINT NOT NULL DEFAULT 0;
+ALTER TABLE repo_file_stats ADD COLUMN IF NOT EXISTS lines_deleted BIGINT NOT NULL DEFAULT 0;
+ALTER TABLE repo_file_stats ADD COLUMN IF NOT EXISTS binary_changes BIGINT NOT NULL DEFAULT 0;
 CREATE INDEX IF NOT EXISTS idx_repo_file_fix ON repo_file_stats(repo, fix_commits DESC);
 CREATE INDEX IF NOT EXISTS idx_repo_file_recent ON repo_file_stats(repo, last_modified_at DESC);
+
+-- Pairs of files changed by the same commit. Paths are stored in canonical
+-- lexical order by the analysis writer so one logical pair has one key.
+CREATE TABLE IF NOT EXISTS repo_file_couplings (
+    repo       TEXT NOT NULL,
+    path_a     TEXT NOT NULL,
+    path_b     TEXT NOT NULL,
+    cochanges  BIGINT NOT NULL DEFAULT 0,
+    fix_commits BIGINT NOT NULL DEFAULT 0,
+    PRIMARY KEY (repo, path_a, path_b)
+);
+ALTER TABLE repo_file_couplings
+    ADD COLUMN IF NOT EXISTS fix_commits BIGINT NOT NULL DEFAULT 0;
+CREATE INDEX IF NOT EXISTS idx_repo_file_couplings_repo_cochanges
+    ON repo_file_couplings(repo, cochanges DESC);
 
 -- Per-author aggregates for the contributors chart.
 --
@@ -399,11 +507,21 @@ CREATE TABLE IF NOT EXISTS repo_author_commit_days (
 
 -- Per-day commit count for the heatmap.
 CREATE TABLE IF NOT EXISTS repo_commit_days (
-    repo     TEXT NOT NULL,
-    day      DATE NOT NULL,
-    commits  BIGINT NOT NULL DEFAULT 0,
+    repo          TEXT NOT NULL,
+    day           DATE NOT NULL,
+    commits       BIGINT NOT NULL DEFAULT 0,
+    lines_added   BIGINT NOT NULL DEFAULT 0,
+    lines_deleted BIGINT NOT NULL DEFAULT 0,
+    files_changed BIGINT NOT NULL DEFAULT 0,
+    binary_files  BIGINT NOT NULL DEFAULT 0,
+    large_changes BIGINT NOT NULL DEFAULT 0,
     PRIMARY KEY (repo, day)
 );
+ALTER TABLE repo_commit_days ADD COLUMN IF NOT EXISTS lines_added BIGINT NOT NULL DEFAULT 0;
+ALTER TABLE repo_commit_days ADD COLUMN IF NOT EXISTS lines_deleted BIGINT NOT NULL DEFAULT 0;
+ALTER TABLE repo_commit_days ADD COLUMN IF NOT EXISTS files_changed BIGINT NOT NULL DEFAULT 0;
+ALTER TABLE repo_commit_days ADD COLUMN IF NOT EXISTS binary_files BIGINT NOT NULL DEFAULT 0;
+ALTER TABLE repo_commit_days ADD COLUMN IF NOT EXISTS large_changes BIGINT NOT NULL DEFAULT 0;
 CREATE INDEX IF NOT EXISTS idx_repo_commit_days_year ON repo_commit_days(repo, day);
 
 -- TODO/FIXME deltas per day. Cumulative sum from first day → cur day
@@ -597,6 +715,9 @@ DECLARE
         ['repo_stargazers','starred_at'],
         ['repos','stargazers_fetched_at'],
         ['repos','metadata_fetched_at'],
+        ['repos','created_at'],
+        ['repos','pushed_at'],
+        ['repos','updated_at'],
         ['api_quota','updated_at'],
         ['star_fetch_queue','enqueued_at'],
         ['star_fetch_queue','claimed_at'],
@@ -609,6 +730,7 @@ DECLARE
         ['installations','updated_at'],
         ['repo_history','last_analyzed_at'],
         ['repo_history','last_visited_at'],
+        ['repo_readiness','updated_at'],
         ['repo_file_stats','last_modified_at'],
         ['repo_author_stats','first_commit_at'],
         ['repo_author_stats','last_commit_at'],
@@ -1042,6 +1164,87 @@ mod tests {
     }
 
     #[test]
+    fn schema_persists_the_public_repository_metadata_snapshot() {
+        for column in [
+            "archived",
+            "pushed_at",
+            "updated_at",
+            "default_branch",
+            "license_spdx",
+            "topics",
+            "has_issues",
+            "has_discussions",
+            "has_pages",
+            "is_template",
+            "subscribers_count",
+            "open_issues_count",
+        ] {
+            assert!(
+                SCHEMA.contains(&format!("ADD COLUMN IF NOT EXISTS {column}")),
+                "metadata column {column} needs an idempotent startup migration"
+            );
+        }
+        assert!(SCHEMA.contains("topics              TEXT[] NOT NULL"));
+        assert!(SCHEMA.contains("GitHub includes open pull requests in open_issues_count"));
+        assert!(SCHEMA.contains("AND (is_nullable = 'YES' OR column_default IS NULL)"));
+    }
+
+    #[test]
+    fn schema_keeps_analysis_churn_couplings_and_readiness_idempotent() {
+        for column in ["lines_added", "lines_deleted", "binary_changes"] {
+            assert!(
+                SCHEMA.contains(&format!(
+                    "ALTER TABLE repo_file_stats ADD COLUMN IF NOT EXISTS {column}"
+                )),
+                "repo_file_stats.{column} needs an idempotent migration"
+            );
+        }
+        for column in [
+            "lines_added",
+            "lines_deleted",
+            "files_changed",
+            "binary_files",
+            "large_changes",
+        ] {
+            assert!(
+                SCHEMA.contains(&format!(
+                    "ALTER TABLE repo_commit_days ADD COLUMN IF NOT EXISTS {column}"
+                )),
+                "repo_commit_days.{column} needs an idempotent migration"
+            );
+        }
+        assert!(SCHEMA.contains("CREATE TABLE IF NOT EXISTS repo_file_couplings"));
+        assert!(SCHEMA.contains("PRIMARY KEY (repo, path_a, path_b)"));
+        assert!(SCHEMA.contains("ADD COLUMN IF NOT EXISTS fix_commits BIGINT NOT NULL DEFAULT 0"));
+        assert!(SCHEMA.contains("idx_repo_file_couplings_repo_cochanges"));
+
+        assert!(SCHEMA.contains("CREATE TABLE IF NOT EXISTS repo_readiness"));
+        assert!(SCHEMA.contains("repo                TEXT PRIMARY KEY NOT NULL"));
+        assert!(SCHEMA.contains("head_sha            TEXT NOT NULL"));
+        for definition in [
+            "readme              BOOLEAN NOT NULL DEFAULT FALSE",
+            "security            BOOLEAN NOT NULL DEFAULT FALSE",
+            "cla                 BOOLEAN NOT NULL DEFAULT FALSE",
+            "code_of_conduct     BOOLEAN NOT NULL DEFAULT FALSE",
+            "contributing        BOOLEAN NOT NULL DEFAULT FALSE",
+            "license             BOOLEAN NOT NULL DEFAULT FALSE",
+            "codeowners          BOOLEAN NOT NULL DEFAULT FALSE",
+            "changelog           BOOLEAN NOT NULL DEFAULT FALSE",
+            "issue_templates     BOOLEAN NOT NULL DEFAULT FALSE",
+            "pr_template         BOOLEAN NOT NULL DEFAULT FALSE",
+            "ci                  BOOLEAN NOT NULL DEFAULT FALSE",
+            "tests               BOOLEAN NOT NULL DEFAULT FALSE",
+            "dependency_updates  BOOLEAN NOT NULL DEFAULT FALSE",
+        ] {
+            assert!(
+                SCHEMA.contains(definition),
+                "repo_readiness definition `{definition}` must stay in the startup schema"
+            );
+        }
+        assert!(SCHEMA.contains("updated_at          TIMESTAMPTZ NOT NULL DEFAULT NOW()"));
+    }
+
+    #[test]
     fn schema_migration_uses_a_stable_advisory_lock_key() {
         assert_ne!(
             SCHEMA_MIGRATION_LOCK_ID, 0,
@@ -1069,7 +1272,7 @@ mod tests {
         assert!(!SCHEMA.contains("CREATE TABLE IF NOT EXISTS user_starred_repos"));
         assert!(!SCHEMA.contains("CREATE TABLE IF NOT EXISTS user_events"));
         assert!(!SCHEMA.contains("CREATE TABLE IF NOT EXISTS fetch_queue"));
-        assert!(!SCHEMA.contains("subscribers_count"));
+        assert!(SCHEMA.contains("subscribers_count"));
         assert!(SCHEMA.contains("CREATE TABLE IF NOT EXISTS repo_stargazers"));
         assert!(SCHEMA.contains("position    BIGINT NOT NULL"));
         assert!(!SCHEMA.contains("login       TEXT NOT NULL"));

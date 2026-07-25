@@ -51,15 +51,18 @@ type Embed = {
 
 /** URL a README would carry: no cache-busting, no attribution parameters. */
 function embedUrl(path: string, theme?: "light" | "dark"): string {
-  return theme ? `${apiBase}${path}?theme=${theme}` : `${apiBase}${path}`;
+  if (!theme) return `${apiBase}${path}`;
+  const separator = path.includes("?") ? "&" : "?";
+  return `${apiBase}${path}${separator}theme=${theme}`;
 }
 
 /** Same asset, plus the revision the site uses to stay off stale edge objects. */
 function previewUrl(path: string, theme?: "light" | "dark"): string {
-  const params = new URLSearchParams();
+  const [pathname, query = ""] = path.split("?", 2);
+  const params = new URLSearchParams(query);
   if (theme) params.set("theme", theme);
   params.set("render", MEDIA_RENDER_REVISION);
-  return `${apiBase}${path}?${params.toString()}`;
+  return `${apiBase}${pathname}?${params.toString()}`;
 }
 
 function markdown(embed: Embed): string {
@@ -68,6 +71,15 @@ function markdown(embed: Embed): string {
 }
 
 const media: Embed[] = [
+  {
+    id: "contributor-ready",
+    name: "Contributor readiness",
+    desc: "A factual checklist badge for project guides, contribution policy, tests, CI, templates, and security documentation. It is a signal, not an achievement.",
+    path: `/api/repos/${exampleSlug}/badge.svg?signal=contributor-ready`,
+    link: repoLink,
+    alt: `${exampleSlug} contributor readiness`,
+    themed: true,
+  },
   {
     id: "chart",
     name: "Star history",
@@ -165,29 +177,29 @@ const health: Embed[] = [
   },
   {
     id: "top-files",
-    name: "Hottest files",
-    desc: "The files the project keeps returning to.",
+    name: "File change frequency",
+    desc: "Files touched by the most analyzed commits.",
     path: `/api/repos/${exampleSlug}/stats/top-files.svg`,
     link: repoLink,
-    alt: `${exampleSlug} most-changed files`,
+    alt: `${exampleSlug} file change frequency`,
     themed: true,
   },
   {
     id: "bug-magnets",
-    name: "Bug magnets",
-    desc: "Files whose history is dominated by fix commits.",
+    name: "Fix-labelled changes",
+    desc: "Files most often touched by commits whose message matches the fix heuristic.",
     path: `/api/repos/${exampleSlug}/stats/bug-magnets.svg`,
     link: repoLink,
-    alt: `${exampleSlug} bug magnets`,
+    alt: `${exampleSlug} fix-labelled changes`,
     themed: true,
   },
   {
     id: "todo-trend",
-    name: "TODO trend",
-    desc: "Whether the in-code backlog is growing or shrinking.",
+    name: "Recent TODO/FIXME movement",
+    desc: "Recent marker movement inside the analyzed commit window.",
     path: `/api/repos/${exampleSlug}/stats/todo-trend.svg`,
     link: repoLink,
-    alt: `${exampleSlug} TODO trend`,
+    alt: `${exampleSlug} recent TODO/FIXME movement`,
     themed: true,
   },
 ];

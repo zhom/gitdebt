@@ -74,6 +74,26 @@ pub struct LanguageCount {
     pub lines_comment: i64,
 }
 
+/// Contributor-facing project guides and automation present in the committed
+/// HEAD tree. This is a factual checklist, not an achievement or quality
+/// score: repositories can intentionally omit any item.
+#[derive(Debug, Clone, Default, PartialEq, Eq)]
+pub struct RepositoryReadiness {
+    pub readme: bool,
+    pub security: bool,
+    pub cla: bool,
+    pub code_of_conduct: bool,
+    pub contributing: bool,
+    pub license: bool,
+    pub codeowners: bool,
+    pub changelog: bool,
+    pub issue_templates: bool,
+    pub pr_template: bool,
+    pub ci: bool,
+    pub tests: bool,
+    pub dependency_updates: bool,
+}
+
 /// One blob of HEAD's tree.
 #[derive(Debug, Clone)]
 struct TreeBlob {
@@ -100,6 +120,108 @@ async fn head_blobs(repo_path: &Path) -> Result<Vec<TreeBlob>> {
         bail!("git ls-tree exited {}", output.status);
     }
     Ok(parse_tree_listing(&output.stdout))
+}
+
+/// Inspect contributor-facing files without hydrating any blobs.
+pub async fn repository_readiness(repo_path: &Path) -> Result<RepositoryReadiness> {
+    Ok(readiness_from_blobs(&head_blobs(repo_path).await?))
+}
+
+fn readiness_from_blobs(blobs: &[TreeBlob]) -> RepositoryReadiness {
+    let mut readiness = RepositoryReadiness::default();
+    for blob in blobs {
+        let path = blob.path.replace('\\', "/").to_ascii_lowercase();
+        let basename = path.rsplit('/').next().unwrap_or(path.as_str());
+        let root_or_meta =
+            !path.contains('/') || path.starts_with(".github/") || path.starts_with("docs/");
+
+        readiness.readme |= root_or_meta && basename.starts_with("readme");
+        readiness.security |= root_or_meta && basename.starts_with("security.");
+        readiness.cla |= matches!(
+            basename,
+            "cla.md"
+                | "cla.txt"
+                | "contributor_license_agreement.md"
+                | "contributor-license-agreement.md"
+        );
+        readiness.code_of_conduct |= root_or_meta && basename.starts_with("code_of_conduct.");
+        readiness.contributing |= root_or_meta && basename.starts_with("contributing.");
+        readiness.license |= root_or_meta
+            && (basename.starts_with("license")
+                || basename.starts_with("licence")
+                || basename.starts_with("copying"));
+        readiness.codeowners |= basename == "codeowners"
+            && (!path.contains('/') || path.starts_with(".github/") || path.starts_with("docs/"));
+        readiness.changelog |=
+            root_or_meta && (basename.starts_with("changelog") || basename.starts_with("changes."));
+        readiness.issue_templates |= path.starts_with(".github/issue_template/");
+        readiness.pr_template |= basename.starts_with("pull_request_template.")
+            && (!path.contains('/') || path.starts_with(".github/"));
+        readiness.ci |= path.starts_with(".github/workflows/")
+            || path == ".gitlab-ci.yml"
+            || path == "azure-pipelines.yml"
+            || path.starts_with(".circleci/");
+        readiness.tests |= path.starts_with("test/")
+            || path.starts_with("tests/")
+            || path.contains("/tests/")
+            || basename.ends_with("_test.rs")
+            || basename.ends_with("_test.py")
+            || basename.ends_with(".test.ts")
+            || basename.ends_with(".test.tsx")
+            || basename.ends_with(".spec.ts")
+            || basename.ends_with(".spec.tsx");
+        readiness.dependency_updates |= path == ".github/dependabot.yml"
+            || path == ".github/dependabot.yaml"
+            || basename == "renovate.json"
+            || basename == "renovate.json5"
+            || basename == ".renovaterc";
+    }
+    readiness
+}
+
+/// Store the exact HEAD checklist under the same head SHA used by the commit
+/// aggregates, so badges never imply that stale files describe a newer tree.
+pub async fn save_repository_readiness(
+    db: &Db,
+    repo: &str,
+    head_sha: &str,
+    value: &RepositoryReadiness,
+) -> Result<()> {
+    sqlx::query(
+        "INSERT INTO repo_readiness \
+            (repo, head_sha, readme, security, cla, code_of_conduct, contributing, license, \
+             codeowners, changelog, issue_templates, pr_template, ci, tests, \
+             dependency_updates, updated_at) \
+         VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11, $12, $13, $14, $15, NOW()) \
+         ON CONFLICT (repo) DO UPDATE SET \
+            head_sha = EXCLUDED.head_sha, readme = EXCLUDED.readme, \
+            security = EXCLUDED.security, cla = EXCLUDED.cla, \
+            code_of_conduct = EXCLUDED.code_of_conduct, \
+            contributing = EXCLUDED.contributing, license = EXCLUDED.license, \
+            codeowners = EXCLUDED.codeowners, changelog = EXCLUDED.changelog, \
+            issue_templates = EXCLUDED.issue_templates, pr_template = EXCLUDED.pr_template, \
+            ci = EXCLUDED.ci, tests = EXCLUDED.tests, \
+            dependency_updates = EXCLUDED.dependency_updates, updated_at = NOW()",
+    )
+    .bind(repo)
+    .bind(head_sha)
+    .bind(value.readme)
+    .bind(value.security)
+    .bind(value.cla)
+    .bind(value.code_of_conduct)
+    .bind(value.contributing)
+    .bind(value.license)
+    .bind(value.codeowners)
+    .bind(value.changelog)
+    .bind(value.issue_templates)
+    .bind(value.pr_template)
+    .bind(value.ci)
+    .bind(value.tests)
+    .bind(value.dependency_updates)
+    .execute(&db.pool)
+    .await
+    .context("save repository readiness")?;
+    Ok(())
 }
 
 /// Parse `git ls-tree -rz` records: `<mode> SP <type> SP <oid> TAB <path>`,
@@ -1023,6 +1145,34 @@ mod tests {
         ]));
         let paths: Vec<&str> = blobs.iter().map(|blob| blob.path.as_str()).collect();
         assert_eq!(paths, vec!["src/main.rs", "scripts/run.sh"]);
+    }
+
+    #[test]
+    fn readiness_is_derived_from_head_paths_without_blob_hydration() {
+        let blobs = parse_tree_listing(&listing(&[
+            ("100644 blob", "README.md"),
+            ("100644 blob", "LICENCE"),
+            ("100644 blob", ".github/SECURITY.md"),
+            ("100644 blob", ".github/CODE_OF_CONDUCT.md"),
+            ("100644 blob", ".github/ISSUE_TEMPLATE/bug.yml"),
+            ("100644 blob", ".github/PULL_REQUEST_TEMPLATE.md"),
+            ("100644 blob", ".github/workflows/test.yml"),
+            ("100644 blob", "docs/CONTRIBUTING.md"),
+            ("100644 blob", "tests/smoke_test.py"),
+            ("100644 blob", "src/main.rs"),
+        ]));
+        let value = readiness_from_blobs(&blobs);
+        assert!(value.readme);
+        assert!(value.license);
+        assert!(value.security);
+        assert!(value.code_of_conduct);
+        assert!(value.contributing);
+        assert!(value.issue_templates);
+        assert!(value.pr_template);
+        assert!(value.ci);
+        assert!(value.tests);
+        assert!(!value.cla);
+        assert!(!value.dependency_updates);
     }
 
     #[test]

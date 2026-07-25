@@ -38,7 +38,7 @@ export function renderAgentMarkdown(
     return `${documentHeader(`${page.name} GitHub repository comparison`, absolute(site, `/compare/${page.slug}`))}> ${page.description}\n\nThis category compares public repositories only. Open the canonical HTML page for interactive charts and links to each repository report.\n`;
   }
 
-  return `${documentHeader(page.title, absolute(site, `/${page.path}`))}> ${page.description}\n\nGitdebt provides fast GitHub star history, growth, contributor, ownership, language, churn, and maintenance statistics for public repositories.\n\n- [Repository leaderboard](${absolute(site, "/leaderboard")})\n- [Compare repositories](${absolute(site, "/compare")})\n- [API and project information](${absolute(site, "/about")})\n`;
+  return `${documentHeader(page.title, absolute(site, `/${page.path}`))}> ${page.description}\n\nGitdebt provides fast GitHub star history, growth, contributor, ownership, language, change-frequency, and maintenance statistics for public repositories.\n\n- [Repository leaderboard](${absolute(site, "/leaderboard")})\n- [Compare repositories](${absolute(site, "/compare")})\n- [API and project information](${absolute(site, "/about")})\n`;
 }
 
 export function markdownResponse(body: string, canonical: string): Response {

@@ -93,9 +93,9 @@ export function LiveRepoReport({ apiBase }: { apiBase: string }) {
         <header className="max-w-2xl space-y-2">
           <h2 className={HEADING}>What deserves attention first</h2>
           <p className={BODY}>
-            Fix concentration, file churn, ownership risk, and maintenance
-            cadence are the clearest starting points for understanding this
-            codebase.
+            Fix-labelled changes, file change frequency, ownership risk, and
+            maintenance cadence are the clearest starting points for
+            understanding this codebase.
           </p>
         </header>
         <InteractiveRepoSignals

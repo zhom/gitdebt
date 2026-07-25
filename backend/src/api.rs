@@ -473,15 +473,26 @@ pub fn router(state: ApiState) -> Router {
         // burst into an out-of-memory restart.
         .layer(
             tower::ServiceBuilder::new()
-                .layer(HandleErrorLayer::new(|_: BoxError| async {
-                    let mut headers = HeaderMap::new();
-                    headers.insert(header::RETRY_AFTER, HeaderValue::from_static("2"));
-                    (StatusCode::SERVICE_UNAVAILABLE, headers, "server busy")
-                }))
+                .layer(HandleErrorLayer::new(|_: BoxError| async { server_busy() }))
                 .layer(LoadShedLayer::new())
                 .layer(GlobalConcurrencyLimitLayer::new(max_inflight_requests())),
         )
         .layer(TraceLayer::new_for_http())
+}
+
+/// Overload is rejected before a request reaches its route-specific CORS
+/// layer. Keep this generic response readable by public cross-origin callers
+/// so browsers expose the useful 503/retry signal instead of reporting a
+/// misleading CORS failure. No request data, credentials, or internal error
+/// details are reflected in the body.
+fn server_busy() -> axum::response::Response {
+    let mut headers = HeaderMap::new();
+    headers.insert(header::RETRY_AFTER, HeaderValue::from_static("2"));
+    headers.insert(
+        header::ACCESS_CONTROL_ALLOW_ORIGIN,
+        HeaderValue::from_static("*"),
+    );
+    (StatusCode::SERVICE_UNAVAILABLE, headers, "server busy").into_response()
 }
 
 /// Ceiling on requests being served at once, above which the tier sheds
@@ -8193,6 +8204,23 @@ mod tests {
         assert_eq!(
             response.headers().get("x-ratelimit-after").unwrap(),
             &HeaderValue::from_static("7")
+        );
+    }
+
+    #[test]
+    fn server_busy_response_preserves_public_cors() {
+        let response = server_busy();
+        assert_eq!(response.status(), StatusCode::SERVICE_UNAVAILABLE);
+        assert_eq!(
+            response
+                .headers()
+                .get(header::ACCESS_CONTROL_ALLOW_ORIGIN)
+                .unwrap(),
+            &HeaderValue::from_static("*")
+        );
+        assert_eq!(
+            response.headers().get(header::RETRY_AFTER).unwrap(),
+            &HeaderValue::from_static("2")
         );
     }
 

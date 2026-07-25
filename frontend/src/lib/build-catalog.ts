@@ -13,7 +13,7 @@ type SitemapResponse = {
 };
 
 const SLUG_RE = /^[a-z0-9._-]+\/[a-z0-9._-]+$/;
-const DEFAULT_LIMIT = 1_000;
+const DEFAULT_LIMIT = 3_000;
 const MAX_LIMIT = 8_000;
 // This build runs on push to main, which is the same event that redeploys the
 // backend, so the catalog fetch regularly lands inside a restart window. The

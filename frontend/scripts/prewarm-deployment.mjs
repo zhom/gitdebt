@@ -3,7 +3,7 @@ import path from "node:path";
 import { isReservedFirstSegment } from "../src/lib/static-routing.mjs";
 
 const apiBase = (process.env.PUBLIC_API_BASE ?? "https://api.gitdebt.com").replace(/\/$/, "");
-const limit = Math.min(1_000, Math.max(1, Number(process.env.STATIC_REPO_LIMIT ?? 1_000)));
+const limit = Math.min(8_000, Math.max(1, Number(process.env.STATIC_REPO_LIMIT ?? 3_000)));
 const stats = [
   "bug-magnets",
   "top-files",

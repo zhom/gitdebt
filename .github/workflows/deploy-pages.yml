@@ -27,7 +27,7 @@ jobs:
       PUBLIC_API_BASE: https://api.gitdebt.com
       PUBLIC_SITE_URL: https://gitdebt.com
       STATIC_CATALOG_REQUIRED: "1"
-      STATIC_REPO_LIMIT: "1000"
+      STATIC_REPO_LIMIT: "3000"
 
     steps:
       - uses: actions/checkout@v7

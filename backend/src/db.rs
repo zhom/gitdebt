@@ -29,6 +29,11 @@ fn pool_options(max_connections: u32) -> PgPoolOptions {
 /// `CREATE INDEX CONCURRENTLY`, creating a deadlock cycle.
 const SCHEMA_MIGRATION_LOCK_ID: i64 = 0x6769_7464_6562_7401;
 
+/// Bump whenever [`SCHEMA`] gains a required table, column, constraint, or
+/// non-concurrent index. Once this revision is recorded, later process starts
+/// can avoid taking DDL locks against live worker transactions.
+const CURRENT_SCHEMA_VERSION: i32 = 4;
+
 /// Attempts at the schema transaction before startup fails. The statements
 /// are idempotent; retrying absorbs a `lock_timeout` abort caused by a
 /// long-running transaction that happens to be open during a deploy.
@@ -783,6 +788,9 @@ BEGIN
         WHERE id = 1;
     END IF;
 END$$;
+UPDATE schema_version
+SET version = 4, applied_at = NOW()
+WHERE id = 1 AND version < 4;
 "#;
 
 /// Large-table indexes built with `CREATE INDEX CONCURRENTLY` *after* the
@@ -917,6 +925,10 @@ impl Db {
             .await
             .context("connect postgres")?;
         let me = Self { pool };
+        if me.schema_is_current().await? {
+            me.spawn_index_maintenance(database_url.to_string());
+            return Ok(me);
+        }
         // Keep the session lock on a dedicated connection. Dropping this
         // connection (including cancellation during startup) closes the
         // session and releases the lock instead of returning a still-locked
@@ -937,7 +949,13 @@ impl Db {
         }
 
         // A lock timeout is a transient condition, not a broken schema.
-        let mut migration_result = me.migrate(&mut connection).await;
+        // Recheck after taking the lock: another process may have completed
+        // the migration while this process was waiting.
+        let mut migration_result = if me.schema_is_current().await? {
+            Ok(())
+        } else {
+            me.migrate(&mut connection).await
+        };
         for attempt in 1..SCHEMA_MIGRATION_ATTEMPTS {
             if migration_result.is_ok() {
                 break;
@@ -961,6 +979,23 @@ impl Db {
         close_result?;
         me.spawn_index_maintenance(database_url.to_string());
         Ok(me)
+    }
+
+    async fn schema_is_current(&self) -> Result<bool> {
+        let version_table_exists: bool =
+            sqlx::query_scalar("SELECT to_regclass('public.schema_version') IS NOT NULL")
+                .fetch_one(&self.pool)
+                .await
+                .context("check schema version table")?;
+        if !version_table_exists {
+            return Ok(false);
+        }
+        let version: Option<i32> =
+            sqlx::query_scalar("SELECT version FROM public.schema_version WHERE id = 1")
+                .fetch_optional(&self.pool)
+                .await
+                .context("read schema version")?;
+        Ok(version.is_some_and(|version| version >= CURRENT_SCHEMA_VERSION))
     }
 
     /// Build the large-table indexes in the background.
@@ -1072,7 +1107,7 @@ impl Db {
 
 #[cfg(test)]
 mod tests {
-    use super::{CONCURRENT_INDEXES, SCHEMA, SCHEMA_MIGRATION_LOCK_ID};
+    use super::{CONCURRENT_INDEXES, CURRENT_SCHEMA_VERSION, SCHEMA, SCHEMA_MIGRATION_LOCK_ID};
 
     /// Indexes added for queries that are executed on a fixed cadence rather
     /// than by a person: the progress poll's fleet-wide duration sample, the
@@ -1119,6 +1154,13 @@ mod tests {
     #[test]
     fn blocked_schema_statements_are_retried_rather_than_fatal() {
         const { assert!(super::SCHEMA_MIGRATION_ATTEMPTS > 1) };
+    }
+
+    #[test]
+    fn schema_records_the_revision_that_skips_redundant_ddl() {
+        assert!(SCHEMA.contains(&format!(
+            "SET version = {CURRENT_SCHEMA_VERSION}, applied_at = NOW()"
+        )));
     }
 
     /// The queue tables take many row versions per job. Their storage

@@ -13,6 +13,7 @@ import { DitherField } from "@/components/DitherField";
 import { LandingRepoLookup } from "@/components/LandingRepoLookup";
 import { GrowthTicker } from "@/components/GrowthTicker";
 import { PlatformPulse } from "@/components/PlatformPulse";
+import { RepoHealthScorecard } from "@/components/RepoHealthScorecard";
 import { ReportLayerGraphic } from "@/components/ReportLayerGraphic";
 import { SignalFlowGraphic } from "@/components/SignalFlowGraphic";
 import { StatStrip } from "@/components/StatStrip";
@@ -100,6 +101,17 @@ const reportLayers = [
   },
 ];
 
+// Fallback line-up for the health scorecard. Live platform activity
+// replaces these client-side whenever it offers analyzed repositories, so
+// this only has to be recognizable and reliably analyzed.
+const healthShowcaseRepos = [
+  "facebook/react",
+  "vercel/next.js",
+  "oven-sh/bun",
+  "denoland/deno",
+  "fastapi/fastapi",
+];
+
 const popularPairs = [
   ["facebook/react", "vuejs/vue"],
   ["denoland/deno", "oven-sh/bun"],
@@ -122,6 +134,7 @@ const featuredCategories = featuredCategorySlugs.flatMap((slug) => {
 });
 const landingWarmRepos = Array.from(
   new Set([
+    ...healthShowcaseRepos,
     ...popularPairs.flatMap((pair) => pair.repos),
     ...featuredCategories.flatMap((category) => category.repos),
   ]),
@@ -195,6 +208,38 @@ const landingWarmRepos = Array.from(
         </section>
 
         <div class="mx-auto max-w-6xl px-6 pb-16">
+          <section
+            id="health"
+            class="mt-16 scroll-mt-24 border-t border-border/60 pt-12"
+          >
+            <div class={SECTION_HEADER}>
+              <h2 class={HEADING}>
+                Stars say it’s popular. The commit history says if it’s healthy.
+              </h2>
+              <a href="#lookup" class={SECTION_ACTION}>
+                score your repo
+                <span
+                  aria-hidden="true"
+                  class="transition-transform duration-150 group-hover:translate-x-0.5 motion-reduce:transition-none"
+                  >→</span
+                >
+              </a>
+            </div>
+            <p class:list={["mt-2 max-w-[68ch]", BODY]}>
+              Four readings taken from a repository's own commit history: whether
+              anyone is still shipping, how few people carry the code, how much
+              of the work is repair rather than new features, and whether known
+              debt is piling up. Every number links back to the full report.
+            </p>
+            <div class="mt-6">
+              <RepoHealthScorecard
+                client:visible
+                apiBase={apiBase}
+                repos={healthShowcaseRepos}
+              />
+            </div>
+          </section>
+
           <section
             id="live"
             class="mt-16 scroll-mt-24 border-t border-border/60 pt-12"

@@ -24,6 +24,7 @@ Gitdebt is an open-source public GitHub repository analytics service. It provide
 - Star history JSON: `GET https://api.gitdebt.com/api/repos/{owner}/{repo}/stars.json`
 - Star history CSV: `GET https://api.gitdebt.com/api/repos/{owner}/{repo}/stars.csv`
 - Repository-health JSON: `GET https://api.gitdebt.com/api/repos/{owner}/{repo}/stats.json`
+- Repository-health summary JSON: `GET https://api.gitdebt.com/api/repos/{owner}/{repo}/health.json`
 - Progress snapshot: `GET https://api.gitdebt.com/api/repos/{owner}/{repo}/progress.json`
 - Progress SSE: `GET https://api.gitdebt.com/api/repos/{owner}/{repo}/progress`
 - Platform activity: `GET https://api.gitdebt.com/api/activity.json`

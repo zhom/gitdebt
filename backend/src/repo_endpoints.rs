@@ -213,6 +213,10 @@ pub fn public_router() -> Router<ApiState> {
             get(stat_dispatcher),
         )
         .route("/api/repos/{owner}/{repo}/stats.json", get(repo_stats_json))
+        .route(
+            "/api/repos/{owner}/{repo}/health.json",
+            get(repo_health_json),
+        )
 }
 
 /// Postgres-only data contract for the interactive in-app charts. Embedded
@@ -431,6 +435,240 @@ async fn repo_stats_json(
         Json(body),
     )
         .into_response())
+}
+
+/// Trailing window behind every "recent" reading in the health summary. A
+/// quarter is long enough to survive a quiet fortnight and short enough
+/// that "still maintained" means something.
+const HEALTH_WINDOW_DAYS: i32 = 90;
+
+/// Months of commit history returned as the maintenance sparkline.
+const HEALTH_MONTHS: usize = 24;
+
+/// Deepest author rank read for the bus factor. A repository whose top 64
+/// non-bot authors still do not hold half the attributed commits is
+/// "broadly shared" by any reading, so the exact rank past that point buys
+/// nothing and would cost a scan of every author row.
+const HEALTH_AUTHOR_DEPTH: i64 = 64;
+
+/// `(total_commits, analysis_truncated, star_count, archived, last_analyzed_at)`
+type HealthOverviewRow = (i64, bool, Option<i64>, bool, Option<chrono::DateTime<Utc>>);
+
+/// `(tracked_files, file_changes, fix_changes, fresh_files, hotspot_path,
+/// hotspot_commits, hotspot_fix_commits)`
+type HealthFileRow = (i64, i64, i64, i64, Option<String>, Option<i64>, Option<i64>);
+
+/// Fixed-size health summary for a repository.
+///
+/// `stats.json` returns every commit day, TODO day and file row — hundreds
+/// of kilobytes on an old repository, which is the right shape for the
+/// report page and the wrong shape for a landing page that only needs one
+/// legible verdict per signal. This aggregates in Postgres instead and
+/// returns a body whose size does not grow with repository age.
+async fn repo_health_json(
+    State(state): State<ApiState>,
+    Path((owner, repo)): Path<(String, String)>,
+) -> Result<Response, ApiError> {
+    if !is_valid_slug(&owner) || !is_valid_slug(&repo) {
+        return Err(ApiError::bad_request("invalid owner/repo"));
+    }
+    let full = crate::analyzer::repo_key(&owner, &repo);
+    let pool = &state.analyzer.cache.db().pool;
+    match load_repo_health(pool, &full).await? {
+        Some(body) => Ok((
+            [(header::CACHE_CONTROL, "public, s-maxage=300, max-age=60")],
+            Json(body),
+        )
+            .into_response()),
+        // Same contract as `stats.json`: an unanalyzed repository is a
+        // not-yet, not a 404, and must never be cached as an answer.
+        None => Ok((
+            StatusCode::ACCEPTED,
+            [(header::CACHE_CONTROL, "no-store")],
+            Json(serde_json::json!({"ready": false, "repo": full})),
+        )
+            .into_response()),
+    }
+}
+
+/// The health summary for one already-analyzed public repository, or
+/// `None` when no completed analysis backs it yet.
+async fn load_repo_health(
+    pool: &sqlx::PgPool,
+    repo: &str,
+) -> Result<Option<serde_json::Value>, ApiError> {
+    let overview: Option<HealthOverviewRow> = sqlx::query_as(
+        "SELECT history.total_commits, history.analysis_truncated, \
+                public_repo.star_count, public_repo.archived, history.last_analyzed_at \
+         FROM repo_history history \
+         JOIN repos public_repo ON public_repo.repo = history.repo \
+         WHERE history.repo = $1 AND history.last_analyzed_at IS NOT NULL \
+           AND public_repo.missing = FALSE \
+           AND public_repo.metadata_fetched_at IS NOT NULL",
+    )
+    .bind(repo)
+    .fetch_optional(pool)
+    .await?;
+    let Some((total_commits, analysis_truncated, star_count, archived, analyzed_at)) = overview
+    else {
+        return Ok(None);
+    };
+
+    // Ownership. The window functions run before LIMIT, so the totals cover
+    // every non-bot author even though only the head of the ranking is read.
+    let author_sql = format!(
+        "SELECT commits, \
+                SUM(commits) OVER ()::BIGINT AS attributed_total, \
+                COUNT(*) OVER ()::BIGINT AS contributor_count \
+         FROM repo_author_stats \
+         WHERE repo = $1 AND commits > 0 AND {NON_BOT_AUTHOR_FILTER} \
+         ORDER BY commits DESC, author_email ASC LIMIT {HEALTH_AUTHOR_DEPTH}"
+    );
+    let author_rows = sqlx::query(sqlx::AssertSqlSafe(author_sql))
+        .bind(repo)
+        .bind(BOT_LOGINS)
+        .fetch_all(pool)
+        .await?;
+    let attributed_commits = author_rows
+        .first()
+        .and_then(|row| {
+            row.try_get::<Option<i64>, _>("attributed_total")
+                .ok()
+                .flatten()
+        })
+        .unwrap_or(0);
+    let contributors = author_rows
+        .first()
+        .and_then(|row| row.try_get::<i64, _>("contributor_count").ok())
+        .unwrap_or(0);
+    let author_commits: Vec<i64> = author_rows
+        .iter()
+        .filter_map(|row| row.try_get::<i64, _>("commits").ok())
+        .collect();
+    let bus_factor = repo_charts::compute_bus_factor(&author_commits, attributed_commits);
+    let top_author_commits = author_commits.first().copied().unwrap_or(0);
+
+    // Maintenance: this window against the one before it.
+    let (commits_window, commits_previous_window, last_commit_day): (i64, i64, Option<NaiveDate>) =
+        sqlx::query_as(
+            "SELECT COALESCE(SUM(commits) FILTER \
+                        (WHERE day > CURRENT_DATE - $2::INT), 0)::BIGINT, \
+                    COALESCE(SUM(commits) FILTER \
+                        (WHERE day > CURRENT_DATE - 2 * $2::INT \
+                           AND day <= CURRENT_DATE - $2::INT), 0)::BIGINT, \
+                    MAX(day) FILTER (WHERE commits > 0) \
+             FROM repo_commit_days WHERE repo = $1",
+        )
+        .bind(repo)
+        .bind(HEALTH_WINDOW_DAYS)
+        .fetch_one(pool)
+        .await?;
+
+    let today = Utc::now().date_naive();
+    let current_month = NaiveDate::from_ymd_opt(today.year(), today.month(), 1).unwrap_or(today);
+    let first_month = current_month
+        .checked_sub_months(chrono::Months::new(HEALTH_MONTHS as u32 - 1))
+        .unwrap_or(current_month);
+    let month_rows: Vec<(NaiveDate, i64)> = sqlx::query_as(
+        "SELECT date_trunc('month', day)::date AS month, SUM(commits)::BIGINT AS commits \
+         FROM repo_commit_days WHERE repo = $1 AND day >= $2 \
+         GROUP BY 1 ORDER BY 1",
+    )
+    .bind(repo)
+    .bind(first_month)
+    .fetch_all(pool)
+    .await?;
+    // Gaps are filled to zero: a month nobody committed in is a fact about
+    // the repository, and dropping it would draw a flatter line than reality.
+    let observed: std::collections::HashMap<NaiveDate, i64> = month_rows.into_iter().collect();
+    let mut commit_months = Vec::with_capacity(HEALTH_MONTHS);
+    let mut cursor = first_month;
+    for _ in 0..HEALTH_MONTHS {
+        commit_months.push(serde_json::json!({
+            "month": format!("{:04}-{:02}", cursor.year(), cursor.month()),
+            "commits": observed.get(&cursor).copied().unwrap_or(0).max(0),
+        }));
+        let Some(next) = cursor.checked_add_months(chrono::Months::new(1)) else {
+            break;
+        };
+        cursor = next;
+    }
+
+    // Repair load, hotspot and freshness share one scan of the file rows.
+    // Dependency manifests are excluded for the same reason the charts
+    // exclude them: version bumps would otherwise be every repo's hotspot.
+    let (
+        tracked_files,
+        file_changes,
+        fix_changes,
+        fresh_files,
+        hotspot_path,
+        hotspot_commits,
+        hotspot_fixes,
+    ): HealthFileRow = sqlx::query_as(
+        "WITH tracked AS MATERIALIZED ( \
+             SELECT path, commits, fix_commits, last_modified_at \
+             FROM repo_file_stats WHERE repo = $1 AND path !~ $2 \
+         ), totals AS ( \
+             SELECT COUNT(*)::BIGINT AS files, \
+                    COALESCE(SUM(commits), 0)::BIGINT AS changes, \
+                    COALESCE(SUM(fix_commits), 0)::BIGINT AS fixes, \
+                    COUNT(*) FILTER \
+                        (WHERE last_modified_at >= NOW() - INTERVAL '1 year')::BIGINT AS fresh \
+             FROM tracked \
+         ), hotspot AS ( \
+             SELECT path, commits, fix_commits FROM tracked \
+             ORDER BY commits DESC, path ASC LIMIT 1 \
+         ) \
+         SELECT totals.files, totals.changes, totals.fixes, totals.fresh, \
+                hotspot.path, hotspot.commits, hotspot.fix_commits \
+         FROM totals LEFT JOIN hotspot ON TRUE",
+    )
+    .bind(repo)
+    .bind(DEPENDENCY_FILE_REGEX)
+    .fetch_one(pool)
+    .await?;
+
+    let (todo_delta_window, todo_outstanding): (i64, i64) = sqlx::query_as(
+        "SELECT COALESCE(SUM(todo_added - todo_removed) FILTER \
+                    (WHERE day > CURRENT_DATE - $2::INT), 0)::BIGINT, \
+                COALESCE(SUM(todo_added - todo_removed), 0)::BIGINT \
+         FROM repo_todo_deltas WHERE repo = $1",
+    )
+    .bind(repo)
+    .bind(HEALTH_WINDOW_DAYS)
+    .fetch_one(pool)
+    .await?;
+
+    Ok(Some(serde_json::json!({
+        "ready": true,
+        "repo": repo,
+        "stars": star_count.unwrap_or(0).max(0),
+        "archived": archived,
+        "analyzed_at": analyzed_at,
+        "window_days": HEALTH_WINDOW_DAYS,
+        "total_commits": total_commits.max(0),
+        "attributed_commits": attributed_commits.max(0),
+        "analysis_truncated": analysis_truncated,
+        "bus_factor": bus_factor,
+        "contributors": contributors.max(0),
+        "top_author_commits": top_author_commits.max(0),
+        "commits_window": commits_window.max(0),
+        "commits_previous_window": commits_previous_window.max(0),
+        "last_commit_day": last_commit_day,
+        "commit_months": commit_months,
+        "tracked_files": tracked_files.max(0),
+        "file_changes": file_changes.max(0),
+        "fix_changes": fix_changes.max(0),
+        "fresh_files": fresh_files.max(0),
+        "hotspot": hotspot_path.map(|path| serde_json::json!({
+            "path": path,
+            "commits": hotspot_commits.unwrap_or(0).max(0),
+            "fix_commits": hotspot_fixes.unwrap_or(0).max(0),
+        })),
+        "todo_delta_window": todo_delta_window,
+        "todo_outstanding": todo_outstanding.max(0),
+    })))
 }
 
 /// Mutating endpoints. api.rs wraps this in a per-IP rate limiter.
@@ -1296,6 +1534,190 @@ fn stat_cache_control(pending: bool) -> HeaderValue {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    /// Every table the health summary reads, for one test repository.
+    #[cfg(test)]
+    async fn cleanup_health_rows(pool: &sqlx::PgPool, repo: &str) {
+        for statement in [
+            "DELETE FROM repo_todo_deltas WHERE repo = $1",
+            "DELETE FROM repo_file_stats WHERE repo = $1",
+            "DELETE FROM repo_commit_days WHERE repo = $1",
+            "DELETE FROM repo_author_stats WHERE repo = $1",
+            "DELETE FROM repo_history WHERE repo = $1",
+            "DELETE FROM repos WHERE repo = $1",
+        ] {
+            sqlx::query(statement)
+                .bind(repo)
+                .execute(pool)
+                .await
+                .expect("cleanup health rows");
+        }
+    }
+
+    /// The summary is five aggregate queries across five tables. A renamed
+    /// column or a mis-parenthesised FILTER surfaces as HTTP 500 on every
+    /// repository rather than as a wrong number, so this runs all of them
+    /// against Postgres and pins each aggregate.
+    #[tokio::test]
+    async fn repo_health_aggregates_over_the_analysis_tables() {
+        let Some(db) = crate::test_db::shared().await else {
+            eprintln!("skipping: set GITDEBT_TEST_DATABASE_URL to run");
+            return;
+        };
+        let pool = &db.pool;
+        let repo = "gitdebt-test-health/repo";
+        let unanalyzed = "gitdebt-test-health/cold";
+        cleanup_health_rows(pool, repo).await;
+        cleanup_health_rows(pool, unanalyzed).await;
+
+        assert!(
+            load_repo_health(pool, unanalyzed)
+                .await
+                .expect("cold health query")
+                .is_none(),
+            "a repository with no completed analysis has no summary to serve"
+        );
+
+        sqlx::query(
+            "INSERT INTO repos (repo, star_count, missing, metadata_fetched_at, archived) \
+             VALUES ($1, 1234, FALSE, NOW(), FALSE)",
+        )
+        .bind(repo)
+        .execute(pool)
+        .await
+        .expect("seed repo");
+        sqlx::query(
+            "INSERT INTO repo_history (repo, total_commits, last_analyzed_at, analysis_truncated) \
+             VALUES ($1, 500, NOW(), TRUE)",
+        )
+        .bind(repo)
+        .execute(pool)
+        .await
+        .expect("seed history");
+
+        // 60 + 30 + 10 attributed; the bot's 900 commits must not count.
+        for (email, name, login, commits) in [
+            ("a@example.com", "A", Some("a"), 60),
+            ("b@example.com", "B", Some("b"), 30),
+            ("c@example.com", "C", Some("c"), 10),
+            ("bot@example.com", "renovate[bot]", Some("renovate"), 900),
+        ] {
+            sqlx::query(
+                "INSERT INTO repo_author_stats \
+                    (repo, author_email, author_name, github_login, commits) \
+                 VALUES ($1, $2, $3, $4, $5)",
+            )
+            .bind(repo)
+            .bind(email)
+            .bind(name)
+            .bind(login)
+            .bind(commits as i64)
+            .execute(pool)
+            .await
+            .expect("seed author");
+        }
+
+        let today = Utc::now().date_naive();
+        for (offset, commits) in [(10i64, 7i64), (100, 5), (1_000, 3)] {
+            sqlx::query("INSERT INTO repo_commit_days (repo, day, commits) VALUES ($1, $2, $3)")
+                .bind(repo)
+                .bind(today - chrono::Duration::days(offset))
+                .bind(commits)
+                .execute(pool)
+                .await
+                .expect("seed commit day");
+        }
+
+        for (path, commits, fixes, modified_days_ago) in [
+            ("src/app.ts", 40i64, 12i64, 3i64),
+            ("legacy/old.ts", 30, 3, 800),
+            // A dependency manifest out-changes everything and must still be
+            // excluded from the hotspot and from the repair-load ratio.
+            ("package.json", 900, 0, 1),
+        ] {
+            sqlx::query(
+                "INSERT INTO repo_file_stats \
+                    (repo, path, commits, fix_commits, last_modified_at) \
+                 VALUES ($1, $2, $3, $4, NOW() - make_interval(days => $5))",
+            )
+            .bind(repo)
+            .bind(path)
+            .bind(commits)
+            .bind(fixes)
+            .bind(modified_days_ago as i32)
+            .execute(pool)
+            .await
+            .expect("seed file stats");
+        }
+
+        for (offset, added, removed) in [(10i64, 9i64, 4i64), (300, 20, 0)] {
+            sqlx::query(
+                "INSERT INTO repo_todo_deltas (repo, day, todo_added, todo_removed) \
+                 VALUES ($1, $2, $3, $4)",
+            )
+            .bind(repo)
+            .bind(today - chrono::Duration::days(offset))
+            .bind(added)
+            .bind(removed)
+            .execute(pool)
+            .await
+            .expect("seed todo delta");
+        }
+
+        let body = load_repo_health(pool, repo)
+            .await
+            .expect("health query")
+            .expect("analyzed repository has a summary");
+
+        assert_eq!(body["ready"], serde_json::json!(true));
+        assert_eq!(body["stars"], serde_json::json!(1234));
+        assert_eq!(body["total_commits"], serde_json::json!(500));
+        assert_eq!(body["analysis_truncated"], serde_json::json!(true));
+
+        assert_eq!(body["attributed_commits"], serde_json::json!(100));
+        assert_eq!(body["contributors"], serde_json::json!(3));
+        assert_eq!(body["top_author_commits"], serde_json::json!(60));
+        // 60 of 100 attributed commits pass half on the first author.
+        assert_eq!(body["bus_factor"], serde_json::json!(1));
+
+        assert_eq!(body["commits_window"], serde_json::json!(7));
+        assert_eq!(body["commits_previous_window"], serde_json::json!(5));
+        assert_eq!(
+            body["last_commit_day"].as_str(),
+            Some((today - chrono::Duration::days(10)).to_string()).as_deref()
+        );
+
+        let months = body["commit_months"]
+            .as_array()
+            .expect("commit months array");
+        assert_eq!(months.len(), HEALTH_MONTHS);
+        assert_eq!(
+            months
+                .iter()
+                .filter_map(|month| month["commits"].as_i64())
+                .sum::<i64>(),
+            12,
+            "the day ~33 months back falls outside the sparkline window"
+        );
+        assert_eq!(
+            months.last().and_then(|month| month["month"].as_str()),
+            Some(format!("{:04}-{:02}", today.year(), today.month()).as_str()),
+            "the series ends on the current month"
+        );
+
+        assert_eq!(body["tracked_files"], serde_json::json!(2));
+        assert_eq!(body["file_changes"], serde_json::json!(70));
+        assert_eq!(body["fix_changes"], serde_json::json!(15));
+        assert_eq!(body["fresh_files"], serde_json::json!(1));
+        assert_eq!(body["hotspot"]["path"], serde_json::json!("src/app.ts"));
+        assert_eq!(body["hotspot"]["commits"], serde_json::json!(40));
+        assert_eq!(body["hotspot"]["fix_commits"], serde_json::json!(12));
+
+        assert_eq!(body["todo_delta_window"], serde_json::json!(5));
+        assert_eq!(body["todo_outstanding"], serde_json::json!(25));
+
+        cleanup_health_rows(pool, repo).await;
+    }
 
     #[test]
     fn avatar_media_only_reads_known_https_cdns() {

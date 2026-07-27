@@ -10,6 +10,7 @@ Gitdebt analyzes public repositories only. Private repositories are ignored and 
 - Use the page's `<link rel="alternate" type="text/markdown">` to discover that representation.
 - Repository star history: `https://api.gitdebt.com/api/repos/{owner}/{repo}/stars.json`
 - Repository health: `https://api.gitdebt.com/api/repos/{owner}/{repo}/stats.json`
+- Repository health summary: `https://api.gitdebt.com/api/repos/{owner}/{repo}/health.json`
 - Queue status and ETA: `https://api.gitdebt.com/api/repos/{owner}/{repo}/progress.json`
 
 ## Primary pages

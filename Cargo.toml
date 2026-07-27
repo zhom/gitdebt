@@ -42,6 +42,6 @@ resvg = { version = "0.47", default-features = false, features = ["text", "raste
 image = { version = "0.25", default-features = false, features = ["gif", "webp"] }
 aes-gcm = "0.11"
 base64 = "0.22"
-redis = { version = "0.32", features = ["tokio-comp", "connection-manager"] }
+redis = { version = "1.4", features = ["tokio-comp", "connection-manager"] }
 gcp_auth = { version = "0.12.7", default-features = false, features = ["aws-lc-rs"] }
 flate2 = "1"

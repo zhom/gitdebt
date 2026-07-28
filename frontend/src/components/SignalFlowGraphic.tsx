@@ -1,5 +1,5 @@
 import { useEffect, useMemo, useState } from "react";
-import { Activity, ArrowUpRight, Eye, Star } from "lucide-react";
+import { Activity, ArrowUpRight } from "lucide-react";
 import { AnimatePresence, motion, useReducedMotion } from "motion/react";
 
 import {
@@ -11,12 +11,16 @@ import { DitherAreaChart } from "@/components/DitherAreaChart";
 import { DitherMeter } from "@/components/DitherMeter";
 import { StatStrip } from "@/components/StatStrip";
 import { CAPTION, EYEBROW, PANEL } from "@/components/style-tokens";
+import {
+  healthReadings,
+  type HealthReading,
+  type RepoHealth,
+} from "@/lib/repo-health";
 import { cn } from "@/lib/utils";
 
 type LiveRepo = {
   repo: string;
   stars: number;
-  views: number;
   viewed_at: string;
   history_ready: boolean;
   analysis_ready: boolean;
@@ -39,11 +43,42 @@ function viewedLabel(value: string): string {
   return hours < 24 ? `opened ${hours}h ago` : `opened ${Math.floor(hours / 24)}d ago`;
 }
 
+const HEALTH_TONE_WEIGHT = {
+  risk: 40,
+  watch: 30,
+  good: 20,
+  steady: 10,
+} as const;
+
+const HEALTH_READING_PRIORITY = {
+  ownership: 4,
+  maintenance: 3,
+  debt: 2,
+  repair: 1,
+} as const;
+
+/**
+ * Lead with the most consequential reading. Ownership wins ties because it is
+ * gitdebt's clearest compact complement to a repository's popularity curve.
+ */
+function featuredHealthReading(health: RepoHealth): HealthReading {
+  return healthReadings(health).reduce((featured, candidate) => {
+    const featuredScore =
+      HEALTH_TONE_WEIGHT[featured.tone] +
+      HEALTH_READING_PRIORITY[featured.key];
+    const candidateScore =
+      HEALTH_TONE_WEIGHT[candidate.tone] +
+      HEALTH_READING_PRIORITY[candidate.key];
+    return candidateScore > featuredScore ? candidate : featured;
+  });
+}
+
 export function SignalFlowGraphic({ apiBase }: { apiBase: string }) {
   const [repos, setRepos] = useState<LiveRepo[]>([]);
   const [index, setIndex] = useState(0);
   const [paused, setPaused] = useState(false);
   const [history, setHistory] = useState<HistoryPoint[]>([]);
+  const [health, setHealth] = useState<RepoHealth | null>(null);
   const reduceMotion = useReducedMotion();
 
   useEffect(() => {
@@ -97,6 +132,14 @@ export function SignalFlowGraphic({ apiBase }: { apiBase: string }) {
     () => history.map((point) => ({ date: point.date, value: point.stars })),
     [history],
   );
+  const selectedHealth =
+    health && selected && health.repo.toLowerCase() === selected.repo.toLowerCase()
+      ? health
+      : null;
+  const featuredHealth = useMemo(
+    () => (selectedHealth ? featuredHealthReading(selectedHealth) : null),
+    [selectedHealth],
+  );
 
   useEffect(() => {
     if (!selected?.history_ready) {
@@ -118,6 +161,27 @@ export function SignalFlowGraphic({ apiBase }: { apiBase: string }) {
       active = false;
     };
   }, [apiBase, selected?.history_ready, selected?.repo]);
+
+  useEffect(() => {
+    if (!selected?.analysis_ready) {
+      setHealth(null);
+      return;
+    }
+    let active = true;
+    fetch(`${apiBase}/api/repos/${selected.repo}/health.json`, {
+      headers: { accept: "application/json" },
+    })
+      .then((response) => (response.ok ? response.json() : null))
+      .then((body: RepoHealth | null) => {
+        if (active) setHealth(body?.ready ? body : null);
+      })
+      .catch(() => {
+        if (active) setHealth(null);
+      });
+    return () => {
+      active = false;
+    };
+  }, [apiBase, selected?.analysis_ready, selected?.repo]);
 
   return (
     <a
@@ -173,26 +237,34 @@ export function SignalFlowGraphic({ apiBase }: { apiBase: string }) {
                 items={[
                   {
                     key: "stars",
-                    label: (
-                      <span className="inline-flex items-center gap-1.5">
-                        <Star className="size-3" aria-hidden="true" /> Current stars
-                      </span>
-                    ),
+                    label: "Current stars",
                     value: formatNumber(selected.stars),
-                  },
-                  {
-                    key: "views",
-                    label: (
-                      <span className="inline-flex items-center gap-1.5">
-                        <Eye className="size-3" aria-hidden="true" /> Report views
-                      </span>
-                    ),
-                    value: formatNumber(selected.views),
                   },
                   {
                     key: "gain",
                     label: "30d gain",
                     value: `+${formatNumber(selected.gained_30d)}`,
+                  },
+                  {
+                    key: "health",
+                    label: featuredHealth?.label ?? "Repo health",
+                    value: (
+                      <>
+                        <div
+                          className="truncate text-[15px] leading-none tracking-tight"
+                          title={featuredHealth?.detail}
+                        >
+                          {featuredHealth
+                            ? featuredHealth.verdict
+                            : selected.analysis_ready
+                              ? "Reading insight…"
+                              : "Analyzing…"}
+                        </div>
+                        {featuredHealth && (
+                          <span className="sr-only">. {featuredHealth.detail}</span>
+                        )}
+                      </>
+                    ),
                   },
                 ]}
               />

@@ -10,6 +10,7 @@ import {
   type BuildAnalyzeResponse as AnalyzeResponse,
 } from "@/lib/build-repo-snapshot";
 import BaseHead from "@/components/BaseHead.astro";
+import { AgentReadmePrompt } from "@/components/AgentReadmePrompt";
 import { ButtonLink } from "@/components/ButtonLink";
 import Seo from "@/components/Seo.astro";
 import SiteHeader from "@/components/SiteHeader.astro";
@@ -29,6 +30,7 @@ import {
   SECTION_HEADER,
 } from "@/components/style-tokens";
 import { categoriesForRepo, relatedRepos } from "@/data/categories";
+import { starFacts } from "@/lib/agent-prompt";
 import {
   firstStarYear as historyFirstYear,
   formatFullDate,
@@ -288,6 +290,10 @@ const FALLBACK_SUGGESTIONS = [
 const vsLinks = (categoryRelated.length > 0 ? categoryRelated : FALLBACK_SUGGESTIONS)
   .filter((s) => s !== repoSlug)
   .slice(0, 3);
+
+// Prerendered seed for the agent prompt. The island refreshes it from the
+// report's own live broadcast, so the copied brief never issues a request.
+const promptStars = data ? starFacts(history, data.total_stars, archiveHistory) : null;
 ---
 
 <!doctype html>
@@ -384,6 +390,34 @@ const vsLinks = (categoryRelated.length > 0 ? categoryRelated : FALLBACK_SUGGEST
               ))}
             </p>
           )}
+        </section>
+
+        <section id="readme" class="mt-16 scroll-mt-24 border-t border-border/60 pt-12">
+          <div class={SECTION_HEADER}>
+            <h2 class={HEADING}>Put this in your README</h2>
+            <a href={`/${repoSlug}.md`} class={SECTION_ACTION}>
+              markdown for agents
+              <span
+                aria-hidden="true"
+                class="transition-transform duration-150 group-hover:translate-x-0.5 motion-reduce:transition-none"
+                >→</span
+              >
+            </a>
+          </div>
+          <p class:list={["mt-2 max-w-[68ch]", BODY]}>
+            Hand a coding agent one prompt and it adds the star-history chart, a
+            stars-and-forks badge, and whichever repo-health charts fit to
+            {repoSlug}'s README — light and dark variants, alt text, and the
+            measured numbers already filled in.
+          </p>
+          <div class="mt-6">
+            <AgentReadmePrompt
+              client:visible
+              apiBase={apiBase}
+              siteOrigin={site}
+              target={{ kind: "repo", slug: repoSlug, stars: promptStars }}
+            />
+          </div>
         </section>
 
         <section class="mt-16 scroll-mt-24 border-t border-border/60 pt-12">

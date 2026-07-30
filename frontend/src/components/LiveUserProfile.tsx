@@ -8,6 +8,7 @@ import {
 import { ExternalLink, Loader2 } from "lucide-react";
 import { motion, useReducedMotion } from "motion/react";
 
+import { AgentReadmePrompt } from "@/components/AgentReadmePrompt";
 import { ButtonLink } from "@/components/ButtonLink";
 import { ChartViewer } from "@/components/ChartViewer";
 import { DitherAreaChart } from "@/components/DitherAreaChart";
@@ -1243,7 +1244,20 @@ export function LiveUserProfile({
             paste it into your profile README.
           </p>
 
-          <div className="mt-6 grid gap-8">
+          <div className="mt-6">
+            <AgentReadmePrompt
+              apiBase={apiBase}
+              siteOrigin={siteOrigin}
+              target={{
+                kind: "profile",
+                login,
+                totalStars: data.total_stars,
+                reposIncluded: data.repos_included,
+              }}
+            />
+          </div>
+
+          <div className="mt-10 grid gap-8">
             <AssetPanel
               apiBase={apiBase}
               chartPath={`/api/users/${login}/card.svg`}

@@ -3,6 +3,7 @@ export const prerender = true;
 
 import "@/styles/globals.css";
 import BaseHead from "@/components/BaseHead.astro";
+import { AgentReadmePrompt } from "@/components/AgentReadmePrompt";
 import { ButtonLink } from "@/components/ButtonLink";
 import Seo from "@/components/Seo.astro";
 import SiteHeader from "@/components/SiteHeader.astro";
@@ -18,6 +19,7 @@ import {
   PANEL,
   TILE_DESC,
   TILE_TITLE,
+  SECTION_ACTION,
   SECTION_HEADER,
   TITLE,
 } from "@/components/style-tokens";
@@ -505,6 +507,38 @@ const jsonLd = [
           </div>
         </section>
 
+        <section
+          id="agent"
+          aria-labelledby="agent-title"
+          class="mt-16 scroll-mt-24 border-t border-border/60 pt-12"
+        >
+          <div class={SECTION_HEADER}>
+            <h2 id="agent-title" class={HEADING}>Let an agent do it</h2>
+            <a href="/badges.md" class={SECTION_ACTION}>
+              markdown for agents
+              <span
+                aria-hidden="true"
+                class="transition-transform duration-150 group-hover:translate-x-0.5 motion-reduce:transition-none"
+                >→</span
+              >
+            </a>
+          </div>
+          <p class:list={["mt-2 max-w-[68ch]", BODY]}>
+            This prompt resolves your repository from its git remote, then adds
+            the badge, the star-history chart, and the health charts that fit —
+            replacing an existing star-history widget in place rather than
+            stacking a second one under it.
+          </p>
+          <div class="mt-6">
+            <AgentReadmePrompt
+              client:visible
+              apiBase={apiBase}
+              siteOrigin={site}
+              target={{ kind: "generic" }}
+            />
+          </div>
+        </section>
+
         <section class="mt-16 scroll-mt-24 border-t border-border/60 pt-12">
           <div class={SECTION_HEADER}>
             <h2 class={HEADING}>Build these for your repository</h2>
@@ -512,7 +546,7 @@ const jsonLd = [
           <p class:list={["mt-2 max-w-[64ch]", BODY]}>
             Open a repository report to get every asset above wired to that
             project, with the badge studio and embed menus already pointed at
-            it.
+            it, plus a prompt carrying that project's measured numbers.
           </p>
           <div class="mt-6">
             <ButtonLink

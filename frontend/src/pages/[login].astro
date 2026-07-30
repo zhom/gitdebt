@@ -1,6 +1,7 @@
 ---
 import "@/styles/globals.css";
 import { catalogReposFor, staticLoginPaths } from "@/lib/build-catalog";
+import { loadBuildProfileSnapshot } from "@/lib/build-profile-snapshot";
 import { staticApiBase } from "@/lib/static-api-base";
 import BaseHead from "@/components/BaseHead.astro";
 import Seo from "@/components/Seo.astro";
@@ -29,40 +30,15 @@ const site = (Astro.site ?? new URL("https://gitdebt.com")).href.replace(/\/$/, 
 const canonicalPath = `/${login}`;
 const canonical = `${site}${canonicalPath}`;
 
-async function fetchJson<T>(path: string): Promise<T | null> {
-  try {
-    const res = await fetch(`${apiBase}${path}`, {
-      headers: { accept: "application/json" },
-      signal: AbortSignal.timeout(5_000),
-    });
-    if (!res.ok) return null;
-    return (await res.json()) as T;
-  } catch {
-    return null;
-  }
+// Shared with the Markdown representation of this same profile, so the two
+// routes cost the build one snapshot between them rather than one each.
+const snapshot = await loadBuildProfileSnapshot(login);
+if (snapshot.notFound) {
+  return new Response("User not found", { status: 404 });
 }
-
-let data: UserAnalyze | null = null;
-let fetchError: string | null = null;
-try {
-  const res = await fetch(`${apiBase}/api/users/${login}/analyze?enqueue=0`, {
-    headers: { accept: "application/json" },
-    signal: AbortSignal.timeout(5_000),
-  });
-  if (res.ok) {
-    data = (await res.json()) as UserAnalyze;
-  } else if (res.status === 404) {
-    return new Response("User not found", { status: 404 });
-  } else {
-    fetchError = `backend returned ${res.status}`;
-  }
-} catch (err) {
-  fetchError = err instanceof Error ? err.message : String(err);
-}
-
-// Code signals come from the Postgres-only profile aggregate. A miss is
-// never fatal: the star report still renders without it.
-const stats = data ? await fetchJson<UserStats>(`/api/users/${login}/stats.json`) : null;
+const data: UserAnalyze | null = snapshot.analyze;
+const stats: UserStats | null = snapshot.stats;
+const fetchError = snapshot.error;
 
 // The build catalog is already loaded and memoized for `getStaticPaths`, so
 // linking a maintainer's tracked repos costs no extra request.

@@ -32,11 +32,36 @@ Gitdebt is an open-source public GitHub repository analytics service. It provide
 
 ## Shareable media
 
+- Metrics badge: `/api/repos/{owner}/{repo}/badge.svg?metrics=stars,forks`
+- Signal badge: `/api/repos/{owner}/{repo}/badge.svg?signal=active|community|momentum|contributor-ready`
 - Star history: `/api/repos/{owner}/{repo}/chart.svg`
+- Repository card: `/api/repos/{owner}/{repo}/card.svg`
+- Stars versus downloads: `/api/repos/{owner}/{repo}/usage.svg`
 - Contributors: `/api/repos/{owner}/{repo}/stats/contributors.svg`
+- Ownership concentration: `/api/repos/{owner}/{repo}/stats/bus-factor.svg`
 - Maintenance pulse: `/api/repos/{owner}/{repo}/stats/commit-trend.svg`
 - Language activity: `/api/repos/{owner}/{repo}/stats/lines.svg`
 - Commit calendar: `/api/repos/{owner}/{repo}/stats/heatmap.svg`
+- File change frequency: `/api/repos/{owner}/{repo}/stats/top-files.svg`
+- Fix-labelled changes: `/api/repos/{owner}/{repo}/stats/bug-magnets.svg`
+- TODO/FIXME movement: `/api/repos/{owner}/{repo}/stats/todo-trend.svg`
+- Social preview: `/api/repos/{owner}/{repo}/og.png`
 - Profile card: `/api/users/{login}/card.svg`
+- Profile star history: `/api/users/{login}/chart.svg`
+- Profile footprint: `/api/users/{login}/stats/{contributions|languages|commit-activity}.svg`
+- Multi-repository overlay: `/api/chart.svg?repos={owner}/{repo},{owner}/{repo}`
 
-SVG URLs accept `theme=light|dark`. Static README output is the default. Use `animate=1` only when animation is explicitly wanted. PNG and WebP variants use the corresponding file extension.
+SVG URLs accept `theme=light|dark`. Colors are baked per asset — there is no `theme=auto` — so a theme-aware README embed publishes both variants behind an HTML `<picture>` element. Static README output is the default. Use `animate=1` only when animation is explicitly wanted, or the `.gif` variant where GitHub strips SVG motion. PNG and WebP variants use the corresponding file extension.
+
+## Embedding these in a README
+
+`https://gitdebt.com/badges.md` is the complete catalog: every asset, a paste-ready snippet for each, the query-parameter reference, and a ready-made prompt for adding them to a repository. A repository's own `https://gitdebt.com/{owner}/{repo}.md` carries the same snippets already pointed at that repository, alongside its measured star and health figures.
+
+Rules that make a published embed correct:
+
+- No account, token, build step, or GitHub Action is involved. Every URL is a plain public image.
+- Attribution rides the surrounding link as `?ref=readme`. It never belongs in an image URL, which stays plain so CDNs can cache it.
+- Do not add cache-busting parameters. Media is edge-cached for a few hours by design.
+- Publish only signal badges the repository has earned; `/api/repos/{owner}/{repo}/earned-badges.json` reports which.
+- A repository nobody has analyzed renders a placeholder frame and queues the work rather than failing. The real chart replaces it at the same URL.
+- Replace an existing star-history widget in place rather than stacking a second chart beneath it.

@@ -8,6 +8,8 @@ Gitdebt analyzes public repositories only. Private repositories are ignored and 
 
 - Add `.md` to any emitted HTML page URL for its Markdown representation.
 - Use the page's `<link rel="alternate" type="text/markdown">` to discover that representation.
+- A repository's `.md` carries its measured star and health figures plus paste-ready README snippets for that repository: `https://gitdebt.com/{owner}/{repo}.md`
+- The complete embed catalog, every snippet, every query parameter, and a ready-made prompt for adding these to a README: `https://gitdebt.com/badges.md`
 - Repository star history: `https://api.gitdebt.com/api/repos/{owner}/{repo}/stars.json`
 - Repository health: `https://api.gitdebt.com/api/repos/{owner}/{repo}/stats.json`
 - Repository health summary: `https://api.gitdebt.com/api/repos/{owner}/{repo}/health.json`

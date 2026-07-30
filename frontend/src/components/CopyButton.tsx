@@ -1,4 +1,4 @@
-import { useEffect, useRef, useState } from "react";
+import { useEffect, useRef, useState, type ReactNode } from "react";
 import { motion, useReducedMotion } from "motion/react";
 import { Check, Copy } from "lucide-react";
 
@@ -11,6 +11,8 @@ type Props = {
   className?: string;
   idleLabel?: string;
   successLabel?: string;
+  /** Replaces the clipboard glyph when the copy means something more specific. */
+  idleIcon?: ReactNode;
   variant?: ButtonProps["variant"];
   size?: ButtonProps["size"];
 };
@@ -24,6 +26,7 @@ export function CopyButton({
   className,
   idleLabel = "Copy",
   successLabel = "Copied",
+  idleIcon = <Copy className="size-3.5" strokeWidth={2} />,
   variant = "soft",
   size = "sm",
 }: Props) {
@@ -73,7 +76,7 @@ export function CopyButton({
           transition={transition}
           aria-hidden="true"
         >
-          <Copy className="size-3.5" strokeWidth={2} />
+          {idleIcon}
         </motion.span>
         <motion.span
           className="col-start-1 row-start-1 inline-flex"

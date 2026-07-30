@@ -5,14 +5,28 @@ import {
   staticComparisonPaths,
   staticLogins,
 } from "@/lib/build-catalog";
+import { loadBuildRepoHealth } from "@/lib/build-repo-health";
+import { loadBuildProfileSnapshot } from "@/lib/build-profile-snapshot";
+import { loadBuildRepoSnapshot } from "@/lib/build-repo-snapshot";
+import { starFacts } from "@/lib/agent-prompt";
 import {
   markdownResponse,
   renderAgentMarkdown,
   type AgentPage,
+  type RepoFacts,
 } from "@/lib/agent-markdown";
+import { firstStarYear } from "@/lib/star-insights";
 import { staticApiBase } from "@/lib/static-api-base";
 
 export const prerender = true;
+
+/** What `getStaticPaths` hands to `GET`, before any data has been read. */
+type PageSeed =
+  | { kind: "static"; path: string; title: string; description: string }
+  | { kind: "repo"; slug: string; updatedAt: string | null }
+  | { kind: "profile"; login: string }
+  | { kind: "category"; slug: string; name: string; description: string; repos: string[] }
+  | { kind: "comparison"; first: string; second: string };
 
 const STATIC_PAGES = [
   { path: "404", title: "Page not found", description: "Search for a public GitHub repository report on gitdebt." },
@@ -28,7 +42,7 @@ const STATIC_PAGES = [
 
 export async function getStaticPaths() {
   const catalog = await loadBuildCatalog();
-  const pages = new Map<string, AgentPage>();
+  const pages = new Map<string, PageSeed>();
 
   for (const page of STATIC_PAGES) {
     pages.set(page.path, { kind: "static", ...page });
@@ -56,6 +70,7 @@ export async function getStaticPaths() {
       slug: category.slug,
       name: category.name,
       description: category.short,
+      repos: [...category.repos],
     });
   }
 
@@ -68,21 +83,107 @@ export async function getStaticPaths() {
   return [...pages].map(([path, props]) => ({ params: { path }, props }));
 }
 
-export const GET: APIRoute = ({ props, site }) => {
+function routeFor(seed: PageSeed): string {
+  switch (seed.kind) {
+    case "repo":
+      return `/${seed.slug}`;
+    case "profile":
+      return `/${seed.login}`;
+    case "category":
+      return `/compare/${seed.slug}`;
+    case "comparison":
+      return `/vs/${seed.first}/${seed.second}`;
+    default:
+      return `/${seed.path}`;
+  }
+}
+
+/**
+ * Star facts for one repository, from the analyze snapshot the HTML page has
+ * already memoized for this build. The Markdown surface therefore costs the
+ * build no extra analyze request.
+ */
+async function repoFacts(slug: string): Promise<{
+  facts: RepoFacts | null;
+  notFound: boolean;
+}> {
+  const snapshot = await loadBuildRepoSnapshot(slug);
+  if (snapshot.notFound) return { facts: null, notFound: true };
+  const data = snapshot.data;
+  if (!data) return { facts: null, notFound: false };
+  const approximate =
+    data.history_kind === "public_star_actions" || data.history_approximate;
+  return {
+    notFound: false,
+    facts: {
+      stars: starFacts(data.history, data.total_stars, approximate),
+      history: data.history.map((point) => ({
+        date: point.date,
+        stars: point.stars,
+      })),
+      createdAt: data.created_at,
+      coverageEnd:
+        data.history_coverage_end ??
+        data.history[data.history.length - 1]?.date ??
+        null,
+      eventCount: approximate ? data.history_event_count : null,
+    },
+  };
+}
+
+/** Resolve a seed into the fully-populated page the renderer consumes. */
+async function resolve(seed: PageSeed): Promise<AgentPage> {
+  if (seed.kind === "repo") {
+    const [{ facts, notFound }, health] = await Promise.all([
+      repoFacts(seed.slug),
+      loadBuildRepoHealth(seed.slug),
+    ]);
+    return {
+      kind: "repo",
+      slug: seed.slug,
+      updatedAt: seed.updatedAt,
+      facts,
+      health,
+      notFound,
+    };
+  }
+
+  if (seed.kind === "profile") {
+    const { analyze } = await loadBuildProfileSnapshot(seed.login);
+    return {
+      kind: "profile",
+      login: seed.login,
+      totalStars: analyze?.total_stars ?? null,
+      reposIncluded: analyze?.repos_included ?? null,
+      firstYear: analyze ? firstStarYear(analyze.history) : null,
+    };
+  }
+
+  if (seed.kind === "comparison") {
+    const [first, second] = await Promise.all([
+      repoFacts(seed.first),
+      repoFacts(seed.second),
+    ]);
+    return {
+      kind: "comparison",
+      first: seed.first,
+      second: seed.second,
+      facts: {
+        [seed.first]: first.facts,
+        [seed.second]: second.facts,
+      },
+    };
+  }
+
+  return seed;
+}
+
+export const GET: APIRoute = async ({ props, site }) => {
   const origin = (site ?? new URL("https://gitdebt.com")).href;
-  const page = props as AgentPage;
-  const path = page.kind === "repo"
-    ? `/${page.slug}`
-    : page.kind === "profile"
-      ? `/${page.login}`
-      : page.kind === "category"
-        ? `/compare/${page.slug}`
-        : page.kind === "comparison"
-          ? `/vs/${page.first}/${page.second}`
-          : `/${page.path}`;
-  const canonical = new URL(path, origin).href;
+  const seed = props as PageSeed;
+  const canonical = new URL(routeFor(seed), origin).href;
   return markdownResponse(
-    renderAgentMarkdown(page, origin, staticApiBase()),
+    renderAgentMarkdown(await resolve(seed), origin, staticApiBase()),
     canonical,
   );
 };

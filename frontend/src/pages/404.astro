@@ -11,6 +11,11 @@ import { staticApiBase } from "@/lib/static-api-base";
 
 const apiBase = staticApiBase();
 
+// The Markdown representation an agent that landed here can always reach. The
+// site prerenders none, so this route answers for any public repository —
+// including the one whose missing static page brought the agent here.
+const agentMarkdown = `${apiBase}/api/md/{owner}/{repo}`;
+
 const title = "Page not found · gitdebt";
 const description =
   "We couldn't find that repo or page. Search any GitHub owner/repo to chart its star history on gitdebt.";
@@ -29,6 +34,7 @@ const ogImage = `${apiBase}/api/og.png`;
       noindex={true}
     />
     <meta name="gitdebt-route-fallback" content="missing-repo" />
+    <meta name="gitdebt-agent-markdown" content={agentMarkdown} />
   </head>
   <body>
     <div class="isolate flex min-h-dvh flex-col">
@@ -39,6 +45,7 @@ const ogImage = `${apiBase}/api/og.png`;
         <noscript>
           <div class="rounded-lg border border-border/60 bg-background/40 p-3.5 text-[13px] leading-relaxed text-muted-foreground">
             JavaScript is required to open a repository that has not been included in the static catalog yet.
+            Without it, {agentMarkdown} returns the report as Markdown for any public repository, and queues the analysis when there is none yet.
           </div>
         </noscript>
       </main>

@@ -708,16 +708,31 @@ async fn write_commits_at_head(
 }
 
 /// Record that an analysis run confirmed the stored aggregates are already at
-/// the repository's current head. Only `last_analyzed_at` moves: the cursor,
-/// the head, and every aggregate are unchanged, and the row must already
-/// exist (the run opened a clone for it). Without this stamp a repository
-/// whose HEAD never moves stays permanently outside the freshness window and
-/// is re-queued and re-fetched by every view.
+/// the repository's current head. The cursor, the head, and every aggregate
+/// are unchanged, and the row must already exist (the run opened a clone for
+/// it). Without this stamp a repository whose HEAD never moves stays
+/// permanently outside the freshness window and is re-queued and re-fetched
+/// by every view.
+///
+/// `analysis_duration_ms` is cleared rather than restamped. It means "how long
+/// the last run that actually walked commits took", and it feeds both the
+/// per-repo progress ETA and the fleet sample that `last_analyzed_at DESC`
+/// orders. Keeping the previous full run's number would re-promote a stale
+/// twenty-minute measurement to the front of that sample on every no-op, while
+/// writing this run's own wall time would be worse still: a head-confirmation
+/// is by construction the shortest possible run and the newest row, so on a
+/// warm corpus it would drag the fleet median down to a couple of seconds and
+/// promise every queued repository a wait it cannot meet. NULL drops the row
+/// out of the sample (and out of `idx_repo_history_duration_recent`) and makes
+/// this repository's own estimate honestly unknown until it is walked again.
 pub async fn touch_analyzed_at(db: &Db, repo: &str) -> Result<()> {
-    sqlx::query("UPDATE repo_history SET last_analyzed_at = NOW() WHERE repo = $1")
-        .bind(repo)
-        .execute(&db.pool)
-        .await?;
+    sqlx::query(
+        "UPDATE repo_history SET last_analyzed_at = NOW(), analysis_duration_ms = NULL \
+         WHERE repo = $1",
+    )
+    .bind(repo)
+    .execute(&db.pool)
+    .await?;
     Ok(())
 }
 

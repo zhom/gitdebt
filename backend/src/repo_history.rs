@@ -5,11 +5,14 @@
 //! path for container deployments. Disk usage is tracked in
 //! `repo_history.clone_size_bytes` and trimmed via `evict_to_quota`.
 
+use std::collections::HashSet;
 use std::path::{Path, PathBuf};
+use std::process::Stdio;
 
 use anyhow::{Context, Result, bail};
 use chrono::{DateTime, NaiveDate, Utc};
 use serde::Serialize;
+use tokio::io::AsyncWriteExt;
 use tokio::process::Command;
 
 // Five thousand recent non-merge commits is enough to stabilize ownership,
@@ -30,12 +33,29 @@ pub(crate) const TODO_PATCH_COMMIT_LIMIT: usize = 100;
 pub(crate) const EMPTY_REPOSITORY_HEAD: &str = "empty-repository";
 const CACHE_FORMAT_VERSION: &str = "2";
 
+/// Ceiling on the bytes one run may pull down ahead of the metadata walk.
+/// Reached only by repositories whose recent window churns very large files;
+/// past it the walk falls back to git's own lazy fetching rather than filling
+/// the volume for a speed optimization.
+const DEFAULT_ANALYSIS_HYDRATE_MAX_BYTES: u64 = 2 * 1024 * 1024 * 1024;
+
+/// Object ids requested per hydrate round trip. Bounds how far past the byte
+/// budget a single round trip can overshoot.
+const HYDRATE_CHUNK: usize = 512;
+
 pub(crate) fn analysis_commit_limit() -> usize {
     std::env::var("REPO_ANALYSIS_COMMIT_LIMIT")
         .ok()
         .and_then(|value| value.parse().ok())
         .unwrap_or(DEFAULT_ANALYSIS_COMMIT_LIMIT)
         .clamp(MIN_ANALYSIS_COMMIT_LIMIT, HARD_ANALYSIS_COMMIT_LIMIT)
+}
+
+fn analysis_hydrate_max_bytes() -> u64 {
+    std::env::var("REPO_ANALYSIS_HYDRATE_MAX_BYTES")
+        .ok()
+        .and_then(|value| value.parse().ok())
+        .unwrap_or(DEFAULT_ANALYSIS_HYDRATE_MAX_BYTES)
 }
 
 #[derive(Clone, Debug)]
@@ -553,7 +573,7 @@ async fn is_shallow_repository(path: &Path) -> Result<bool> {
     Ok(String::from_utf8_lossy(&output.stdout).trim() == "true")
 }
 
-async fn partial_clone_filter(path: &Path) -> Result<Option<String>> {
+pub(crate) async fn partial_clone_filter(path: &Path) -> Result<Option<String>> {
     let output = git_in(path)
         .args(["config", "--get", "remote.origin.partialclonefilter"])
         .output()
@@ -701,12 +721,222 @@ pub(crate) async fn walk_commit_batch(
     Ok(parse_log_records(&output.stdout))
 }
 
-/// Read author, date, message, changed paths, and line movement without
-/// materializing historical file bodies. `--numstat --no-renames` needs commit
-/// trees but not blobs and preserves the old path-set contract for renames
-/// (delete + add). Rename-only commits can therefore report line movement;
-/// this is intentional and documented as Git numstat churn rather than edit
-/// distance.
+/// Pull down every object the window's diffs touch, in a few batched fetches,
+/// so the `--numstat` walk that follows runs entirely against local objects.
+///
+/// `--numstat` reports line counts, which git can only produce by diffing blob
+/// *content*. On a `--filter=blob:none` clone that means one promisor round
+/// trip per commit — three orders of magnitude more wall time than the walk
+/// itself. This pass asks for the same diffs in `--raw` form, which reads only
+/// trees, collects the object ids from both sides, and fetches them in chunks.
+///
+/// Every collected id is requested, without first asking which are already
+/// local. `git cat-file --batch-check` cannot answer that question here: under
+/// `GIT_NO_LAZY_FETCH=1` it dies with exit 128 on the first missing object and
+/// writes nothing at all to stdout (verified on git 2.39.5, the runtime
+/// image's version), so a probe reports "nothing missing" for exactly the cold
+/// clone this pass exists to serve. Without the env var the probe hydrates
+/// every id one at a time, which is the cost being removed. Re-asking for
+/// objects the clone already has is free by comparison: git negotiates them
+/// away and returns an empty pack.
+///
+/// `size_before` is the clone size the whole window's budget is measured
+/// against, so calling this once per walk batch still enforces one ceiling
+/// rather than one per batch. Returns `false` once that budget is exhausted:
+/// the caller stops hydrating and git fetches whatever is left lazily, exactly
+/// as before. Hydration is a speed optimization and must never fail a run.
+///
+/// `git rev-list --objects --missing=print` is deliberately not used here: it
+/// enumerates every blob in every window commit's full tree, which would
+/// download the repository the blob filter exists to avoid.
+pub(crate) async fn hydrate_window_blobs(
+    handle: &RepoHandle,
+    shas: &[String],
+    size_before: u64,
+) -> Result<bool> {
+    if handle.is_empty() || shas.is_empty() {
+        return Ok(true);
+    }
+    // A clone with no blob filter already holds every object the walk reads,
+    // so the `--raw` enumeration below would be pure added latency on the
+    // critical path it exists to shorten.
+    if partial_clone_filter(&handle.path).await?.is_none() {
+        return Ok(true);
+    }
+    validate_shas(shas)?;
+    let budget = analysis_hydrate_max_bytes();
+    for batch in shas.chunks(METADATA_BATCH_COMMITS) {
+        let touched = raw_diff_oids(&handle.path, batch).await?;
+        for chunk in touched.chunks(HYDRATE_CHUNK) {
+            fetch_objects(&handle.path, chunk).await?;
+            if clone_size_bytes(&handle.path).saturating_sub(size_before) > budget {
+                tracing::info!(budget, "commit-window hydration hit its byte budget");
+                return Ok(false);
+            }
+        }
+    }
+    Ok(true)
+}
+
+/// One local `--raw` pass over a batch of commits, yielding the object ids
+/// their diffs read. Lazy fetching is disabled: a pass whose whole purpose is
+/// to batch promisor traffic must never issue any of its own.
+async fn raw_diff_oids(path: &Path, shas: &[String]) -> Result<Vec<String>> {
+    let mut command = git_in(path);
+    command
+        .args([
+            "log",
+            "--no-walk=unsorted",
+            "--raw",
+            "-z",
+            "--no-renames",
+            "--no-abbrev",
+            "--format=%x00",
+        ])
+        .env("GIT_NO_LAZY_FETCH", "1");
+    command.args(shas).arg("--");
+    let output = command.output().await.context("batched raw diff listing")?;
+    if !output.status.success() {
+        bail!(
+            "batched raw diff listing failed: {}",
+            String::from_utf8_lossy(&output.stderr)
+        );
+    }
+    Ok(parse_raw_diff_oids(&output.stdout))
+}
+
+/// Object ids both sides of every diff in a `--raw -z` stream touch, de-duped
+/// in first-seen order.
+///
+/// Each entry is `:<srcmode> <dstmode> <srcoid> <dstoid> <status>` in one NUL
+/// segment, followed by its path in the next. The all-zero id on the absent
+/// side of an add or a delete is dropped, and so are submodule gitlinks
+/// (mode 160000) — those ids name commits in another repository and asking
+/// this remote for one fails the whole fetch.
+pub(crate) fn parse_raw_diff_oids(stdout: &[u8]) -> Vec<String> {
+    let segments: Vec<&[u8]> = stdout.split(|byte| *byte == 0).collect();
+    let mut seen = HashSet::new();
+    let mut oids = Vec::new();
+    let mut index = 0;
+    while index < segments.len() {
+        let segment = String::from_utf8_lossy(segments[index]);
+        let Some(entry) = parse_raw_diff_entry(segment.as_ref()) else {
+            index += 1;
+            continue;
+        };
+        for oid in entry.oids {
+            if seen.insert(oid.clone()) {
+                oids.push(oid);
+            }
+        }
+        index += 1 + entry.path_segments;
+    }
+    oids
+}
+
+struct RawDiffEntry {
+    oids: Vec<String>,
+    /// Rename/copy statuses carry two path segments instead of one. `--raw`
+    /// is always invoked with `--no-renames`, so this is defense against a
+    /// caller that forgets rather than a shape we expect.
+    path_segments: usize,
+}
+
+fn parse_raw_diff_entry(segment: &str) -> Option<RawDiffEntry> {
+    // The first entry of each commit is preceded by the newline that follows
+    // the `--format` block.
+    let rest = segment.trim_start_matches(['\n', '\r']).strip_prefix(':')?;
+    let mut fields = rest.split(' ');
+    let src_mode = fields.next()?;
+    let dst_mode = fields.next()?;
+    let src_oid = fields.next()?;
+    let dst_oid = fields.next()?;
+    let status = fields.next()?;
+    if fields.next().is_some() || !is_diff_mode(src_mode) || !is_diff_mode(dst_mode) {
+        return None;
+    }
+    let mut status = status.chars();
+    let letter = status.next()?;
+    if !letter.is_ascii_uppercase() || !status.all(|char| char.is_ascii_digit()) {
+        return None;
+    }
+    let oids = [(src_mode, src_oid), (dst_mode, dst_oid)]
+        .into_iter()
+        .filter(|(mode, oid)| *mode != "160000" && is_fetchable_oid(oid))
+        .map(|(_, oid)| oid.to_string())
+        .collect();
+    Some(RawDiffEntry {
+        oids,
+        path_segments: usize::from(matches!(letter, 'R' | 'C')) + 1,
+    })
+}
+
+fn is_diff_mode(mode: &str) -> bool {
+    mode.len() == 6 && mode.bytes().all(|byte| byte.is_ascii_digit())
+}
+
+/// An id worth asking the remote for: well-formed, and not the all-zero
+/// placeholder git prints for the missing side of an add or a delete.
+fn is_fetchable_oid(oid: &str) -> bool {
+    (40..=64).contains(&oid.len())
+        && oid.bytes().all(|byte| byte.is_ascii_hexdigit())
+        && oid.bytes().any(|byte| byte != b'0')
+}
+
+/// Fetch exactly the listed objects from the promisor remote. `--filter` keeps
+/// the traversal from dragging in anything the explicit ids do not name, and
+/// the `noop` negotiation algorithm — what git's own promisor path in
+/// `promisor-remote.c` uses — keeps an object-id request from paying ref
+/// negotiation once per chunk.
+async fn fetch_objects(path: &Path, oids: &[String]) -> Result<()> {
+    let mut child = git_in(path)
+        .args([
+            "-c",
+            "fetch.negotiationAlgorithm=noop",
+            "fetch",
+            "origin",
+            "--no-tags",
+            "--no-write-fetch-head",
+            "--recurse-submodules=no",
+            "--filter=blob:none",
+            "--stdin",
+        ])
+        .stdin(Stdio::piped())
+        .stdout(Stdio::null())
+        .stderr(Stdio::piped())
+        .spawn()
+        .context("spawn window blob fetch")?;
+    {
+        let mut stdin = child.stdin.take().context("fetch stdin")?;
+        for oid in oids {
+            stdin.write_all(oid.as_bytes()).await?;
+            stdin.write_all(b"\n").await?;
+        }
+        stdin.shutdown().await?;
+    }
+    let output = child
+        .wait_with_output()
+        .await
+        .context("window blob fetch")?;
+    if !output.status.success() {
+        bail!(
+            "window blob fetch failed: {}",
+            String::from_utf8_lossy(&output.stderr)
+        );
+    }
+    Ok(())
+}
+
+/// Read author, date, message, changed paths, and line movement.
+///
+/// `--numstat` is what makes `lines_added`/`lines_deleted` — and therefore
+/// `repo_commit_days` and every churn chart — possible, and git can only
+/// produce those counts by diffing blob content. On a blobless clone that is
+/// one promisor round trip per commit unless [`hydrate_window_blobs`] has
+/// already pulled the window's objects down. `--no-renames` preserves the old
+/// path-set contract for renames (delete + add); rename-only commits can
+/// therefore report line movement, which is intentional and documented as Git
+/// numstat churn rather than edit distance.
 pub(crate) async fn walk_commit_metadata_batch(
     handle: &RepoHandle,
     shas: &[String],
@@ -1260,6 +1490,99 @@ mod tests {
         assert_eq!(count_todo_words("// FIXME later TODO maybe"), 2);
         assert_eq!(count_todo_words("prefix should not match"), 0);
         assert_eq!(count_todo_words(""), 0);
+    }
+
+    /// Build the byte stream `git log --raw -z --no-renames --no-abbrev
+    /// --format=%x00` produces for one commit: the format block's NUL, the
+    /// `-z` record terminator, then a newline before the first raw entry.
+    /// Entries are `(src_mode, dst_mode, src_oid, dst_oid, status, path)`.
+    fn raw_commit(entries: &[(&str, &str, &str, &str, &str, &str)]) -> Vec<u8> {
+        let mut bytes = vec![0u8, 0u8];
+        for (index, (src_mode, dst_mode, src_oid, dst_oid, status, path)) in
+            entries.iter().enumerate()
+        {
+            if index == 0 {
+                bytes.push(b'\n');
+            }
+            bytes.extend_from_slice(
+                format!(":{src_mode} {dst_mode} {src_oid} {dst_oid} {status}").as_bytes(),
+            );
+            bytes.push(0);
+            bytes.extend_from_slice(path.as_bytes());
+            bytes.push(0);
+        }
+        bytes
+    }
+
+    #[test]
+    fn raw_diff_oids_collects_both_sides_once() {
+        let zero = "0".repeat(40);
+        let modified_before = "a".repeat(40);
+        let modified_after = "b".repeat(40);
+        let added = "c".repeat(40);
+        let deleted = "d".repeat(40);
+        let executable = "e".repeat(40);
+        let submodule_before = "f".repeat(40);
+        let submodule_after = "1".repeat(40);
+        let later = "9".repeat(40);
+
+        let mut stream = raw_commit(&[
+            (
+                "100644",
+                "100644",
+                &modified_before,
+                &modified_after,
+                "M",
+                "src/lib.rs",
+            ),
+            ("000000", "100644", &zero, &added, "A", "src/new.rs"),
+            ("100644", "000000", &deleted, &zero, "D", "src/old.rs"),
+            // Mode-only change: one object id on both sides.
+            ("100644", "100755", &executable, &executable, "M", "run.sh"),
+            (
+                "160000",
+                "160000",
+                &submodule_before,
+                &submodule_after,
+                "M",
+                "vendor/dep",
+            ),
+        ]);
+        // A second commit that edits the same file again: the shared id must
+        // be requested once, not twice.
+        stream.extend_from_slice(&raw_commit(&[(
+            "100644",
+            "100644",
+            &modified_after,
+            &later,
+            "M",
+            "src/lib.rs",
+        )]));
+
+        assert_eq!(
+            parse_raw_diff_oids(&stream),
+            vec![
+                modified_before,
+                modified_after,
+                added,
+                deleted,
+                executable,
+                later
+            ],
+            "all-zero placeholders and submodule gitlinks are never requested"
+        );
+    }
+
+    /// `-z` emits paths raw and unquoted, so a committed file name can be
+    /// byte-identical to an entry header. Path segments are skipped by
+    /// position, never re-parsed.
+    #[test]
+    fn raw_diff_oids_ignores_paths_that_look_like_entries() {
+        let before = "a".repeat(40);
+        let after = "b".repeat(40);
+        let decoy = format!(":100644 100644 {} {} M", "c".repeat(40), "d".repeat(40));
+        let stream = raw_commit(&[("100644", "100644", &before, &after, "M", &decoy)]);
+        assert_eq!(parse_raw_diff_oids(&stream), vec![before, after]);
     }
 
     #[test]

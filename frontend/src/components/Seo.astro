@@ -1,4 +1,6 @@
 ---
+import { staticApiBase } from "@/lib/static-api-base";
+
 type JsonLd = Record<string, unknown>;
 type CanonicalValue = string | URL;
 
@@ -63,10 +65,14 @@ if (!Number.isInteger(imageHeight) || imageHeight <= 0) {
 
 const canonical = canonicalUrl.href;
 const socialImage = socialImageUrl.href;
-const markdownPath = canonicalUrl.pathname === "/"
-  ? "/index.md"
-  : `${canonicalUrl.pathname}.md`;
-const markdownUrl = new URL(markdownPath, site).href;
+// The site emits no Markdown of its own: every representation is rendered
+// live by the API at `/api/md/{path}`, where `{path}` mirrors the site path
+// exactly and the home page is the empty path. `gitdebt.com/{path}.md` still
+// works, but only as a redirect here, so the alternate names the document
+// itself rather than sending every agent through an extra hop.
+const markdownUrl = `${staticApiBase()}/api/md${
+  canonicalUrl.pathname === "/" ? "/" : canonicalUrl.pathname
+}`;
 
 function truncate(value: string, maxLength: number): string {
   const normalized = value.trim().replace(/\s+/g, " ");

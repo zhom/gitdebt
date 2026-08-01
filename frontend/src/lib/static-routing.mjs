@@ -93,8 +93,53 @@ export function missingProfileReportTarget(pathname) {
     return null;
   }
 
-  const login = profileLogin(segment);
+  // `/{login}.md` is the documented Markdown representation of a profile, and
+  // a login can never contain a dot, so the suffix is dropped before the
+  // login grammar rejects it outright.
+  const login = profileLogin(baseRepoSegment(segment));
   return login ? `/${login}` : null;
+}
+
+/**
+ * Drop the `.md` representation suffix from a repository segment. `.md` is the
+ * one alternate representation the site itself emits, so `/{owner}/{repo}.md`
+ * means the report for `{owner}/{repo}` rather than a repository literally
+ * named `{repo}.md`. Nothing else is stripped: `.json`, `.csv`, `.svg` and
+ * `.png` are API paths that this site never emits as pages, and `owner/tool.js`
+ * is an ordinary repository name.
+ *
+ * @param {string} segment
+ * @returns {string}
+ */
+export function baseRepoSegment(segment) {
+  return segment.length > 3 && segment.endsWith(".md")
+    ? segment.slice(0, -3)
+    : segment;
+}
+
+/**
+ * The one place a two-segment path becomes a repository. Both the 404 URL
+ * fallback and the live report parse the same grammar, so they cannot drift
+ * apart on suffix stripping, reserved owners, or relative segments.
+ *
+ * @param {string} owner
+ * @param {string} segment
+ * @returns {{ owner: string; repo: string } | null}
+ */
+function repoSlug(owner, segment) {
+  const repo = baseRepoSegment(segment);
+  if (
+    !REPO_SEGMENT_RE.test(owner) ||
+    !REPO_SEGMENT_RE.test(repo) ||
+    owner === "." ||
+    owner === ".." ||
+    repo === "." ||
+    repo === ".." ||
+    isReservedFirstSegment(owner)
+  ) {
+    return null;
+  }
+  return { owner: owner.toLowerCase(), repo: repo.toLowerCase() };
 }
 
 /**
@@ -114,26 +159,40 @@ export function missingRepoReportTarget(pathname) {
     return null;
   }
 
-  let owner;
-  let repo;
+  let decoded;
   try {
-    [owner, repo] = segments.map((segment) => decodeURIComponent(segment));
+    decoded = segments.map((segment) => decodeURIComponent(segment));
   } catch {
     return null;
   }
 
-  if (
-    !REPO_SEGMENT_RE.test(owner) ||
-    !REPO_SEGMENT_RE.test(repo) ||
-    owner === "." ||
-    owner === ".." ||
-    repo === "." ||
-    repo === ".." ||
-    isReservedFirstSegment(owner)
-  ) {
+  const slug = repoSlug(decoded[0], decoded[1]);
+  return slug ? `/${slug.owner}/${slug.repo}` : null;
+}
+
+/**
+ * The repository a client-side live report should analyze, read from the
+ * document location. `?repo=` wins over the path because `/report?repo=…` is
+ * how the homepage lookup hands a slug over; the path form is what the 404
+ * fallback sees when `github.com/{owner}/{repo}` is rewritten here.
+ *
+ * The location is used raw rather than decoded: an escape sequence never
+ * survives the repository grammar, so decoding could only widen what enqueues
+ * an analysis.
+ *
+ * @param {unknown} pathname
+ * @param {unknown} search
+ * @returns {{ owner: string; repo: string } | null}
+ */
+export function liveReportRepo(pathname, search) {
+  const queryRepo =
+    typeof search === "string" ? new URLSearchParams(search).get("repo") : null;
+  const pathRepo =
+    typeof pathname === "string" ? pathname.replace(/^\/+|\/+$/g, "") : "";
+
+  const segments = (queryRepo ?? pathRepo).trim().split("/");
+  if (segments.length !== 2 || segments.some((segment) => !segment)) {
     return null;
   }
-
-  const slug = `${owner.toLowerCase()}/${repo.toLowerCase()}`;
-  return `/${slug}`;
+  return repoSlug(segments[0], segments[1]);
 }

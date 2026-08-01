@@ -28,8 +28,9 @@ const CANONICAL_SLASH_ROUTES = [
 ];
 
 // Maintainer profiles moved from `/u/{login}` to the root path. The legacy
-// prefix must keep resolving, and the placeholder rule also carries the
-// Markdown alternate (`/u/{login}.md` → `/{login}.md`).
+// prefix must keep resolving, and it must stay ahead of the `/*.md` splat so
+// `/u/{login}.md` canonicalizes to `/{login}.md` before it is handed to the
+// API's Markdown route.
 const LEGACY_PROFILE_REDIRECTS = [
   ["/u/:login/", "/:login"],
   ["/u/:login", "/:login"],
@@ -208,18 +209,61 @@ function headerRules(contents) {
   return rules;
 }
 
+// Cloudflare's own rule compiler, transcribed from wrangler's
+// `workers-shared/asset-worker/src/utils/rules-engine.ts` rather than
+// approximated: the host evaluates `_redirects` *before* it looks for an
+// asset, so a rule whose expression happens to cover an emitted page replaces
+// that page with a 302, and an approximation would be free to disagree about
+// exactly which pages those are.
+const ESCAPE_REGEX_CHARACTERS = /[-/\\^$*+?.()|[\]{}]/g;
+const PLACEHOLDER_REGEX = /:([A-Za-z]\w*)/g;
+
+/** `null` when the rule is one Cloudflare would drop as uncompilable. */
+function ruleRegExp(source) {
+  let expression = source
+    .split("*")
+    .map((part) => part.replace(ESCAPE_REGEX_CHARACTERS, "\\$&"))
+    .join("(?<splat>.*)");
+  for (const match of [...expression.matchAll(PLACEHOLDER_REGEX)]) {
+    expression = expression.split(match[0]).join(`(?<${match[1]}>[^/]+)`);
+  }
+  try {
+    return new RegExp(`^${expression}$`);
+  } catch {
+    return null;
+  }
+}
+
 function sourceMatches(source, pathname) {
-  const expression = source
-    .split("/")
-    .map((segment) => {
-      if (segment === "*") return ".*";
-      if (segment.startsWith(":")) return "[^/]+";
-      return segment
-        .replace(/[.+?^${}()|[\]\\]/g, "\\$&")
-        .replaceAll("*", ".*");
-    })
-    .join("/");
-  return new RegExp(`^${expression}$`).test(pathname);
+  return ruleRegExp(source)?.test(pathname) ?? false;
+}
+
+function isDynamicSource(source) {
+  return /[*]|:[A-Za-z]\w*/.test(source);
+}
+
+/**
+ * Every pathname the host can answer from prerendered HTML: the extensionless
+ * route Pages canonicalizes to, plus the literal asset path, which a rule can
+ * intercept just as easily.
+ */
+function emittedHtmlRoutes(absoluteDist) {
+  const routes = new Set();
+  const walk = (directory, prefix) => {
+    for (const entry of fs.readdirSync(directory, { withFileTypes: true })) {
+      const child = path.join(directory, entry.name);
+      if (entry.isDirectory()) {
+        walk(child, `${prefix}${entry.name}/`);
+        continue;
+      }
+      if (!entry.isFile() || !entry.name.endsWith(".html")) continue;
+      routes.add(`/${prefix}${entry.name}`);
+      const base = entry.name.slice(0, -".html".length);
+      routes.add(base === "index" ? `/${prefix}` : `/${prefix}${base}`);
+    }
+  };
+  walk(absoluteDist, "");
+  return [...routes];
 }
 
 function exactRedirectChain(rules, source) {
@@ -279,9 +323,18 @@ function exactRedirectCycles(rules) {
   return [...new Set(cycles)];
 }
 
-export function auditPagesRouting({ distDir }) {
+/**
+ * `apiBase` is an explicit parameter, never read from the ambient environment.
+ * `deploy-pages.yml` exports `PUBLIC_API_BASE` at job level, so defaulting to
+ * it made this audit's own unit tests pass or fail depending on which workflow
+ * invoked them — the routing fixtures carry no deployment identity. The CLI
+ * passes it; the tests pass their own. What the Markdown rules must LOOK like
+ * is checked unconditionally; only which origin they must point at needs one.
+ */
+export function auditPagesRouting({ distDir, apiBase }) {
   const absoluteDist = path.resolve(distDir);
   const errors = [];
+  const expectedApiBase = apiBase ? apiBase.replace(/\/+$/, "") : null;
 
   if (!fs.existsSync(absoluteDist)) {
     return [`Build output does not exist: ${absoluteDist}`];
@@ -427,6 +480,113 @@ export function auditPagesRouting({ distDir }) {
     for (const cycle of exactRedirectCycles(rules)) {
       errors.push(`Redirect cycle: ${cycle}`);
     }
+
+    // The general form of "`/*.md` steals `/owner/manual.md`": compile every
+    // rule the way Cloudflare does and prove none of them covers a page we
+    // actually emitted. A rule that wins here is served instead of the file.
+    const emittedRoutes = emittedHtmlRoutes(absoluteDist);
+    for (const { source, destination, status } of rules) {
+      if (!source.startsWith("/")) continue;
+      const pattern = ruleRegExp(source);
+      if (!pattern) {
+        errors.push(`Uncompilable redirect source: ${source}`);
+        continue;
+      }
+      const shadowed = emittedRoutes.filter((route) => pattern.test(route));
+      if (shadowed.length > 0) {
+        const sample = shadowed.slice(0, 3).join(", ");
+        const rest =
+          shadowed.length > 3 ? ` and ${shadowed.length - 3} more` : "";
+        errors.push(
+          `Redirect ${source} → ${status} ${destination} shadows emitted ` +
+            `page(s): ${sample}${rest}`,
+        );
+      }
+    }
+
+    const markdownRules = rules.filter(({ destination }) => {
+      if (!/^https?:\/\//i.test(destination)) return false;
+      try {
+        return new URL(destination).pathname.startsWith("/api/md");
+      } catch {
+        return false;
+      }
+    });
+    // Both Markdown rules must exist and must be 302s, whatever origin they
+    // point at — that is a property of the file, not of the deployment, so it
+    // is enforced every time. `/index.md` is separate because the splat would
+    // otherwise send it to `/api/md/index`, which is not the home page.
+    for (const [source, expectedPath] of [
+      ["/index.md", "/api/md/"],
+      ["/*.md", "/api/md/:splat"],
+    ]) {
+      const rule = rules.find((candidate) => candidate.source === source);
+      if (!rule || rule.status !== "302") {
+        errors.push(`Missing Markdown redirect: ${source} → …${expectedPath} 302`);
+        continue;
+      }
+      let destinationPath = null;
+      try {
+        destinationPath = new URL(rule.destination).pathname;
+      } catch {
+        // A relative destination cannot reach the API at all.
+      }
+      if (destinationPath !== expectedPath) {
+        errors.push(
+          `Markdown redirect ${source} targets ${rule.destination}, ` +
+            `expected a path of ${expectedPath}`,
+        );
+      }
+    }
+
+    // Which origin they must point at is deployment identity, so it is only
+    // checkable when the caller supplied one.
+    if (expectedApiBase) {
+      for (const { source, destination } of markdownRules) {
+        if (!destination.startsWith(`${expectedApiBase}/`)) {
+          errors.push(
+            `Markdown redirect ${source} targets ${destination} instead of ` +
+              `PUBLIC_API_BASE (${expectedApiBase})`,
+          );
+        }
+      }
+    }
+
+    // Cloudflare stops classifying rules as static after the first dynamic
+    // one, and only static rules are matched ahead of every splat, so a
+    // `/index.md` declared below a placeholder rule is never reached.
+    const indexMarkdownIndex = rules.findIndex(
+      ({ source }) => source === "/index.md",
+    );
+    const firstDynamicIndex = rules.findIndex(({ source }) =>
+      isDynamicSource(source),
+    );
+    if (
+      indexMarkdownIndex !== -1 &&
+      firstDynamicIndex !== -1 &&
+      indexMarkdownIndex > firstDynamicIndex
+    ) {
+      errors.push(
+        `/index.md must be declared before ${rules[firstDynamicIndex].source} ` +
+          "or Cloudflare demotes it below the splat rules",
+      );
+    }
+
+    // `/u/{login}.md` has to canonicalize to `/{login}.md` first, or it
+    // reaches `/api/md/u/{login}` instead of `/api/md/{login}`.
+    const splatMarkdownIndex = rules.findIndex(
+      ({ source }) => source === "/*.md",
+    );
+    const legacyProfileIndex = rules.findIndex(
+      ({ source }) => source === "/u/:login",
+    );
+    if (
+      splatMarkdownIndex !== -1 &&
+      legacyProfileIndex !== -1 &&
+      splatMarkdownIndex < legacyProfileIndex
+    ) {
+      errors.push("/*.md must be declared after /u/:login");
+    }
   }
 
   const headersPath = path.join(absoluteDist, "_headers");
@@ -448,6 +608,15 @@ export function auditPagesRouting({ distDir }) {
     ) {
       errors.push(
         "/badges must use Cache-Control: public, max-age=0, must-revalidate",
+      );
+    }
+
+    // The site emits no Markdown, so a `/*.md` block types nothing but the
+    // HTML 404 fallback Cloudflare serves for an unmatched `.md` path — and
+    // `nosniff` then makes that mislabel unrecoverable for the client.
+    if (rules.some(({ source }) => source === "/*.md")) {
+      errors.push(
+        "/*.md headers mislabel the HTML 404 fallback; Markdown is served by the API",
       );
     }
   }
@@ -485,7 +654,10 @@ function runCli() {
   const distIndex = process.argv.indexOf("--dist");
   const distDir =
     distIndex === -1 ? "dist" : process.argv[distIndex + 1] ?? "dist";
-  const errors = auditPagesRouting({ distDir });
+  const errors = auditPagesRouting({
+    distDir,
+    apiBase: process.env.PUBLIC_API_BASE,
+  });
   if (errors.length === 0) {
     console.log("Pages routing audit: static-first routes and fallback are valid");
     return;

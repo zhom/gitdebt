@@ -6,10 +6,13 @@ Gitdebt analyzes public repositories only. Private repositories are ignored and 
 
 ## Preferred representations
 
-- Add `.md` to any emitted HTML page URL for its Markdown representation.
-- Use the page's `<link rel="alternate" type="text/markdown">` to discover that representation.
-- A repository's `.md` carries its measured star and health figures plus paste-ready README snippets for that repository: `https://gitdebt.com/{owner}/{repo}.md`
-- The complete embed catalog, every snippet, every query parameter, and a ready-made prompt for adding these to a README: `https://gitdebt.com/badges.md`
+- One rule: the Markdown for any page is `https://api.gitdebt.com/api/md/{path}`, where `{path}` is that page's site path. The home page is `https://api.gitdebt.com/api/md/`.
+- Adding `.md` to a site URL still works, but as a 302 to the route above. The site serves no Markdown itself.
+- Use the page's `<link rel="alternate" type="text/markdown">` to discover the route rather than constructing it.
+- Every shape resolves: `/api/md/about`, `/api/md/badges`, `/api/md/{owner}/{repo}`, `/api/md/{login}`, `/api/md/compare/{category}`, `/api/md/vs/{owner1}/{repo1}/{owner2}/{repo2}`.
+- A repository report carries its measured star and health figures plus paste-ready README snippets, and works for ANY public repository, analyzed or not. It answers 202 and queues the analysis when nobody has analyzed the repository yet; add `?enqueue=0` to look without queueing.
+- Repository alias, the same document under the repository's own API prefix: `https://api.gitdebt.com/api/repos/{owner}/{repo}/report.md`
+- The complete embed catalog, every snippet, every query parameter, and a ready-made prompt for adding these to a README: `https://api.gitdebt.com/api/md/badges`
 - Repository star history: `https://api.gitdebt.com/api/repos/{owner}/{repo}/stars.json`
 - Repository health: `https://api.gitdebt.com/api/repos/{owner}/{repo}/stats.json`
 - Repository health summary: `https://api.gitdebt.com/api/repos/{owner}/{repo}/health.json`

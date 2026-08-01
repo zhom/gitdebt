@@ -181,10 +181,12 @@ struct RawProgress {
     analysis_phase: Option<String>,
     analysis_priority: i64,
     analysis_position: Option<i64>,
+    analysis_next_attempt_at: Option<DateTime<Utc>>,
     analysis_started_at: Option<DateTime<Utc>>,
     analysis_total_units: Option<i64>,
     analysis_completed_units: i64,
-    analysis_average_ms: i64,
+    analysis_median_ms: i64,
+    repo_last_duration_ms: Option<i64>,
     analysis_complete: bool,
     analysis_scope_commits: Option<i64>,
     analysis_truncated: bool,
@@ -342,22 +344,40 @@ impl ProgressSnapshot {
             _ if raw.analysis_complete => Some(100),
             _ => Some(0),
         };
+        // A row parked in exponential backoff is excluded from every other
+        // row's queue position, so nothing else in the projection accounts for
+        // the wait it owes itself. Without this it reports position 1 and an
+        // ETA of its own last run while being unclaimable for another half
+        // hour.
+        let analysis_retry_at = raw
+            .analysis_next_attempt_at
+            .filter(|retry| *retry > Utc::now());
+        let analysis_backoff_seconds = analysis_retry_at
+            .map(|retry| (retry - Utc::now()).num_seconds().max(0) as u64)
+            .unwrap_or(0);
         let analysis_eta = if raw.analysis_status.as_deref() == Some("in_progress") {
             match (elapsed, analysis_processed, analysis_total) {
+                // The commit walk is the measured part of a run; saving and
+                // finishing are not. Scale the extrapolation instead of adding
+                // a flat tail nobody measured.
                 (Some(elapsed), Some(done), Some(total)) if done > 0 && total > done => Some(
                     elapsed
                         .saturating_mul(total.saturating_sub(done))
                         .saturating_div(done)
-                        .saturating_add(60),
+                        .saturating_mul(5)
+                        .saturating_div(4),
                 ),
-                _ if matches!(analysis_detail, Some("saving_history" | "finishing")) => Some(60),
                 _ => None,
             }
         } else {
-            raw.analysis_position.map(|position| {
-                let workers = configured_analysis_workers() as u64;
-                let waves = (position.max(1) as u64).div_ceil(workers);
-                waves.saturating_mul((raw.analysis_average_ms.max(1) as u64).div_ceil(1_000))
+            raw.analysis_position.and_then(|position| {
+                pending_analysis_eta_seconds(
+                    position,
+                    configured_analysis_workers() as u64,
+                    raw.analysis_median_ms,
+                    raw.repo_last_duration_ms,
+                    analysis_backoff_seconds,
+                )
             })
         };
         Self {
@@ -391,12 +411,57 @@ impl ProgressSnapshot {
                 percent: analysis_percent,
                 elapsed_seconds: elapsed,
                 eta_seconds: analysis_eta,
-                retry_at: None,
+                retry_at: analysis_phase
+                    .active()
+                    .then_some(analysis_retry_at)
+                    .flatten(),
                 priority: (raw.analysis_priority >= crate::repo_analysis::INTERACTIVE_PRIORITY)
                     .then_some("interactive"),
                 blocked_reason: None,
             },
         }
+    }
+}
+
+/// Wait for a job that has not started yet.
+///
+/// The fleet median describes the jobs queued *ahead* of this one; this
+/// repository's own last measured run describes its own wave, and it is taken
+/// as measured. It used to be capped by the fleet median on the theory that
+/// the queued run is only an incremental re-analysis, but the cases that make
+/// a run expensive — a bumped `CURRENT_ANALYSIS_REVISION`, an evicted clone —
+/// are exactly the ones that skip the head-unchanged branch and re-walk the
+/// whole window. Over-estimating from this repository's own evidence is the
+/// honest direction to be wrong in.
+///
+/// A repository that has never been analyzed contributes nothing of its own.
+/// When nothing is queued ahead of it either and it is not parked in backoff,
+/// every input to the number would be a statistic about unrelated
+/// repositories — return `None` and let the client say it is still measuring
+/// rather than state a confident wait that the viewed repository had no part
+/// in.
+fn pending_analysis_eta_seconds(
+    position: i64,
+    workers: u64,
+    fleet_median_ms: i64,
+    repo_last_duration_ms: Option<i64>,
+    backoff_seconds: u64,
+) -> Option<u64> {
+    let waves = (position.max(1) as u64).div_ceil(workers.max(1));
+    let fleet = (fleet_median_ms.max(1) as u64).div_ceil(1_000);
+    let queue_wait = waves.saturating_sub(1).saturating_mul(fleet);
+    let own = repo_last_duration_ms
+        .map(|ms| (ms.max(1) as u64).div_ceil(1_000))
+        .or_else(|| (queue_wait > 0).then_some(fleet));
+    match own {
+        Some(own) => Some(
+            backoff_seconds
+                .saturating_add(queue_wait)
+                .saturating_add(own),
+        ),
+        // Backoff is a measurement of this row, not of the fleet: it is worth
+        // reporting on its own even when nothing else about the job is known.
+        None => (backoff_seconds > 0).then_some(backoff_seconds),
     }
 }
 
@@ -432,11 +497,42 @@ fn archive_eta_seconds(total: u64, done: u64, indexed_source: bool) -> u64 {
     }
 }
 
+/// Rank among the analysis jobs a claimer could take right now.
+///
+/// Kept as one string because [`analysis_queue_position`] runs it verbatim:
+/// the `next_attempt_at` predicate is the part most easily broken by a later
+/// edit, and a database-backed test of a hand-copied query proves nothing.
+const ANALYSIS_POSITION_SQL: &str = "SELECT COUNT(*)::BIGINT + 1 FROM repo_analysis_queue ahead \
+     WHERE ahead.status = 'pending' \
+       AND ahead.next_attempt_at <= NOW() \
+       AND (ahead.priority > analysis.priority OR \
+            (ahead.priority = analysis.priority AND ahead.enqueued_at < analysis.enqueued_at))";
+
+/// The queue rank the progress surface reports for one pending analysis, or
+/// `None` when the repository has no queued job.
+pub async fn analysis_queue_position(
+    db: &crate::db::Db,
+    repo: &str,
+) -> Result<Option<i64>, sqlx::Error> {
+    let sql = format!(
+        "SELECT CASE WHEN analysis.status = 'pending' THEN ({ANALYSIS_POSITION_SQL}) END \
+         FROM repo_analysis_queue analysis WHERE analysis.repo = $1"
+    );
+    sqlx::query_scalar(sqlx::AssertSqlSafe(sql))
+        .bind(repo)
+        .fetch_optional(&db.pool)
+        .await
+        .map(Option::flatten)
+}
+
 async fn load_snapshot(state: &ApiState, repo: &str) -> Result<ProgressSnapshot, ApiError> {
     // One round-trip and one row: all joined columns are primary-key
     // lookups. Error strings are read solely for retry classification and
-    // never copied into the public payload.
-    let row = sqlx::query(
+    // never copied into the public payload. The queue-position subqueries
+    // mirror what the claimers actually take, including `next_attempt_at`:
+    // counting rows parked in exponential backoff (up to half an hour out)
+    // as "ahead of you" inflates every reported wait.
+    let sql = format!(
         "SELECT \
             COALESCE(r.missing, FALSE) AS missing, \
             COALESCE(r.history_complete, FALSE) AS stars_complete, \
@@ -449,6 +545,7 @@ async fn load_snapshot(state: &ApiState, repo: &str) -> Result<ProgressSnapshot,
             CASE WHEN stars.status = 'pending' THEN ( \
                 SELECT COUNT(*)::BIGINT + 1 FROM star_fetch_queue ahead \
                 WHERE ahead.status = 'pending' \
+                  AND ahead.next_attempt_at <= NOW() \
                   AND (ahead.priority > stars.priority OR \
                        (ahead.priority = stars.priority AND ahead.enqueued_at < stars.enqueued_at)) \
             ) END AS star_position, \
@@ -456,28 +553,27 @@ async fn load_snapshot(state: &ApiState, repo: &str) -> Result<ProgressSnapshot,
             COALESCE(analysis.attempts, 0) AS analysis_attempts, \
             analysis.phase AS analysis_phase, \
             COALESCE(analysis.priority, 0) AS analysis_priority, \
+            analysis.next_attempt_at AS analysis_next_attempt_at, \
             analysis.started_at AS analysis_started_at, \
             analysis.total_units AS analysis_total_units, \
             COALESCE(analysis.completed_units, 0) AS analysis_completed_units, \
-            CASE WHEN analysis.status = 'pending' THEN ( \
-                SELECT COUNT(*)::BIGINT + 1 FROM repo_analysis_queue ahead \
-                WHERE ahead.status = 'pending' \
-                  AND (ahead.priority > analysis.priority OR \
-                       (ahead.priority = analysis.priority AND ahead.enqueued_at < analysis.enqueued_at)) \
-            ) END AS analysis_position, \
+            CASE WHEN analysis.status = 'pending' THEN ({ANALYSIS_POSITION_SQL}) END \
+                AS analysis_position, \
             (history.last_analyzed_at IS NOT NULL) AS analysis_complete, \
+            history.analysis_duration_ms AS repo_last_duration_ms, \
             history.analysis_scope_commits, \
             COALESCE(history.analysis_truncated, FALSE) AS analysis_truncated \
          FROM (SELECT $1::TEXT AS repo) requested \
          LEFT JOIN repos r ON r.repo = requested.repo \
          LEFT JOIN star_fetch_queue stars ON stars.repo = requested.repo \
          LEFT JOIN repo_analysis_queue analysis ON analysis.repo = requested.repo \
-         LEFT JOIN repo_history history ON history.repo = requested.repo",
-    )
-    .bind(repo)
-    .fetch_one(&state.analyzer.cache.db().pool)
-    .await?;
-    let analysis_average_ms = fleet_analysis_average_ms(state).await;
+         LEFT JOIN repo_history history ON history.repo = requested.repo"
+    );
+    let row = sqlx::query(sqlx::AssertSqlSafe(sql))
+        .bind(repo)
+        .fetch_one(&state.analyzer.cache.db().pool)
+        .await?;
+    let analysis_median_ms = fleet_analysis_median_ms(state).await;
     Ok(ProgressSnapshot::from_raw(
         repo.to_string(),
         RawProgress {
@@ -499,10 +595,12 @@ async fn load_snapshot(state: &ApiState, repo: &str) -> Result<ProgressSnapshot,
             analysis_phase: row.try_get("analysis_phase")?,
             analysis_priority: row.try_get("analysis_priority")?,
             analysis_position: row.try_get("analysis_position")?,
+            analysis_next_attempt_at: row.try_get("analysis_next_attempt_at")?,
             analysis_started_at: row.try_get("analysis_started_at")?,
             analysis_total_units: row.try_get("analysis_total_units")?,
             analysis_completed_units: row.try_get("analysis_completed_units")?,
-            analysis_average_ms,
+            analysis_median_ms,
+            repo_last_duration_ms: row.try_get("repo_last_duration_ms")?,
             analysis_complete: row.try_get("analysis_complete")?,
             analysis_scope_commits: row.try_get("analysis_scope_commits")?,
             analysis_truncated: row.try_get("analysis_truncated")?,
@@ -511,29 +609,37 @@ async fn load_snapshot(state: &ApiState, repo: &str) -> Result<ProgressSnapshot,
 }
 
 /// Fallback ETA when no analysis has ever been timed.
-const DEFAULT_ANALYSIS_AVERAGE_MS: i64 = 300_000;
-/// How long the fleet-wide average is reused before it is re-measured.
-const ANALYSIS_AVERAGE_TTL: Duration = Duration::from_secs(60);
+const DEFAULT_ANALYSIS_DURATION_MS: i64 = 300_000;
+/// How long the fleet-wide median is reused before it is re-measured.
+const ANALYSIS_MEDIAN_TTL: Duration = Duration::from_secs(60);
 
-/// Mean duration of the most recent analysis runs, cached per process.
+/// Median duration of the most recent analysis runs, cached per process.
+///
+/// The median rather than the mean: a single monorepo taking twenty minutes
+/// used to drag every queued repository's reported wait up with it, and the
+/// sample is only twenty rows wide, so one outlier moves the mean by 5%.
 ///
 /// This is a fleet-wide constant, not a per-repository value, but it used to
 /// ride along in the per-poll progress query — where it read `repo_history`
 /// (one row per repository ever analyzed) with a sort that no index serves,
 /// once per stream per two seconds. Measuring it on its own schedule keeps
 /// the poll to primary-key lookups.
-async fn fleet_analysis_average_ms(state: &ApiState) -> i64 {
+async fn fleet_analysis_median_ms(state: &ApiState) -> i64 {
     static CACHED: OnceLock<Mutex<Option<(Instant, i64)>>> = OnceLock::new();
     let cell = CACHED.get_or_init(|| Mutex::new(None));
     let now = Instant::now();
     if let Some((measured_at, value)) =
         *cell.lock().unwrap_or_else(|poisoned| poisoned.into_inner())
-        && now.duration_since(measured_at) < ANALYSIS_AVERAGE_TTL
+        && now.duration_since(measured_at) < ANALYSIS_MEDIAN_TTL
     {
         return value;
     }
-    let measured: Option<i64> = sqlx::query_scalar(
-        "SELECT AVG(sample.analysis_duration_ms)::BIGINT FROM ( \
+    // `percentile_cont` is double precision; the subselect keeps the ordered
+    // index scan that `idx_repo_history_duration_recent` serves.
+    let measured: Option<f64> = sqlx::query_scalar(
+        "SELECT percentile_cont(0.5) WITHIN GROUP ( \
+             ORDER BY sample.analysis_duration_ms::DOUBLE PRECISION \
+         ) FROM ( \
              SELECT analysis_duration_ms FROM repo_history \
              WHERE analysis_duration_ms IS NOT NULL \
              ORDER BY last_analyzed_at DESC NULLS LAST LIMIT 20 \
@@ -542,7 +648,11 @@ async fn fleet_analysis_average_ms(state: &ApiState) -> i64 {
     .fetch_one(&state.analyzer.cache.db().pool)
     .await
     .unwrap_or(None);
-    let value = measured.unwrap_or(DEFAULT_ANALYSIS_AVERAGE_MS).max(1);
+    let value = measured
+        .filter(|ms| ms.is_finite())
+        .map(|ms| ms.round().clamp(1.0, i64::MAX as f64) as i64)
+        .unwrap_or(DEFAULT_ANALYSIS_DURATION_MS)
+        .max(1);
     *cell.lock().unwrap_or_else(|poisoned| poisoned.into_inner()) = Some((now, value));
     value
 }
@@ -1017,6 +1127,130 @@ mod tests {
         assert!(value.stars.complete);
         assert_eq!(value.stars.next_page, Some(9));
         assert!(!value.terminal);
+    }
+
+    #[test]
+    fn queued_repo_without_its_own_timing_reports_no_eta() {
+        let value = snapshot(RawProgress {
+            analysis_status: Some("pending".into()),
+            analysis_position: Some(1),
+            analysis_median_ms: 300_000,
+            ..RawProgress::default()
+        });
+        assert_eq!(value.analysis.phase, ProgressPhase::Pending);
+        assert_eq!(value.analysis.queue_position, Some(1));
+        assert_eq!(value.analysis.eta_seconds, None);
+    }
+
+    #[test]
+    fn next_queued_repo_is_estimated_from_its_own_last_run() {
+        let value = snapshot(RawProgress {
+            analysis_status: Some("pending".into()),
+            analysis_position: Some(1),
+            analysis_median_ms: 300_000,
+            repo_last_duration_ms: Some(4_000),
+            ..RawProgress::default()
+        });
+        assert_eq!(value.analysis.eta_seconds, Some(4));
+    }
+
+    #[test]
+    fn queue_wait_uses_the_fleet_median_and_the_repo_owns_its_wave() {
+        // Twelve jobs ahead fill two waves of six workers; the thirteenth then
+        // runs for as long as this repository itself last took.
+        assert_eq!(
+            pending_analysis_eta_seconds(13, 6, 300_000, Some(4_000), 0),
+            Some(2 * 300 + 4)
+        );
+        assert_eq!(
+            pending_analysis_eta_seconds(13, 6, 300_000, None, 0),
+            Some(900)
+        );
+        assert_eq!(pending_analysis_eta_seconds(1, 6, 300_000, None, 0), None);
+        // The repository's own measured run is reported as measured: a repo
+        // that has only ever taken twenty minutes is not promised five.
+        assert_eq!(
+            pending_analysis_eta_seconds(1, 6, 300_000, Some(1_200_000), 0),
+            Some(1_200)
+        );
+    }
+
+    #[test]
+    fn a_job_parked_in_backoff_is_promised_its_own_backoff_first() {
+        // Nothing claimable is ahead of it, so its position is 1 — but it is
+        // not claimable either for another half hour.
+        assert_eq!(
+            pending_analysis_eta_seconds(1, 6, 300_000, Some(4_000), 1_800),
+            Some(1_804)
+        );
+        // With no timing of its own, the backoff is still a real measurement
+        // of this job and is worth reporting alone.
+        assert_eq!(
+            pending_analysis_eta_seconds(1, 6, 300_000, None, 1_800),
+            Some(1_800)
+        );
+    }
+
+    #[test]
+    fn backoff_wait_is_carried_into_the_reported_analysis_eta() {
+        let retry_at = Utc::now() + chrono::Duration::minutes(30);
+        let value = snapshot(RawProgress {
+            analysis_status: Some("pending".into()),
+            analysis_attempts: 6,
+            analysis_position: Some(1),
+            analysis_next_attempt_at: Some(retry_at),
+            analysis_median_ms: 300_000,
+            repo_last_duration_ms: Some(4_000),
+            ..RawProgress::default()
+        });
+        assert_eq!(value.analysis.phase, ProgressPhase::Retrying);
+        assert_eq!(value.analysis.retry_at, Some(retry_at));
+        let eta = value.analysis.eta_seconds.expect("backoff is measurable");
+        assert!(
+            (1_800..=1_804).contains(&eta),
+            "expected the half-hour park plus this repo's own run, got {eta}"
+        );
+    }
+
+    #[test]
+    fn an_elapsed_backoff_stamp_does_not_inflate_the_wait() {
+        let value = snapshot(RawProgress {
+            analysis_status: Some("pending".into()),
+            analysis_position: Some(1),
+            analysis_next_attempt_at: Some(Utc::now() - chrono::Duration::minutes(5)),
+            analysis_median_ms: 300_000,
+            repo_last_duration_ms: Some(4_000),
+            ..RawProgress::default()
+        });
+        assert_eq!(value.analysis.retry_at, None);
+        assert_eq!(value.analysis.eta_seconds, Some(4));
+    }
+
+    #[test]
+    fn unmeasurable_analysis_tail_reports_no_eta() {
+        let value = snapshot(RawProgress {
+            analysis_status: Some("in_progress".into()),
+            analysis_phase: Some("saving_history".into()),
+            analysis_started_at: Some(Utc::now() - chrono::Duration::seconds(30)),
+            ..RawProgress::default()
+        });
+        assert_eq!(value.analysis.detail, Some("saving_history"));
+        assert_eq!(value.analysis.eta_seconds, None);
+    }
+
+    #[test]
+    fn in_progress_eta_extrapolates_the_measured_walk() {
+        let value = snapshot(RawProgress {
+            analysis_status: Some("in_progress".into()),
+            analysis_phase: Some("scanning_history".into()),
+            analysis_started_at: Some(Utc::now() - chrono::Duration::seconds(40)),
+            analysis_total_units: Some(400),
+            analysis_completed_units: 100,
+            ..RawProgress::default()
+        });
+        // 40s bought 100 of 400 commits: 120s of walk left, plus a quarter of
+        // that for the phases after the walk.
+        assert_eq!(value.analysis.eta_seconds, Some(150));
     }
 
     #[test]

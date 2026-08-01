@@ -3,14 +3,15 @@
  * rules for putting it there correctly.
  *
  * Three surfaces publish this information and must never drift apart: the
- * Markdown representation an agent fetches (`agent-markdown.ts`), the
  * clipboard prompt the "Ask an agent" button hands to a coding agent
- * (`agent-prompt.ts`), and the human badge catalog at `/badges`. They all read
- * this module.
+ * (`agent-prompt.ts`), the human badge catalog at `/badges`, and the Markdown
+ * the API serves at `/api/md/{path}`. The first two read this module; the
+ * third is a Rust port in `backend/src/agent_embeds.rs`, held to byte equality
+ * with it by `scripts/embed-parity.test.mjs` and the matching Rust test.
  *
  * Everything here is pure and deterministic given a slug and an API origin —
- * no wall clock, no fetch — so the snippet a visitor copies, the snippet in the
- * `.md` file, and the snippet in the prompt are byte-identical.
+ * no wall clock, no fetch — so the snippet a visitor copies, the snippet the
+ * API renders, and the snippet in the prompt are byte-identical.
  *
  * Relative specifiers with their extension: this module is covered by the Node
  * test runner in `scripts/`, which resolves neither the `@/` alias nor an
@@ -456,5 +457,9 @@ export const CANDIDATE_FILES: string[] = [
   "docs/index.md, docs/README.md, or a docs-site landing page",
   "website/ or site/ landing content, if the project publishes one",
   "CONTRIBUTING.md, where repository-health charts tell a contributor what they are joining",
-  ".github/profile/README.md for an organization profile",
+  // An organization profile README is `profile/README.md` inside a repository
+  // literally named `.github`. `.github/profile/README.md` is a path that
+  // exists in no other checkout, so an agent told to look there finds nothing.
+  "profile/README.md, when the checkout is the account's `.github` repository, " +
+    "which is where an organization profile README lives",
 ];

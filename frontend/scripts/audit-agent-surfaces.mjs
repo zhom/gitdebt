@@ -5,6 +5,10 @@ import path from "node:path";
 import { pathToFileURL } from "node:url";
 
 const DEFAULT_SITE = "https://gitdebt.com";
+// `astro build` refuses to run in production without PUBLIC_API_BASE, so a
+// dist directory always had one; this default only covers auditing an existing
+// build from a shell that no longer carries the variable.
+const DEFAULT_API = "https://api.gitdebt.com";
 
 function walk(directory, extension) {
   if (!fs.existsSync(directory)) return [];
@@ -37,18 +41,27 @@ function markdownAlternate(html) {
   return null;
 }
 
+/**
+ * Every page must advertise its Markdown representation, and every one of
+ * those now lives on the API at `/api/md/{path}` — the site prerenders none.
+ * The two halves are one invariant: an emitted `.md` file would be shadowed by
+ * the `/*.md` redirect and served as HTML by the 404 fallback instead, so a
+ * page pointing at itself is the failure this audit exists to catch.
+ */
 export function auditAgentSurfaces({
   distDir,
   site = process.env.PUBLIC_SITE_URL ?? DEFAULT_SITE,
+  apiBase = process.env.PUBLIC_API_BASE ?? DEFAULT_API,
 }) {
   const absoluteDist = path.resolve(distDir);
   const errors = [];
   const htmlFiles = walk(absoluteDist, ".html");
-  const origin = new URL(site).origin;
+  const apiOrigin = new URL(apiBase).origin;
 
   for (const file of htmlFiles) {
     const route = routeForHtml(absoluteDist, file);
-    const expectedPath = route === "/" ? "/index.md" : `${route}.md`;
+    // The home page is the empty path, not a segment named `index`.
+    const expectedPath = route === "/" ? "/api/md/" : `/api/md${route}`;
     const html = fs.readFileSync(file, "utf8");
     const alternate = markdownAlternate(html);
     if (!alternate) {
@@ -62,14 +75,17 @@ export function auditAgentSurfaces({
       errors.push(`${route}: invalid Markdown alternate`);
       continue;
     }
-    if (url.origin !== origin || url.pathname !== expectedPath) {
-      errors.push(`${route}: Markdown alternate is ${url.href}, expected ${origin}${expectedPath}`);
-      continue;
+    if (url.origin !== apiOrigin || url.pathname !== expectedPath) {
+      errors.push(
+        `${route}: Markdown alternate is ${url.href}, expected ${apiOrigin}${expectedPath}`,
+      );
     }
-    const markdownFile = path.join(absoluteDist, expectedPath.replace(/^\//, ""));
-    if (!fs.existsSync(markdownFile)) {
-      errors.push(`${route}: missing generated ${expectedPath}`);
-    }
+  }
+
+  for (const file of walk(absoluteDist, ".md")) {
+    errors.push(
+      `${path.relative(absoluteDist, file)}: Markdown is served by the API, not prerendered`,
+    );
   }
 
   for (const required of ["llms.txt", "llms-full.txt"]) {
@@ -97,7 +113,9 @@ function main() {
     process.exitCode = 1;
     return;
   }
-  console.log(`Agent surfaces audit: ${result.pages} HTML pages have Markdown alternates`);
+  console.log(
+    `Agent surfaces audit: ${result.pages} HTML pages point at /api/md, none prerender Markdown`,
+  );
 }
 
 if (import.meta.url === pathToFileURL(process.argv[1] ?? "").href) main();

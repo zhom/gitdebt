@@ -11,16 +11,23 @@ Gitdebt is an open-source public GitHub repository analytics service. It provide
 
 ## URL conventions
 
-- Repository HTML: `https://gitdebt.com/{owner}/{repo}`
-- Repository Markdown: `https://gitdebt.com/{owner}/{repo}.md`
-- Profile HTML: `https://gitdebt.com/{login}`
-- Profile Markdown: `https://gitdebt.com/{login}.md`
-- Comparison HTML: `https://gitdebt.com/vs/{owner1}/{repo1}/{owner2}/{repo2}`
-- Add `.md` to any emitted HTML page URL for the corresponding Markdown representation.
+HTML is served by the site, Markdown by the API. The Markdown for any page is `https://api.gitdebt.com/api/md/{path}` for that page's site path; `https://gitdebt.com/{path}.md` is a 302 to it, kept so appending `.md` still lands on the document.
+
+- Home: `https://gitdebt.com/` — Markdown `https://api.gitdebt.com/api/md/`
+- Repository: `https://gitdebt.com/{owner}/{repo}` — Markdown `https://api.gitdebt.com/api/md/{owner}/{repo}`
+- Profile: `https://gitdebt.com/{login}` — Markdown `https://api.gitdebt.com/api/md/{login}`
+- Category: `https://gitdebt.com/compare/{category}` — Markdown `https://api.gitdebt.com/api/md/compare/{category}`
+- Comparison: `https://gitdebt.com/vs/{owner1}/{repo1}/{owner2}/{repo2}` — Markdown `https://api.gitdebt.com/api/md/vs/{owner1}/{repo1}/{owner2}/{repo2}`
+- Embed catalog: `https://gitdebt.com/badges` — Markdown `https://api.gitdebt.com/api/md/badges`
+- Repository Markdown alias: `https://api.gitdebt.com/api/repos/{owner}/{repo}/report.md` renders the same document as `/api/md/{owner}/{repo}`.
+
+Every repository shape works for ANY public repository, analyzed or not.
 
 ## Public API
 
 - Analyze/cache snapshot: `GET https://api.gitdebt.com/api/repos/{owner}/{repo}/analyze`
+- Markdown for any page: `GET https://api.gitdebt.com/api/md/{path}`
+- Markdown report: `GET https://api.gitdebt.com/api/repos/{owner}/{repo}/report.md` — 200 once analyzed, 202 with `Retry-After` while the analysis it just queued runs, 404 when the repository is not public. `?enqueue=0` reads without queueing. The same statuses apply to `/api/md/{owner}/{repo}`.
 - Star history JSON: `GET https://api.gitdebt.com/api/repos/{owner}/{repo}/stars.json`
 - Star history CSV: `GET https://api.gitdebt.com/api/repos/{owner}/{repo}/stars.csv`
 - Repository-health JSON: `GET https://api.gitdebt.com/api/repos/{owner}/{repo}/stats.json`
@@ -55,7 +62,7 @@ SVG URLs accept `theme=light|dark`. Colors are baked per asset — there is no `
 
 ## Embedding these in a README
 
-`https://gitdebt.com/badges.md` is the complete catalog: every asset, a paste-ready snippet for each, the query-parameter reference, and a ready-made prompt for adding them to a repository. A repository's own `https://gitdebt.com/{owner}/{repo}.md` carries the same snippets already pointed at that repository, alongside its measured star and health figures.
+`https://api.gitdebt.com/api/md/badges` is the complete catalog: every asset, a paste-ready snippet for each, the query-parameter reference, and a ready-made prompt for adding them to a repository. `https://api.gitdebt.com/api/md/{owner}/{repo}` carries the same snippets already pointed at that repository, alongside its measured star and health figures.
 
 Rules that make a published embed correct:
 

@@ -13,6 +13,13 @@ type SitemapResponse = {
 };
 
 const SLUG_RE = /^[a-z0-9._-]+\/[a-z0-9._-]+$/;
+// Cloudflare applies `_redirects` before it looks for an asset, and `/*.md`
+// hands every path ending in `.md` to the API's Markdown renderer. A slug is
+// allowed to contain dots, so `owner/manual.md` would get a prerendered page
+// and a sitemap entry that nobody can ever reach: the URL 302s to
+// `/api/md/owner/manual`, a *different* repository. Such a slug is dropped
+// from the catalog rather than published behind a redirect that shadows it.
+const REDIRECT_SHADOWED_SLUG = /\.md$/;
 const DEFAULT_LIMIT = 3_000;
 const MAX_LIMIT = 8_000;
 // This build runs on push to main, which is the same event that redeploys the
@@ -117,6 +124,23 @@ async function fetchCatalog(): Promise<CatalogRepo[]> {
           typeof row.updated_at === "string" ? row.updated_at : null,
       });
     }
+
+    const total = typeof body.total === "number" ? body.total : null;
+    console.log(
+      `Static catalog: ${(body.repos?.length ?? 0).toLocaleString()} of ` +
+        `${total?.toLocaleString() ?? "an unreported number of"} published ` +
+        `repositories, limit ${limit.toLocaleString()}`,
+    );
+    // Truncation is silent otherwise: the build succeeds and the missing
+    // repositories simply never get a static page or a sitemap entry.
+    if (staticCatalogRequired() && total !== null && total > limit) {
+      console.warn(
+        `Static catalog truncated: ${(total - limit).toLocaleString()} of ` +
+          `${total.toLocaleString()} published repositories are not being ` +
+          `built as static pages. Raise STATIC_REPO_LIMIT (max ` +
+          `${MAX_LIMIT.toLocaleString()}) to include them.`,
+      );
+    }
   } catch (error) {
     if (staticCatalogRequired()) {
       const detail = error instanceof Error ? error.message : String(error);
@@ -130,9 +154,25 @@ async function fetchCatalog(): Promise<CatalogRepo[]> {
     }
   }
 
-  return [...bySlug.values()].sort((a, b) =>
-    a.slug.localeCompare(b.slug),
-  );
+  const publishable: CatalogRepo[] = [];
+  let shadowed = 0;
+  for (const repo of bySlug.values()) {
+    if (REDIRECT_SHADOWED_SLUG.test(repo.slug)) {
+      shadowed += 1;
+      continue;
+    }
+    publishable.push(repo);
+  }
+  if (shadowed > 0) {
+    console.warn(
+      `Static catalog: dropped ${shadowed.toLocaleString()} ` +
+        `${shadowed === 1 ? "repository" : "repositories"} whose slug ends in ` +
+        `".md"; the /*.md redirect shadows their pages, so neither a page nor ` +
+        `a sitemap entry is emitted for them`,
+    );
+  }
+
+  return publishable.sort((a, b) => a.slug.localeCompare(b.slug));
 }
 
 export function loadBuildCatalog(): Promise<CatalogRepo[]> {

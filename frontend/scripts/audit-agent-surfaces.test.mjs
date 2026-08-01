@@ -27,20 +27,23 @@ function fixture() {
   return directory;
 }
 
-test("accepts HTML pages with exact generated Markdown counterparts", () => {
+test("accepts pages whose alternates name the API's Markdown route", () => {
   const directory = fixture();
   fs.mkdirSync(path.join(directory, "owner", "repo"), { recursive: true });
   fs.writeFileSync(
     path.join(directory, "owner", "repo", "index.html"),
-    '<link rel="alternate" type="text/markdown" href="https://gitdebt.com/owner/repo.md">',
+    '<link rel="alternate" type="text/markdown" href="https://api.gitdebt.com/api/md/owner/repo">',
   );
-  fs.mkdirSync(path.join(directory, "owner"), { recursive: true });
-  fs.writeFileSync(path.join(directory, "owner", "repo.md"), "# owner/repo");
+  // The home page maps to the empty path, not a segment named `index`.
+  fs.writeFileSync(
+    path.join(directory, "index.html"),
+    '<link rel="alternate" type="text/markdown" href="https://api.gitdebt.com/api/md/">',
+  );
 
   assert.deepEqual(auditAgentSurfaces({ distDir: directory }).errors, []);
 });
 
-test("rejects a page whose advertised Markdown file is absent", () => {
+test("rejects a page that still points its alternate at the site origin", () => {
   const directory = fixture();
   fs.writeFileSync(
     path.join(directory, "index.html"),
@@ -48,7 +51,28 @@ test("rejects a page whose advertised Markdown file is absent", () => {
   );
 
   const result = auditAgentSurfaces({ distDir: directory });
-  assert.ok(result.errors.includes("/: missing generated /index.md"));
+  assert.ok(
+    result.errors.some((error) =>
+      error.startsWith("/: Markdown alternate is https://gitdebt.com/index.md"),
+    ),
+    result.errors.join("\n"),
+  );
+});
+
+test("rejects any prerendered Markdown, which the /*.md redirect would shadow", () => {
+  const directory = fixture();
+  fs.writeFileSync(
+    path.join(directory, "index.html"),
+    '<link rel="alternate" type="text/markdown" href="https://api.gitdebt.com/api/md/">',
+  );
+  fs.mkdirSync(path.join(directory, "owner"), { recursive: true });
+  fs.writeFileSync(path.join(directory, "owner", "repo.md"), "# owner/repo");
+
+  const result = auditAgentSurfaces({ distDir: directory });
+  assert.ok(
+    result.errors.some((error) => error.startsWith("owner/repo.md:")),
+    result.errors.join("\n"),
+  );
 });
 
 test("page sitemap and emitted comparison pages share one path source", () => {
@@ -94,13 +118,10 @@ test("profiles live at the root and share one login source", () => {
   );
   assert.match(read("src/pages/[login].astro"), /staticLoginPaths\(\)/);
   assert.match(read("src/pages/sitemaps/pages.xml.ts"), /staticLogins\(\)/);
-  assert.match(read("src/pages/[...path].md.ts"), /staticLogins\(\)/);
 
   for (const relative of [
     "src/pages/[login].astro",
     "src/pages/sitemaps/pages.xml.ts",
-    "src/pages/[...path].md.ts",
-    "src/lib/agent-markdown.ts",
     "src/components/ProfileCardPreview.tsx",
     "src/pages/[owner]/[repo].astro",
   ]) {

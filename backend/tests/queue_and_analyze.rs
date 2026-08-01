@@ -23,7 +23,7 @@ use gitdebt::{
     cache::{ArchiveStarEvent, Cache},
     db::Db,
     github::RepoMetadata,
-    queue, repo_analysis,
+    progress, queue, repo_analysis,
     repo_history::{CommitInfo, RepoStorage},
     repo_stats,
 };
@@ -1316,11 +1316,13 @@ async fn confirming_an_unchanged_head_keeps_the_analysis_fresh() {
     cleanup(&db, prefix).await;
     let repo = format!("{prefix}unchanged");
 
-    // A completed analysis that has since aged past the freshness window.
+    // A completed analysis that has since aged past the freshness window,
+    // carrying the twenty-minute wall time of the full walk that produced it.
     sqlx::query(
         "INSERT INTO repo_history \
-            (repo, last_analyzed_sha, last_analyzed_at, head_sha, analysis_revision) \
-         VALUES ($1, 'a1b2c3', NOW() - INTERVAL '30 days', 'a1b2c3', $2)",
+            (repo, last_analyzed_sha, last_analyzed_at, head_sha, analysis_revision, \
+             analysis_duration_ms) \
+         VALUES ($1, 'a1b2c3', NOW() - INTERVAL '30 days', 'a1b2c3', $2, 1200000)",
     )
     .bind(&repo)
     .bind(repo_analysis::CURRENT_ANALYSIS_REVISION)
@@ -1347,6 +1349,89 @@ async fn confirming_an_unchanged_head_keeps_the_analysis_fresh() {
         repo_analysis::enqueue(&db, &repo).await.unwrap(),
         repo_analysis::EnqueueOutcome::Fresh,
         "and the next view must not re-queue the same no-op run"
+    );
+
+    // The confirmation bumps `last_analyzed_at`, which is what orders the
+    // twenty-row fleet duration sample behind every progress ETA. Leaving the
+    // old full-walk duration attached would re-promote a stale measurement to
+    // the front of that window, and stamping the no-op's own wall time would
+    // seed it with the shortest run the worker can possibly do. Neither is a
+    // duration of a run that walked commits, so the column is cleared.
+    let duration: Option<i64> =
+        sqlx::query_scalar("SELECT analysis_duration_ms FROM repo_history WHERE repo = $1")
+            .bind(&repo)
+            .fetch_one(&db.pool)
+            .await
+            .unwrap();
+    assert_eq!(
+        duration, None,
+        "a head confirmation walks no commits, so it leaves no measured duration"
+    );
+
+    cleanup(&db, prefix).await;
+}
+
+/// A job parked in exponential backoff must not be counted as standing in
+/// anyone's way.
+///
+/// The reported position is a rank among the jobs a claimer could take right
+/// now. Counting rows whose `next_attempt_at` is up to half an hour out told
+/// every waiting visitor that jobs were ahead of theirs which no worker would
+/// touch in that window.
+#[tokio::test]
+async fn queue_position_ignores_jobs_parked_in_backoff() {
+    let Some(db) = test_db().await else {
+        eprintln!("skipping: set GITDEBT_TEST_DATABASE_URL to run");
+        return;
+    };
+    let prefix = "gitdebt-test-position-backoff/";
+    cleanup(&db, prefix).await;
+    let parked = format!("{prefix}parked");
+    let viewed = format!("{prefix}viewed");
+
+    // Both rows sit above every priority the product itself ever assigns, so
+    // rows left pending by a sibling test can never rank ahead of them and the
+    // absolute positions below stay deterministic on a shared database.
+    const ISOLATED_PRIORITY: i64 = repo_analysis::INTERACTIVE_PRIORITY * 9;
+    // Equal priority with the parked row enqueued first: plain FIFO ordering
+    // would put it ahead of the viewed one.
+    sqlx::query(
+        "INSERT INTO repo_analysis_queue \
+            (repo, status, priority, enqueued_at, next_attempt_at) \
+         VALUES ($1, 'pending', $3, NOW() - INTERVAL '1 hour', NOW() + INTERVAL '10 minutes'), \
+                ($2, 'pending', $3, NOW(), NOW())",
+    )
+    .bind(&parked)
+    .bind(&viewed)
+    .bind(ISOLATED_PRIORITY)
+    .execute(&db.pool)
+    .await
+    .unwrap();
+
+    assert_eq!(
+        progress::analysis_queue_position(&db, &viewed)
+            .await
+            .unwrap(),
+        Some(1),
+        "the only job enqueued ahead is unclaimable for another ten minutes"
+    );
+    // Making it claimable puts it back in front.
+    sqlx::query("UPDATE repo_analysis_queue SET next_attempt_at = NOW() WHERE repo = $1")
+        .bind(&parked)
+        .execute(&db.pool)
+        .await
+        .unwrap();
+    assert_eq!(
+        progress::analysis_queue_position(&db, &viewed)
+            .await
+            .unwrap(),
+        Some(2)
+    );
+    assert_eq!(
+        progress::analysis_queue_position(&db, &format!("{prefix}never-queued"))
+            .await
+            .unwrap(),
+        None
     );
 
     cleanup(&db, prefix).await;

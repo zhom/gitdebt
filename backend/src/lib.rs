@@ -1,3 +1,9 @@
+pub mod agent_docs;
+pub mod agent_embeds;
+pub mod agent_markdown;
+pub mod agent_pages;
+pub mod agent_prompt;
+pub mod agent_report;
 pub mod aggregate;
 pub mod analyzer;
 pub mod animated_gif;

@@ -25,39 +25,12 @@ const history = (() => {
   return points;
 })();
 
-const health = {
-  ready: true,
-  repo: SLUG,
-  stars: 7_300,
-  archived: false,
-  analyzed_at: "2026-07-20T00:00:00Z",
-  window_days: 90,
-  total_commits: 8_400,
-  attributed_commits: 8_000,
-  analysis_truncated: false,
-  bus_factor: 6,
-  contributors: 240,
-  top_author_commits: 900,
-  commits_window: 400,
-  commits_previous_window: 400,
-  last_commit_day: "2026-07-19",
-  commit_months: [{ month: "2026-07", commits: 140 }],
-  tracked_files: 1_000,
-  file_changes: 5_000,
-  fix_changes: 600,
-  fresh_files: 620,
-  hotspot: { path: "src/core/render.ts", commits: 412, fix_commits: 88 },
-  todo_delta_window: 0,
-  todo_outstanding: 140,
-};
-
 const full = () =>
   repoAgentPrompt({
     slug: SLUG,
     siteOrigin: SITE,
     apiBase: API,
     stars: starFacts(history, 7_300, false),
-    health,
   });
 
 test("star facts anchor on the series, not the wall clock", () => {
@@ -84,8 +57,10 @@ test("the prompt carries the measured numbers so the agent invents none", () => 
   assert.match(prompt, /7,300 GitHub stars/);
   assert.match(prompt, /\+900 in 90 days/);
   assert.match(prompt, /\+300 in 30/);
-  assert.match(prompt, /Ownership: Shared/);
-  assert.match(prompt, /Change hotspot: src\/core\/render\.ts/);
+  // Repository-health readings are deliberately not in this prompt; the API's
+  // own report carries them. The prompt points the agent at health.json.
+  assert.ok(!prompt.includes("Ownership:"));
+  assert.match(prompt, /health\.json/);
 });
 
 test("without measurements the prompt says where to read them instead", () => {
@@ -104,16 +79,6 @@ test("an archive-derived curve is never described as net stars", () => {
   });
   assert.match(prompt, /cannot see unstars/);
   assert.match(prompt, /never as net stars/);
-});
-
-test("a truncated analysis window is disclosed", () => {
-  const prompt = repoAgentPrompt({
-    slug: SLUG,
-    siteOrigin: SITE,
-    apiBase: API,
-    health: { ...health, analysis_truncated: true },
-  });
-  assert.match(prompt, /bounded analysis window/);
 });
 
 test("the prompt ships complete, paste-ready snippets", () => {
@@ -174,7 +139,15 @@ test("the profile prompt explains where a profile README lives", () => {
     reposIncluded: 31,
   });
   assert.match(prompt, /`octocat\/octocat` for a user/);
-  assert.match(prompt, /\.github\/profile\/README\.md/);
+  // This prompt is executed by a coding agent, so a wrong file location is a
+  // wrong `mkdir -p`. An organization profile README lives at
+  // `profile/README.md` inside a repository literally named `.github`; the path
+  // `.github/profile/README.md` names no repository at all.
+  assert.match(
+    prompt,
+    /a repository named `\.github` with the file at `profile\/README\.md`/,
+  );
+  assert.ok(!prompt.includes(".github/profile/README.md"));
   assert.match(prompt, /4,200 stars across octocat's public repositories/);
   assert.ok(prompt.includes(`${API}/api/users/octocat/card.svg?theme=dark`));
 });

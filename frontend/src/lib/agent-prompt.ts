@@ -15,8 +15,6 @@
  * resolves neither the `@/` alias nor an extensionless specifier.
  */
 
-import type { RepoHealth } from "./repo-health.ts";
-import { healthReadings } from "./repo-health.ts";
 import {
   CANDIDATE_FILES,
   EMBED_RULES,
@@ -30,7 +28,6 @@ import {
   type EmbedAsset,
 } from "./readme-embeds.ts";
 import {
-  formatCompact,
   formatMonthYear,
   gainedInTrailingDays,
   growthTrend,
@@ -60,7 +57,6 @@ export type RepoPromptInput = {
   siteOrigin: string;
   apiBase: string;
   stars?: StarFacts | null;
-  health?: RepoHealth | null;
 };
 
 export type ProfilePromptInput = {
@@ -89,6 +85,27 @@ export function starFacts(
     firstStarMonth: formatMonthYear(history[0]?.date ?? null),
     approximate,
   };
+}
+
+/**
+ * `12,043`, grouped by hand rather than through `toLocaleString`.
+ *
+ * `toLocaleString()` follows the reader's browser, so a German visitor would
+ * copy `12.043` for the figure the API's own prompt prints as `12,043`. Pinning
+ * the locale fixes that but is a guarantee no test can hold: dropping the
+ * `"en-US"` argument still passes under any English CI locale and only diverges
+ * on somebody else's machine. Grouping explicitly leaves nothing to regress,
+ * and mirrors `thousands` in `backend/src/agent_markdown.rs` exactly — the two
+ * are held to byte equality by the parity fixtures.
+ */
+function thousands(value: number): string {
+  const digits = Math.abs(Math.trunc(value)).toString();
+  let out = value < 0 ? "-" : "";
+  for (let index = 0; index < digits.length; index += 1) {
+    if (index > 0 && (digits.length - index) % 3 === 0) out += ",";
+    out += digits[index];
+  }
+  return out;
 }
 
 function bullet(lines: string[]): string {
@@ -121,10 +138,10 @@ function repoEvidence(input: RepoPromptInput): string[] {
   if (stars?.totalStars !== null && stars?.totalStars !== undefined) {
     const window: string[] = [];
     if (stars.gained90 !== null) {
-      window.push(`+${stars.gained90.toLocaleString()} in 90 days`);
+      window.push(`+${thousands(stars.gained90)} in 90 days`);
     }
     if (stars.gained30 !== null) {
-      window.push(`+${stars.gained30.toLocaleString()} in 30`);
+      window.push(`+${thousands(stars.gained30)} in 30`);
     }
     const pace =
       stars.trend === "accelerating"
@@ -135,41 +152,33 @@ function repoEvidence(input: RepoPromptInput): string[] {
             ? ", in line with its lifetime pace"
             : "";
     facts.push(
-      `${stars.totalStars.toLocaleString()} GitHub stars${
+      `${thousands(stars.totalStars)} GitHub stars${
         window.length > 0 ? ` (${window.join(", ")})` : ""
       }${pace}.`,
     );
-    if (stars.approximate) {
-      facts.push(
-        "The star curve is public GH Archive star activity, not a net-star " +
-          "series: it records star actions and cannot see unstars. Describe it " +
-          "as star activity, never as net stars.",
-      );
-    }
   }
+
+  // Outside the total-stars branch on purpose: a series can be known to be GH
+  // Archive activity before any total is available, and an agent that calls an
+  // activity curve "net stars" publishes a wrong claim either way.
+  if (stars?.approximate) {
+    facts.push(
+      "The star curve is public GH Archive star activity, not a net-star " +
+        "series: it records star actions and cannot see unstars. Describe it " +
+        "as star activity, never as net stars.",
+    );
+  }
+
   if (stars?.firstStarMonth) {
     facts.push(`Star history begins ${stars.firstStarMonth}.`);
   }
 
-  const health = input.health;
-  if (health?.ready) {
-    for (const reading of healthReadings(health)) {
-      facts.push(`${reading.label}: ${reading.verdict} — ${reading.detail}.`);
-    }
-    if (health.hotspot) {
-      facts.push(
-        `Change hotspot: ${health.hotspot.path} (${formatCompact(health.hotspot.commits)} changes, ` +
-          `${formatCompact(health.hotspot.fix_commits)} fix-labelled).`,
-      );
-    }
-    if (health.analysis_truncated) {
-      facts.push(
-        "Repository-health figures describe a bounded analysis window, not the " +
-          "full history. Say so if you quote them in prose.",
-      );
-    }
-  }
-
+  // Repository-health readings are deliberately absent. No caller ever had
+  // them — the button seeds star facts from the report's own broadcast and
+  // never fetches `health.json` — so the branch that rendered them was dead,
+  // and being dead it was the one part of this prompt the cross-language parity
+  // fixtures could not hold against `backend/src/agent_prompt.rs`. The prompt
+  // still tells the agent where to read those figures for itself.
   return facts;
 }
 
@@ -343,19 +352,24 @@ export function profileAgentPrompt(input: ProfilePromptInput): string {
   const evidence: string[] = [];
   if (input.totalStars !== null && input.totalStars !== undefined) {
     evidence.push(
-      `${input.totalStars.toLocaleString()} stars across ${login}'s public repositories` +
-        (input.reposIncluded ? ` (${input.reposIncluded.toLocaleString()} repositories counted)` : "") +
+      `${thousands(input.totalStars)} stars across ${login}'s public repositories` +
+        (input.reposIncluded ? ` (${thousands(input.reposIncluded)} repositories counted)` : "") +
         ".",
     );
   }
 
   const sections: string[] = [
     `# Add gitdebt profile analytics to ${login}'s profile README`,
+    // This prompt is executed by a coding agent, so a wrong file location is a
+    // wrong `mkdir -p`. An organization profile README lives at
+    // `profile/README.md` inside a repository literally named `.github`; the
+    // path `.github/profile/README.md` names no repository at all.
     `gitdebt (${siteOrigin}) renders aggregate public-repository statistics for ` +
       "an account as plain image URLs. No account, token, or GitHub Action is " +
       "involved. A profile README lives in a repository named after the account " +
-      `itself — \`${login}/${login}\` for a user, \`.github/profile/README.md\` for ` +
-      "an organization. Create it if it does not exist.",
+      `itself — \`${login}/${login}\` for a user; for an organization, a ` +
+      "repository named `.github` with the file at `profile/README.md`. Create " +
+      "it if it does not exist.",
   ];
 
   if (evidence.length > 0) {

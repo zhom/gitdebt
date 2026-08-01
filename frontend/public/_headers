@@ -22,11 +22,6 @@
   Cache-Control: public, max-age=0, must-revalidate
   X-Robots-Tag: noindex, follow
 
-/*.md
-  Cache-Control: public, max-age=3600, s-maxage=86400
-  Content-Type: text/markdown; charset=utf-8
-  X-Robots-Tag: noindex, follow
-
 /llms*.txt
   Cache-Control: public, max-age=3600, s-maxage=86400
   Content-Type: text/plain; charset=utf-8

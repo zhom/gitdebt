@@ -672,8 +672,31 @@ async fn process(job: &AnalysisJob, ctx: &AnalysisCtx) -> Result<usize> {
     }
     let reachable_commits = repo_history::reachable_commit_count(&handle).await?;
     update_work_progress(&ctx.db, repo, "scanning_history", Some(plan.shas.len()), 0).await?;
+    // The `--numstat` walk below diffs blob content, so on a blobless clone it
+    // otherwise costs one promisor round trip per commit. Pull each batch's
+    // diff objects down in a couple of batched fetches immediately before
+    // walking it, rather than hydrating the whole window up front: reported
+    // progress then advances throughout, so the ETA extrapolated from it stays
+    // proportional instead of sitting at zero completed units for minutes.
+    // Failure here only means the walk pays git's lazy fetches again — never a
+    // failed run.
+    let hydrate_from = repo_history::clone_size_bytes(&handle.path);
+    let mut hydrating = true;
     let mut commits = Vec::with_capacity(plan.shas.len());
     for batch in plan.shas.chunks(repo_history::METADATA_BATCH_COMMITS) {
+        if hydrating {
+            match repo_history::hydrate_window_blobs(&handle, batch, hydrate_from).await {
+                Ok(within_budget) => hydrating = within_budget,
+                Err(error) => {
+                    // Stop after the first failure: a promisor remote that
+                    // refuses one batch refuses the rest, and retrying it per
+                    // batch only adds latency and log noise to a run that is
+                    // already falling back to lazy fetching.
+                    hydrating = false;
+                    tracing::warn!(repo, %error, "commit-window hydration failed; walking lazily");
+                }
+            }
+        }
         commits.extend(repo_history::walk_commit_metadata_batch(&handle, batch).await?);
         update_work_progress(
             &ctx.db,
@@ -831,16 +854,21 @@ async fn update_work_progress(
 /// columns are zero" — readers rendered that as a confident `0 lines of code`,
 /// and profile aggregates summed file counts and line counts into one number.
 async fn run_line_counts(db: &Db, handle: &RepoHandle, repo: &str) -> Result<()> {
-    let readiness = code_count::repository_readiness(&handle.path).await?;
+    // Readiness, the census, and the exact count all describe HEAD's tree, so
+    // list it once instead of paying three `git ls-tree -r` walks. The listing
+    // stays outside the timeout below: readiness and the census are persisted
+    // unconditionally, and a slow repository must not end up with neither.
+    let blobs = code_count::head_blobs(&handle.path).await?;
+    let readiness = code_count::readiness_from_blobs(&blobs);
     code_count::save_repository_readiness(db, repo, &handle.head_sha, &readiness).await?;
-    let (file_census, tree_files) = code_count::language_file_census(&handle.path).await?;
+    let (file_census, tree_files) = code_count::census_from_blobs(&blobs);
     // The timeout is a backstop against a pathological local read, not the
-    // thing that decides which metric is stored: `count_lines` returns `None`
-    // by its own deterministic budget, so a repository does not flip between
-    // metrics because one run happened to be slower than another.
+    // thing that decides which metric is stored: `count_lines_for` returns
+    // `None` by its own deterministic budget, so a repository does not flip
+    // between metrics because one run happened to be slower than another.
     let exact = match tokio::time::timeout(
         code_count::exact_line_count_timeout(),
-        code_count::count_lines(&handle.path),
+        code_count::count_lines_for(&handle.path, &blobs),
     )
     .await
     {

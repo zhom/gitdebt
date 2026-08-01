@@ -9,21 +9,14 @@ import { LiveUserProfile } from "@/components/LiveUserProfile";
 import { RepoHero } from "@/components/RepoHero";
 import { UsageSection } from "@/components/UsageSection";
 import {
-  isReservedFirstSegment,
+  liveReportRepo,
   missingProfileReportTarget,
 } from "@/lib/static-routing.mjs";
 import { cn } from "@/lib/utils";
 
-const SLUG_RE = /^([A-Za-z0-9._-]+)\/([A-Za-z0-9._-]+)$/;
-
 function selectedRepo(): { owner: string; repo: string } | null {
   if (typeof window === "undefined") return null;
-  const queryRepo = new URLSearchParams(window.location.search).get("repo");
-  const pathRepo = window.location.pathname.replace(/^\/+|\/+$/g, "");
-  const raw = queryRepo ?? pathRepo;
-  const match = raw.trim().match(SLUG_RE);
-  if (!match || isReservedFirstSegment(match[1])) return null;
-  return { owner: match[1].toLowerCase(), repo: match[2].toLowerCase() };
+  return liveReportRepo(window.location.pathname, window.location.search);
 }
 
 function selectedProfile(): string | null {

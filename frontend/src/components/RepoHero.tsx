@@ -636,9 +636,16 @@ function progressDetail(
     return `Retry scheduled${eta}`;
   }
   if (work.queue_position) {
+    // A 1-based rank among pending jobs, not a count of reports ahead: rank 1
+    // is the next one to start, so phrasing it as "1 ahead" reads as a wait
+    // that does not exist.
+    const place =
+      work.queue_position === 1
+        ? "next up"
+        : `queue position ${work.queue_position.toLocaleString()}`;
     return remaining !== undefined
-      ? `About ${formatCountdown(remaining)} left · ${work.queue_position.toLocaleString()} ahead`
-      : `${work.queue_position.toLocaleString()} reports ahead · measuring wait`;
+      ? `About ${formatCountdown(remaining)} left · ${place}`
+      : `${place} · measuring wait`;
   }
   if (
     work.phase === "backfilling" &&

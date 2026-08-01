@@ -24,7 +24,7 @@
 //! and code buckets — irrelevant at the order of magnitude this chart
 //! shows.
 
-use std::collections::HashMap;
+use std::collections::{HashMap, HashSet};
 use std::io::{BufRead, BufReader, Read, Write};
 use std::path::Path;
 use std::process::Stdio;
@@ -96,7 +96,7 @@ pub struct RepositoryReadiness {
 
 /// One blob of HEAD's tree.
 #[derive(Debug, Clone)]
-struct TreeBlob {
+pub(crate) struct TreeBlob {
     oid: String,
     path: String,
 }
@@ -107,7 +107,11 @@ struct TreeBlob {
 /// the size lives in the object header, not the tree, so on a partial clone
 /// git lazily fetches every blob in the repository to answer it. Symlinks
 /// (mode 120000) and submodule gitlinks (type `commit`) are dropped here.
-async fn head_blobs(repo_path: &Path) -> Result<Vec<TreeBlob>> {
+///
+/// Callers hoist one listing and feed it to every consumer: readiness, the
+/// census, and the exact count all describe the same tree, so three separate
+/// `ls-tree` passes would be three walks of it for one answer.
+pub(crate) async fn head_blobs(repo_path: &Path) -> Result<Vec<TreeBlob>> {
     let output = Command::new("git")
         .arg("-C")
         .arg(repo_path)
@@ -123,11 +127,7 @@ async fn head_blobs(repo_path: &Path) -> Result<Vec<TreeBlob>> {
 }
 
 /// Inspect contributor-facing files without hydrating any blobs.
-pub async fn repository_readiness(repo_path: &Path) -> Result<RepositoryReadiness> {
-    Ok(readiness_from_blobs(&head_blobs(repo_path).await?))
-}
-
-fn readiness_from_blobs(blobs: &[TreeBlob]) -> RepositoryReadiness {
+pub(crate) fn readiness_from_blobs(blobs: &[TreeBlob]) -> RepositoryReadiness {
     let mut readiness = RepositoryReadiness::default();
     for blob in blobs {
         let path = blob.path.replace('\\', "/").to_ascii_lowercase();
@@ -257,11 +257,7 @@ fn parse_tree_listing(stdout: &[u8]) -> Vec<TreeBlob> {
 /// Language file counts over the committed HEAD tree. The second value is the
 /// total number of files in the tree, including types gitdebt cannot classify
 /// — the denominator that makes the classified count honest.
-pub async fn language_file_census(repo_path: &Path) -> Result<(Vec<LanguageCount>, usize)> {
-    Ok(census_from_blobs(&head_blobs(repo_path).await?))
-}
-
-fn census_from_blobs(blobs: &[TreeBlob]) -> (Vec<LanguageCount>, usize) {
+pub(crate) fn census_from_blobs(blobs: &[TreeBlob]) -> (Vec<LanguageCount>, usize) {
     let mut files_by_language: HashMap<&'static str, i64> = HashMap::new();
     for blob in blobs {
         let path = Path::new(&blob.path);
@@ -293,12 +289,7 @@ fn census_from_blobs(blobs: &[TreeBlob]) -> (Vec<LanguageCount>, usize) {
 /// `None` means the repository's countable content is outside the budget and
 /// the caller should persist the census instead. That decision is a pure
 /// function of the tree, so a repository does not switch metrics between runs.
-pub async fn count_lines(repo_path: &Path) -> Result<Option<Vec<LanguageCount>>> {
-    let blobs = head_blobs(repo_path).await?;
-    count_lines_for(repo_path, &blobs).await
-}
-
-async fn count_lines_for(
+pub(crate) async fn count_lines_for(
     repo_path: &Path,
     blobs: &[TreeBlob],
 ) -> Result<Option<Vec<LanguageCount>>> {
@@ -325,65 +316,50 @@ async fn count_lines_for(
         .map(Some)
 }
 
-/// Object ids missing from the local store, without fetching anything.
-fn missing_objects(repo_path: &Path, blobs: &[TreeBlob]) -> Result<Vec<String>> {
-    let mut child = std::process::Command::new("git")
-        .arg("-C")
-        .arg(repo_path)
-        .args([
-            "cat-file",
-            "--batch-check=%(objectname) %(objecttype) %(objectsize)",
-        ])
-        .env("GIT_NO_LAZY_FETCH", "1")
-        .stdin(Stdio::piped())
-        .stdout(Stdio::piped())
-        .stderr(Stdio::null())
-        .spawn()
-        .context("spawn git cat-file --batch-check")?;
-    let mut stdin = child.stdin.take().context("cat-file stdin")?;
-    let oids: Vec<String> = blobs.iter().map(|blob| blob.oid.clone()).collect();
-    let writer = std::thread::spawn(move || {
-        for oid in &oids {
-            if writeln!(stdin, "{oid}").is_err() {
-                break;
-            }
-        }
-    });
-    let stdout = child.stdout.take().context("cat-file stdout")?;
-    let mut missing = Vec::new();
-    for line in BufReader::new(stdout).lines() {
-        let line = line.context("read cat-file --batch-check")?;
-        if let Some(oid) = line.split_whitespace().next()
-            && line.contains("missing")
-        {
-            missing.push(oid.to_string());
-        }
-    }
-    let _ = writer.join();
-    let _ = child.wait();
-    Ok(missing)
-}
-
 /// Fetch the selected objects — and only those — from the promisor remote.
 ///
 /// Returns `false` when the hydrated volume exceeds the byte budget, i.e. the
 /// caller should fall back to the census. Chunking bounds the overshoot to one
 /// round trip, and the fetch is a direct child so a cancelled analysis reaps it
 /// instead of leaving git pulling a multi-gigabyte pack in the background.
+///
+/// There is deliberately no "which of these are missing?" probe first.
+/// `git cat-file --batch-check` cannot answer that question on a promisor
+/// clone: with `GIT_NO_LAZY_FETCH=1` it dies with exit 128 on the first absent
+/// object having written nothing to stdout, and without it, it silently
+/// lazy-fetches each object one round trip at a time — which is the cost this
+/// function exists to avoid. Asking the remote for an object already present
+/// is free, so the whole selected set goes to one batched fetch instead.
 async fn hydrate_blobs(repo_path: &Path, blobs: &[TreeBlob]) -> Result<bool> {
-    let repo = repo_path.to_path_buf();
-    let candidates = blobs.to_vec();
-    let missing = task::spawn_blocking(move || missing_objects(&repo, &candidates)).await??;
-    if missing.is_empty() {
+    // A clone with no blob filter already holds every object, so the fetch
+    // below would be a pointless network round trip on the critical path.
+    if crate::repo_history::partial_clone_filter(repo_path)
+        .await?
+        .is_none()
+    {
+        return Ok(true);
+    }
+    // One blob can sit at many paths; the remote should hear about it once.
+    let mut seen = HashSet::new();
+    let wanted: Vec<String> = blobs
+        .iter()
+        .filter(|blob| seen.insert(blob.oid.as_str()))
+        .map(|blob| blob.oid.clone())
+        .collect();
+    if wanted.is_empty() {
         return Ok(true);
     }
     let budget = exact_line_count_max_bytes();
     let before = crate::repo_history::clone_size_bytes(repo_path);
-    for chunk in missing.chunks(HYDRATE_CHUNK) {
+    for chunk in wanted.chunks(HYDRATE_CHUNK) {
         let mut child = Command::new("git")
             .arg("-C")
             .arg(repo_path)
             .args([
+                // Object-id fetches must not pay ref negotiation; git's own
+                // promisor path sets this for the same reason.
+                "-c",
+                "fetch.negotiationAlgorithm=noop",
                 "fetch",
                 "origin",
                 "--no-tags",
@@ -499,7 +475,14 @@ fn read_and_count(repo_path: &Path, blobs: &[TreeBlob]) -> Result<Vec<LanguageCo
         row.lines_code += code;
     }
     let _ = writer.join();
-    let _ = child.wait();
+    // A mid-stream death ends the loop above at EOF with whatever it had, and
+    // the result is persisted as an *exact* count. Truncated-but-confident is
+    // the one outcome worse than falling back to the file census, so a failed
+    // probe becomes an error the caller can degrade on.
+    let status = child.wait().context("wait for git cat-file --batch")?;
+    if !status.success() {
+        bail!("git cat-file --batch exited with {status}");
+    }
 
     let mut out: Vec<LanguageCount> = totals
         .into_values()

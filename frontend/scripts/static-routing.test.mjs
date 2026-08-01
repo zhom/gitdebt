@@ -5,7 +5,9 @@ import path from "node:path";
 import { afterEach, test } from "node:test";
 import { auditPagesRouting } from "./audit-routing.mjs";
 import {
+  baseRepoSegment,
   isReservedFirstSegment,
+  liveReportRepo,
   missingProfileReportTarget,
   missingRepoReportTarget,
   profileLogin,
@@ -33,6 +35,19 @@ function write(directory, relative, contents = "") {
   fs.mkdirSync(path.dirname(filePath), { recursive: true });
   fs.writeFileSync(filePath, contents);
 }
+
+const HEADERS = `/*
+  Content-Security-Policy: frame-ancestors 'none'
+
+/badges
+  Cache-Control: public, max-age=0, must-revalidate
+
+/report
+  X-Robots-Tag: noindex, follow
+
+/profile
+  X-Robots-Tag: noindex, follow
+`;
 
 function validOutput(directory, redirects = null) {
   for (const route of [
@@ -89,28 +104,15 @@ function validOutput(directory, redirects = null) {
 /privacy/ /privacy 301
 /profile/ /profile 301
 /terms/ /terms 301
+/index.md https://api.gitdebt.com/api/md/ 302
 /u/:login/ /:login 301
 /u/:login /:login 301
 /:first/:second/ /:first/:second 301
 /vs/:owner1/:repo1/:owner2/:repo2/ /vs/:owner1/:repo1/:owner2/:repo2 301
+/*.md https://api.gitdebt.com/api/md/:splat 302
 `,
   );
-  write(
-    directory,
-    "_headers",
-    `/*
-  Content-Security-Policy: frame-ancestors 'none'
-
-/badges
-  Cache-Control: public, max-age=0, must-revalidate
-
-/report
-  X-Robots-Tag: noindex, follow
-
-/profile
-  X-Robots-Tag: noindex, follow
-`,
-  );
+  write(directory, "_headers", HEADERS);
 }
 
 test("missing two-segment repo paths fall back to the noindex live report", () => {
@@ -122,6 +124,66 @@ test("missing two-segment repo paths fall back to the noindex live report", () =
     missingRepoReportTarget("/new-owner/new-repo/"),
     "/new-owner/new-repo",
   );
+});
+
+test("only the exact `.md` representation suffix is dropped from a segment", () => {
+  assert.equal(baseRepoSegment("tauri-wd.md"), "tauri-wd");
+  // `.md` is the only representation the site emits, so no other extension is
+  // stripped from a repository that legitimately carries one.
+  assert.equal(baseRepoSegment("tauri-wd.json"), "tauri-wd.json");
+  assert.equal(baseRepoSegment("tool.js"), "tool.js");
+  assert.equal(baseRepoSegment("markdown"), "markdown");
+  // A repository really named `.md` keeps its name; only a suffix is dropped.
+  assert.equal(baseRepoSegment(".md"), ".md");
+});
+
+test("the site's own `.md` representation resolves to the base repository", () => {
+  assert.equal(missingRepoReportTarget("/zhom/tauri-wd.md"), "/zhom/tauri-wd");
+  assert.equal(
+    missingRepoReportTarget("/zhom/tauri-wd.json"),
+    "/zhom/tauri-wd.json",
+  );
+  assert.equal(missingRepoReportTarget("/zhom/.md"), "/zhom/.md");
+});
+
+test("the live report reads the same slug the 404 fallback resolves", () => {
+  assert.deepEqual(liveReportRepo("/zhom/tauri-wd.md", ""), {
+    owner: "zhom",
+    repo: "tauri-wd",
+  });
+  assert.deepEqual(liveReportRepo("/Some-Owner/Repo.js", ""), {
+    owner: "some-owner",
+    repo: "repo.js",
+  });
+  assert.deepEqual(liveReportRepo("/new-owner/new-repo/", ""), {
+    owner: "new-owner",
+    repo: "new-repo",
+  });
+  // The homepage lookup hands the slug over as a query parameter, which wins.
+  assert.deepEqual(liveReportRepo("/report", "?repo=Facebook/React.md"), {
+    owner: "facebook",
+    repo: "react",
+  });
+});
+
+test("the live report refuses anything that is not a repository slug", () => {
+  for (const [pathname, search] of [
+    ["/report", ""],
+    ["/only-one-segment", ""],
+    ["/one/two/three", ""],
+    ["/vs/a", ""],
+    ["/owner/..md", ""],
+    ["/owner/", ""],
+    ["/report", "?repo=vs/anything"],
+    ["/report", "?repo=owner/repo/extra"],
+  ]) {
+    assert.equal(
+      liveReportRepo(pathname, search),
+      null,
+      `${pathname}${search} must not enqueue an analysis`,
+    );
+  }
+  assert.equal(liveReportRepo(undefined, undefined), null);
 });
 
 test("application, legal, malformed, and non-repo routes stay on the 404", () => {
@@ -150,6 +212,8 @@ test("single missing segments resolve to a root profile report", () => {
   assert.equal(missingProfileReportTarget("/Zhom"), "/zhom");
   assert.equal(missingProfileReportTarget("/some-user/"), "/some-user");
   assert.equal(missingProfileReportTarget("/%7Ahom"), "/zhom");
+  // An agent following the site's documented `.md` convention one segment up.
+  assert.equal(missingProfileReportTarget("/zhom.md"), "/zhom");
 });
 
 test("reserved first segments are never published or resolved as profiles", () => {
@@ -325,6 +389,25 @@ test("proves badges slash canonicalization is one-way and exactly one hop", () =
   assert.ok(
     errors.some((error) => error.includes("exactly one redirect")),
     errors.join("\n"),
+  );
+});
+
+test("rejects a Markdown header block the site no longer has anything to type", () => {
+  const directory = fixture();
+  validOutput(directory);
+  assert.deepEqual(auditPagesRouting({ distDir: directory }), []);
+
+  // Nothing under `/*.md` is a Pages asset any more, so the only response the
+  // block can reach is the HTML 404 fallback, relabelled as Markdown.
+  write(
+    directory,
+    "_headers",
+    `${HEADERS}\n/*.md\n  Content-Type: text/markdown; charset=utf-8\n`,
+  );
+  assert.ok(
+    auditPagesRouting({ distDir: directory }).some((error) =>
+      error.includes("/*.md headers mislabel the HTML 404 fallback"),
+    ),
   );
 });
 

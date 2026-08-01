@@ -493,7 +493,7 @@ async fn repo_health_json(
 
 /// The health summary for one already-analyzed public repository, or
 /// `None` when no completed analysis backs it yet.
-async fn load_repo_health(
+pub(crate) async fn load_repo_health(
     pool: &sqlx::PgPool,
     repo: &str,
 ) -> Result<Option<serde_json::Value>, ApiError> {

@@ -104,6 +104,12 @@ pub struct ApiState {
     /// Origin allowed to make credentialed (cookie-bearing) requests to
     /// `/api/me` and `/auth/*`. Defaults to local dev frontend.
     pub frontend_origin: String,
+    /// This API's own public origin, baked into the asset and data-surface
+    /// URLs of server-rendered bodies. It cannot be derived from the frontend
+    /// origin (the API answers on its own hostname), and it must never come
+    /// from the request's `Host` header, which the client controls and which
+    /// would then be edge-cached — and pasted into third-party READMEs.
+    pub api_origin: String,
     pub metrics_token: Option<String>,
     /// Bare-clone storage. Written by the worker's repo-analysis pool; the
     /// usage endpoint reuses it (read-only) to read package manifests out of
@@ -167,7 +173,16 @@ impl ApiState {
             _ if cfg!(debug_assertions) => "http://localhost:14321".to_string(),
             _ => anyhow::bail!("PUBLIC_FRONTEND_ORIGIN must be set in release deployments"),
         };
-        let frontend_origin = normalize_frontend_origin(&frontend_origin_raw)?;
+        let frontend_origin = normalize_origin("PUBLIC_FRONTEND_ORIGIN", &frontend_origin_raw)?;
+        // Guessing this one is worse than refusing to boot: a wrong value is
+        // silently correct-looking output that points self-hosted deployments
+        // at somebody else's API.
+        let api_origin_raw = match std::env::var("PUBLIC_API_BASE") {
+            Ok(value) if !value.trim().is_empty() => value,
+            _ if cfg!(debug_assertions) => "http://localhost:8787".to_string(),
+            _ => anyhow::bail!("PUBLIC_API_BASE must be set in release deployments"),
+        };
+        let api_origin = normalize_origin("PUBLIC_API_BASE", &api_origin_raw)?;
         let metrics_token = match std::env::var("METRICS_TOKEN")
             .ok()
             .filter(|token| !token.trim().is_empty())
@@ -185,6 +200,7 @@ impl ApiState {
             storage,
             redis,
             frontend_origin,
+            api_origin,
             metrics_token,
         )
     }
@@ -200,6 +216,7 @@ impl ApiState {
         storage: std::sync::Arc<crate::repo_history::RepoStorage>,
         redis: Option<std::sync::Arc<RedisHandle>>,
         frontend_origin: String,
+        api_origin: String,
         metrics_token: Option<String>,
     ) -> anyhow::Result<Self> {
         let day = Duration::from_secs(24 * 60 * 60);
@@ -240,6 +257,7 @@ impl ApiState {
             leaderboard_cache,
             gh_app,
             frontend_origin,
+            api_origin,
             metrics_token,
             storage,
             redis,
@@ -247,9 +265,11 @@ impl ApiState {
     }
 }
 
-fn normalize_frontend_origin(raw: &str) -> anyhow::Result<String> {
-    let parsed = url::Url::parse(raw)
-        .map_err(|e| anyhow::anyhow!("PUBLIC_FRONTEND_ORIGIN is invalid: {e}"))?;
+/// Validate one configured public origin. Every origin this process advertises
+/// goes through here: a path, query, or credential in a configured origin is a
+/// misconfiguration that would be concatenated into links and asset URLs.
+fn normalize_origin(variable: &str, raw: &str) -> anyhow::Result<String> {
+    let parsed = url::Url::parse(raw).map_err(|e| anyhow::anyhow!("{variable} is invalid: {e}"))?;
     if !matches!(parsed.scheme(), "http" | "https")
         || parsed.host_str().is_none()
         || !parsed.username().is_empty()
@@ -258,7 +278,7 @@ fn normalize_frontend_origin(raw: &str) -> anyhow::Result<String> {
         || parsed.query().is_some()
         || parsed.fragment().is_some()
     {
-        anyhow::bail!("PUBLIC_FRONTEND_ORIGIN must be an http(s) origin without a path");
+        anyhow::bail!("{variable} must be an http(s) origin without a path");
     }
     Ok(parsed.origin().ascii_serialization())
 }
@@ -289,6 +309,16 @@ pub fn router(state: ApiState) -> Router {
     );
     let analyze = Router::new()
         .route("/api/repos/{owner}/{repo}/analyze", get(analyze))
+        // The universal agent surface. It sits on the analyze budget because,
+        // like `/analyze`, a cold request enqueues durable work.
+        .route("/api/repos/{owner}/{repo}/report.md", get(repo_report_md))
+        // Every Markdown representation of the site, at the path the page
+        // itself lives at. A catch-all never matches an empty remainder, so the
+        // home page needs the two bare spellings of its own — and `_redirects`
+        // sends both `/.md` and `/index.md` to `/api/md/`.
+        .route("/api/md", get(agent_md_home))
+        .route("/api/md/", get(agent_md_home))
+        .route("/api/md/{*path}", get(agent_md))
         .route("/api/repos/{owner}/{repo}/stars.csv", get(stars_csv))
         .route("/api/repos/{owner}/{repo}/stars.json", get(stars_json))
         .route(
@@ -969,6 +999,851 @@ fn analyze_cache_control(live: bool) -> HeaderValue {
     } else {
         HeaderValue::from_static("public, s-maxage=300, max-age=60")
     }
+}
+
+// Agent Markdown
+
+/// One rendered Markdown page and the policy it must be served with, resolved
+/// and memoized as a unit: the status and the cache lifetime are views of the
+/// same state as the body, and pairing a cached body with a freshly guessed
+/// status would eventually tell an agent that a queued repository is ready.
+///
+/// `canonical_path` is a site path, never an origin: the `Link` header is
+/// assembled from it and the configured `frontend_origin` at response time, so
+/// a memoized page cannot carry a stale or request-derived host.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+struct MarkdownPage {
+    status: u16,
+    canonical_path: String,
+    body: String,
+    freshness: MdFreshness,
+}
+
+/// How long a shared cache may hold one Markdown answer.
+#[derive(Debug, Clone, Copy, Serialize, Deserialize)]
+enum MdFreshness {
+    /// The body is a view of Postgres, so it follows the analyze matrix:
+    /// 200 five minutes, 202 thirty seconds, 404 a day, 400 never.
+    Live,
+    /// The body is built entirely from compiled-in text and the configured
+    /// origins, so it can only change when a new binary is deployed. A day of
+    /// shared-cache life is the longest lifetime this API hands out anywhere
+    /// (it matches the tombstone), and the short `max-age` keeps a redeploy
+    /// visible to a browser within the hour without a purge.
+    Compiled,
+}
+
+impl MdFreshness {
+    fn cache_control(self, status: StatusCode) -> HeaderValue {
+        match self {
+            Self::Live => report_cache_control(status),
+            Self::Compiled => HeaderValue::from_static("public, s-maxage=86400, max-age=3600"),
+        }
+    }
+}
+
+impl MarkdownPage {
+    fn live(status: StatusCode, canonical_path: &str, body: String) -> Self {
+        Self {
+            status: status.as_u16(),
+            canonical_path: canonical_path.to_string(),
+            body,
+            freshness: MdFreshness::Live,
+        }
+    }
+
+    fn compiled(canonical_path: &str, body: String) -> Self {
+        Self {
+            status: StatusCode::OK.as_u16(),
+            canonical_path: canonical_path.to_string(),
+            body,
+            freshness: MdFreshness::Compiled,
+        }
+    }
+
+    fn respond(self, site_origin: &str) -> axum::response::Response {
+        let status = StatusCode::from_u16(self.status).unwrap_or(StatusCode::OK);
+        markdown_response(
+            status,
+            self.freshness.cache_control(status),
+            &format!("{site_origin}{}", self.canonical_path),
+            self.body,
+        )
+    }
+}
+
+/// `GET /api/repos/{owner}/{repo}/report.md` — the Markdown report, for ANY
+/// public repository.
+///
+/// The repository-scoped alias of `/api/md/{owner}/{repo}`, kept because it is
+/// the URL an agent can guess from the other per-repository data surfaces. The
+/// site itself emits no Markdown at all, so both spellings answer here — from
+/// the same function, so they cannot become two documents. Like `/analyze` it
+/// never
+/// paginates GitHub on the request path: a cold request enqueues durable work,
+/// answers 202 with what is running, and says where to poll. `?enqueue=0`
+/// reads without queueing, exactly as it does on `/analyze`.
+///
+/// A complete star history alone is a 200. Gating that on repository health
+/// too left every repository whose clone can never be analyzed answering 202
+/// forever, with a body that prints no star figures by construction — the one
+/// surface built for uncatalogued repositories withholding data it holds.
+async fn repo_report_md(
+    State(state): State<ApiState>,
+    Path((owner, repo)): Path<(String, String)>,
+    Query(query): Query<AnalyzeQuery>,
+) -> Result<axum::response::Response, ApiError> {
+    let page = repo_markdown_page(&state, &owner, &repo, query.enqueue != Some(0)).await?;
+    Ok(page.respond(&state.frontend_origin))
+}
+
+/// The repository report, resolved and memoized. Both `report.md` and
+/// `/api/md/{owner}/{repo}` render through this one function, so the two URLs
+/// cannot drift into two documents for the same repository.
+async fn repo_markdown_page(
+    state: &ApiState,
+    owner: &str,
+    repo: &str,
+    enqueue: bool,
+) -> Result<MarkdownPage, ApiError> {
+    if !is_valid_slug(owner) || !is_valid_slug(repo) {
+        return Ok(md_rejected(state));
+    }
+    let owner = owner.to_ascii_lowercase();
+    let repo = repo.to_ascii_lowercase();
+    let slug = crate::analyzer::repo_key(&owner, &repo);
+    // Coalesced on the same moka cache as `/analyze`, in its own key
+    // namespace. One viral README can point a burst of agents at a single cold
+    // slug; without the single flight each of them repeats the analyze read,
+    // the health summary and an enqueue.
+    let flight_key = if enqueue {
+        format!("report.md:{slug}")
+    } else {
+        format!("report.md:readonly:{slug}")
+    };
+    let (payload, _live) = single_flight_analyze(&state.analyze_cache, flight_key, async {
+        let report = build_report(state, &owner, &repo, &slug, enqueue).await?;
+        // Only a settled report is memoized. A 202 goes through the live arm
+        // so concurrent pollers still coalesce onto one origin read while its
+        // queue figures stay current.
+        let live = report.status == StatusCode::ACCEPTED.as_u16();
+        Ok((serde_json::to_string(&report)?, live))
+    })
+    .await?;
+    Ok(serde_json::from_str(&payload)?)
+}
+
+/// Resolve one report from Postgres, queueing the work it needs.
+async fn build_report(
+    state: &ApiState,
+    owner: &str,
+    repo: &str,
+    slug: &str,
+    enqueue: bool,
+) -> Result<MarkdownPage, ApiError> {
+    let result = if enqueue {
+        analyze_repo(owner, repo, &state.analyzer).await?
+    } else {
+        crate::analyzer::analyze_repo_readonly(owner, repo, &state.analyzer).await?
+    };
+    let mut view = crate::agent_report::ReportView {
+        slug: slug.to_string(),
+        site_origin: state.frontend_origin.clone(),
+        api_origin: state.api_origin.clone(),
+        state: crate::agent_report::ReportState::NotPublic,
+    };
+    let canonical = format!("/{slug}");
+    if result.not_found {
+        return Ok(MarkdownPage::live(
+            StatusCode::NOT_FOUND,
+            &canonical,
+            crate::agent_report::render(&view),
+        ));
+    }
+
+    let db = state.analyzer.cache.db();
+    let analysis = analysis_state(db, slug).await?;
+
+    // A repository nobody has opened on the site is only ever going to get its
+    // analysis from a request like this one — the same reasoning as the
+    // repo-health embed path. Offer the durable job (bounded, deduplicated and
+    // capacity-gated inside `enqueue`) and report what it answered, so a 202
+    // never promises work that a ceiling refused.
+    //
+    // Deliberately not gated on `analysis.complete`: that only records whether
+    // figures exist, not whether they are still current. Gating on it would
+    // leave a once-analyzed repository serving the same stale health forever,
+    // because this surface would never re-queue it. `enqueue_prioritized` owns
+    // the freshness decision through `ANALYSIS_IS_CURRENT_SQL` and answers
+    // `Fresh` when there is nothing to do, so asking every time cannot spam the
+    // queue and cannot drift from the canonical predicate.
+    let mut analysis_working = false;
+    if enqueue && !analysis.terminal {
+        match crate::repo_analysis::enqueue(db, slug).await {
+            Ok(outcome) => {
+                analysis_working = matches!(
+                    outcome,
+                    crate::repo_analysis::EnqueueOutcome::Enqueued
+                        | crate::repo_analysis::EnqueueOutcome::AlreadyActive
+                );
+            }
+            Err(error) => {
+                tracing::warn!(repo = %slug, %error, "agent report analysis enqueue failed");
+            }
+        }
+    }
+
+    // The health summary is six queries. Run them only when a completed
+    // analysis backs the slug, i.e. only where the figures get printed.
+    let health = if analysis.complete {
+        crate::repo_endpoints::load_repo_health(&db.pool, slug)
+            .await?
+            .map(|body| serde_json::from_value(body).map(Box::new))
+            .transpose()?
+    } else {
+        None
+    };
+    let health = match health {
+        Some(health) => crate::agent_report::ReportHealthSection::Measured(health),
+        None if analysis.terminal => crate::agent_report::ReportHealthSection::Unavailable,
+        None => crate::agent_report::ReportHealthSection::Running,
+    };
+
+    // Star history is the product: it is reported the moment Postgres holds a
+    // complete series, whether or not the repository-health differentiator on
+    // top of it has landed (or can ever land).
+    if result.history_complete {
+        view.state =
+            crate::agent_report::ReportState::Ready(Box::new(crate::agent_report::ReadyReport {
+                stars: crate::agent_report::ReportStars {
+                    total_stars: result.total_stars,
+                    approximate: result.history_approximate,
+                    event_count: result.history_event_count,
+                    created_on: result.created_at.map(|at| at.date_naive()),
+                    coverage_start: result.history_coverage_start.map(|at| at.date_naive()),
+                    coverage_end: result.history_coverage_end.map(|at| at.date_naive()),
+                    insights: result.star_history_insights,
+                },
+                health,
+            }));
+        return Ok(MarkdownPage::live(
+            StatusCode::OK,
+            &canonical,
+            crate::agent_report::render(&view),
+        ));
+    }
+
+    let stars = star_queue_state(db, slug).await;
+    view.state = crate::agent_report::ReportState::Running(crate::agent_report::RunningReport {
+        history_status: result.history_status,
+        backfilling: result.backfilling,
+        health,
+        queue: if !enqueue {
+            crate::agent_report::QueueState::NotRequested
+        } else if stars.working || analysis_working {
+            crate::agent_report::QueueState::Working
+        } else {
+            crate::agent_report::QueueState::Refused
+        },
+        queue_position: stars.position,
+        queue_depth: result.queued,
+    });
+    Ok(MarkdownPage::live(
+        StatusCode::ACCEPTED,
+        &canonical,
+        crate::agent_report::render(&view),
+    ))
+}
+
+fn report_cache_control(status: StatusCode) -> HeaderValue {
+    match status {
+        // A tombstone is a settled answer; a resolved report follows the
+        // analyze policy.
+        StatusCode::NOT_FOUND => HeaderValue::from_static("public, s-maxage=86400"),
+        // Short, but never `no-store`: an agent obeying `Retry-After: 30` must
+        // not reach the origin — and so the enqueue paths — more than once per
+        // window per edge.
+        StatusCode::ACCEPTED => HeaderValue::from_static("public, s-maxage=30"),
+        // A rejected request is never cached: the answer is about this
+        // caller's input, and the next caller's is a different one.
+        StatusCode::BAD_REQUEST => HeaderValue::from_static("no-store"),
+        _ => analyze_cache_control(false),
+    }
+}
+
+/// Shared response policy for the Markdown report: the type an agent asked
+/// for, no indexing (the canonical HTML report is the indexable copy), and a
+/// canonical link back to it.
+fn markdown_response(
+    status: StatusCode,
+    cache_control: HeaderValue,
+    canonical: &str,
+    body: String,
+) -> axum::response::Response {
+    let mut headers = HeaderMap::new();
+    headers.insert(
+        header::CONTENT_TYPE,
+        HeaderValue::from_static("text/markdown; charset=utf-8"),
+    );
+    headers.insert(header::CACHE_CONTROL, cache_control);
+    headers.insert(
+        header::HeaderName::from_static("x-robots-tag"),
+        HeaderValue::from_static("noindex, follow"),
+    );
+    if let Ok(link) = HeaderValue::from_str(&format!("<{canonical}>; rel=\"canonical\"")) {
+        headers.insert(header::LINK, link);
+    }
+    if status == StatusCode::ACCEPTED {
+        headers.insert(header::RETRY_AFTER, HeaderValue::from_static("30"));
+    }
+    (status, headers, body).into_response()
+}
+
+/// This repository's star-fetch job.
+#[derive(Debug, Default, Clone, Copy)]
+struct StarQueueState {
+    /// A job is queued or a worker holds it.
+    working: bool,
+    /// Place in the pending line, 1 = next. `None` while a worker already
+    /// holds the job, nothing is queued, or the read fails — a progress figure
+    /// must never turn a report into an error.
+    position: Option<i64>,
+}
+
+/// Read that job. The rank predicate mirrors `progress::load_snapshot`'s
+/// star-queue subquery exactly, `next_attempt_at` included: rows parked in
+/// exponential backoff are not ahead of anyone, and the 202 body tells the
+/// agent to poll `progress.json`, so the two must not report different
+/// positions for the same repository.
+async fn star_queue_state(db: &crate::db::Db, repo: &str) -> StarQueueState {
+    let row: Option<(String, Option<i64>)> = sqlx::query_as(
+        "SELECT queued.status, \
+                CASE WHEN queued.status = 'pending' THEN ( \
+                    SELECT COUNT(*)::BIGINT + 1 FROM star_fetch_queue ahead \
+                    WHERE ahead.status = 'pending' \
+                      AND ahead.next_attempt_at <= NOW() \
+                      AND (ahead.priority > queued.priority \
+                           OR (ahead.priority = queued.priority \
+                               AND ahead.enqueued_at < queued.enqueued_at)) \
+                ) END AS position \
+         FROM star_fetch_queue queued \
+         WHERE queued.repo = $1",
+    )
+    .bind(repo)
+    .fetch_optional(&db.pool)
+    .await
+    .ok()
+    .flatten();
+    let Some((status, position)) = row else {
+        return StarQueueState::default();
+    };
+    StarQueueState {
+        working: matches!(status.as_str(), "pending" | "in_progress"),
+        position,
+    }
+}
+
+/// Where this repository's health analysis stands.
+#[derive(Debug, Clone, Copy)]
+struct AnalysisState {
+    /// Some completed analysis backs the slug, so there are figures to print.
+    /// This is deliberately weaker than `repo_analysis`'s currency predicate:
+    /// stale figures are still worth serving, labelled with when they ran.
+    /// Whether to re-queue is `enqueue`'s decision, not this flag's.
+    complete: bool,
+    /// The queue row was parked by `repo_analysis`'s attempt ceiling.
+    /// `repo_analysis::enqueue` resets `attempts` and clears `last_error` on a
+    /// `dead` row, so enqueueing one revives a clone that already failed every
+    /// allowed attempt — once per poll, for as long as an agent follows
+    /// `Retry-After`. Rows carrying the terminal marker were parked
+    /// deliberately and must stay parked.
+    terminal: bool,
+}
+
+async fn analysis_state(db: &crate::db::Db, repo: &str) -> Result<AnalysisState, ApiError> {
+    let (complete, terminal): (bool, bool) = sqlx::query_as(
+        "SELECT (history.last_analyzed_at IS NOT NULL) AS complete, \
+                COALESCE(queued.status = 'dead' AND queued.last_error LIKE $2, FALSE) AS terminal \
+         FROM (SELECT $1::TEXT AS repo) requested \
+         LEFT JOIN repo_history history ON history.repo = requested.repo \
+         LEFT JOIN repo_analysis_queue queued ON queued.repo = requested.repo",
+    )
+    .bind(repo)
+    .bind(format!("{}%", crate::repo_analysis::TERMINAL_MARKER))
+    .fetch_one(&db.pool)
+    .await?;
+    Ok(AnalysisState { complete, terminal })
+}
+
+// The universal agent surface
+
+/// Every first path segment the site itself owns, mirroring
+/// `frontend/src/lib/static-routing.mjs`. A GitHub login or owner colliding
+/// with one of these is simply never published, so this dispatcher must not
+/// resolve one either — otherwise `/api/md/api/whatever` becomes a repository
+/// lookup for the owner `api`, and `/api/md/u/{login}` answers as a repository
+/// instead of the profile the site redirects it to.
+pub const RESERVED_FIRST_SEGMENTS: &[&str] = &[
+    "_astro",
+    "404",
+    "about",
+    "api",
+    "badges",
+    "compare",
+    "favicon.ico",
+    "leaderboard",
+    "privacy",
+    "profile",
+    "report",
+    "robots.txt",
+    "sitemap-index.xml",
+    "sitemaps",
+    "terms",
+    "u",
+    "vs",
+];
+
+/// A validated, lowercased repository slug taken from the request path.
+#[derive(Debug, Clone, PartialEq, Eq)]
+struct MdRepo {
+    owner: String,
+    repo: String,
+}
+
+impl MdRepo {
+    fn slug(&self) -> String {
+        crate::analyzer::repo_key(&self.owner, &self.repo)
+    }
+}
+
+/// What one `/api/md/{*path}` request resolves to, decided before any data is
+/// read. Pure and total: every path lands on exactly one of these, so the
+/// routing table is unit-testable without a database.
+enum MdRoute {
+    Home,
+    Badges,
+    Static(&'static crate::agent_docs::StaticPage),
+    Category(Box<crate::catalog::Category>),
+    Comparison(MdRepo, MdRepo),
+    Profile(String),
+    Repo(MdRepo),
+    /// A well-formed path the site has no page at.
+    NotFound,
+    /// A path segment that is not a legal slug. Answered without ever
+    /// repeating the input.
+    Invalid,
+}
+
+/// Resolve a site path to the page that backs it.
+///
+/// The path arrives already percent-decoded by the extractor and is matched
+/// lowercased, because every site path this mirrors is lowercase. A `.md`
+/// suffix is deliberately NOT stripped: `path` mirrors the site path exactly,
+/// the `_redirects` rule that sends `/<path>.md` here has already removed the
+/// extension, and stripping again would make `/api/md/owner/tool.md` mean a
+/// different repository than the one that was asked for.
+fn md_route(path: &str) -> MdRoute {
+    let path = path.trim_matches('/').to_ascii_lowercase();
+    if path.is_empty() {
+        return MdRoute::Home;
+    }
+    // Named ahead of the static-page lookup, which also carries a `badges`
+    // entry: the Markdown representation of `/badges` is the complete embed
+    // catalog rather than a page stub, and that has to be a routing decision
+    // here instead of a special case buried in the static renderer.
+    if path == "badges" {
+        return MdRoute::Badges;
+    }
+    if let Some(page) = crate::agent_docs::static_page(&path) {
+        return MdRoute::Static(page);
+    }
+
+    let segments: Vec<&str> = path.split('/').collect();
+    match segments.as_slice() {
+        ["compare", slug] => {
+            if !is_valid_slug(slug) {
+                return MdRoute::Invalid;
+            }
+            crate::catalog::category(slug)
+                .map(|category| MdRoute::Category(Box::new(category)))
+                .unwrap_or(MdRoute::NotFound)
+        }
+        ["vs", first_owner, first_repo, second_owner, second_repo] => {
+            match (
+                md_repo(first_owner, first_repo),
+                md_repo(second_owner, second_repo),
+            ) {
+                (Some(first), Some(second)) => MdRoute::Comparison(first, second),
+                _ => MdRoute::Invalid,
+            }
+        }
+        [login] => {
+            if is_reserved_segment(login) {
+                MdRoute::NotFound
+            } else if aggregate::is_valid_login(login) {
+                MdRoute::Profile((*login).to_string())
+            } else {
+                MdRoute::Invalid
+            }
+        }
+        [owner, repo] => {
+            // A reserved owner is not a repository, exactly as
+            // `static-routing.mjs` decides it for the site's own fallback.
+            if is_reserved_segment(owner) {
+                return MdRoute::NotFound;
+            }
+            md_repo(owner, repo)
+                .map(MdRoute::Repo)
+                .unwrap_or(MdRoute::Invalid)
+        }
+        _ => MdRoute::NotFound,
+    }
+}
+
+fn is_reserved_segment(segment: &str) -> bool {
+    RESERVED_FIRST_SEGMENTS.contains(&segment)
+}
+
+fn md_repo(owner: &str, repo: &str) -> Option<MdRepo> {
+    (is_valid_slug(owner) && is_valid_slug(repo)).then(|| MdRepo {
+        owner: owner.to_string(),
+        repo: repo.to_string(),
+    })
+}
+
+/// `GET /api/md` and `GET /api/md/` — the home page. A catch-all parameter
+/// never matches an empty remainder, so these cannot ride the same route.
+async fn agent_md_home(State(state): State<ApiState>) -> axum::response::Response {
+    md_home(&state).respond(&state.frontend_origin)
+}
+
+/// `GET /api/md/{*path}` — the Markdown representation of any site page.
+///
+/// One rule, documented in `llms.txt`: the Markdown for a page lives at this
+/// route under that page's own site path. Repository reports and comparisons
+/// can enqueue durable work exactly like `/analyze`, which is why the route
+/// sits on the analyze budget; `?enqueue=0` reads without queueing, the same
+/// spelling as everywhere else.
+async fn agent_md(
+    State(state): State<ApiState>,
+    Path(path): Path<String>,
+    Query(query): Query<AnalyzeQuery>,
+) -> Result<axum::response::Response, ApiError> {
+    let page = render_agent_md(&state, &path, query.enqueue != Some(0)).await?;
+    Ok(page.respond(&state.frontend_origin))
+}
+
+async fn render_agent_md(
+    state: &ApiState,
+    path: &str,
+    enqueue: bool,
+) -> Result<MarkdownPage, ApiError> {
+    let site = &state.frontend_origin;
+    let api = &state.api_origin;
+    match md_route(path) {
+        MdRoute::Home => Ok(md_home(state)),
+        MdRoute::Badges => Ok(MarkdownPage::compiled(
+            "/badges",
+            crate::agent_docs::render_badge_catalog(site, api),
+        )),
+        MdRoute::Static(page) => Ok(MarkdownPage::compiled(
+            &format!("/{}", page.path.trim_start_matches('/')),
+            crate::agent_docs::render_static(page, site, api),
+        )),
+        MdRoute::Category(category) => Ok(MarkdownPage::compiled(
+            &format!("/compare/{}", category.slug),
+            crate::agent_pages::render_category(&category, site, api),
+        )),
+        MdRoute::Comparison(first, second) => {
+            comparison_markdown_page(state, &first, &second, enqueue).await
+        }
+        MdRoute::Profile(login) => profile_markdown_page(state, &login, enqueue).await,
+        MdRoute::Repo(repo) => repo_markdown_page(state, &repo.owner, &repo.repo, enqueue).await,
+        MdRoute::NotFound => Ok(md_notice(
+            state,
+            StatusCode::NOT_FOUND,
+            "/",
+            "No Markdown at this path",
+            "gitdebt has no page here, so there is nothing to represent.",
+        )),
+        MdRoute::Invalid => Ok(md_rejected(state)),
+    }
+}
+
+fn md_home(state: &ApiState) -> MarkdownPage {
+    MarkdownPage::compiled(
+        "/",
+        crate::agent_docs::render_home(&state.frontend_origin, &state.api_origin),
+    )
+}
+
+/// The Markdown 400. The rejected path is echoed nowhere — not in the body,
+/// and not in the canonical link, which points at the live discovery route
+/// instead of at a URL built from the input.
+fn md_rejected(state: &ApiState) -> MarkdownPage {
+    md_notice(
+        state,
+        StatusCode::BAD_REQUEST,
+        "/report",
+        "Invalid path",
+        "A path segment here is not a legal GitHub owner, repository, or login \
+         name, so it was not looked up.",
+    )
+}
+
+/// The Markdown 4xx. An agent asked for Markdown, so it gets Markdown rather
+/// than the JSON envelope every other API error uses, and every one of these
+/// bodies carries the route table so a wrong guess self-corrects on the spot.
+fn md_notice(
+    state: &ApiState,
+    status: StatusCode,
+    canonical_path: &str,
+    headline: &str,
+    lead: &str,
+) -> MarkdownPage {
+    let site = &state.frontend_origin;
+    let api = &state.api_origin;
+    let body = format!(
+        "# {headline}\n\n\
+         {lead}\n\n\
+         Every page on {site} has a Markdown representation at \
+         `{api}/api/md/<path>`, where `<path>` is that page's site path:\n\n\
+         - `{api}/api/md/` — the home page\n\
+         - `{api}/api/md/{{owner}}/{{repo}}` — one repository's report, \
+         catalogued or not\n\
+         - `{api}/api/md/{{login}}` — one maintainer's profile\n\
+         - `{api}/api/md/compare/{{category}}` — one curated category\n\
+         - `{api}/api/md/vs/{{owner}}/{{repo}}/{{owner}}/{{repo}}` — one \
+         head-to-head comparison\n\
+         - `{api}/api/md/badges` — every embeddable asset, with paste-ready \
+         snippets\n\n\
+         Open {site}/report to look up any public repository.\n"
+    );
+    MarkdownPage::live(status, canonical_path, body)
+}
+
+/// One maintainer profile. The aggregate build is the heaviest read in the
+/// codebase, so this shares the analyze memo the same way the report does.
+async fn profile_markdown_page(
+    state: &ApiState,
+    login: &str,
+    enqueue: bool,
+) -> Result<MarkdownPage, ApiError> {
+    let login = login.to_ascii_lowercase();
+    let flight_key = if enqueue {
+        format!("md:profile:{login}")
+    } else {
+        format!("md:profile:readonly:{login}")
+    };
+    let (payload, _live) = single_flight_analyze(&state.analyze_cache, flight_key, async {
+        let page = build_profile_markdown(state, &login, enqueue).await?;
+        let live = page.status == StatusCode::ACCEPTED.as_u16();
+        Ok((serde_json::to_string(&page)?, live))
+    })
+    .await?;
+    Ok(serde_json::from_str(&payload)?)
+}
+
+async fn build_profile_markdown(
+    state: &ApiState,
+    login: &str,
+    enqueue: bool,
+) -> Result<MarkdownPage, ApiError> {
+    let canonical = format!("/{login}");
+    let aggregate = if enqueue {
+        build_user_aggregate(state, login).await.map(Some)
+    } else {
+        match aggregate::build_readonly(&state.analyzer, login).await {
+            Ok(built) => Ok(Some(std::sync::Arc::new(built))),
+            Err(error) => Err(map_aggregate_err(error)),
+        }
+    };
+    let aggregate = match aggregate {
+        Ok(aggregate) => aggregate,
+        Err(error) if error.status == StatusCode::NOT_FOUND => {
+            return Ok(md_notice(
+                state,
+                StatusCode::NOT_FOUND,
+                &canonical,
+                &format!("{login} — not a public GitHub account"),
+                "GitHub does not expose this account to gitdebt's credentials, \
+                 so there is nothing to aggregate.",
+            ));
+        }
+        // No cached repository list and no GitHub budget headroom. That is a
+        // wait, not a fact about the account: withhold every figure and let the
+        // 202 below invite the retry.
+        Err(error) if error.status == StatusCode::SERVICE_UNAVAILABLE => None,
+        Err(error) => return Err(error),
+    };
+
+    // `repos_included` counts only repositories whose COMPLETE star history
+    // contributed to the sum, so a zero there means nothing has been measured
+    // yet — never that the account has no stars.
+    let measured = aggregate
+        .as_ref()
+        .is_some_and(|aggregate| aggregate.repos_included > 0);
+    let view = crate::agent_pages::ProfileView {
+        login: login.to_string(),
+        total_stars: measured.then(|| {
+            i64::try_from(aggregate.as_ref().map_or(0, |a| a.total_stars)).unwrap_or(i64::MAX)
+        }),
+        // Carried whenever the list itself is known, measured or not: it is what
+        // makes the total legible as coverage of a large account rather than as
+        // a complete one.
+        repos_included: aggregate
+            .as_ref()
+            .map(|aggregate| i64::from(aggregate.repos_included)),
+        // The denominator, straight from GitHub's public-repository count. It is
+        // what turns "stars across 3 repositories" into a floor over a capped
+        // sample instead of a settled total for a 200-repository organization.
+        repos_total: aggregate
+            .as_ref()
+            .and_then(|aggregate| aggregate.repos_total)
+            .and_then(|total| i64::try_from(total).ok()),
+        repos_pending: aggregate
+            .as_ref()
+            .map(|aggregate| i64::from(aggregate.repos_pending)),
+        first_year: aggregate
+            .as_ref()
+            .and_then(|aggregate| aggregate.series.first())
+            .map(|point| point.at.year()),
+    };
+    // 200 as soon as anything is measured, even while other repositories are
+    // still draining: the body states the coverage — repositories counted, how
+    // many the account owns, how many are still measuring — so partial coverage
+    // is disclosed rather than hidden, and a permanently stuck repository in a
+    // large organization must not pin a popular profile to a 30-second cache
+    // forever.
+    let status = if measured {
+        StatusCode::OK
+    } else {
+        StatusCode::ACCEPTED
+    };
+    Ok(MarkdownPage::live(
+        status,
+        &canonical,
+        crate::agent_pages::render_profile(&view, &state.frontend_origin, &state.api_origin),
+    ))
+}
+
+/// One head-to-head comparison. Each leg carries its own readiness: a curated
+/// pair routinely has one analyzed repository and one that nobody has opened.
+async fn comparison_markdown_page(
+    state: &ApiState,
+    first: &MdRepo,
+    second: &MdRepo,
+    enqueue: bool,
+) -> Result<MarkdownPage, ApiError> {
+    let (first_slug, second_slug) = (first.slug(), second.slug());
+    let flight_key = if enqueue {
+        format!("md:vs:{first_slug}:{second_slug}")
+    } else {
+        format!("md:vs:readonly:{first_slug}:{second_slug}")
+    };
+    let (payload, _live) = single_flight_analyze(&state.analyze_cache, flight_key, async {
+        let page = build_comparison_markdown(state, first, second, enqueue).await?;
+        let live = page.status == StatusCode::ACCEPTED.as_u16();
+        Ok((serde_json::to_string(&page)?, live))
+    })
+    .await?;
+    Ok(serde_json::from_str(&payload)?)
+}
+
+async fn build_comparison_markdown(
+    state: &ApiState,
+    first: &MdRepo,
+    second: &MdRepo,
+    enqueue: bool,
+) -> Result<MarkdownPage, ApiError> {
+    let canonical = format!("/vs/{}/{}", first.slug(), second.slug());
+    let (first_leg, second_leg) = tokio::try_join!(
+        comparison_leg(state, first, enqueue),
+        comparison_leg(state, second, enqueue),
+    )?;
+
+    if let Some(missing) = [&first_leg, &second_leg]
+        .into_iter()
+        .find(|leg| leg.not_public)
+    {
+        return Ok(md_notice(
+            state,
+            StatusCode::NOT_FOUND,
+            &canonical,
+            "Comparison unavailable",
+            &format!(
+                "GitHub does not expose `{}` to gitdebt's credentials, so this \
+                 pair cannot be compared. Private repositories are never \
+                 analyzed or counted.",
+                missing.leg.slug
+            ),
+        ));
+    }
+
+    // 200 only when BOTH curves are complete. A comparison whose legs are not
+    // both measured is a partial answer by construction, and the 202 tells an
+    // agent the missing side is worth coming back for.
+    let status = if first_leg.leg.stars.is_some() && second_leg.leg.stars.is_some() {
+        StatusCode::OK
+    } else {
+        StatusCode::ACCEPTED
+    };
+    Ok(MarkdownPage::live(
+        status,
+        &canonical,
+        crate::agent_pages::render_comparison(
+            &first_leg.leg,
+            &second_leg.leg,
+            &state.frontend_origin,
+            &state.api_origin,
+        ),
+    ))
+}
+
+/// One side of a comparison, plus whether GitHub exposes it at all.
+struct ComparisonLegState {
+    leg: crate::agent_pages::ComparisonLeg,
+    not_public: bool,
+}
+
+async fn comparison_leg(
+    state: &ApiState,
+    repo: &MdRepo,
+    enqueue: bool,
+) -> Result<ComparisonLegState, ApiError> {
+    let result = if enqueue {
+        analyze_repo(&repo.owner, &repo.repo, &state.analyzer).await?
+    } else {
+        crate::analyzer::analyze_repo_readonly(&repo.owner, &repo.repo, &state.analyzer).await?
+    };
+    // `None` unless the history is COMPLETE: the analyze path reports
+    // `total_stars = 0` behind an empty series, and publishing that as this
+    // side of a comparison is exactly the claim this surface must never make.
+    let stars = result.history_complete.then(|| {
+        // The same downsampled series the site's own renderer reads, so the
+        // two agree on every trailing-window figure.
+        let history: Vec<(chrono::NaiveDate, i64)> = result
+            .history
+            .iter()
+            .map(|point| (point.at.date_naive(), i64::from(point.stars)))
+            .collect();
+        // Either signal alone means the curve is GH Archive star activity;
+        // over-claiming exactness would let an agent write "net stars".
+        let approximate =
+            result.history_approximate || result.history_kind == "public_star_actions";
+        crate::agent_prompt::StarSummary::from_history(
+            &history,
+            Some(i64::from(result.total_stars)),
+            approximate,
+        )
+    });
+    Ok(ComparisonLegState {
+        leg: crate::agent_pages::ComparisonLeg {
+            slug: repo.slug(),
+            stars,
+        },
+        not_public: result.not_found,
+    })
 }
 
 // Star exports
@@ -3128,7 +4003,11 @@ async fn ensure_chart_raster(
 /// bounded (each repo is a separate analyze pass) and matches the
 /// categorical palette length doubling — beyond ~12 lines the chart is
 /// unreadable anyway.
-const MAX_OVERLAY_REPOS: usize = 12;
+///
+/// Shared with `agent_pages`, which truncates the overlay snippets it publishes
+/// to this same bound: a hand-copied constant there would silently start
+/// printing URLs that render fewer series than they name.
+pub(crate) const MAX_OVERLAY_REPOS: usize = 12;
 
 async fn multi_chart(
     State(state): State<ApiState>,
@@ -6648,14 +7527,174 @@ impl IntoResponse for ApiError {
 mod tests {
     use super::*;
 
+    /// Every reserved first segment, named. The site's arbiter is
+    /// `frontend/src/lib/static-routing.mjs`; the two lists decide the same
+    /// question (which logins can never be published) on two sides of the
+    /// wire, so a segment added there and not here would make this API answer
+    /// `/api/md/{segment}` as a profile for a page the site owns.
     #[test]
-    fn frontend_origin_is_normalized_and_rejects_paths() {
+    fn reserved_first_segments_match_the_frontend_arbiter() {
         assert_eq!(
-            normalize_frontend_origin("https://gitdebt.com/").unwrap(),
-            "https://gitdebt.com"
+            RESERVED_FIRST_SEGMENTS,
+            [
+                "_astro",
+                "404",
+                "about",
+                "api",
+                "badges",
+                "compare",
+                "favicon.ico",
+                "leaderboard",
+                "privacy",
+                "profile",
+                "report",
+                "robots.txt",
+                "sitemap-index.xml",
+                "sitemaps",
+                "terms",
+                "u",
+                "vs",
+            ]
+            .as_slice()
         );
-        assert!(normalize_frontend_origin("https://gitdebt.com/path").is_err());
-        assert!(normalize_frontend_origin("javascript:alert(1)").is_err());
+
+        // Read back from the frontend module itself, so a drift is a failing
+        // test rather than a routing surprise in production.
+        let source = std::fs::read_to_string(concat!(
+            env!("CARGO_MANIFEST_DIR"),
+            "/../frontend/src/lib/static-routing.mjs"
+        ))
+        .expect("read the frontend routing contract");
+        let (_, body) = source
+            .split_once("RESERVED_FIRST_SEGMENTS")
+            .and_then(|(_, rest)| rest.split_once("new Set(["))
+            .expect("locate the reserved-segment set");
+        let (body, _) = body
+            .split_once("])")
+            .expect("close the reserved-segment set");
+        let mut published: Vec<&str> = body
+            .split(',')
+            .map(|entry| entry.trim().trim_matches('"'))
+            .filter(|entry| !entry.is_empty())
+            .collect();
+        published.sort_unstable();
+        let mut reserved = RESERVED_FIRST_SEGMENTS.to_vec();
+        reserved.sort_unstable();
+        assert_eq!(published, reserved);
+    }
+
+    #[test]
+    fn md_route_resolves_every_documented_shape() {
+        assert!(matches!(md_route(""), MdRoute::Home));
+        assert!(matches!(md_route("/"), MdRoute::Home));
+        // The complete embed catalog, not the `badges` landing page's prose.
+        assert!(matches!(md_route("badges"), MdRoute::Badges));
+        assert!(matches!(md_route("about"), MdRoute::Static(page) if page.path == "about"));
+        assert!(matches!(md_route("compare"), MdRoute::Static(page) if page.path == "compare"));
+        assert!(
+            matches!(md_route("compare/frontend-frameworks"), MdRoute::Category(category)
+                if category.slug == "frontend-frameworks")
+        );
+        assert!(matches!(
+            md_route("compare/not-a-category"),
+            MdRoute::NotFound
+        ));
+        assert!(matches!(md_route("facebook"), MdRoute::Profile(login) if login == "facebook"));
+        assert!(
+            matches!(md_route("facebook/react"), MdRoute::Repo(repo) if repo.slug() == "facebook/react")
+        );
+        assert!(
+            matches!(md_route("vs/facebook/react/vuejs/vue"), MdRoute::Comparison(first, second)
+                if first.slug() == "facebook/react" && second.slug() == "vuejs/vue")
+        );
+        // Site paths are lowercase, and so is every slug this API stores.
+        assert!(
+            matches!(md_route("Facebook/React"), MdRoute::Repo(repo) if repo.owner == "facebook")
+        );
+    }
+
+    /// A login can never shadow a page the site owns, and a reserved owner is
+    /// not a repository — `/u/{login}` is a redirect on the site, so
+    /// `/api/md/u/{login}` must not answer as the repository `u/{login}`.
+    #[test]
+    fn md_route_never_serves_a_reserved_segment_as_a_profile_or_owner() {
+        for segment in RESERVED_FIRST_SEGMENTS {
+            let route = md_route(segment);
+            assert!(
+                !matches!(route, MdRoute::Profile(_)),
+                "{segment} was served as a profile"
+            );
+            assert!(
+                !matches!(md_route(&format!("{segment}/anything")), MdRoute::Repo(_)),
+                "{segment} was served as a repository owner"
+            );
+        }
+        assert!(matches!(md_route("u/octocat"), MdRoute::NotFound));
+        assert!(matches!(md_route("api/repos"), MdRoute::NotFound));
+    }
+
+    #[test]
+    fn md_route_rejects_illegal_segments_and_unknown_shapes() {
+        for path in [
+            "ev~il",
+            "owner/ev~il",
+            "ev~il/repo",
+            "compare/ev~il",
+            "vs/facebook/react/vuejs/ev~il",
+        ] {
+            assert!(matches!(md_route(path), MdRoute::Invalid), "{path}");
+        }
+        // A login longer than GitHub allows is not a slug this API looks up.
+        assert!(matches!(md_route(&"a".repeat(40)), MdRoute::Invalid));
+        for path in ["a/b/c", "vs/facebook/react", "vs/a/b/c/d/e", "owner//repo"] {
+            assert!(matches!(md_route(path), MdRoute::NotFound), "{path}");
+        }
+    }
+
+    /// The `.md` suffix belongs to the redirect, not to this route: the
+    /// `_redirects` rule captures the site path without it, so a segment that
+    /// still ends in `.md` here is part of the repository name.
+    #[test]
+    fn md_route_does_not_strip_a_representation_suffix() {
+        assert!(matches!(md_route("owner/tool.md"), MdRoute::Repo(repo) if repo.repo == "tool.md"));
+    }
+
+    #[test]
+    fn compiled_pages_outlive_live_ones_in_shared_caches() {
+        assert_eq!(
+            MdFreshness::Compiled.cache_control(StatusCode::OK),
+            HeaderValue::from_static("public, s-maxage=86400, max-age=3600")
+        );
+        assert_eq!(
+            MdFreshness::Live.cache_control(StatusCode::OK),
+            HeaderValue::from_static("public, s-maxage=300, max-age=60")
+        );
+        assert_eq!(
+            MdFreshness::Live.cache_control(StatusCode::ACCEPTED),
+            HeaderValue::from_static("public, s-maxage=30")
+        );
+        assert_eq!(
+            MdFreshness::Live.cache_control(StatusCode::NOT_FOUND),
+            HeaderValue::from_static("public, s-maxage=86400")
+        );
+        // A rejected request is about its own input and is never cached.
+        assert_eq!(
+            MdFreshness::Live.cache_control(StatusCode::BAD_REQUEST),
+            HeaderValue::from_static("no-store")
+        );
+    }
+
+    #[test]
+    fn configured_origins_are_normalized_and_reject_paths() {
+        for variable in ["PUBLIC_FRONTEND_ORIGIN", "PUBLIC_API_BASE"] {
+            assert_eq!(
+                normalize_origin(variable, "https://gitdebt.com/").unwrap(),
+                "https://gitdebt.com"
+            );
+            assert!(normalize_origin(variable, "https://api.gitdebt.com/v1").is_err());
+            assert!(normalize_origin(variable, "https://gitdebt.com/?x=1").is_err());
+            assert!(normalize_origin(variable, "javascript:alert(1)").is_err());
+        }
     }
 
     #[test]
@@ -7142,6 +8181,7 @@ mod tests {
                 std::sync::Arc::new(crate::repo_history::RepoStorage::from_env()),
                 None,
                 "http://localhost:14321".to_string(),
+                "http://localhost:8787".to_string(),
                 None,
             )
             .expect("api state"),

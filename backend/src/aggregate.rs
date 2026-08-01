@@ -31,12 +31,12 @@
 //!      is a *separate, much slower* pipeline (clone + commit walk) from the
 //!      star history above, so it is never allowed to gate what the star
 //!      half already knows. One build enqueues at most
-//!      [`PROFILE_ANALYSIS_HEAD_DEFAULT`] repositories in the visitor
-//!      priority band (the stars-leading ones the report renders — the only
-//!      ones `repos_analyzing` counts) plus a
-//!      [`PROFILE_ANALYSIS_TAIL_DEFAULT`]-row drip of the long tail at the
-//!      background band. A 500-repository account therefore costs the queue
-//!      a handful of rows per view, not one per repository.
+//!      [`PROFILE_ANALYSIS_HEAD`] repositories in the visitor priority band
+//!      (the stars-leading ones the report renders — the only ones
+//!      `repos_analyzing` counts) plus a [`PROFILE_ANALYSIS_TAIL`]-row drip
+//!      of the long tail at the background band. A 500-repository account
+//!      therefore costs the queue a handful of rows per view, not one per
+//!      repository.
 //!
 //! NOTE (2026-06 stargazers-endpoint restriction): this module adds no new
 //! stargazer pagination. Star data is read exclusively from Postgres, and
@@ -86,37 +86,26 @@ pub const MAX_ENQUEUES_PER_BUILD: usize = 10;
 /// whole queue with each other's backlogs. The report only renders code
 /// signals for the leading repositories by stars, so those are the only ones
 /// a visitor is actually waiting on: the head rides the visitor band, the
-/// tail drips through the background band ([`PROFILE_ANALYSIS_TAIL_DEFAULT`])
-/// and converges across builds without ever holding the page.
-const PROFILE_ANALYSIS_HEAD_DEFAULT: usize = 4;
+/// tail drips through the background band ([`PROFILE_ANALYSIS_TAIL`]) and
+/// converges across builds without ever holding the page.
+///
+/// Three, not more, because of what is on the other end of the queue: this
+/// host runs a single-digit number of concurrent repo analyses (12 vCPU shared
+/// with Postgres and other services, and a large repository's walk wants
+/// several cores to itself), of which only a reserved lane serves visitors. A
+/// head of three is the largest number that still lets a *second* visitor's
+/// profile start landing while the first one's is in flight; four is one whole
+/// profile owning the visitor lane.
+const PROFILE_ANALYSIS_HEAD: usize = 3;
 
 /// Long-tail repositories one profile build may offer to the *background*
-/// band. Small on purpose: the tail is what makes a large account converge
-/// eventually, not what a visitor is waiting for, and every row it adds is a
-/// row of the global `MAX_PENDING_ANALYSES` ceiling that a live viewer's
-/// repository could have used.
-const PROFILE_ANALYSIS_TAIL_DEFAULT: usize = 2;
-
-/// Env-tunable ([`PROFILE_ANALYSIS_HEAD_DEFAULT`]). Zero is refused: a
-/// profile with no head would enqueue nothing a visitor can see land.
-fn profile_analysis_head() -> usize {
-    std::env::var("PROFILE_ANALYSIS_HEAD")
-        .ok()
-        .and_then(|value| value.parse().ok())
-        .filter(|value: &usize| *value > 0)
-        .unwrap_or(PROFILE_ANALYSIS_HEAD_DEFAULT)
-        .min(MAX_AGGREGATE_REPOS)
-}
-
-/// Env-tunable ([`PROFILE_ANALYSIS_TAIL_DEFAULT`]). Zero is allowed and
-/// means "never spend queue capacity on the tail from a request path".
-fn profile_analysis_tail() -> usize {
-    std::env::var("PROFILE_ANALYSIS_TAIL")
-        .ok()
-        .and_then(|value| value.parse().ok())
-        .unwrap_or(PROFILE_ANALYSIS_TAIL_DEFAULT)
-        .min(MAX_AGGREGATE_REPOS)
-}
+/// band. One per build on purpose: the tail is what makes a large account
+/// converge eventually, not what a visitor is waiting for, and every row it
+/// adds is a row of the global pending-analysis ceiling that a live viewer's
+/// repository could have used. A profile is memoized for ~5 minutes upstream,
+/// so a genuinely watched account still walks outward steadily; an account
+/// nobody revisits costs the queue one row and stops.
+const PROFILE_ANALYSIS_TAIL: usize = 1;
 
 /// Split stars-descending analysis candidates into the bounded head a
 /// visitor is waiting on and the long tail offered to the background band.
@@ -579,7 +568,7 @@ async fn build_from_repos(
     // `top_repos_by_stars`, so the head is exactly the set the report renders.
     // This is Postgres-only on the request path; cloning and author enrichment
     // happen asynchronously in the existing worker pool.
-    let (awaited, tail) = split_analysis_fanout(&analysis_candidates, profile_analysis_head());
+    let (awaited, tail) = split_analysis_fanout(&analysis_candidates, PROFILE_ANALYSIS_HEAD);
     if enqueue {
         // A signed-in self-profile is a stronger, authenticated signal than an
         // anonymous page view, so it keeps the warm band; an anonymous view
@@ -599,12 +588,9 @@ async fn build_from_repos(
         }
         // The tail is background work by definition: nothing on the rendered
         // page is waiting for it, so it goes in at the lowest band and only a
-        // couple of rows at a time. Fresh and already-queued repositories do
-        // not consume the allowance, so repeat builds keep walking outward.
-        let tail_limit = profile_analysis_tail();
-        if tail_limit > 0
-            && let Err(error) = repo_analysis::enqueue_many(db, tail, tail_limit).await
-        {
+        // row at a time. Fresh and already-queued repositories do not consume
+        // the allowance, so repeat builds keep walking outward.
+        if let Err(error) = repo_analysis::enqueue_many(db, tail, PROFILE_ANALYSIS_TAIL).await {
             tracing::warn!(login, %error, "profile repo-analysis tail enqueue failed");
         }
     }
@@ -1154,9 +1140,9 @@ mod tests {
         let candidates: Vec<String> = (0..MAX_AGGREGATE_REPOS)
             .map(|i| format!("o/repo{i:02}"))
             .collect();
-        let (head, tail) = split_analysis_fanout(&candidates, 4);
-        assert_eq!(head, &candidates[..4]);
-        assert_eq!(tail.len(), MAX_AGGREGATE_REPOS - 4);
+        let (head, tail) = split_analysis_fanout(&candidates, PROFILE_ANALYSIS_HEAD);
+        assert_eq!(head, &candidates[..PROFILE_ANALYSIS_HEAD]);
+        assert_eq!(tail.len(), MAX_AGGREGATE_REPOS - PROFILE_ANALYSIS_HEAD);
         // The candidate order is `top_repos_by_stars`' stars-descending
         // order, so the head is what the report actually renders.
         assert_eq!(head[0], "o/repo00");
@@ -1173,16 +1159,23 @@ mod tests {
         assert!(head.is_empty() && tail.is_empty());
     }
 
-    /// The configured head is what `repos_analyzing` can ever report, so it
-    /// must stay small enough that a visitor watches a handful of jobs, not
-    /// a whole account.
+    /// The head is what `repos_analyzing` can ever report, so it must stay
+    /// small enough that a visitor watches a handful of jobs, not a whole
+    /// account — and small enough that one profile view cannot own the
+    /// single-digit analysis lane this host runs.
     #[test]
-    fn profile_fanout_defaults_stay_bounded() {
+    fn profile_fanout_stays_bounded() {
         const {
-            assert!(PROFILE_ANALYSIS_HEAD_DEFAULT > 0);
             assert!(
-                PROFILE_ANALYSIS_HEAD_DEFAULT + PROFILE_ANALYSIS_TAIL_DEFAULT
-                    < MAX_ENQUEUES_PER_BUILD,
+                PROFILE_ANALYSIS_HEAD > 0,
+                "a profile with no head enqueues nothing a visitor sees land"
+            );
+            assert!(
+                PROFILE_ANALYSIS_HEAD <= MAX_AGGREGATE_REPOS,
+                "the head cannot exceed the list it is taken from"
+            );
+            assert!(
+                PROFILE_ANALYSIS_HEAD + PROFILE_ANALYSIS_TAIL < MAX_ENQUEUES_PER_BUILD,
                 "one profile build must cost the analysis queue less than the star queue"
             );
         }

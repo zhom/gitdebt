@@ -35,10 +35,28 @@ use crate::github::GithubClient;
 use crate::repo_history::{self, RepoHandle, RepoStorage};
 use crate::repo_stats;
 
-const DEFAULT_MAX_PENDING_ANALYSES: i64 = 500;
+/// Rows this replica lets accumulate in `pending` + `in_progress` before it
+/// starts answering `AtCapacity`.
+///
+/// Sized as a drain time, not as a memory bound: [`ANALYSIS_WORKERS`] run at
+/// once and a catalog-sized repository takes a couple of minutes on this host
+/// (apache/kafka's 17,985 commits measured 93 s end to end), so 200 rows is
+/// roughly two hours of queue — the longest backlog still worth reporting to a
+/// visitor as an ETA. The previous 500 was three times that, and a queue that
+/// deep is indistinguishable from a stuck one.
+const MAX_PENDING_ANALYSES: i64 = 200;
 /// How far above the ordinary ceiling interactive work may push the queue.
 const INTERACTIVE_CAPACITY_FACTOR: i64 = 4;
-const DEFAULT_ANALYSIS_FRESH_HOURS: i64 = 24;
+/// How long a completed analysis is treated as current before a view may
+/// re-enqueue it.
+///
+/// A full-history walk is the most expensive thing this host does, and a day
+/// of new commits moves no repo-health chart visibly, so re-analysis is a
+/// daily job rather than an hourly one. It also sets the catalog's steady-state
+/// load: ~117 curated repositories expiring once a day is ~5 re-analyses an
+/// hour, which the single catalog slot (see [`catalog_concurrency_cap`])
+/// absorbs while leaving the pool to visitors.
+const ANALYSIS_FRESH_HOURS: i64 = 24;
 const ENQUEUE_LOCK_ID: i64 = 6_794_738_132_977;
 /// Priority for work a person is waiting on right now: exactly one repository
 /// per request, from a surface that is rendering its report.
@@ -108,21 +126,8 @@ struct AnalysisJob {
     best_units: u64,
 }
 
-fn max_pending_analyses() -> i64 {
-    std::env::var("MAX_PENDING_ANALYSES")
-        .ok()
-        .and_then(|value| value.parse().ok())
-        .filter(|value| *value > 0)
-        .unwrap_or(DEFAULT_MAX_PENDING_ANALYSES)
-}
-
 pub(crate) fn analysis_freshness() -> chrono::Duration {
-    let hours = std::env::var("REPO_ANALYSIS_FRESH_HOURS")
-        .ok()
-        .and_then(|value| value.parse().ok())
-        .filter(|value: &i64| *value > 0)
-        .unwrap_or(DEFAULT_ANALYSIS_FRESH_HOURS);
-    chrono::Duration::hours(hours)
+    chrono::Duration::hours(ANALYSIS_FRESH_HOURS)
 }
 
 /// The predicate half of [`ANALYSIS_IS_CURRENT_SQL`], over a `repo_history`
@@ -274,9 +279,9 @@ pub async fn enqueue_prioritized(
     // anonymous traffic only, and signed-in bursts could grow the queue past
     // any drain time worth reporting as an ETA.
     let ceiling = if priority >= INTERACTIVE_PRIORITY {
-        max_pending_analyses().saturating_mul(INTERACTIVE_CAPACITY_FACTOR)
+        MAX_PENDING_ANALYSES.saturating_mul(INTERACTIVE_CAPACITY_FACTOR)
     } else {
-        max_pending_analyses()
+        MAX_PENDING_ANALYSES
     };
     if active >= ceiling {
         tx.commit().await?;
@@ -355,7 +360,7 @@ pub async fn enqueue_many(db: &Db, repos: &[String], max_new: usize) -> Result<u
 /// Three differences from [`enqueue_many`], all of them about work nobody is
 /// waiting on:
 ///   * **bounded**: at most `max_new` rows per pass, so a bootstrap cannot
-///     consume the global [`max_pending_analyses`] ceiling and turn every
+///     consume the global [`MAX_PENDING_ANALYSES`] ceiling and turn every
 ///     visitor's enqueue into `AtCapacity`;
 ///   * **never resurrects**: a repository that already has a queue row in any
 ///     state, including a parked one, is skipped. `enqueue_prioritized` clears
@@ -403,27 +408,19 @@ pub async fn enqueue_backfill(db: &Db, repos: &[String], max_new: usize) -> Resu
     Ok(enqueued)
 }
 
-/// Repositories one catalog backfill pass may add.
-const DEFAULT_CATALOG_BACKFILL_BATCH: usize = 8;
-/// Gap between passes. The catalog is warm-up work with no viewer: a slow
-/// drip that keeps the queue shallow beats a bootstrap flood that fills it.
-const DEFAULT_CATALOG_BACKFILL_INTERVAL_SECONDS: u64 = 600;
-
-fn catalog_backfill_batch() -> usize {
-    std::env::var("CATALOG_BACKFILL_BATCH")
-        .ok()
-        .and_then(|value| value.parse().ok())
-        .unwrap_or(DEFAULT_CATALOG_BACKFILL_BATCH)
-}
-
-fn catalog_backfill_interval() -> Duration {
-    let seconds = std::env::var("CATALOG_BACKFILL_INTERVAL_SECONDS")
-        .ok()
-        .and_then(|value| value.parse().ok())
-        .filter(|value: &u64| *value > 0)
-        .unwrap_or(DEFAULT_CATALOG_BACKFILL_INTERVAL_SECONDS);
-    Duration::from_secs(seconds)
-}
+/// Repositories one catalog backfill pass may add, and the gap between passes.
+///
+/// The pair is chosen as a *rate*, and the rate has to sit below what the
+/// catalog band can retire, or the drip is just a slower flood: sub-floor rows
+/// run [`catalog_concurrency_cap`] at a time — one slot — and a catalog-sized
+/// repository takes two to five minutes on this host, so that slot retires
+/// roughly 12–30 rows an hour. Two rows every fifteen minutes is 8 an hour:
+/// strictly below the drain, so the pending catalog depth converges to zero
+/// instead of the 495-row backlog that filled the queue and starved visitor
+/// work. Offering the ~117 curated repositories therefore takes most of a day,
+/// which is the correct priority for warm-up nobody is waiting on.
+const CATALOG_BACKFILL_BATCH: usize = 2;
+const CATALOG_BACKFILL_INTERVAL: Duration = Duration::from_secs(900);
 
 /// Drip the curated catalog into the analysis queue forever, a bounded batch
 /// at a time.
@@ -438,10 +435,8 @@ pub fn spawn_catalog_backfill(db: Db, repos: Vec<String>) {
         return;
     }
     tokio::spawn(async move {
-        let batch = catalog_backfill_batch();
-        let interval = catalog_backfill_interval();
         loop {
-            match enqueue_backfill(&db, &repos, batch).await {
+            match enqueue_backfill(&db, &repos, CATALOG_BACKFILL_BATCH).await {
                 Ok(0) => {}
                 Ok(added) => tracing::info!(
                     added,
@@ -450,18 +445,105 @@ pub fn spawn_catalog_backfill(db: Db, repos: Vec<String>) {
                 ),
                 Err(error) => tracing::warn!(%error, "curated catalog backfill pass failed"),
             }
-            sleep(interval).await;
+            sleep(CATALOG_BACKFILL_INTERVAL).await;
         }
     });
 }
 
+/// Identity carried by every job this *process* claims:
+/// `ra:{host}:{pid}:{boot}:`. Unique to one process — two processes cannot
+/// share a pid on a host at the same millisecond — which is what lets
+/// [`release_pool_claims`] hand back this pool's rows and nobody else's.
+fn pool_worker_prefix() -> &'static str {
+    static PREFIX: std::sync::OnceLock<String> = std::sync::OnceLock::new();
+    PREFIX.get_or_init(|| {
+        format!(
+            "{}{}:",
+            replica_worker_prefix(),
+            Utc::now().timestamp_millis()
+        )
+    })
+}
+
+/// The same identity minus the boot timestamp: `ra:{host}:{pid}:`, which every
+/// *incarnation* of this replica shares. Under Docker a restarted container
+/// keeps its hostname and its pid 1, so this is how a process recognizes rows
+/// its own predecessor abandoned.
+fn replica_worker_prefix() -> &'static str {
+    static PREFIX: std::sync::OnceLock<String> = std::sync::OnceLock::new();
+    PREFIX.get_or_init(|| format!("ra:{}:{}:", worker_host(), std::process::id()))
+}
+
+fn worker_host() -> String {
+    std::env::var("HOSTNAME")
+        .ok()
+        .map(|value| value.trim().to_string())
+        .filter(|value| !value.is_empty())
+        .unwrap_or_else(|| "unknown".to_string())
+}
+
+/// Does `{host}:{pid}` really name this replica and no other?
+///
+/// Only when the deployment gave the process a hostname. Without one, two
+/// containers on the same host share `unknown` *and* pid 1, and a startup
+/// sweep keyed on that identity would reclaim a live peer's running jobs —
+/// so it is skipped rather than guessed.
+fn replica_identity_is_unique() -> bool {
+    std::env::var("HOSTNAME").is_ok_and(|value| !value.trim().is_empty())
+}
+
+/// Reclaim analysis jobs no live worker is running, once, before this
+/// process's own pool exists.
+///
+/// Two disjoint reasons a row qualifies, and the second one is the fix:
+///
+///   * **the lease expired.** Nothing has heartbeated `claimed_at` for longer
+///     than the claim path's steal window, so the row is free by the same rule
+///     a peer would use.
+///   * **the row is this replica's own.** A redeploy that was SIGKILLed (or
+///     died between the heartbeat and the release) leaves rows whose
+///     `claimed_at` was refreshed seconds before the process died — inside the
+///     steal window, so the lease rule skipped them, and they then sat
+///     `in_progress` under a `worker_id` belonging to a pool that no longer
+///     exists, spending [`catalog_concurrency_cap`] and
+///     [`MAX_PENDING_ANALYSES`] budget until some worker happened to steal them
+///     minutes later. This process has not claimed anything yet, so any row
+///     already carrying *its own* identity is by construction a ghost.
+///
+/// The identity half needs a hostname to be safe (see
+/// [`replica_identity_is_unique`]); the lease half always applies. Both are
+/// backstops — an orderly shutdown hands the rows back itself in
+/// [`release_pool_claims`].
 pub async fn reset_inflight_on_startup(db: &Db) -> Result<u64> {
     let res = sqlx::query(
         "UPDATE repo_analysis_queue SET status = 'pending', phase = 'queued', \
          worker_id = NULL, claimed_at = NULL, started_at = NULL, updated_at = NOW() \
          WHERE status = 'in_progress' \
-           AND (claimed_at IS NULL OR claimed_at < NOW() - INTERVAL '2 minutes')",
+           AND (claimed_at IS NULL \
+                OR claimed_at < NOW() - INTERVAL '2 minutes' \
+                OR ($1 AND starts_with(worker_id, $2)))",
     )
+    .bind(replica_identity_is_unique())
+    .bind(replica_worker_prefix())
+    .execute(&db.pool)
+    .await?;
+    Ok(res.rows_affected())
+}
+
+/// Hand back every job this process still holds, on the way out.
+///
+/// A redeploy is the one case where the process knows something the queue
+/// cannot infer: its workers are about to stop existing. Waiting for the lease
+/// to expire instead left the incoming pool's first two minutes of accounting
+/// describing jobs nobody was running. Scoped to [`pool_worker_prefix`], so it
+/// is exactly this process's rows however many replicas are up.
+pub async fn release_pool_claims(db: &Db) -> Result<u64> {
+    let res = sqlx::query(
+        "UPDATE repo_analysis_queue SET status = 'pending', phase = 'queued', \
+         worker_id = NULL, claimed_at = NULL, started_at = NULL, updated_at = NOW() \
+         WHERE status = 'in_progress' AND starts_with(worker_id, $1)",
+    )
+    .bind(pool_worker_prefix())
     .execute(&db.pool)
     .await?;
     Ok(res.rows_affected())
@@ -472,7 +554,7 @@ pub async fn reset_inflight_on_startup(db: &Db) -> Result<u64> {
 /// every restart would undo the ceiling and let permanently-failing
 /// repositories reoccupy the queue's capacity after each deploy.
 ///
-/// Rows parked by [`DEFAULT_MAX_ANALYSIS_STALLS`] deliberately do *not* carry
+/// Rows parked by [`MAX_ANALYSIS_STALLS`] deliberately do *not* carry
 /// that marker, so a deploy re-arms them: a stall is a diagnosis of one
 /// process, and the release being deployed is often exactly what fixes it.
 /// Their `last_error` keeps the `stall:N/U` record, so a repository that goes
@@ -496,32 +578,54 @@ pub async fn revive_retryable_on_startup(db: &Db) -> Result<u64> {
     Ok(res.rows_affected())
 }
 
-/// Hard ceiling on pool size. Each worker holds one git subprocess at a
-/// time, so this bounds concurrent clones per replica; the default stays
-/// conservative and `REPO_ANALYSIS_WORKERS` raises it for hosts that can
-/// absorb the disk and network concurrency.
-const MAX_ANALYSIS_WORKERS: usize = 32;
-
-/// Total pool size for this process. **The** single definition of how many
-/// analysis jobs this replica runs at once: the worker binary sizes its pool
-/// with it.
+/// Analyses this replica runs at once. **The** single definition of the pool
+/// size: the worker binary sizes its pool with it, and `repo_history` divides
+/// the host's cores by it for `pack.threads` and for the commit walk's
+/// subprocess fan-out.
 ///
-/// It is *not* the number that a queue ETA divides by any more — part of the
-/// pool serves only visitor-driven work, so a row in the catalog band drains
-/// at [`general_analysis_workers`] per wave, not at this rate.
+/// **Three, because the box has 12 vCPU and does not belong to gitdebt.**
+/// Every per-analysis parallelism on this host is `cores / pool`, so the
+/// pool's total CPU appetite is a constant ~12 whatever this number is, and
+/// the only thing it actually chooses is how that budget is *shaped*:
+///
+///   * at 8 (the previous production value) each clone indexed its pack with
+///     `12 / 8 = 1` thread and each walk ran one `git log`, so eight analyses
+///     crawled in lockstep: apache/kafka's 17,985 commits landed in 93 s while
+///     microsoft/vscode (161k commits), postgres/postgres (64k) and rabbitmq
+///     (62k) all ran past twenty minutes without finishing and torvalds/linux
+///     never got a slot at all. The clones were finished and static on disk
+///     throughout — the contention was CPU, disk and Postgres, not network;
+///   * at 3 the same budget buys `12 / 3 = 4` index-pack threads and a 4-way
+///     walk fan-out per analysis, three concurrent clones sharing the measured
+///     32 MiB/s instead of eight, and three concurrent aggregate transactions
+///     against a Postgres that lives on this same box and was already logging
+///     slow statements every second or two.
+///
+/// A repository that finishes is worth more than a repository that started,
+/// and finishing is what frees the slot: three fat workers retire more work
+/// per hour than eight starved ones even though fewer jobs are in flight.
+/// Three also leaves genuine headroom for the co-tenant services, the star
+/// pool and the API, which eight did not.
+///
+/// It is *not* the number a queue ETA divides by — part of the pool serves
+/// only visitor-driven work, so a row in the catalog band drains at
+/// [`general_analysis_workers`] per wave, not at this rate.
+const ANALYSIS_WORKERS: usize = 3;
+
 pub fn configured_analysis_workers() -> usize {
-    let default = std::thread::available_parallelism()
-        .map(|cpus| cpus.get().div_ceil(2).clamp(1, 8))
-        .unwrap_or(2);
-    std::env::var("REPO_ANALYSIS_WORKERS")
-        .ok()
-        .and_then(|value| value.parse().ok())
-        .unwrap_or(default)
-        .clamp(1, MAX_ANALYSIS_WORKERS)
+    ANALYSIS_WORKERS
 }
 
 /// Share of the pool held back for rows at or above
-/// [`VISITOR_PRIORITY_FLOOR`]. One in three by default.
+/// [`VISITOR_PRIORITY_FLOOR`]: one in three, so exactly one of
+/// [`ANALYSIS_WORKERS`] is reserved and two stay general.
+///
+/// A third is the smallest reservation that survives the pool getting
+/// smaller. The shape matters more than the ratio: at a pool of 3 this is one
+/// worker that a waiting visitor always finds free, and two that the catalog
+/// may compete for — while at the old pool of 8 the same fraction reserved 2
+/// and left 6, which is why a burst of catalog work could still swallow the
+/// queue.
 ///
 /// Always leaves at least one worker able to claim any band, so a pool of one
 /// reserves nothing: a lone worker that only ever claimed visitor work would
@@ -529,11 +633,8 @@ pub fn configured_analysis_workers() -> usize {
 /// general claims after a few empty polls (see [`RESERVED_FALLBACK_POLLS`]),
 /// so the reservation costs idle capacity for seconds, not for a job.
 pub fn reserved_visitor_workers(pool: usize) -> usize {
-    let default = (pool / RESERVED_VISITOR_SHARE_DIVISOR).max(1);
-    std::env::var("REPO_ANALYSIS_RESERVED_VISITOR_WORKERS")
-        .ok()
-        .and_then(|value| value.parse().ok())
-        .unwrap_or(default)
+    (pool / RESERVED_VISITOR_SHARE_DIVISOR)
+        .max(1)
         .min(pool.saturating_sub(1))
 }
 
@@ -553,23 +654,18 @@ pub fn general_analysis_workers() -> usize {
 /// can never hold more than this many slots no matter how many workers go
 /// looking for work.
 ///
-/// Half the general pool by default: enough that backfill still progresses
-/// steadily, low enough that a burst of visitors always finds a free slot.
-/// Never zero — that would stall the catalog forever.
+/// Half the general pool, which at [`ANALYSIS_WORKERS`] = 3 is **one**: the
+/// catalog gets a single slot and two of the three always remain available to
+/// somebody waiting on a report. That is the headroom the old shape lacked —
+/// 8 workers with a cap of 3 still let backfill hold three quarters of the
+/// visitor-reachable pool at once. Never zero, which would not throttle the
+/// catalog but stop it forever.
 pub fn catalog_concurrency_cap() -> i64 {
-    clamp_catalog_cap(
-        std::env::var("REPO_ANALYSIS_MAX_CONCURRENT_CATALOG")
-            .ok()
-            .and_then(|value| value.parse::<usize>().ok()),
-        general_analysis_workers(),
-    )
+    catalog_cap_for(general_analysis_workers())
 }
 
-fn clamp_catalog_cap(configured: Option<usize>, general_workers: usize) -> i64 {
-    let cap = configured
-        .filter(|value| *value > 0)
-        .unwrap_or((general_workers / 2).max(1));
-    i64::try_from(cap).unwrap_or(i64::MAX)
+fn catalog_cap_for(general_workers: usize) -> i64 {
+    i64::try_from((general_workers / 2).max(1)).unwrap_or(i64::MAX)
 }
 
 /// Empty visitor-only polls a reserved worker tolerates before it also claims
@@ -585,11 +681,13 @@ pub fn spawn_pool(ctx: AnalysisCtx, count: usize) {
     // bounded schedule, so it can neither gate analysis readiness nor keep a
     // job in the queue.
     spawn_author_enrichment_sweep(ctx.clone());
-    let pool_id = format!("{}-{}", std::process::id(), Utc::now().timestamp_millis());
     let reserved = reserved_visitor_workers(count);
     for i in 0..count {
         let ctx = ctx.clone();
-        let id = format!("ra-{pool_id}-{i}");
+        // Every id carries this process's identity, which is what lets a
+        // shutdown hand its own rows back and a restart recognize its
+        // predecessor's (see [`reset_inflight_on_startup`]).
+        let id = format!("{}{i}", pool_worker_prefix());
         let lane = if i < reserved {
             Lane::Visitor
         } else {
@@ -637,8 +735,6 @@ async fn run_worker(worker_id: String, ctx: AnalysisCtx, lane: Lane) {
     // One indexed claim per idle worker per second keeps wake-up latency low
     // without turning an empty queue into a busy loop.
     let idle = Duration::from_secs(1);
-    // Read once: these are deployment knobs, not per-claim decisions, and a
-    // reserved worker polls them every second.
     let catalog_cap = catalog_concurrency_cap();
     let mut empty_polls: u32 = 0;
     loop {
@@ -739,11 +835,15 @@ async fn run_worker(worker_id: String, ctx: AnalysisCtx, lane: Lane) {
 ///
 /// One hour of *total silence* is therefore an order of magnitude above the
 /// only phase that can honestly produce it, and is unambiguous evidence of a
-/// hang. The cost of the headroom is that a genuinely wedged run holds its
-/// worker for an hour before [`max_analysis_stalls`] starts counting; the pool
-/// reserves visitor capacity and caps catalog concurrency precisely so that
-/// this cannot become a queue-wide outage.
-const DEFAULT_ANALYSIS_STALL_SECONDS: u64 = 3_600;
+/// hang. It is also twelve times `repo_history`'s own longest per-chunk
+/// ceiling (300 s for a walk chunk), so a phase that is merely slow on a
+/// loaded co-tenant box lapses into an ordinary, retryable error long before
+/// it looks stuck. The cost of the headroom is that a genuinely wedged run
+/// holds one of three workers for an hour before [`MAX_ANALYSIS_STALLS`]
+/// starts counting; the pool reserves visitor capacity and caps catalog
+/// concurrency precisely so that this cannot become a queue-wide outage.
+const ANALYSIS_STALL_SECONDS: u64 = 3_600;
+const ANALYSIS_STALL_WINDOW: Duration = Duration::from_secs(ANALYSIS_STALL_SECONDS);
 
 /// How often the guard samples the heartbeat. Only the resolution of the
 /// stall verdict, so it is coarse on purpose.
@@ -752,47 +852,44 @@ const STALL_POLL_INTERVAL: Duration = Duration::from_secs(15);
 /// Consecutive stalls, without ever getting further, before the row is parked.
 /// A parked row is re-armed by the next deploy (see
 /// [`revive_retryable_on_startup`]) and by any explicit request, so this ends
-/// a wasteful loop rather than a repository's chances.
-const DEFAULT_MAX_ANALYSIS_STALLS: u32 = 3;
+/// a wasteful loop rather than a repository's chances. Three is what a wedged
+/// repository costs this pool before it is put down: 3 × the stall window ≈ 3
+/// hours of one worker, spread over an escalating backoff.
+const MAX_ANALYSIS_STALLS: u32 = 3;
 
-fn stall_patience() -> Duration {
-    let seconds = std::env::var("REPO_ANALYSIS_STALL_SECONDS")
-        .ok()
-        .and_then(|value| value.parse::<u64>().ok())
-        .filter(|value| *value > 0)
-        .unwrap_or(DEFAULT_ANALYSIS_STALL_SECONDS);
-    Duration::from_secs(seconds)
-}
-
-fn max_analysis_stalls() -> u32 {
-    std::env::var("REPO_ANALYSIS_MAX_STALLS")
-        .ok()
-        .and_then(|value| value.parse().ok())
-        .filter(|value| *value > 0)
-        .unwrap_or(DEFAULT_MAX_ANALYSIS_STALLS)
-}
-
-/// Absolute wall-clock ceiling on one run, for operators who need one.
+/// Absolute wall-clock ceiling on one run: twelve hours.
 ///
-/// Unset (and 0) means no ceiling at all, which is the default and the
-/// intended production setting: complete history is the product and disk is
-/// the only resource a long analysis can exhaust. It exists purely as an
-/// escape hatch — a run that trips it is reported as an ordinary transient
-/// failure and does not count toward [`max_analysis_stalls`], because the
-/// repository did nothing wrong.
+/// A runaway detector, deliberately not a size limit. The honest way to read
+/// any value here is **any repository whose first analysis cannot finish
+/// inside this window will never be analyzed at all** — a run is not resumable
+/// past the cursor its last *successful* run committed, so every attempt
+/// restarts the same walk and dies at the same point. So the number has to be
+/// derived from the largest repository that must still land, not from what an
+/// operator would like a job to cost.
 ///
-/// Setting it is not a throttle, it is a size limit, and the honest way to
-/// read it is: **any repository whose first analysis cannot finish inside this
-/// window will never be analyzed at all.** A run is not resumable past the
-/// cursor its last *successful* run committed, so every attempt restarts the
-/// same walk and dies at the same point. Only set it if that is the intent.
-fn absolute_job_ceiling() -> Option<Duration> {
-    std::env::var("REPO_ANALYSIS_MAX_JOB_SECONDS")
-        .ok()
-        .and_then(|value| value.parse::<u64>().ok())
-        .filter(|value| *value > 0)
-        .map(Duration::from_secs)
-}
+/// **The arithmetic, on this host.** apache/kafka's 17,985 commits completed
+/// in 93 s — ~190 commits/s end to end at a pool of 8. torvalds/linux is
+/// 1.46M commits, so the same rate extrapolates to ~2.1 hours, and its 6.1 GB
+/// clone adds ~190 s of transfer at the measured 32 MiB/s plus an index-pack
+/// that now gets `12 / 3 = 4` threads instead of 1. Even tripling the whole
+/// estimate for a fully contended box lands near 6 hours, and 12 leaves a 2×
+/// margin on top of *that*. Nothing anyone points at this deployment reaches
+/// it while making progress.
+///
+/// It is coherent with [`ANALYSIS_STALL_WINDOW`] by being a multiple of it: a
+/// run that goes quiet is always killed by the stall guard first (at 1 hour,
+/// with the stall ladder that eventually parks the row), so this ceiling can
+/// only ever fire on a run that is *beating* and still going after half a day
+/// — a loop, not a big repository. That is why a run that trips it is reported
+/// as an ordinary transient failure and counts toward neither
+/// [`MAX_ANALYSIS_STALLS`] nor [`TERMINAL_MARKER`]: the repository did nothing
+/// wrong, and the next deploy must be able to bring it back.
+const ABSOLUTE_JOB_CEILING_SECONDS: u64 = 12 * 3_600;
+const ABSOLUTE_JOB_CEILING: Duration = Duration::from_secs(ABSOLUTE_JOB_CEILING_SECONDS);
+/// The ceiling must stay several stall windows wide, or it would start
+/// pre-empting the stall guard — killing wedged runs *without* recording a
+/// stall, so the ladder that eventually parks them would never advance.
+const _: () = assert!(ABSOLUTE_JOB_CEILING_SECONDS >= 4 * ANALYSIS_STALL_SECONDS);
 
 /// Evidence that a run is still doing something, shared between [`process`]
 /// and the guard watching it.
@@ -855,13 +952,20 @@ impl Heartbeat {
 async fn run_until_stalled(job: &AnalysisJob, ctx: &AnalysisCtx) -> Result<usize, Failure> {
     let beat = Heartbeat::default();
     let work = process(job, ctx, &beat);
-    guard_progress(job, &beat, stall_patience(), absolute_job_ceiling(), work).await
+    guard_progress(
+        job,
+        &beat,
+        ANALYSIS_STALL_WINDOW,
+        Some(ABSOLUTE_JOB_CEILING),
+        work,
+    )
+    .await
 }
 
 /// The guard proper, over any work that reports through `beat`.
 ///
 /// Split out from [`run_until_stalled`] so the budgets are arguments rather
-/// than environment reads. The property that matters — "a run that keeps
+/// than module constants. The property that matters — "a run that keeps
 /// beating is never killed, however many windows it outlasts" — is about the
 /// ratio of beat interval to window, not about hours, so a test can only state
 /// it by supplying both.
@@ -1067,13 +1171,13 @@ struct Failure {
     /// process inflicts on itself, and those are exactly the ones a very large
     /// repository accumulates:
     ///
-    ///   * a stall has its own ladder ([`max_analysis_stalls`]) whose contract
+    ///   * a stall has its own ladder ([`MAX_ANALYSIS_STALLS`]) whose contract
     ///     is that the next deploy re-arms the row — the release being
     ///     deployed is often what fixes the hang. Letting a stall also spend
     ///     the attempt ceiling silently broke that contract: a repository that
     ///     stalled with `attempts` already high was retired for good;
-    ///   * an [`absolute_job_ceiling`] lapse is a statement about the
-    ///     operator's configuration, not about the repository. Raising the
+    ///   * an [`ABSOLUTE_JOB_CEILING`] lapse is a statement about this
+    ///     deployment's own patience, not about the repository. Raising the
     ///     ceiling and redeploying must bring the row back;
     ///   * a `repo_history` wall-clock ceiling — clone, fetch, plan, count,
     ///     walk — is the same statement one layer down. It arrives as an
@@ -1125,18 +1229,18 @@ impl Failure {
                 silence.as_secs(),
                 beat.current_phase(),
             )),
-            park: consecutive >= max_analysis_stalls(),
+            park: consecutive >= MAX_ANALYSIS_STALLS,
             terminal: false,
         }
     }
 
-    /// An operator-configured absolute ceiling lapsed while the run was still
-    /// working. Deliberately an ordinary transient failure: nothing about the
+    /// [`ABSOLUTE_JOB_CEILING`] lapsed while the run was still beating.
+    /// Deliberately an ordinary transient failure: nothing about the
     /// repository is wrong, so it must not accumulate toward parking.
     fn over_ceiling(beat: &Heartbeat, elapsed: Duration) -> Self {
         Self {
             message: compact_error(&format!(
-                "analysis exceeded the configured {}s ceiling in phase '{}' after {} units",
+                "analysis exceeded the {}s runaway ceiling in phase '{}' after {} units",
                 elapsed.as_secs(),
                 beat.current_phase(),
                 beat.units(),
@@ -1562,7 +1666,7 @@ async fn process(job: &AnalysisJob, ctx: &AnalysisCtx, beat: &Heartbeat) -> Resu
     // applied run is exactly the state that is undetectable afterwards. This
     // phase is likewise the reason the save publishes no intermediate progress
     // and the stall window has to clear it (see
-    // [`DEFAULT_ANALYSIS_STALL_SECONDS`]) — chunking it to emit progress would
+    // [`ANALYSIS_STALL_WINDOW`]) — chunking it to emit progress would
     // be chunking the transaction.
     if replace {
         repo_stats::replace_aggregates_at_head(
@@ -2094,28 +2198,32 @@ mod tests {
             assert!(reserved_visitor_workers(pool) < pool.max(2));
             assert!(pool - reserved_visitor_workers(pool) >= 1);
         }
-        if std::env::var("REPO_ANALYSIS_RESERVED_VISITOR_WORKERS").is_err() {
-            assert_eq!(reserved_visitor_workers(1), 0, "no sharing to do at all");
-            assert_eq!(reserved_visitor_workers(2), 1);
-            assert_eq!(reserved_visitor_workers(8), 2);
-            assert_eq!(reserved_visitor_workers(32), 10);
-        }
+        assert_eq!(reserved_visitor_workers(1), 0, "no sharing to do at all");
+        assert_eq!(reserved_visitor_workers(2), 1);
+        assert_eq!(reserved_visitor_workers(8), 2);
+        assert_eq!(reserved_visitor_workers(32), 10);
+        // The shape the production pool actually runs: one lane a waiting
+        // visitor always finds free, two the catalog may compete for.
+        assert_eq!(reserved_visitor_workers(ANALYSIS_WORKERS), 1);
+        assert_eq!(general_analysis_workers(), 2);
     }
 
     /// A cap of zero would not throttle the catalog, it would stop it: no
     /// worker could ever admit a sub-floor row and the backfill would never
-    /// run again. Neither the default nor a hostile env value may produce one.
+    /// run again. And a cap that reached the pool size would not be a cap at
+    /// all — backfill could hold every slot, which is the starvation the
+    /// reservation exists to prevent.
     #[test]
-    fn the_catalog_cap_can_never_wedge_the_pool_at_zero() {
-        assert!(general_analysis_workers() >= 1);
-        assert!(catalog_concurrency_cap() >= 1);
-        for general in 1..=MAX_ANALYSIS_WORKERS {
-            // An unparseable or zero setting falls back; it never disables the
-            // catalog, which a cap of zero would do permanently.
-            assert!(clamp_catalog_cap(None, general) >= 1);
-            assert!(clamp_catalog_cap(Some(0), general) >= 1);
+    fn the_catalog_cap_leaves_headroom_without_ever_wedging_at_zero() {
+        for general in 1..=32usize {
+            assert!(catalog_cap_for(general) >= 1);
+            assert!(catalog_cap_for(general) <= general as i64);
         }
-        assert_eq!(clamp_catalog_cap(Some(3), 32), 3, "the operator wins");
+        assert_eq!(catalog_concurrency_cap(), 1);
+        assert!(
+            catalog_concurrency_cap() < configured_analysis_workers() as i64,
+            "the catalog band must never be able to hold the whole pool"
+        );
     }
 
     #[test]
@@ -2397,40 +2505,38 @@ mod tests {
             ))),
             (3, 9_000)
         );
-        // An operator ceiling is not the repository's fault and never counts.
+        // The runaway ceiling is not the repository's fault and never counts.
         assert_eq!(
             stall_record(Some(
-                Failure::over_ceiling(&beat, Duration::from_secs(3_600)).message
+                Failure::over_ceiling(&beat, ABSOLUTE_JOB_CEILING).message
             )),
             (0, 0)
         );
 
-        if std::env::var("REPO_ANALYSIS_MAX_STALLS").is_err() {
-            // Stuck at the same place, run after run: the count climbs and the
-            // slot is eventually released for good — but the message never
-            // carries TERMINAL_MARKER, so a deploy still re-arms the row.
-            let mut job = job_after(0, 0);
-            let mut parked_after = None;
-            for attempt in 1..=DEFAULT_MAX_ANALYSIS_STALLS {
-                let failure = Failure::stalled(&job, &beat, silence);
-                let (consecutive, best) = stall_record(Some(failure.message.clone()));
-                assert_eq!(
-                    consecutive, attempt,
-                    "no progress must not reset the ladder"
-                );
-                assert!(!failure.message.starts_with(TERMINAL_MARKER));
-                if failure.park {
-                    parked_after = Some(attempt);
-                    break;
-                }
-                job = job_after(consecutive, best);
-            }
+        // Stuck at the same place, run after run: the count climbs and the
+        // slot is eventually released for good — but the message never
+        // carries TERMINAL_MARKER, so a deploy still re-arms the row.
+        let mut job = job_after(0, 0);
+        let mut parked_after = None;
+        for attempt in 1..=MAX_ANALYSIS_STALLS {
+            let failure = Failure::stalled(&job, &beat, silence);
+            let (consecutive, best) = stall_record(Some(failure.message.clone()));
             assert_eq!(
-                parked_after,
-                Some(DEFAULT_MAX_ANALYSIS_STALLS),
-                "a repository stuck at the same point must stop reclaiming slots"
+                consecutive, attempt,
+                "no progress must not reset the ladder"
             );
+            assert!(!failure.message.starts_with(TERMINAL_MARKER));
+            if failure.park {
+                parked_after = Some(attempt);
+                break;
+            }
+            job = job_after(consecutive, best);
         }
+        assert_eq!(
+            parked_after,
+            Some(MAX_ANALYSIS_STALLS),
+            "a repository stuck at the same point must stop reclaiming slots"
+        );
     }
 
     async fn seed(db: &Db, repo: &str, priority: i64, status: &str, claimed: bool) {
@@ -2590,6 +2696,74 @@ mod tests {
             .filter(|repo| !repo.starts_with(prefix))
             .collect();
         release(&db, &borrowed).await;
+        purge(&db, prefix).await;
+    }
+
+    /// A redeploy must not leave the incoming pool accounting for jobs nobody
+    /// is running. Both rows here carry a *fresh* lease — the shape a SIGTERM
+    /// produces, since the heartbeat ran seconds before the process died — so
+    /// the two-minute lease rule reclaims neither, which is exactly why six of
+    /// them once sat `in_progress` under a dead pool's `worker_id` for fifteen
+    /// minutes, spending catalog-concurrency and queue-capacity budget until a
+    /// worker happened to steal them.
+    #[tokio::test]
+    async fn a_shutdown_hands_back_this_pools_rows_and_only_this_pools_rows() {
+        let Some(db) = crate::test_db::shared().await else {
+            eprintln!("skipping: set GITDEBT_TEST_DATABASE_URL to run");
+            return;
+        };
+        let _guard = CLAIM_LOCK.lock().await;
+        let prefix = "gitdebt-test-release/";
+        let mine = format!("{prefix}mine");
+        let peer = format!("{prefix}peer");
+        purge(&db, prefix).await;
+
+        let seed_claimed = async |repo: &String, worker: String| {
+            sqlx::query(
+                "INSERT INTO repo_analysis_queue \
+                    (repo, status, phase, priority, enqueued_at, claimed_at, worker_id) \
+                 VALUES ($1, 'in_progress', 'cloning', 0, NOW(), NOW(), $2)",
+            )
+            .bind(repo)
+            .bind(worker)
+            .execute(&db.pool)
+            .await
+            .expect("seed claimed row");
+        };
+        seed_claimed(&mine, format!("{}0", pool_worker_prefix())).await;
+        seed_claimed(&peer, "ra:another-host:1:1700000000000:0".to_string()).await;
+
+        assert_eq!(
+            release_pool_claims(&db).await.unwrap(),
+            1,
+            "a process may release its own claims and nobody else's"
+        );
+        assert_eq!(
+            statuses(&db, prefix).await,
+            vec![
+                (mine.clone(), "pending".to_string()),
+                (peer.clone(), "in_progress".to_string()),
+            ]
+        );
+
+        // The SIGKILL path: nothing released the rows, and a restart finds its
+        // own identity on them. Only meaningful where the deployment gives the
+        // replica a name to be recognized by.
+        if replica_identity_is_unique() {
+            purge(&db, prefix).await;
+            seed_claimed(&mine, format!("{}0", replica_worker_prefix())).await;
+            seed_claimed(&peer, "ra:another-host:1:1700000000000:0".to_string()).await;
+            reset_inflight_on_startup(&db).await.expect("startup reset");
+            assert_eq!(
+                statuses(&db, prefix).await,
+                vec![
+                    (mine, "pending".to_string()),
+                    (peer, "in_progress".to_string()),
+                ],
+                "a restart reclaims its predecessor's rows without touching a live peer's"
+            );
+        }
+
         purge(&db, prefix).await;
     }
 

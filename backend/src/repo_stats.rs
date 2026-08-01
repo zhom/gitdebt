@@ -110,6 +110,19 @@ struct CouplingAgg {
 /// One borrowed co-change row on its way to the chunked upsert.
 type CouplingRow<'a> = (&'a (Arc<str>, Arc<str>), &'a CouplingAgg);
 
+/// Interned author email — the stable author identity shared by
+/// `Aggregates::authors` and every `(author, day)` bucket.
+///
+/// It is a shared handle rather than an owned `String` because of how the two
+/// maps differ in size: there is one author row per person, but one
+/// `author_commit_days` row per person *per day they committed*, which for a
+/// long-lived repository is tens of thousands of keys per prolific author. An
+/// owned key copied the same email into every one of them, and on a
+/// linux-shaped walk that single map was the largest term in [`Aggregates`] —
+/// bigger than the file and coupling maps together. Interning collapses it to
+/// one allocation per distinct author plus a pointer per bucket.
+type AuthorKey = Arc<str>;
+
 /// Per-day TODO delta for one batch.
 #[derive(Clone, Debug, Default, PartialEq)]
 struct TodoAgg {
@@ -130,8 +143,8 @@ struct TodoAgg {
 /// history, so a caller can stream a million commits through
 /// [`CommitAggregator`] and hold only this.
 pub struct Aggregates {
-    authors: HashMap<String, AuthorAgg>,
-    author_commit_days: HashMap<(String, NaiveDate), i64>,
+    authors: HashMap<AuthorKey, AuthorAgg>,
+    author_commit_days: HashMap<(AuthorKey, NaiveDate), i64>,
     files: HashMap<Arc<str>, FileAgg>,
     commit_days: HashMap<NaiveDate, i64>,
     change_days: HashMap<NaiveDate, ChangeDayAgg>,
@@ -187,6 +200,11 @@ pub struct CommitAggregator {
     /// both halves of every coupling key. A path in a 12-file commit would
     /// otherwise be copied into up to 11 separate pair keys.
     paths: HashSet<Arc<str>>,
+    /// One [`AuthorKey`] per distinct author email, shared by the `authors`
+    /// key and by every `(author, day)` bucket that author appears in. Kept
+    /// separate from `paths` so the two namespaces cannot alias each other's
+    /// entries and so each set stays sized by what it actually holds.
+    author_emails: HashSet<AuthorKey>,
     /// Cochange count below which pairs are dropped by [`prune_couplings`].
     /// Rises monotonically so that pruning cannot oscillate.
     coupling_floor: i64,
@@ -215,6 +233,7 @@ impl CommitAggregator {
                 commits_seen: 0,
             },
             paths: HashSet::new(),
+            author_emails: HashSet::new(),
             coupling_floor: 0,
             pruned_couplings: 0,
             wide_commits: 0,
@@ -240,12 +259,13 @@ impl CommitAggregator {
         let committed_at = commit.committed_at;
         let day = commit.committed_day;
 
-        self.push_author(commit, committed_at);
+        let author = self.intern_author(&commit.author_email);
+        self.push_author(author.clone(), commit, committed_at);
 
         *self
             .out
             .author_commit_days
-            .entry((commit.author_email.clone(), day))
+            .entry((author, day))
             .or_insert(0) += 1;
         *self.out.commit_days.entry(day).or_insert(0) += 1;
 
@@ -316,23 +336,34 @@ impl CommitAggregator {
         self.out
     }
 
-    fn intern(&mut self, path: &str) -> Arc<str> {
-        if let Some(existing) = self.paths.get(path) {
+    /// Shared handle for `value` from `pool`, inserting it on first sight.
+    /// An associated function rather than a method so a caller can intern
+    /// while holding a mutable borrow of another field.
+    fn intern(pool: &mut HashSet<Arc<str>>, value: &str) -> Arc<str> {
+        if let Some(existing) = pool.get(value) {
             return existing.clone();
         }
-        let interned: Arc<str> = Arc::from(path);
-        self.paths.insert(interned.clone());
+        let interned: Arc<str> = Arc::from(value);
+        pool.insert(interned.clone());
         interned
     }
 
-    fn push_author(&mut self, commit: &CommitInfo, committed_at: DateTime<Utc>) {
+    fn intern_path(&mut self, path: &str) -> Arc<str> {
+        Self::intern(&mut self.paths, path)
+    }
+
+    fn intern_author(&mut self, email: &str) -> AuthorKey {
+        Self::intern(&mut self.author_emails, email)
+    }
+
+    fn push_author(&mut self, email: AuthorKey, commit: &CommitInfo, committed_at: DateTime<Utc>) {
         // Derived lazily inside the closures: for a repository with a handful
         // of authors and a million commits these two helpers would otherwise
         // run an md5 and two allocations per commit for a value that is
         // discarded on every hit after the first.
         self.out
             .authors
-            .entry(commit.author_email.clone())
+            .entry(email)
             .and_modify(|a| {
                 // name: last-wins (oldest-first ⇒ newest commit's name).
                 a.name.clear();
@@ -386,7 +417,7 @@ impl CommitAggregator {
             }
             return;
         }
-        let key = self.intern(path);
+        let key = self.intern_path(path);
         self.out.files.insert(
             key,
             FileAgg {
@@ -439,7 +470,7 @@ impl CommitAggregator {
         // handles: a hit on an existing pair costs a refcount bump instead of
         // two heap allocations, which at up to 66 pairs per commit over a
         // million commits is the difference that matters.
-        let interned: Vec<Arc<str>> = coupled.iter().map(|path| self.intern(path)).collect();
+        let interned: Vec<Arc<str>> = coupled.iter().map(|path| self.intern_path(path)).collect();
         for left in 0..interned.len() - 1 {
             for right in left + 1..interned.len() {
                 let coupling = self
@@ -705,7 +736,7 @@ async fn write_aggregates_in_tx(
     }
 
     // Authors
-    let author_rows: Vec<(&String, &AuthorAgg)> = agg.authors.iter().collect();
+    let author_rows: Vec<(&AuthorKey, &AuthorAgg)> = agg.authors.iter().collect();
     for chunk in author_rows.chunks(UPSERT_CHUNK) {
         let mut emails: Vec<String> = Vec::with_capacity(chunk.len());
         let mut names: Vec<String> = Vec::with_capacity(chunk.len());
@@ -715,7 +746,7 @@ async fn write_aggregates_in_tx(
         let mut firsts: Vec<DateTime<Utc>> = Vec::with_capacity(chunk.len());
         let mut lasts: Vec<DateTime<Utc>> = Vec::with_capacity(chunk.len());
         for (email, a) in chunk {
-            emails.push((*email).clone());
+            emails.push(email.to_string());
             names.push(a.name.clone());
             avatars.push(a.avatar.clone());
             logins.push(a.login.clone());
@@ -754,14 +785,14 @@ async fn write_aggregates_in_tx(
     // Per-author/day buckets back truthful user streaks. Store the same stable
     // author key as repo_author_stats; GitHub-login enrichment can then join
     // the two without rewriting historical day rows.
-    let author_day_rows: Vec<(&(String, NaiveDate), &i64)> =
+    let author_day_rows: Vec<(&(AuthorKey, NaiveDate), &i64)> =
         agg.author_commit_days.iter().collect();
     for chunk in author_day_rows.chunks(UPSERT_CHUNK) {
         let mut emails: Vec<String> = Vec::with_capacity(chunk.len());
         let mut days: Vec<NaiveDate> = Vec::with_capacity(chunk.len());
         let mut counts: Vec<i64> = Vec::with_capacity(chunk.len());
         for ((email, day), count) in chunk {
-            emails.push(email.clone());
+            emails.push(email.to_string());
             days.push(*day);
             counts.push(**count);
         }
@@ -1570,8 +1601,8 @@ mod tests {
     /// COALESCE/LEAST/GREATEST/last-wins rules the SQL used. The batched
     /// `aggregate_commits` must produce identical maps.
     fn oracle(commits: &[CommitInfo]) -> Aggregates {
-        let mut authors: HashMap<String, AuthorAgg> = HashMap::new();
-        let mut author_commit_days: HashMap<(String, NaiveDate), i64> = HashMap::new();
+        let mut authors: HashMap<AuthorKey, AuthorAgg> = HashMap::new();
+        let mut author_commit_days: HashMap<(AuthorKey, NaiveDate), i64> = HashMap::new();
         let mut files: HashMap<Arc<str>, FileAgg> = HashMap::new();
         let mut commit_days: HashMap<NaiveDate, i64> = HashMap::new();
         let mut change_days: HashMap<NaiveDate, ChangeDayAgg> = HashMap::new();
@@ -1581,10 +1612,10 @@ mod tests {
             let avatar = avatar_for_email(&c.author_email);
             let login = github_login_for_email(&c.author_email);
             // Author: replicate INSERT ... ON CONFLICT row-by-row.
-            match authors.get_mut(&c.author_email) {
+            match authors.get_mut(c.author_email.as_str()) {
                 None => {
                     authors.insert(
-                        c.author_email.clone(),
+                        AuthorKey::from(c.author_email.as_str()),
                         AuthorAgg {
                             name: c.author_name.clone(),
                             avatar: avatar.clone(),
@@ -1605,7 +1636,7 @@ mod tests {
                 }
             }
             *author_commit_days
-                .entry((c.author_email.clone(), c.committed_day))
+                .entry(author_day(&c.author_email, c.committed_day))
                 .or_insert(0) += 1;
             *commit_days.entry(c.committed_day).or_insert(0) += 1;
             let change_day = change_days.entry(c.committed_day).or_default();
@@ -1683,6 +1714,10 @@ mod tests {
 
     fn pair(a: &str, b: &str) -> (Arc<str>, Arc<str>) {
         (Arc::from(a), Arc::from(b))
+    }
+
+    fn author_day(email: &str, day: NaiveDate) -> (AuthorKey, NaiveDate) {
+        (AuthorKey::from(email), day)
     }
 
     fn assert_same_aggregates(a: &Aggregates, b: &Aggregates, what: &str) {
@@ -1801,8 +1836,8 @@ mod tests {
         assert_eq!(agg.authors["d@e.f"].commits, 1);
         let day0 = at(0).date_naive();
         let day1 = at(86_500).date_naive();
-        assert_eq!(agg.author_commit_days[&("a@b.c".to_string(), day0)], 1);
-        assert_eq!(agg.author_commit_days[&("a@b.c".to_string(), day1)], 1);
+        assert_eq!(agg.author_commit_days[&author_day("a@b.c", day0)], 1);
+        assert_eq!(agg.author_commit_days[&author_day("a@b.c", day1)], 1);
         // f1 touched by 2 commits (1 of them a fix).
         assert_eq!(agg.files["f1"].commits, 2);
         assert_eq!(agg.files["f1"].fix_commits, 1);
@@ -1824,6 +1859,32 @@ mod tests {
                 removed: 0
             }
         );
+    }
+
+    /// The author key is shared, never copied per bucket. `author_commit_days`
+    /// holds one entry per author per active day, so a prolific author in a
+    /// long-lived repository owns tens of thousands of these keys; copying the
+    /// email into each of them made this map the largest single term in
+    /// `Aggregates` on a full-history walk.
+    #[test]
+    fn author_keys_are_interned_across_every_day_bucket() {
+        let mut aggregator = CommitAggregator::new();
+        for day in 0..50 {
+            aggregator.push(&commit("a@b.c", "A", day * 86_400, false, &["f"], 0, 0));
+        }
+        let agg = aggregator.finish();
+        assert_eq!(
+            agg.author_commit_days.len(),
+            50,
+            "one bucket per active day"
+        );
+        let canonical = agg.authors.keys().next().expect("exactly one author");
+        for (email, _day) in agg.author_commit_days.keys() {
+            assert!(
+                Arc::ptr_eq(canonical, email),
+                "every day bucket shares the author's single allocation"
+            );
+        }
     }
 
     #[test]

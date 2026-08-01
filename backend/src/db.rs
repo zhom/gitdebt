@@ -4,7 +4,32 @@ use sqlx::PgConnection;
 use sqlx::PgPool;
 use sqlx::postgres::PgPoolOptions;
 
-const DEFAULT_POOL_MAX: u32 = 24;
+/// Postgres connections a single gitdebt process may hold.
+///
+/// Both binaries build their pool from this one number, so its real cost is
+/// `2 × POOL_MAX` plus the worker's two out-of-pool leader sessions (the GH
+/// Archive coordinator and the hourly follower each pin an advisory lock to a
+/// dedicated connection): 16 + 16 + 2 = 34 of the 60 the shared server allows.
+///
+/// 16, down from 24, because Postgres runs on the same 12-vCPU / 32 GB host as
+/// the api, the worker's git clones, and unrelated co-tenant services — gitdebt
+/// does not own the box. Production held 28 backends open while the analysis
+/// pool and a GH Archive backfill wrote at the same time, logging a statement
+/// over the 1 s slow threshold every second or two: past that point more
+/// concurrent writers bought contention, not throughput. Postgres cannot
+/// usefully run more active queries than the host has cores, so a ceiling near
+/// the core count converts oversubscription into a bounded
+/// [`POOL_ACQUIRE_TIMEOUT`] wait on our side instead of an unbounded one inside
+/// the server, where it would also slow every co-tenant's queries.
+///
+/// 16 covers both binaries' real demand. The worker's simultaneous claimants
+/// are the repo-analysis pool (deliberately few, fat workers), the
+/// star/metadata pool, the two archive singletons, and a handful of periodic
+/// sweeps — under a dozen in the worst case. The api is bounded by
+/// `api::MAX_INFLIGHT_REQUESTS`, but only its Postgres-backed handlers hold a
+/// slot, and 16 statements in flight at single-digit-millisecond latency is an
+/// order of magnitude more read throughput than this host is asked for.
+const POOL_MAX: u32 = 16;
 const POOL_ACQUIRE_TIMEOUT: std::time::Duration = std::time::Duration::from_secs(5);
 const POOL_IDLE_TIMEOUT: std::time::Duration = std::time::Duration::from_secs(5 * 60);
 const POOL_MAX_LIFETIME: std::time::Duration = std::time::Duration::from_secs(30 * 60);
@@ -291,7 +316,7 @@ CREATE OR REPLACE VIEW active_repo_star_history AS
 -- race on the same rows). Priority is popularity-first (view_count DESC)
 -- then enqueue order (FIFO) so hot repos drain first under a tight
 -- GitHub budget. `partial` marks a job that hit the per-attempt page cap
--- (MAX_STARGAZER_PAGES) and was re-enqueued to continue later — the
+-- (`worker::MAX_STARGAZER_PAGES`) and was re-enqueued to continue later — the
 -- stargazer cache stays `*_complete = FALSE` until a job finishes the
 -- whole list.
 CREATE TABLE IF NOT EXISTS star_fetch_queue (
@@ -896,11 +921,7 @@ impl Db {
     /// Connect to the Postgres instance pointed at by `database_url` and
     /// apply the schema.
     pub async fn connect(database_url: &str) -> Result<Self> {
-        let max_connections: u32 = std::env::var("DB_POOL_MAX")
-            .ok()
-            .and_then(|s| s.parse().ok())
-            .unwrap_or(DEFAULT_POOL_MAX);
-        Self::connect_with_pool_size(database_url, max_connections).await
+        Self::connect_with_pool_size(database_url, POOL_MAX).await
     }
 
     /// Open a pool against an already-migrated database, applying no schema.
@@ -1107,7 +1128,39 @@ impl Db {
 
 #[cfg(test)]
 mod tests {
-    use super::{CONCURRENT_INDEXES, CURRENT_SCHEMA_VERSION, SCHEMA, SCHEMA_MIGRATION_LOCK_ID};
+    use super::{
+        CONCURRENT_INDEXES, CURRENT_SCHEMA_VERSION, POOL_MAX, SCHEMA, SCHEMA_MIGRATION_LOCK_ID,
+    };
+
+    /// Both binaries size their pool from the same constant, so the ceiling is
+    /// a fleet-wide budget and not a per-process one — raising it by one adds
+    /// two backends. This pins the arithmetic in [`POOL_MAX`]'s docs, because
+    /// the Postgres it spends is shared with co-tenant services that have no
+    /// way to defend themselves against gitdebt taking the last slot.
+    #[test]
+    fn pool_ceiling_budgets_the_whole_fleet_not_one_process() {
+        /// gitdebt-api and gitdebt-worker.
+        const PROCESSES: u32 = 2;
+        /// GH Archive coordinator + hourly follower: advisory-lock sessions
+        /// held on dedicated connections outside the pool.
+        const LEADER_SESSIONS: u32 = 2;
+        /// `max_connections` on the shared host's Postgres.
+        const SERVER_LIMIT: u32 = 60;
+        /// Left for the other services on the box plus an operator's psql.
+        const CO_TENANT_RESERVE: u32 = 20;
+
+        let fleet = POOL_MAX * PROCESSES + LEADER_SESSIONS;
+        assert!(
+            fleet + CO_TENANT_RESERVE <= SERVER_LIMIT,
+            "{fleet} connections leaves under {CO_TENANT_RESERVE} for co-tenants"
+        );
+        // A rolling deploy runs an old and a new process side by side while
+        // the old one drains, which must not exhaust the server.
+        assert!(
+            fleet + POOL_MAX <= SERVER_LIMIT,
+            "{fleet} connections leaves no room for an overlapping deploy"
+        );
+    }
 
     /// Indexes added for queries that are executed on a fixed cadence rather
     /// than by a person: the progress poll's fleet-wide duration sample, the

@@ -539,7 +539,7 @@ pub fn router(state: ApiState) -> Router {
             tower::ServiceBuilder::new()
                 .layer(HandleErrorLayer::new(|_: BoxError| async { server_busy() }))
                 .layer(LoadShedLayer::new())
-                .layer(GlobalConcurrencyLimitLayer::new(max_inflight_requests())),
+                .layer(GlobalConcurrencyLimitLayer::new(MAX_INFLIGHT_REQUESTS)),
         )
         .layer(TraceLayer::new_for_http())
 }
@@ -560,22 +560,25 @@ fn server_busy() -> axum::response::Response {
 }
 
 /// Ceiling on requests being served at once, above which the tier sheds
-/// rather than queues. Sized from the visible CPUs by default because the
-/// expensive request classes are CPU-bound (rasterization) or
-/// Postgres-bound, and both degrade worse when oversubscribed than when
-/// callers are told to retry.
-fn max_inflight_requests() -> usize {
-    std::env::var("MAX_INFLIGHT_REQUESTS")
-        .ok()
-        .and_then(|value| value.parse::<usize>().ok())
-        .filter(|value| *value > 0)
-        .unwrap_or_else(|| {
-            std::thread::available_parallelism()
-                .map(|cpus| cpus.get() * 64)
-                .unwrap_or(512)
-        })
-        .clamp(32, 8_192)
-}
+/// rather than queues.
+///
+/// This limit buys latency and memory, never throughput: the expensive request
+/// classes are CPU-bound (rasterization) or Postgres-bound, and the 12 vCPU
+/// they run on are shared with the worker's git clones, with Postgres itself,
+/// and with co-tenant services on the same host. Past the point where the
+/// CPUs are busy, an extra accepted request is a response body held for the
+/// full 60-second timeout — and that queue, not the CPU, is what turns a burst
+/// into an out-of-memory restart.
+///
+/// 256 is 16× [`crate::db`]'s Postgres pool, deliberately generous relative to
+/// what the box can execute so that cheap cache and CDN-revalidation hits never
+/// shed, while a burst of genuinely Postgres-backed requests waits on the pool's
+/// bounded acquire timeout rather than being turned away. It replaces a
+/// CPU-derived 64-per-core value that allowed 768 in flight here — a queue
+/// several times deeper than anything this host can drain inside the request
+/// timeout, so it shed far too late to protect anyone. At the ceiling the
+/// buffered bodies are tens of megabytes against 32 GB of RAM.
+const MAX_INFLIGHT_REQUESTS: usize = 256;
 
 /// Admission middleware shared by the four rate-limited route classes.
 /// Client identity comes from [`CloudflareIpKeyExtractor`] (forwarding

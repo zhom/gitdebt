@@ -10,18 +10,19 @@
 //! until the per-token budget has headroom (and honors `Retry-After` on
 //! secondary limits). Each request reserves budget before it is sent.
 //!
-//! Default to a SINGLE worker (avoid burstiness, per AGENTS.md);
-//! `WORKER_COUNT` overrides. Exponential backoff on transient errors.
+//! Fallback status: with GH Archive enabled this pool does not run at all —
+//! the archive coordinator is the primary star-history source. It exists for
+//! local installs and for a deployment whose BigQuery credentials are absent,
+//! which is why every ceiling below is sized to stay out of the way of the
+//! repo-analysis pool rather than to maximise star throughput.
 //!
 //! Big-repo guardrail: a single attempt fetches at most
-//! `MAX_STARGAZER_PAGES` pages (env, default 400 → 40k stars). A repo
-//! larger than that is written partial (cache stays `*_complete = FALSE`)
-//! and re-enqueued with a persisted page cursor, so one viral repo can't
-//! eat the whole hourly budget in a single job.
-//
-// TODO: GH Archive/BigQuery backfill for >cap repos — the right primary
-// source for the full timeline of million-star repos, moving the hot path
-// off GitHub's per-token API budget entirely (see AGENTS.md roadmap).
+//! [`MAX_STARGAZER_PAGES`] pages. A repo larger than that is written partial
+//! (cache stays `*_complete = FALSE`) and re-enqueued with a persisted page
+//! cursor, so one viral repo can't eat the whole hourly budget — or hold one
+//! Postgres transaction open for an unbounded write — in a single job.
+//!
+//! Exponential backoff on transient errors.
 
 use std::sync::Arc;
 use std::time::Duration;
@@ -36,55 +37,78 @@ use crate::db::Db;
 use crate::github::{GithubClient, GithubError};
 use crate::queue;
 
-/// Default per-attempt page cap. 400 pages × 100/page = 40k stars per
-/// attempt. Tunable via `MAX_STARGAZER_PAGES`.
-const DEFAULT_MAX_STARGAZER_PAGES: u32 = 400;
+/// Pages one fetch attempt may walk: 200 × 100 stars/page = 20k stars, after
+/// which the job is written partial and re-enqueued with a page cursor.
+///
+/// Sized against Postgres rather than against GitHub. The end of an attempt is
+/// a single multi-thousand-row write to the same database — on the same
+/// 12 vCPU co-tenant host — that the repo-analysis pool commits its aggregates
+/// to, and the GH Archive backfill's 8-14k-row inserts already log >1s
+/// statements there while analyses are running. 20k rows keeps this pool's
+/// largest statement in that same order instead of double it; the only cost of
+/// the smaller chunk is one extra `rel=last` probe (a single GitHub call) per
+/// 20k stars, which is nothing next to the 200 page fetches around it.
+const MAX_STARGAZER_PAGES: u32 = 200;
 
 /// Backoff ceiling for transient errors (1, 2, 4, … capped at 32s),
 /// matching the AGENTS.md-documented schedule.
 const BACKOFF_CAP_SECS: u64 = 32;
 
+/// Workers this pool runs, whatever the caller asks for.
+///
+/// Every worker here contends with the repo-analysis pool for the same 12
+/// vCPU, the same disk, and the same Postgres, and star fetching has no
+/// deadline attached to it while an analysis has a visitor waiting on a
+/// report. Two is enough to keep the queue draining — one worker blocked on a
+/// GitHub round-trip while the other commits its pages — and small enough that
+/// the fallback can never be the reason an analysis waits for a connection.
+/// GitHub's own per-token budget, not this number, is what bounds throughput.
+const MAX_STAR_FETCH_WORKERS: usize = 2;
+
 #[derive(Clone)]
 pub struct WorkerCtx {
     pub github: Arc<GithubClient>,
     pub cache: Cache,
-    /// Per-attempt page cap (the big-repo guardrail).
-    pub max_pages: u32,
 }
 
 impl WorkerCtx {
     pub fn new(github: Arc<GithubClient>, cache: Cache) -> Self {
-        let max_pages = std::env::var("MAX_STARGAZER_PAGES")
-            .ok()
-            .and_then(|s| s.parse().ok())
-            .filter(|n| *n > 0)
-            .unwrap_or(DEFAULT_MAX_STARGAZER_PAGES);
-        Self {
-            github,
-            cache,
-            max_pages,
-        }
+        Self { github, cache }
     }
 }
 
-/// Max repos one metadata-backfill sweep pass may enqueue. Bounds both the
-/// per-pass GitHub metadata spend (one metadata call per repo when the
-/// claim path processes it) and the queue growth from a single sweep.
-const METADATA_BACKFILL_BATCH: i64 = 200;
+/// Repos one metadata-backfill sweep pass may enqueue. Bounds both the
+/// per-pass GitHub metadata spend (one metadata call per repo when the claim
+/// path processes it) and the queue growth from a single sweep.
+///
+/// A hundred is deliberately modest: this is one-off repair of legacy rows
+/// with no deadline on it, running hourly against a database that interactive
+/// analysis writes to, and a backlog that drains over a day of passes is
+/// indistinguishable to any reader from one that drains in an afternoon.
+const METADATA_BACKFILL_BATCH: i64 = 100;
 
 /// Sweep cadence: one pass at startup, then hourly.
 const METADATA_BACKFILL_INTERVAL: Duration = Duration::from_secs(60 * 60);
 
-/// Mirror of the analyze-path global pending-queue ceiling
-/// (`analyzer::max_pending_fetches`): past this many `pending` rows the
-/// sweep enqueues nothing and waits for its next pass.
-fn max_pending_fetches() -> i64 {
-    std::env::var("MAX_PENDING_FETCHES")
-        .ok()
-        .and_then(|s| s.parse::<i64>().ok())
-        .filter(|n| *n > 0)
-        .unwrap_or(5_000)
-}
+/// Gap between the individual enqueues of one backfill pass.
+///
+/// The candidate query is one statement, but the enqueues are one round trip
+/// each, and firing a hundred of them back to back takes a pooled connection
+/// and a burst of WAL from whatever analysis is committing aggregates at that
+/// moment. At 50ms the whole pass is spread over ~5s of an hour-long cycle,
+/// which is invisible to the backlog and invisible to Postgres.
+const BACKFILL_ENQUEUE_PACING: Duration = Duration::from_millis(50);
+
+/// Global ceiling on `pending` star-fetch rows: past this many the sweep
+/// enqueues nothing and waits for its next pass. Mirrors the analyze path's
+/// own ceiling in `analyzer`.
+///
+/// This bounds queue *depth*, not concurrency: a pending row is ~100 bytes and
+/// costs nothing until a worker claims it, so the number is generous on
+/// purpose. What protects the host is [`MAX_STAR_FETCH_WORKERS`]; what this
+/// protects is the queue table from unbounded growth when acquisition is
+/// slower than enqueue for a long stretch.
+const MAX_PENDING_FETCHES: i64 = 5_000;
 
 /// One pass of the profile-stats metadata backfill sweep.
 ///
@@ -97,14 +121,15 @@ fn max_pending_fetches() -> i64 {
 /// any history, so healing costs one metadata call per repo and never
 /// re-paginates stargazers.
 ///
-/// Bounded per pass ([`METADATA_BACKFILL_BATCH`]), respects the global
-/// pending ceiling, ordinary popularity-first priority, and skips repos that
-/// already hold any queue row (pending/in-progress are already being
-/// handled; dead/restricted parks are terminal and must not be revived
-/// here). Returns the repos actually enqueued.
+/// Bounded per pass ([`METADATA_BACKFILL_BATCH`]) and paced row by row
+/// ([`BACKFILL_ENQUEUE_PACING`]), respects the global pending ceiling,
+/// ordinary popularity-first priority, and skips repos that already hold any
+/// queue row (pending/in-progress are already being handled; dead/restricted
+/// parks are terminal and must not be revived here). Returns the repos
+/// actually enqueued.
 pub async fn sweep_missing_metadata(db: &Db) -> Result<Vec<String>> {
     let pending = queue::pending_only_count(db).await?;
-    let headroom = max_pending_fetches().saturating_sub(pending);
+    let headroom = MAX_PENDING_FETCHES.saturating_sub(pending);
     if headroom <= 0 {
         return Ok(Vec::new());
     }
@@ -125,6 +150,9 @@ pub async fn sweep_missing_metadata(db: &Db) -> Result<Vec<String>> {
     .await?;
     let mut enqueued = Vec::with_capacity(candidates.len());
     for (repo, view_count) in candidates {
+        if !enqueued.is_empty() {
+            sleep(BACKFILL_ENQUEUE_PACING).await;
+        }
         queue::enqueue(db, &repo, view_count).await?;
         enqueued.push(repo);
     }
@@ -134,9 +162,22 @@ pub async fn sweep_missing_metadata(db: &Db) -> Result<Vec<String>> {
 /// How stale a tracked repository's public metadata may get before the worker
 /// refreshes it.
 const METADATA_REFRESH_TTL: chrono::Duration = chrono::Duration::hours(24);
-/// Repositories one refresh pass may touch. One GitHub metadata call each,
-/// so this is also the per-pass budget spend.
+
+/// Repositories one refresh pass may touch. One GitHub metadata call each, so
+/// this is also the per-pass budget spend.
+///
+/// Self-pacing, which is why it stays this large while the backfill sweep does
+/// not: each repository costs a blocking GitHub round-trip before its single
+/// small `UPDATE`, so a pass is a trickle of ~3 writes/second spread over
+/// tens of seconds of a 15-minute cycle — it cannot burst at Postgres the way
+/// a loop of pure inserts can. 120 per pass covers ~11.5k repositories a day,
+/// which is what keeps the whole tracked corpus inside the 24h
+/// [`METADATA_REFRESH_TTL`] that badges and cards read from.
 const METADATA_REFRESH_BATCH: i64 = 120;
+
+/// Refresh cadence: one pass at startup, then every 15 minutes. Short enough
+/// that the daily budget above is delivered as small trickles rather than as
+/// one long burst competing with an analysis commit.
 const METADATA_REFRESH_INTERVAL: Duration = Duration::from_secs(15 * 60);
 
 /// One pass of the public-metadata refresh sweep.
@@ -225,10 +266,25 @@ pub fn spawn_metadata_backfill(db: Db) {
     });
 }
 
-/// Spawn `count` background workers (min 1). Each loops claiming and
-/// processing jobs.
-pub fn spawn_pool(ctx: WorkerCtx, count: usize) {
-    let count = count.max(1);
+/// Workers this pool actually runs for a requested size. Pure so the clamp is
+/// unit-testable without spawning anything.
+fn effective_worker_count(requested: usize) -> usize {
+    requested.clamp(1, MAX_STAR_FETCH_WORKERS)
+}
+
+/// Spawn background workers, clamped to [`MAX_STAR_FETCH_WORKERS`]. Each
+/// loops claiming and processing jobs. The clamp is enforced here rather than
+/// trusted to the caller because this pool's cost lands on the analysis pool's
+/// CPU and database, not on the caller's.
+pub fn spawn_pool(ctx: WorkerCtx, requested: usize) {
+    let count = effective_worker_count(requested);
+    if requested > count {
+        tracing::info!(
+            requested,
+            effective = count,
+            "star-fetch pool clamped so background star work yields to repo analysis"
+        );
+    }
     for i in 0..count {
         let ctx = ctx.clone();
         let id = format!("sf{i}");
@@ -241,7 +297,7 @@ pub fn spawn_pool(ctx: WorkerCtx, count: usize) {
 async fn run_worker(worker_id: String, ctx: WorkerCtx) {
     tracing::info!(
         worker_id,
-        max_pages = ctx.max_pages,
+        max_pages = MAX_STARGAZER_PAGES,
         "star-fetch worker started"
     );
     let idle = Duration::from_secs(5);
@@ -544,7 +600,7 @@ async fn full_fetch<S: PageSource + Sync>(
     } else {
         next_page.max(1)
     };
-    let plan = plan_full_chunk(start_page, last_page, ctx.max_pages);
+    let plan = plan_full_chunk(start_page, last_page, MAX_STARGAZER_PAGES);
     let mut acc = if start_page == 1 { first } else { Vec::new() };
     let pages: Vec<u32> = plan
         .pages
@@ -679,7 +735,7 @@ async fn incremental_fetch<S: PageSource>(ctx: &WorkerCtx, repo: &str, src: &S) 
     let (_first, last_page) = src.page(1).await?;
     let last_page = last_page.unwrap_or(1);
 
-    let plan = plan_incremental(last_page, ctx.max_pages);
+    let plan = plan_incremental(last_page, MAX_STARGAZER_PAGES);
     let mut new_items: Vec<StargazerEvent> = Vec::new();
     let mut reached_boundary = false;
 
@@ -945,6 +1001,40 @@ mod tests {
         let plan = plan_full_chunk(1, 2, 0);
         assert_eq!(plan.pages, vec![1]);
         assert_eq!(plan.next_page, Some(2));
+    }
+
+    /// The fallback pool shares one 12 vCPU co-tenant host and one Postgres
+    /// with the repo-analysis pool, so its size is a property of this module,
+    /// not of whatever a caller passes in.
+    #[test]
+    fn worker_pool_is_clamped_however_many_are_requested() {
+        assert_eq!(effective_worker_count(0), 1, "always at least one worker");
+        assert_eq!(effective_worker_count(1), 1);
+        assert_eq!(effective_worker_count(8), MAX_STAR_FETCH_WORKERS);
+        assert_eq!(effective_worker_count(usize::MAX), MAX_STAR_FETCH_WORKERS);
+        const {
+            assert!(
+                MAX_STAR_FETCH_WORKERS <= 4,
+                "star fetching has no deadline; analysis does"
+            )
+        };
+    }
+
+    /// One attempt's commit is a single write to the database the analysis
+    /// pool commits aggregates to, so the page cap is a write-size bound.
+    #[test]
+    fn one_attempt_writes_a_bounded_number_of_rows() {
+        const {
+            assert!(
+                MAX_STARGAZER_PAGES as usize * 100 <= 20_000,
+                "an attempt must not commit more rows than the archive backfill's slow inserts"
+            )
+        };
+        // The cap is also the resume unit: a repo past it continues from a
+        // cursor instead of restarting.
+        let plan = plan_full_chunk(1, MAX_STARGAZER_PAGES + 5, MAX_STARGAZER_PAGES);
+        assert_eq!(plan.pages.len(), MAX_STARGAZER_PAGES as usize);
+        assert_eq!(plan.next_page, Some(MAX_STARGAZER_PAGES + 1));
     }
 
     #[test]

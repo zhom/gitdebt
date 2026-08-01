@@ -55,23 +55,40 @@ const BINARY_SNIFF_BYTES: usize = 8 * 1024;
 /// from a promisor remote first, which put the largest repositories — the ones
 /// whose language breakdown is most worth having — permanently on the census.
 /// Reading them out of a local pack is a different order of cost, so the
-/// ceiling is now sized to cover a kernel-scale tree rather than to bound a
-/// network transfer.
-const DEFAULT_EXACT_LINE_COUNT_MAX_FILES: usize = 200_000;
-// Exact lines are a refinement over the cheap, always-saved language census,
-// so this stays a ceiling rather than an open-ended phase — but it has to be
-// larger than the work it bounds or it decides the outcome by itself, which is
-// exactly what happened when it was eight seconds and the files had to be
-// fetched. The read phase below carries its own deadline; this one is the
-// backstop over the whole call.
-const DEFAULT_EXACT_LINE_COUNT_TIMEOUT_SECS: u64 = 180;
+/// ceiling covers a kernel-scale tree (linux's HEAD is ~90k files) with room
+/// to spare rather than bounding a network transfer that no longer happens.
+const EXACT_LINE_COUNT_MAX_FILES: usize = 200_000;
 
-/// Wall-clock ceiling for the read phase. It degrades to the file census,
-/// which is always saved, so it cannot fail an analysis.
-const DEFAULT_EXACT_LINE_COUNT_READ_TIMEOUT_SECS: u64 = 120;
-/// Ceiling on the tree listing itself. Local and cheap even on a monorepo;
-/// this exists so a damaged object store cannot stall the phase forever.
-const DEFAULT_TREE_LISTING_TIMEOUT_SECS: u64 = 120;
+/// Ceiling on the whole exact-count call, and the last thing this module owes
+/// the analysis it runs inside.
+///
+/// The line count is the `finishing` phase of an analysis: every durable
+/// signal is already written, so what this bounds is how long a completed run
+/// keeps holding a worker slot that a queued repository is waiting for. Three
+/// minutes covers any tree that passes [`EXACT_LINE_COUNT_MAX_FILES`] on a
+/// 12 vCPU box shared with Postgres, the star workers and the sibling
+/// analyses, and a lapse costs the refinement rather than the run: the file
+/// census is saved either way.
+///
+/// The read phase carries its own [`EXACT_LINE_COUNT_READ_TIMEOUT`]; this is
+/// the backstop over the whole call, and the two together are what the
+/// analysis stall guard assumes bounds `finishing`.
+pub const fn exact_line_count_timeout() -> std::time::Duration {
+    std::time::Duration::from_secs(180)
+}
+
+/// Wall-clock ceiling for the read phase, two thirds of
+/// [`exact_line_count_timeout`] so the outer backstop still has room to fire
+/// after this one has degraded cleanly. It degrades to the file census, which
+/// is always saved, so it cannot fail an analysis.
+const EXACT_LINE_COUNT_READ_TIMEOUT: std::time::Duration = std::time::Duration::from_secs(120);
+
+/// Ceiling on the tree listing itself. `ls-tree -r` against a complete local
+/// clone is one pack read even on a monorepo — seconds, not minutes — so two
+/// minutes exists only so that a damaged object store cannot stall the phase
+/// forever. Unlike the counts below, this one runs before readiness and the
+/// census are saved, so it is a hard error rather than a degradation.
+const TREE_LISTING_TIMEOUT: std::time::Duration = std::time::Duration::from_secs(120);
 
 #[derive(Debug, Clone)]
 pub struct LanguageCount {
@@ -126,31 +143,17 @@ pub(crate) async fn head_blobs(repo_path: &Path) -> Result<Vec<TreeBlob>> {
         .arg(repo_path)
         .args(["ls-tree", "-rz", "HEAD"])
         .kill_on_drop(true);
-    let budget = budget_from_env(
-        "REPO_LINE_COUNT_TREE_TIMEOUT_SECONDS",
-        DEFAULT_TREE_LISTING_TIMEOUT_SECS,
-    );
-    let Ok(output) = tokio::time::timeout(budget, command.output()).await else {
-        bail!("git ls-tree did not finish in {}s", budget.as_secs());
+    let Ok(output) = tokio::time::timeout(TREE_LISTING_TIMEOUT, command.output()).await else {
+        bail!(
+            "git ls-tree did not finish in {}s",
+            TREE_LISTING_TIMEOUT.as_secs()
+        );
     };
     let output = output.context("git ls-tree")?;
     if !output.status.success() {
         bail!("git ls-tree exited {}", output.status);
     }
     Ok(parse_tree_listing(&output.stdout))
-}
-
-/// Wall-clock ceiling read from `name`, in seconds. Zero and unparseable
-/// values fall back to the default: a ceiling of zero would mean "no
-/// repository is ever counted exactly", which is never what an operator means.
-fn budget_from_env(name: &str, default_seconds: u64) -> std::time::Duration {
-    std::time::Duration::from_secs(
-        std::env::var(name)
-            .ok()
-            .and_then(|value| value.parse().ok())
-            .filter(|value| *value > 0)
-            .unwrap_or(default_seconds),
-    )
 }
 
 /// Inspect contributor-facing files from their paths alone, reading no blob.
@@ -328,7 +331,7 @@ pub(crate) async fn count_lines_for(
         })
         .cloned()
         .collect();
-    if candidates.is_empty() || candidates.len() > exact_line_count_max_files() {
+    if candidates.is_empty() || candidates.len() > EXACT_LINE_COUNT_MAX_FILES {
         return Ok(None);
     }
     let repo_path = repo_path.to_path_buf();
@@ -336,11 +339,7 @@ pub(crate) async fn count_lines_for(
     // runtime threads. It carries its own deadline because a blocking task is
     // not cancellable: an outer `tokio::time::timeout` returns while the
     // thread — and the `git cat-file` child it is feeding — keep running.
-    let deadline = std::time::Instant::now()
-        + budget_from_env(
-            "REPO_LINE_COUNT_READ_TIMEOUT_SECONDS",
-            DEFAULT_EXACT_LINE_COUNT_READ_TIMEOUT_SECS,
-        );
+    let deadline = std::time::Instant::now() + EXACT_LINE_COUNT_READ_TIMEOUT;
     task::spawn_blocking(move || read_and_count(&repo_path, &candidates, deadline))
         .await
         .context("line-count task")?
@@ -472,24 +471,6 @@ fn read_and_count(
         .collect();
     out.sort_by_key(|row| std::cmp::Reverse(row.lines_code));
     Ok(out)
-}
-
-pub fn exact_line_count_max_files() -> usize {
-    std::env::var("REPO_LINE_COUNT_MAX_FILES")
-        .ok()
-        .and_then(|value| value.parse().ok())
-        .filter(|value| *value > 0)
-        .unwrap_or(DEFAULT_EXACT_LINE_COUNT_MAX_FILES)
-}
-
-pub fn exact_line_count_timeout() -> std::time::Duration {
-    std::time::Duration::from_secs(
-        std::env::var("REPO_LINE_COUNT_TIMEOUT_SECONDS")
-            .ok()
-            .and_then(|value| value.parse().ok())
-            .filter(|value| *value > 0)
-            .unwrap_or(DEFAULT_EXACT_LINE_COUNT_TIMEOUT_SECS),
-    )
 }
 
 /// Replace the persisted line counts for `repo` with `counts`. Single

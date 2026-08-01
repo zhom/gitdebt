@@ -13,14 +13,30 @@ const USER_AGENT_STR: &str = concat!("gitdebt/", env!("CARGO_PKG_VERSION"));
 const API_BASE: &str = "https://api.github.com";
 type StargazerPageEvents = Vec<(i64, DateTime<Utc>)>;
 
-/// Concurrency factor for parallelized stargazer page fetches. 8 is a
-/// pragmatic default — high enough that TCP/TLS handshake cost amortizes
-/// across pages, low enough that we don't pile up rate-limit-tracker
-/// wakeups when GitHub momentarily slows. Tunable per-deployment if a
-/// faster pipe wants to push it.
+/// Pages of a repository's stargazer list fetched in parallel. 8 is high
+/// enough that TCP/TLS handshake cost amortizes across pages and low enough
+/// that we don't pile up rate-limit-tracker wakeups when GitHub momentarily
+/// slows. Raising it would not fetch a repository faster: the per-token
+/// GitHub budget, not round-trip latency, is what bounds this walk.
 const STARGAZER_FETCH_CONCURRENCY: usize = 8;
-const DEFAULT_MAX_IN_FLIGHT_REQUESTS: usize = 64;
-const HARD_MAX_IN_FLIGHT_REQUESTS: usize = 90;
+
+/// Concurrent REST requests one client may have outstanding.
+///
+/// GitHub asks callers to stay under 100 concurrent requests per token, so
+/// this is a courtesy limit owed to GitHub rather than a number sized for the
+/// host: these requests are network-bound and cost the 12-vCPU co-tenant box
+/// almost nothing. 64 keeps clear headroom under GitHub's line while sitting
+/// well above the worker's real peak — the star-fetch pool is deliberately
+/// small and each of its jobs fans out to at most
+/// [`STARGAZER_FETCH_CONCURRENCY`] pages, alongside single metadata lookups —
+/// so the semaphore stays a backstop against a pathological fan-out and never
+/// the thing that paces normal ingestion. That pacing belongs to
+/// `RateLimitTracker`, which is aware of the actual remaining budget.
+///
+/// A signed-in visitor's OAuth client is a separate instance with its own
+/// permits, which is correct: it spends that user's own GitHub allowance and
+/// must not be throttled against the shared worker token's traffic.
+const MAX_IN_FLIGHT_REQUESTS: usize = 64;
 
 #[derive(Debug, Error)]
 pub enum GithubError {
@@ -59,9 +75,8 @@ pub struct GithubClient {
     /// OAuth user token, etc). Tokens with separate GitHub-side budgets
     /// must each have a distinct source so we don't conflate quotas.
     source: String,
-    /// GitHub recommends keeping concurrent REST requests below 100. This
-    /// process-wide-per-client gate keeps an 8× analysis configuration plus
-    /// request traffic inside that boundary.
+    /// Per-client gate holding this client's share of GitHub's
+    /// under-100-concurrent-requests guidance; see [`MAX_IN_FLIGHT_REQUESTS`].
     request_permits: Arc<Semaphore>,
 }
 
@@ -102,16 +117,11 @@ impl GithubClient {
             .pool_idle_timeout(std::time::Duration::from_secs(90))
             .build()?;
         let source = source_for_token(kind, token);
-        let max_in_flight = std::env::var("GITHUB_MAX_IN_FLIGHT_REQUESTS")
-            .ok()
-            .and_then(|value| value.parse::<usize>().ok())
-            .unwrap_or(DEFAULT_MAX_IN_FLIGHT_REQUESTS)
-            .clamp(1, HARD_MAX_IN_FLIGHT_REQUESTS);
         Ok(Self {
             http,
             rate,
             source,
-            request_permits: Arc::new(Semaphore::new(max_in_flight)),
+            request_permits: Arc::new(Semaphore::new(MAX_IN_FLIGHT_REQUESTS)),
         })
     }
 

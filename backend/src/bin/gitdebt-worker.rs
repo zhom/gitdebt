@@ -11,6 +11,19 @@ use anyhow::{Context, Result};
 use axum::{Json, Router, extract::State, http::StatusCode, response::IntoResponse, routing::get};
 use gitdebt::{bootstrap, db::Db};
 
+/// Star-history acquisition concurrency.
+///
+/// With GH Archive enabled this is *only* the fan-out for the cheap GitHub
+/// metadata lookups that resolve stable numeric repo IDs — the timelines
+/// themselves come from batched BigQuery corpus scans run by the leader — and
+/// in the local-only fallback it is the stargazer-list pool. Either way the
+/// work is GitHub-rate-limit bound, not CPU bound: extra tasks buy nothing but
+/// hidden round-trip latency, while each one holds a Postgres connection to
+/// write with. Four keeps that pressure off a database sharing 12 vCPU with
+/// the analysis pool and this host's other tenants; the previous 8 contended
+/// with the analysis workers for exactly the connections and disk they needed.
+const STAR_WORKERS: usize = 4;
+
 #[tokio::main]
 async fn main() -> Result<()> {
     bootstrap::init_process();
@@ -24,13 +37,12 @@ async fn main() -> Result<()> {
     // transaction-scoped advisory lock and non-winners return immediately.
     gitdebt::leaderboard::spawn(db.clone());
 
-    // Repo-history analysis pool. Separate queue, separate workload
-    // shape: clones are disk-heavy + CPU-heavy, not GitHub-API-bound.
-    // Interactive profile/report requests enqueue durable priority work.
-    // Default to half the visible CPU quota on a production-sized host while
-    // retaining headroom for Postgres, HTTP, and raster work. The explicit
-    // ceiling prevents a bad env value from launching an unbounded number of
-    // git subprocesses.
+    // Repo-history analysis pool. Separate queue, separate workload shape:
+    // clones are disk-heavy + CPU-heavy, not GitHub-API-bound. Interactive
+    // profile/report requests enqueue durable priority work. How many run at
+    // once, and why that number for this host, lives with the pool itself
+    // (`repo_analysis::ANALYSIS_WORKERS`) because `repo_history` divides the
+    // host's cores by it for `pack.threads` and for the walk fan-out.
     let storage = Arc::new(gitdebt::repo_history::RepoStorage::from_env());
     let analysis_workers = gitdebt::repo_analysis::configured_analysis_workers();
     let reset = gitdebt::repo_analysis::reset_inflight_on_startup(&db).await?;
@@ -45,24 +57,6 @@ async fn main() -> Result<()> {
         tracing::info!(
             revived = analysis_revived,
             "repo-analysis: revived jobs parked by older releases"
-        );
-    }
-    // Star-history acquisition. With GH Archive enabled the leader-elected
-    // BigQuery coordinator batches repos into shared corpus scans, while
-    // WORKER_COUNT only controls the inexpensive GitHub metadata lookups
-    // needed to resolve stable numeric repo IDs. The legacy GitHub
-    // stargazer-list pool remains an explicit fallback for local/dev installs.
-    let requested_worker_count: usize = std::env::var("WORKER_COUNT")
-        .ok()
-        .and_then(|s| s.parse().ok())
-        .filter(|n| *n >= 1)
-        .unwrap_or(8);
-    let worker_count = requested_worker_count.clamp(1, 16);
-    if requested_worker_count != worker_count {
-        tracing::warn!(
-            requested = requested_worker_count,
-            effective = worker_count,
-            "WORKER_COUNT capped to protect GitHub and socket capacity"
         );
     }
     let star_reset = gitdebt::queue::reset_inflight_on_startup(&db).await?;
@@ -150,23 +144,23 @@ async fn main() -> Result<()> {
                 Arc::new(archive_client),
                 services.github.clone(),
                 cache.clone(),
-                worker_count,
+                STAR_WORKERS,
             ),
             database_url.clone(),
         );
         gitdebt::archive_hourly_db::spawn(db.clone(), database_url.clone())
             .context("GH Archive hourly follower configuration failed")?;
         tracing::info!(
-            metadata_concurrency = worker_count,
+            metadata_concurrency = STAR_WORKERS,
             "GH Archive historical coordinator and hourly follower contending for leadership"
         );
     } else {
         gitdebt::worker::spawn_pool(
             gitdebt::worker::WorkerCtx::new(services.github.clone(), cache.clone()),
-            worker_count,
+            STAR_WORKERS,
         );
         tracing::warn!(
-            worker_count,
+            star_workers = STAR_WORKERS,
             "GH Archive disabled; using the restricted GitHub stargazer-list fallback"
         );
     }
@@ -182,7 +176,7 @@ async fn main() -> Result<()> {
     let app = Router::new()
         .route("/health", get(health))
         .route("/ready", get(ready))
-        .with_state(db);
+        .with_state(db.clone());
     let listener = tokio::net::TcpListener::bind(addr)
         .await
         .with_context(|| format!("bind {addr}"))?;
@@ -190,6 +184,18 @@ async fn main() -> Result<()> {
     axum::serve(listener, app)
         .with_graceful_shutdown(bootstrap::shutdown_signal())
         .await?;
+    // The analysis pool is about to stop existing, and only this process knows
+    // that. Waiting for the two-minute lease to expire instead handed the
+    // incoming deployment a queue whose in-progress rows described workers
+    // nobody was running — they kept spending catalog-concurrency and
+    // queue-capacity budget until some worker happened to steal them minutes
+    // later. Runs abandoned here are durable and idempotent: nothing was
+    // committed unless the whole aggregate transaction was.
+    match gitdebt::repo_analysis::release_pool_claims(&db).await {
+        Ok(0) => {}
+        Ok(released) => tracing::info!(released, "repo-analysis: handed back in-flight jobs"),
+        Err(error) => tracing::warn!(%error, "repo-analysis: releasing in-flight jobs failed"),
+    }
     tracing::info!("worker shut down cleanly");
     Ok(())
 }

@@ -35,9 +35,10 @@ use tokio::process::Command;
 /// makes git generate, and this process decode, the full text of every diff
 /// rather than three integers per file. Contributor, cadence, churn and fix
 /// signals cover every commit; TODO/FIXME churn is one auxiliary marker count
-/// measured over the newest commits so it cannot hold the primary analysis
-/// hostage. This bounds one signal's *input*, never the history that is
-/// analyzed.
+/// measured over the newest commits, so a hundred of them is the entire input
+/// this signal can ever cost — one `git log -p` subprocess, however long the
+/// history behind it. This bounds one signal's *input*, never the history that
+/// is analyzed.
 pub(crate) const TODO_PATCH_COMMIT_LIMIT: usize = 100;
 /// Stable cursor for a valid repository whose default branch has no commits.
 /// It cannot collide with a Git object id and lets the normal freshness/cache
@@ -50,33 +51,109 @@ pub(crate) const EMPTY_REPOSITORY_HEAD: &str = "empty-repository";
 /// speed.
 const CACHE_FORMAT_VERSION: &str = "3";
 
-/// Wall-clock ceilings, all env-tunable, with defaults sized for a
-/// 12 vCPU / 32 GB host running the default analysis pool. Each one bounds a
-/// single phase, so a repository that is slow in one of them no longer spends
-/// another job's worth of wall clock discovering that: a lapsed refresh
-/// analyzes the revision already on disk, a lapsed TODO scan drops one
-/// auxiliary signal. Only the clone gives up on the run, because there is
-/// nothing to analyze without one.
+/// Cores this process will let git occupy across the *whole* analysis pool.
 ///
-/// The transfer ceilings are large on purpose. A complete clone is the one
-/// unavoidable network cost, it is paid once per repository, and the
-/// repositories that need it most are the ones it must not cut off: the
-/// largest failing catalog entries are 1.8 GB (godot), 2.5 GB (next.js) and
-/// 6.1 GB (linux), and at the ~1.8 MB/s the measured django clone sustained
-/// the last of those needs the better part of an hour. Every phase after the
-/// clone is local and correspondingly tight.
+/// The host has 12 vCPU and does not belong to gitdebt: Postgres runs on the
+/// same box, so do the star-fetch workers, the GH Archive backfill and
+/// unrelated services. Sizing git off `available_parallelism` is what produced
+/// the measured contention — every analysis believed it was entitled to a
+/// share of all 12 cores while the backfill was logging a >1 s statement every
+/// other second — and the repositories that lost that fight (vscode, postgres,
+/// rabbitmq) were the ones the product exists to chart. Four cores are left
+/// unclaimed so Postgres keeps answering while a clone resolves deltas, and
+/// the remaining eight are divided by the size of the analysis pool rather
+/// than handed to each of its members.
+const GIT_CORE_BUDGET: usize = 8;
+
+/// Ceiling on one cold `git clone --bare`, sized on the largest repository the
+/// catalog contains.
 ///
-/// The clone ceiling is only *reachable* because the transfer phases report
-/// liveness through [`Progress`]. The caller kills a run after a much shorter
-/// silence, so one hour-long await with no signal would have parked the
-/// largest repositories long before this budget ever applied.
-const DEFAULT_CLONE_TIMEOUT_SECS: u64 = 3_600;
-const DEFAULT_FETCH_TIMEOUT_SECS: u64 = 1_800;
-const DEFAULT_MAINTENANCE_TIMEOUT_SECS: u64 = 600;
-const DEFAULT_COMMIT_COUNT_TIMEOUT_SECS: u64 = 300;
-const DEFAULT_PLAN_TIMEOUT_SECS: u64 = 300;
-const DEFAULT_WALK_TIMEOUT_SECS: u64 = 300;
-const DEFAULT_PATCH_WALK_TIMEOUT_SECS: u64 = 120;
+/// linux is 6.1 GB and this host clones from GitHub at a measured 32 MiB/s, so
+/// the transfer alone is 6.1 GB / 32 MiB/s ≈ 195 s. The expensive half is what
+/// follows it: `index-pack` resolving deltas for ~11.7M objects with the
+/// [`GIT_CORE_BUDGET`] share one analysis gets (two threads at a pool of
+/// four), which runs on the order of fifteen minutes. Twenty minutes for an
+/// uncontended run, times a factor of three because the pool deliberately
+/// admits several analyses to the same twelve shared vCPU, is one hour.
+///
+/// That ceiling is only *reachable* because the transfer phases report
+/// liveness through [`Progress`]; a silent hour would have been killed by the
+/// caller's stall guard long before it applied. Raising it buys nothing this
+/// host can deliver — and a clone is not resumable, so any repository that
+/// cannot finish inside it is a repository gitdebt never analyzes at all.
+const CLONE_TIMEOUT: Duration = Duration::from_secs(3_600);
+
+/// Ceiling on an incremental `git fetch`.
+///
+/// Steady state is one push's worth of objects and finishes in seconds. What
+/// this bounds is the first refresh of a repository left idle for months,
+/// where the transfer is a real fraction of a clone. Half the clone ceiling
+/// covers any of those on a 32 MiB/s link and still ends a fetch that is
+/// really a wedged connection.
+const FETCH_TIMEOUT: Duration = Duration::from_secs(1_800);
+
+/// Ceiling on the `commit-graph write` that follows every clone and fetch.
+///
+/// Graphing linux's 1.46M commits is about a minute of one core; ten times
+/// that absorbs doing it while three sibling analyses hold the rest of
+/// [`GIT_CORE_BUDGET`]. Best-effort regardless — a lapse costs a slower
+/// reachable-commit count, never a wrong one.
+const COMMIT_GRAPH_TIMEOUT: Duration = Duration::from_secs(600);
+
+/// Ceiling on `rev-list --count HEAD`.
+///
+/// With the commit-graph written above this is a sub-second read even at
+/// linux's 1.46M commits, and tens of seconds without one. Five minutes
+/// therefore makes a lapse evidence that the object store is damaged rather
+/// than evidence that the repository is large, which matters because this is
+/// the one phase with no honest degradation: it fails rather than reporting a
+/// commit total it did not measure.
+const COMMIT_COUNT_TIMEOUT: Duration = Duration::from_secs(300);
+
+/// Ceiling on the `rev-list --reverse --no-merges` that enumerates the commits
+/// an analysis will walk. 1.46M object ids is ~60 MB of output the commit
+/// graph produces in seconds; five minutes is the same "the clone is broken"
+/// backstop as [`COMMIT_COUNT_TIMEOUT`].
+const PLAN_TIMEOUT: Duration = Duration::from_secs(300);
+
+/// Ceiling on ONE `git log --numstat` subprocess.
+///
+/// A chunk is at most [`METADATA_BATCH_COMMITS`] / [`walk_concurrency`]
+/// commits — 250 at a pool of four — and a commit costs ~0.44 ms against a
+/// complete local clone, so nominal is well under a second. Five minutes is
+/// not a size limit, then; it is the point at which a slice is assumed to be
+/// losing a fight for disk or CPU on a co-tenant host. Losing that fight is
+/// answered by halving the slice and running it again ([`walk_with_retry`]),
+/// never by giving up on the repository.
+const WALK_TIMEOUT: Duration = Duration::from_secs(300);
+
+/// Ceiling on ONE `git log -p` subprocess for the TODO/FIXME scan.
+///
+/// Same reasoning as [`WALK_TIMEOUT`], over at most
+/// [`TODO_PATCH_COMMIT_LIMIT`] commits of patch text with the non-text
+/// pathspecs already excluded. It was two minutes while patch bodies still
+/// arrived one promisor round trip at a time; against a complete clone the
+/// work is local, so the ceiling matches the walk it is a variant of rather
+/// than encoding a network cost that no longer exists.
+const PATCH_WALK_TIMEOUT: Duration = Duration::from_secs(300);
+
+/// Wall clock one slice's retry ladder may spend before it gives up.
+///
+/// This used to be a count of lapsed subprocesses, which bounds nothing an
+/// operator cares about: a traced walk spent ~4,100 s inside a ladder that was
+/// still under its lapse budget, because the slices that *succeeded* between
+/// the lapses cost time too. A batch boundary is the only place these walks
+/// beat the analysis heartbeat, so the stall guard read those 68 minutes as
+/// silence and killed a walk that was about to return — discarding a completed
+/// prefix of hundreds of thousands of commits, which is precisely what the
+/// ladder exists to protect.
+///
+/// Bounding elapsed time caps the thing that was actually unbounded. Fifteen
+/// minutes is a quarter of the guard's one-hour silence window, so a ladder
+/// can always run to its end and hand its prefix back before the guard has a
+/// verdict, and it is still three full per-subprocess ceilings of second
+/// chances for a host that is merely overloaded.
+const WALK_RETRY_LADDER_BUDGET: Duration = Duration::from_secs(900);
 
 /// Smallest slice of commits worth its own `git log` subprocess. Below this
 /// the fan-out in [`walk_commit_metadata_batch`] would spend more on process
@@ -87,37 +164,12 @@ const MIN_WALK_CHUNK_COMMITS: usize = 50;
 ///
 /// The walk was a single subprocess on a single core — 13.8 s of user CPU for
 /// django's 34,838 commits — even though its batches are independent and, now
-/// that the clone is complete, entirely local. The share is the cores this
-/// analysis is entitled to rather than every core on the host, for the same
-/// reason [`pack_threads_config`] divides them: the pool runs this many
+/// that the clone is complete, entirely local. The share is this analysis's
+/// slice of [`GIT_CORE_BUDGET`] rather than every core on the host, for the
+/// same reason [`pack_threads_config`] divides it: the pool runs this many
 /// analyses, and therefore this many walks, at once.
 fn walk_concurrency() -> usize {
-    let cores = std::thread::available_parallelism()
-        .map(|value| value.get())
-        .unwrap_or(2);
-    let share = (cores / crate::repo_analysis::configured_analysis_workers().max(1)).max(1);
-    usize_from_env("REPO_ANALYSIS_WALK_CONCURRENCY", share).clamp(1, 16)
-}
-
-fn usize_from_env(name: &str, default: usize) -> usize {
-    std::env::var(name)
-        .ok()
-        .and_then(|value| value.parse().ok())
-        .filter(|value| *value > 0)
-        .unwrap_or(default)
-}
-
-/// Wall-clock ceiling read from `name`, in seconds. Zero and unparseable
-/// values fall back to the default: a ceiling of zero would mean "every
-/// repository is too slow", which is never what an operator means.
-fn budget_from_env(name: &str, default_seconds: u64) -> Duration {
-    Duration::from_secs(
-        std::env::var(name)
-            .ok()
-            .and_then(|value| value.parse().ok())
-            .filter(|value| *value > 0)
-            .unwrap_or(default_seconds),
-    )
+    (GIT_CORE_BUDGET / crate::repo_analysis::configured_analysis_workers().max(1)).max(1)
 }
 
 /// Run one git subprocess under a wall-clock ceiling. `Ok(None)` means the
@@ -270,23 +322,35 @@ fn repo_label(path: &Path) -> String {
     }
 }
 
-/// Bytes of clone storage `REPOS_DIR` may hold before [`evict_clone`] starts
-/// trimming, when `REPOS_QUOTA_BYTES` is unset.
+/// Bytes of clone storage `REPOS_DIR` may hold before the eviction sweep
+/// starts trimming.
 ///
-/// **This default assumes a 500 GB data volume mounted for `REPOS_DIR`, with
-/// Postgres and the OS living outside it.** That is an assumption, not a
-/// measurement — the operator has not stated a disk budget — so it is written
-/// here as one number to change rather than spread across the module.
+/// **This assumes the measured ~313 GiB volume, shared with Postgres, the OS
+/// and the co-tenant services.** It had been configured at 335,899,345,920
+/// bytes — the whole disk — which is not a quota: the accountant sums only
+/// *finished* clones, so that ceiling is first reached while a repack is
+/// transiently doubling linux's 6.1 GB and an in-flight clone of next.js is
+/// still uncounted, and the first casualty of a full volume is the packfile
+/// being written onto it.
 ///
-/// Sizing, at the clone sizes this module now produces: a few hundred catalog
-/// repositories average a few hundred megabytes each (django is 275 MB), which
-/// is roughly 75-100 GB, and the handful of giants that must also stay warm add
-/// about 20 GB more (godot 1.8 GB, next.js 2.5 GB, linux 6.1 GB). 250 GiB
-/// therefore holds the whole intended working set with headroom of the same
-/// order again — which the sweep needs, because a repack transiently doubles
-/// one repository on disk and an in-flight clone is not yet counted against
-/// anything. The other half of the volume is deliberately left unclaimed.
-const DEFAULT_REPOS_QUOTA_BYTES: u64 = 250 * 1024 * 1024 * 1024;
+/// 250 GiB, trimmed at [`REPOS_HIGH_WATERMARK_PCT`], means clones settle
+/// around 200 GiB and are hard-capped well below the disk. That is far above
+/// the working set: 119 complete clones currently occupy 51 GB, an average of
+/// ~430 MB, so this holds several hundred of them plus every giant that must
+/// stay warm (godot 1.8 GB, next.js 2.5 GB, linux 6.1 GB). The ~113 GiB left
+/// over is what repack transients, uncounted in-flight clones, Postgres and
+/// the rest of the box get to use.
+const REPOS_QUOTA_BYTES: u64 = 250 * 1024 * 1024 * 1024;
+
+/// Fraction of [`REPOS_QUOTA_BYTES`] that clones are actually held at: the
+/// sweep both fires and stops at this line, so the top fifth of the quota is
+/// slack it never fills.
+///
+/// That slack is the point rather than a rounding allowance. The accountant
+/// sums *finished* clones only, so a repack transiently doubling linux and an
+/// in-flight clone of next.js are both spending disk no sweep can see, and
+/// 50 GiB is several times the largest pair of them.
+const REPOS_HIGH_WATERMARK_PCT: u8 = 80;
 
 /// Where clones live and how much of the volume they may hold.
 ///
@@ -294,9 +358,10 @@ const DEFAULT_REPOS_QUOTA_BYTES: u64 = 250 * 1024 * 1024 * 1024;
 /// 275 MB for django, 1.8 GB for godot, 2.5 GB for next.js, 6.1 GB for linux,
 /// against tens of megabytes each when the same repositories were cloned
 /// blobless. Disk is now the only ceiling on what gitdebt can analyze, so
-/// `REPOS_QUOTA_BYTES` and the volume behind it are the knob that decides how
-/// many repositories stay warm — set it from your mount rather than inheriting
-/// [`DEFAULT_REPOS_QUOTA_BYTES`], whose assumed volume is written down there.
+/// [`REPOS_QUOTA_BYTES`] is what decides how many repositories stay warm; the
+/// volume it assumes is written down there. Only the mount point is
+/// deployment-specific, and that is the one thing still read from the
+/// environment.
 #[derive(Clone, Debug)]
 pub struct RepoStorage {
     pub root: PathBuf,
@@ -312,18 +377,10 @@ impl RepoStorage {
                 let home = std::env::var("HOME").unwrap_or_else(|_| "/tmp".into());
                 PathBuf::from(home).join(".cache/gitdebt/repos")
             });
-        let quota_bytes: u64 = std::env::var("REPOS_QUOTA_BYTES")
-            .ok()
-            .and_then(|s| s.parse().ok())
-            .unwrap_or(DEFAULT_REPOS_QUOTA_BYTES);
-        let high_watermark_pct: u8 = std::env::var("REPOS_HIGH_WATERMARK_PCT")
-            .ok()
-            .and_then(|s| s.parse().ok())
-            .unwrap_or(80);
         Self {
             root,
-            quota_bytes,
-            high_watermark_pct,
+            quota_bytes: REPOS_QUOTA_BYTES,
+            high_watermark_pct: REPOS_HIGH_WATERMARK_PCT,
         }
     }
 
@@ -353,16 +410,20 @@ impl RepoHandle {
 
 /// Thread cap handed to every git invocation. `index-pack` defaults to one
 /// thread per visible core, so N concurrent clones oversubscribe the host by a
-/// factor of N while Postgres runs beside them. Dividing the cores by the pool
-/// size keeps the whole pool inside one host's CPU budget.
+/// factor of N while Postgres runs beside them. Dividing [`GIT_CORE_BUDGET`]
+/// by the pool size keeps the whole pool inside the share of the box gitdebt
+/// owns.
+///
+/// It divides, so the pool size and the speed of any one clone trade directly
+/// against each other: eight workers on this host left each `index-pack` a
+/// single thread, which is how repositories that had already finished
+/// transferring still failed to finish resolving. Fewer, fatter workers is the
+/// only side of that trade where a giant repository completes.
 fn pack_threads_config() -> &'static str {
     static CONFIG: std::sync::OnceLock<String> = std::sync::OnceLock::new();
     CONFIG.get_or_init(|| {
-        let cores = std::thread::available_parallelism()
-            .map(|value| value.get())
-            .unwrap_or(2);
         let threads =
-            (cores / crate::repo_analysis::configured_analysis_workers().max(1)).clamp(1, 8);
+            (GIT_CORE_BUDGET / crate::repo_analysis::configured_analysis_workers().max(1)).max(1);
         format!("pack.threads={threads}")
     })
 }
@@ -552,11 +613,7 @@ async fn clone_bare(repo: &str, path: &Path, progress: Option<Progress<'_>>) -> 
         ])
         .arg(&url)
         .arg(path);
-    let budget = budget_from_env(
-        "REPO_ANALYSIS_CLONE_TIMEOUT_SECONDS",
-        DEFAULT_CLONE_TIMEOUT_SECS,
-    );
-    let Some(output) = output_within_progress(command, budget, progress)
+    let Some(output) = output_within_progress(command, CLONE_TIMEOUT, progress)
         .await
         .context("spawn full git clone")?
     else {
@@ -568,12 +625,12 @@ async fn clone_bare(repo: &str, path: &Path, progress: Option<Progress<'_>>) -> 
         let _ = tokio::fs::remove_dir_all(path).await;
         tracing::info!(
             repo,
-            budget_seconds = budget.as_secs(),
+            budget_seconds = CLONE_TIMEOUT.as_secs(),
             "clone exceeded its budget; discarding the partial clone"
         );
         bail!(
             "{BUDGET_MARKER}: clone did not finish in {}s",
-            budget.as_secs()
+            CLONE_TIMEOUT.as_secs()
         );
     };
     if !output.status.success() {
@@ -613,11 +670,7 @@ async fn write_commit_graph(path: &Path, progress: Option<Progress<'_>>) {
         "--split",
         "--progress",
     ]);
-    let budget = budget_from_env(
-        "REPO_ANALYSIS_GIT_MAINTENANCE_TIMEOUT_SECONDS",
-        DEFAULT_MAINTENANCE_TIMEOUT_SECS,
-    );
-    match output_within_progress(command, budget, progress).await {
+    match output_within_progress(command, COMMIT_GRAPH_TIMEOUT, progress).await {
         Ok(Some(output)) if output.status.success() => {}
         Ok(Some(output)) => tracing::debug!(
             stderr = %String::from_utf8_lossy(&output.stderr),
@@ -628,7 +681,7 @@ async fn write_commit_graph(path: &Path, progress: Option<Progress<'_>>) {
         // because the count's own ceiling is the next thing to lapse.
         Ok(None) => tracing::info!(
             repo = repo_label(path),
-            budget_seconds = budget.as_secs(),
+            budget_seconds = COMMIT_GRAPH_TIMEOUT.as_secs(),
             "commit-graph write exceeded its budget"
         ),
         Err(error) => tracing::debug!(%error, "commit-graph write could not run"),
@@ -670,17 +723,13 @@ async fn fetch_updates(path: &Path, progress: Option<Progress<'_>>) -> Result<()
     // `--` before the positional remote name: defense-in-depth so a future
     // unvalidated positional arg can't be parsed as a flag.
     command.args(["--", "origin", &refspec]);
-    let budget = budget_from_env(
-        "REPO_ANALYSIS_FETCH_TIMEOUT_SECONDS",
-        DEFAULT_FETCH_TIMEOUT_SECS,
-    );
-    let Some(output) = output_within_progress(command, budget, progress)
+    let Some(output) = output_within_progress(command, FETCH_TIMEOUT, progress)
         .await
         .context("spawn git fetch")?
     else {
         bail!(
             "{BUDGET_MARKER}: fetch did not finish in {}s",
-            budget.as_secs()
+            FETCH_TIMEOUT.as_secs()
         );
     };
     if !output.status.success() {
@@ -1007,17 +1056,13 @@ pub(crate) async fn plan_commits(
     };
     let mut command = git_in(&handle.path);
     command.args(["rev-list", "--reverse", "--no-merges", &range]);
-    let budget = budget_from_env(
-        "REPO_ANALYSIS_PLAN_TIMEOUT_SECONDS",
-        DEFAULT_PLAN_TIMEOUT_SECS,
-    );
-    let Some(output) = output_within(command, budget)
+    let Some(output) = output_within(command, PLAN_TIMEOUT)
         .await
         .context("git rev-list")?
     else {
         bail!(
             "{BUDGET_MARKER}: commit selection did not finish in {}s",
-            budget.as_secs()
+            PLAN_TIMEOUT.as_secs()
         );
     };
     if !output.status.success() {
@@ -1096,10 +1141,6 @@ pub(crate) async fn reachable_commit_count(handle: &RepoHandle) -> Result<usize>
     }
     let mut command = git_in(&handle.path);
     command.args(["rev-list", "--count", "HEAD"]);
-    let budget = budget_from_env(
-        "REPO_ANALYSIS_COMMIT_COUNT_TIMEOUT_SECONDS",
-        DEFAULT_COMMIT_COUNT_TIMEOUT_SECS,
-    );
     // This is the one phase with no honest degradation. The number is the
     // repository's exact commit total; substituting the analyzed non-merge
     // count, or zero, would state something false about the repository. A
@@ -1107,13 +1148,13 @@ pub(crate) async fn reachable_commit_count(handle: &RepoHandle) -> Result<usize>
     // explicitly named failure — and with
     // the commit-graph written above it is a sub-second read even at a million
     // commits, so lapsing means the clone itself is damaged.
-    let Some(output) = output_within(command, budget)
+    let Some(output) = output_within(command, COMMIT_COUNT_TIMEOUT)
         .await
         .context("git reachable commit count")?
     else {
         bail!(
             "{BUDGET_MARKER}: reachable commit count did not finish in {}s",
-            budget.as_secs()
+            COMMIT_COUNT_TIMEOUT.as_secs()
         );
     };
     if !output.status.success() {
@@ -1194,6 +1235,19 @@ async fn walk_new_commits_batched(
 /// the `paths_changed` this returns is deliberately narrower than the commit's
 /// real path set. The per-file and per-author aggregates take their paths from
 /// [`walk_commit_metadata_batch`], which applies no pathspec.
+///
+/// A lapsed slice is halved and re-run on the same ladder the metadata walk
+/// uses, and an exhausted ladder is an error. It used to return an empty batch
+/// instead, which reads as success: every commit in it kept the
+/// `todo_added`/`todo_removed` zeros the metadata walk left, and those zeros
+/// were then persisted, charted and exported as a measurement — "this
+/// repository added no TODOs" stated with full confidence about commits nobody
+/// ever looked at. That is the truncated-but-confident trade this module
+/// refuses one function away, and it is worse here than a failure is: a
+/// [`BUDGET_MARKER`] error arrives before anything durable is written, is
+/// classified non-terminal, and re-runs the identical range against a warm
+/// clone, whereas an incremental run never revisits a commit behind the
+/// cursor — so a zero written here is permanent.
 pub(crate) async fn walk_commit_batch(
     handle: &RepoHandle,
     shas: &[String],
@@ -1201,12 +1255,28 @@ pub(crate) async fn walk_commit_batch(
     if shas.is_empty() {
         return Ok(Vec::new());
     }
+    validate_shas(shas)?;
+    let path = handle.path.as_path();
+    let walk = walk_with_retry(
+        shas,
+        "TODO patch scan",
+        Instant::now() + WALK_RETRY_LADDER_BUDGET,
+        |slice| patch_chunk(path, slice),
+    )
+    .await?;
+    // `incomplete_objects` is unreachable here: this walk has no tree-only
+    // fallback to degrade into, so an unreadable object is an error rather
+    // than a quietly inexact batch.
+    Ok(walk.commits)
+}
 
+/// One `git log -p` subprocess over an explicit SHA list.
+async fn patch_chunk(path: &Path, shas: &[String]) -> Result<ChunkOutcome> {
     // %H sha · %P parent hashes · %ae author email · %an name · %aI
     // iso8601 · %s subject. `%P` identifies the root commit, whose content
     // contributes TODO deltas but no changed-path aggregate.
     let log_format = "%x00%x00GDCOMMIT%x00%H%x00%P%x00%ae%x00%an%x00%aI%x00%s%x00";
-    let mut command = git_in(&handle.path);
+    let mut command = git_in(path);
     command.args([
         "log",
         "--no-walk=unsorted",
@@ -1222,21 +1292,17 @@ pub(crate) async fn walk_commit_batch(
     // reading and hashing both sides of a file that may be hundreds of
     // megabytes, for a line the TODO scanner then throws away.
     command.args(NON_TEXT_PATHSPECS);
-    let budget = budget_from_env(
-        "REPO_ANALYSIS_PATCH_WALK_TIMEOUT_SECONDS",
-        DEFAULT_PATCH_WALK_TIMEOUT_SECS,
-    );
-    let Some(output) = output_within(command, budget)
+    let Some(output) = output_within(command, PATCH_WALK_TIMEOUT)
         .await
         .context("batched git log")?
     else {
         tracing::info!(
-            repo = repo_label(&handle.path),
+            repo = repo_label(path),
             commits = shas.len(),
-            budget_seconds = budget.as_secs(),
-            "TODO patch scan exceeded its budget; TODO deltas omitted for this batch"
+            budget_seconds = PATCH_WALK_TIMEOUT.as_secs(),
+            "TODO patch scan exceeded its budget; retrying it in halves"
         );
-        return Ok(Vec::new());
+        return Ok(ChunkOutcome::Lapsed);
     };
     if !output.status.success() {
         bail!(
@@ -1244,7 +1310,9 @@ pub(crate) async fn walk_commit_batch(
             String::from_utf8_lossy(&output.stderr)
         );
     }
-    Ok(parse_log_records(&output.stdout))
+    Ok(ChunkOutcome::Exact(
+        parse_off_thread(output.stdout, parse_log_records).await?,
+    ))
 }
 
 /// One batch of walked commits plus whether any of it lost line movement.
@@ -1260,9 +1328,9 @@ pub(crate) async fn walk_commit_batch(
 /// repository.
 ///
 /// It is deliberately narrower than the old `degraded` flag, which also fired
-/// when a chunk merely lapsed [`DEFAULT_WALK_TIMEOUT_SECS`]. Conflating the
-/// two meant one slow chunk on a busy host threw away a walk that had already
-/// completed a million commits, and the retry started from zero. Slowness is
+/// when a chunk merely lapsed [`WALK_TIMEOUT`]. Conflating the two meant one
+/// slow chunk on a busy host threw away a walk that had already completed a
+/// million commits, and the retry started from zero. Slowness is
 /// now answered where it happens — see [`walk_with_retry`] — and never
 /// reported as damage.
 #[derive(Clone, Debug)]
@@ -1301,39 +1369,40 @@ enum ChunkOutcome {
 /// damaged object store gets.
 const MAX_WALK_CHUNK_SPLITS: u32 = 5;
 
-/// Total lapsed subprocesses one chunk walk may absorb before it gives up.
-///
-/// Depth alone does not bound the wall clock: five levels of halving is up to
-/// 63 slices, and if every one of them lapsed the chunk would sit silent for
-/// 63 budgets. A batch boundary is the only place this walk beats its
-/// heartbeat, so anything longer than `REPO_ANALYSIS_STALL_SECONDS` gets the
-/// run killed as wedged — throwing away the completed prefix that the retry
-/// ladder exists to protect. Eight lapses at the default 300 s ceiling is
-/// 40 minutes of retrying inside a 60-minute stall window, which is far more
-/// slack than a transiently busy host ever needs and still leaves the guard
-/// its margin.
-const MAX_WALK_CHUNK_LAPSES: u32 = 8;
-
 /// Where to halve a lapsed slice, or `None` when the ladder is spent.
 fn retry_split(len: usize, splits: u32) -> Option<usize> {
     (len > 1 && splits < MAX_WALK_CHUNK_SPLITS).then(|| len.div_ceil(2))
 }
 
-/// Walk `shas` through `run`, halving and retrying any slice that lapsed.
+/// Walk `shas` through `run`, halving and retrying any slice that lapsed until
+/// `deadline`.
 ///
 /// Generic over the subprocess so the retry ladder is testable without a
 /// repository that happens to be slow on the day the test runs. What it must
 /// preserve is the ordering contract every caller depends on: records come
 /// back in `shas` order no matter how many times a slice was split, which is
 /// why the halves go back on the *front* of the worklist, left before right.
-async fn walk_with_retry<'a, R, F>(shas: &'a [String], run: R) -> Result<CommitWalk>
+///
+/// `deadline` bounds how long the ladder may keep buying second chances — see
+/// [`WALK_RETRY_LADDER_BUDGET`] for why that has to be wall clock and not a
+/// count of attempts. It is passed in rather than computed here so a test can
+/// exercise the bound at a scale that does not take fifteen minutes to run.
+/// The deadline is only ever consulted after a lapse, so a ladder that runs
+/// past it still returns the slices it completed rather than discarding them,
+/// and [`MAX_WALK_CHUNK_SPLITS`] keeps the recursion finite on its own.
+async fn walk_with_retry<'a, R, F>(
+    shas: &'a [String],
+    phase: &str,
+    deadline: Instant,
+    run: R,
+) -> Result<CommitWalk>
 where
     R: Fn(&'a [String]) -> F,
     F: std::future::Future<Output = Result<ChunkOutcome>>,
 {
+    let started = Instant::now();
     let mut commits = Vec::new();
     let mut incomplete_objects = false;
-    let mut lapses = 0;
     let mut pending: std::collections::VecDeque<(&'a [String], u32)> =
         std::collections::VecDeque::new();
     pending.push_back((shas, 0));
@@ -1345,14 +1414,13 @@ where
                 incomplete_objects = true;
             }
             ChunkOutcome::Lapsed => {
-                lapses += 1;
-                let split =
-                    retry_split(slice.len(), splits).filter(|_| lapses < MAX_WALK_CHUNK_LAPSES);
+                let split = retry_split(slice.len(), splits).filter(|_| Instant::now() < deadline);
                 let Some(mid) = split else {
                     bail!(
-                        "{BUDGET_MARKER}: commit walk did not finish for a slice of {} commits \
-                         after {lapses} lapsed attempts",
-                        slice.len()
+                        "{BUDGET_MARKER}: {phase} did not finish for a slice of {} commits \
+                         within {}s of retrying",
+                        slice.len(),
+                        started.elapsed().as_secs()
                     );
                 };
                 let (left, right) = slice.split_at(mid);
@@ -1397,10 +1465,6 @@ pub(crate) async fn walk_commit_metadata_batch(
         });
     }
     validate_shas(shas)?;
-    let budget = budget_from_env(
-        "REPO_ANALYSIS_WALK_TIMEOUT_SECONDS",
-        DEFAULT_WALK_TIMEOUT_SECS,
-    );
     let chunk = shas
         .len()
         .div_ceil(walk_concurrency())
@@ -1408,7 +1472,7 @@ pub(crate) async fn walk_commit_metadata_batch(
     let path = handle.path.as_path();
     let walks = shas
         .chunks(chunk)
-        .map(|chunk| walk_metadata_chunk(path, chunk, budget));
+        .map(|chunk| walk_metadata_chunk(path, chunk));
     // `try_join_all` drives every chunk on this one task: the work being
     // parallelized lives in the git child processes and in the blocking pool,
     // so nothing here needs a `'static` spawn or a clone of the SHA list.
@@ -1439,12 +1503,18 @@ pub(crate) async fn walk_commit_metadata_batch(
 /// A lapsed ceiling gets none of that. It is not evidence about any object,
 /// so it is answered by halving the slice and walking it again
 /// ([`walk_with_retry`]).
-async fn walk_metadata_chunk(path: &Path, shas: &[String], budget: Duration) -> Result<CommitWalk> {
-    walk_with_retry(shas, |slice| numstat_chunk(path, slice, budget)).await
+async fn walk_metadata_chunk(path: &Path, shas: &[String]) -> Result<CommitWalk> {
+    walk_with_retry(
+        shas,
+        "commit walk",
+        Instant::now() + WALK_RETRY_LADDER_BUDGET,
+        |slice| numstat_chunk(path, slice),
+    )
+    .await
 }
 
 /// One `git log --numstat` subprocess over an explicit SHA list.
-async fn numstat_chunk(path: &Path, shas: &[String], budget: Duration) -> Result<ChunkOutcome> {
+async fn numstat_chunk(path: &Path, shas: &[String]) -> Result<ChunkOutcome> {
     let log_format = "%x00%x00GDCOMMIT%x00%H%x00%P%x00%ae%x00%an%x00%aI%x00%s%x00";
     let mut command = git_in(path);
     command
@@ -1458,7 +1528,7 @@ async fn numstat_chunk(path: &Path, shas: &[String], budget: Duration) -> Result
         ])
         .env("GIT_NO_LAZY_FETCH", "1");
     command.args(shas).arg("--");
-    let detail = match output_within(command, budget)
+    let detail = match output_within(command, WALK_TIMEOUT)
         .await
         .context("batched metadata git log")?
     {
@@ -1476,7 +1546,7 @@ async fn numstat_chunk(path: &Path, shas: &[String], budget: Duration) -> Result
             tracing::info!(
                 repo = repo_label(path),
                 commits = shas.len(),
-                budget_seconds = budget.as_secs(),
+                budget_seconds = WALK_TIMEOUT.as_secs(),
                 "commit walk slice exceeded its budget; retrying it in halves"
             );
             return Ok(ChunkOutcome::Lapsed);
@@ -1538,17 +1608,13 @@ pub(crate) async fn walk_commit_paths_chunk(
         ])
         .env("GIT_NO_LAZY_FETCH", "1");
     command.args(shas).arg("--");
-    let budget = budget_from_env(
-        "REPO_ANALYSIS_WALK_TIMEOUT_SECONDS",
-        DEFAULT_WALK_TIMEOUT_SECS,
-    );
-    let Some(output) = output_within(command, budget)
+    let Some(output) = output_within(command, WALK_TIMEOUT)
         .await
         .context("batched path-only git log")?
     else {
         bail!(
             "{BUDGET_MARKER}: path-only commit walk did not finish in {}s",
-            budget.as_secs()
+            WALK_TIMEOUT.as_secs()
         );
     };
     if !output.status.success() {
@@ -2214,6 +2280,12 @@ mod tests {
         (0..count).map(|index| format!("{index:040x}")).collect()
     }
 
+    /// A ladder that starts now and may run for the whole
+    /// [`WALK_RETRY_LADDER_BUDGET`], as production builds one.
+    fn ladder_deadline() -> Instant {
+        Instant::now() + WALK_RETRY_LADDER_BUDGET
+    }
+
     /// The failure the operator spent a session fighting: one slow slice used
     /// to mark the whole batch degraded, which discarded a walk that had
     /// already completed a million commits. A lapse must cost the slice, not
@@ -2221,7 +2293,7 @@ mod tests {
     #[tokio::test]
     async fn a_slow_slice_is_retried_and_the_completed_prefix_survives() {
         let shas = stub_shas(400);
-        let walk = walk_with_retry(&shas, |slice| {
+        let walk = walk_with_retry(&shas, "commit walk", ladder_deadline(), |slice| {
             let commits: Vec<CommitInfo> = slice.iter().map(|sha| stub_commit(sha)).collect();
             // Stands for a host that can walk a hundred commits inside the
             // ceiling but not four hundred.
@@ -2254,34 +2326,55 @@ mod tests {
     #[tokio::test]
     async fn an_exhausted_retry_ladder_reports_a_budget_lapse_not_damage() {
         let shas = stub_shas(64);
-        let error = walk_with_retry(&shas, |_| async { Ok(ChunkOutcome::Lapsed) })
-            .await
-            .expect_err("a walk that never completes a slice cannot succeed");
+        let error = walk_with_retry(&shas, "commit walk", ladder_deadline(), |_| async {
+            Ok(ChunkOutcome::Lapsed)
+        })
+        .await
+        .expect_err("a walk that never completes a slice cannot succeed");
         assert!(
             budget_lapsed(&error),
             "a lapse must be recognisable as this process's own ceiling: {error:#}"
         );
     }
 
-    /// Depth bounds one branch; nothing bounds the tree. Enough independently
-    /// slow siblings would keep the chunk retrying for dozens of budgets, and
-    /// a batch boundary is the only place this walk beats its heartbeat — so
-    /// the stall guard would kill the run and discard the very prefix the
-    /// ladder exists to keep.
+    /// The ladder has to be bounded in the unit the stall guard measures.
+    ///
+    /// Counting lapsed attempts did not bound it: the slices that *succeed*
+    /// between the lapses cost wall clock too, and a traced walk spent
+    /// ~4,100 s inside a ladder that was still under its lapse budget. A batch
+    /// boundary is the only place this walk beats the analysis heartbeat, so
+    /// the guard read that as silence and killed a walk that was about to
+    /// return — discarding the completed prefix the ladder exists to keep.
+    ///
+    /// The fixture is the shape that produced it: a slice that is slow only
+    /// while it is wide, so the ladder walks a 63-node tree in which every
+    /// internal node lapses and every leaf *succeeds*. Half the wall clock is
+    /// therefore spent on slices that worked, which is precisely the half an
+    /// attempt counter cannot see. Durations are scaled down by four orders of
+    /// magnitude: the contract under test is that elapsed time is what bounds
+    /// the ladder, not what the production number happens to be.
     #[tokio::test]
-    async fn total_retry_time_is_bounded_so_the_stall_guard_never_fires_first() {
+    async fn the_retry_ladder_is_bounded_by_elapsed_time_not_by_attempt_count() {
+        /// Stands for [`WALK_TIMEOUT`] — the cost of one subprocess, whether
+        /// it lapses or returns just inside its ceiling.
+        const ATTEMPT: Duration = Duration::from_millis(20);
+        /// Stands for [`WALK_RETRY_LADDER_BUDGET`].
+        const LADDER: Duration = Duration::from_millis(300);
+        /// 31 internal nodes plus 32 leaves: what this fixture costs when
+        /// nothing but the depth limit stops it.
+        const WHOLE_TREE: u32 = 63;
+
         let shas = stub_shas(2_000);
-        let lapses = std::cell::Cell::new(0_u32);
-        let error = walk_with_retry(&shas, |slice| {
+        let attempts = std::cell::Cell::new(0_u32);
+        let started = Instant::now();
+        let error = walk_with_retry(&shas, "commit walk", started + LADDER, |slice| {
             let commits: Vec<CommitInfo> = slice.iter().map(|sha| stub_commit(sha)).collect();
-            // Slow for anything wider than a hundred commits, so the ladder
-            // reaches its depth limit on several sibling branches rather than
-            // on one.
-            let lapsed = slice.len() > 100;
-            if lapsed {
-                lapses.set(lapses.get() + 1);
-            }
+            // 2,000 commits halve to 63 in the five splits the depth limit
+            // allows, so every internal node is slow and every leaf is not.
+            let lapsed = slice.len() > 63;
+            attempts.set(attempts.get() + 1);
             async move {
+                tokio::time::sleep(ATTEMPT).await;
                 Ok(if lapsed {
                     ChunkOutcome::Lapsed
                 } else {
@@ -2292,10 +2385,21 @@ mod tests {
         .await
         .expect_err("this fixture cannot finish and must say so");
         assert!(budget_lapsed(&error), "{error:#}");
-        assert_eq!(
-            lapses.get(),
-            MAX_WALK_CHUNK_LAPSES,
-            "the walk must stop at its lapse budget, not run the whole tree"
+
+        let elapsed = started.elapsed();
+        assert!(
+            elapsed >= LADDER,
+            "the ladder must spend its budget on second chances before giving up: {elapsed:?}"
+        );
+        assert!(
+            elapsed < LADDER + 10 * ATTEMPT,
+            "the ladder must give up once its wall clock is spent: {elapsed:?}"
+        );
+        assert!(
+            attempts.get() < WHOLE_TREE,
+            "elapsed time, not the exhausted tree, is what has to stop it: \
+             {} attempts in {elapsed:?}",
+            attempts.get()
         );
     }
 
@@ -2303,7 +2407,7 @@ mod tests {
     #[tokio::test]
     async fn an_unreadable_slice_still_marks_the_batch_inexact() {
         let shas = stub_shas(8);
-        let walk = walk_with_retry(&shas, |slice| {
+        let walk = walk_with_retry(&shas, "commit walk", ladder_deadline(), |slice| {
             let commits: Vec<CommitInfo> = slice.iter().map(|sha| stub_commit(sha)).collect();
             async move { Ok(ChunkOutcome::PathsOnly(commits)) }
         })
@@ -3269,12 +3373,7 @@ mod tests {
             // serialized result, not a chosen field.
             let mut chunked = Vec::new();
             for chunk in shas.chunks(2) {
-                chunked.extend(
-                    walk_metadata_chunk(dir, chunk, Duration::from_secs(300))
-                        .await
-                        .unwrap()
-                        .commits,
-                );
+                chunked.extend(walk_metadata_chunk(dir, chunk).await.unwrap().commits);
             }
             assert_eq!(
                 serde_json::to_string(&chunked).unwrap(),

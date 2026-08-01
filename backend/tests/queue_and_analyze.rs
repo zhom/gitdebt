@@ -33,7 +33,7 @@ use tokio::sync::Mutex;
 static SCHEMA_READY: OnceLock<()> = OnceLock::new();
 static SCHEMA_LOCK: Mutex<()> = Mutex::const_new(());
 static STAR_CLAIM_LOCK: Mutex<()> = Mutex::const_new(());
-const CURRENT_ANALYSIS_REVISION: i32 = 5;
+use gitdebt::repo_analysis::CURRENT_ANALYSIS_REVISION;
 
 fn metadata(id: u64, stars: u64, forks: u64) -> RepoMetadata {
     RepoMetadata {

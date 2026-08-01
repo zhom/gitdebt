@@ -109,7 +109,13 @@ pub struct ApiState {
     /// origin (the API answers on its own hostname), and it must never come
     /// from the request's `Host` header, which the client controls and which
     /// would then be edge-cached — and pasted into third-party READMEs.
-    pub api_origin: String,
+    /// `None` when `PUBLIC_API_BASE` is unset. Only the Markdown surfaces need
+    /// it, so an unset value degrades those to 503 and leaves charts, badges,
+    /// analyze and every JSON path serving normally. Refusing to boot over it
+    /// was worse than the problem: it took a whole deployment offline for a
+    /// variable that had never existed there, and the binary that died was the
+    /// one every other surface depends on.
+    pub api_origin: Option<String>,
     pub metrics_token: Option<String>,
     /// Bare-clone storage. Written by the worker's repo-analysis pool; the
     /// usage endpoint reuses it (read-only) to read package manifests out of
@@ -174,15 +180,43 @@ impl ApiState {
             _ => anyhow::bail!("PUBLIC_FRONTEND_ORIGIN must be set in release deployments"),
         };
         let frontend_origin = normalize_origin("PUBLIC_FRONTEND_ORIGIN", &frontend_origin_raw)?;
-        // Guessing this one is worse than refusing to boot: a wrong value is
-        // silently correct-looking output that points self-hosted deployments
-        // at somebody else's API.
-        let api_origin_raw = match std::env::var("PUBLIC_API_BASE") {
-            Ok(value) if !value.trim().is_empty() => value,
-            _ if cfg!(debug_assertions) => "http://localhost:8787".to_string(),
-            _ => anyhow::bail!("PUBLIC_API_BASE must be set in release deployments"),
+        // Guessing this one is worse than serving nothing: a wrong value is
+        // silently correct-looking output that points a self-hosted deployment
+        // at somebody else's API, edge-cached and then pasted permanently into
+        // third-party READMEs. So it is never inferred — but it is also never
+        // fatal, because only `/api/md/*` reads it.
+        //
+        // A malformed value degrades exactly like a missing one. Deployment
+        // environments strip or keep quotes inconsistently and a bare hostname
+        // reads as valid to a human, so `PUBLIC_API_BASE="api.example.com"` is
+        // the likely typo — and `Url::parse` rejects both the quotes and the
+        // missing scheme with "relative URL without a base". Bailing on that
+        // put the whole API into a crash loop over one feature's config.
+        let api_origin = match std::env::var("PUBLIC_API_BASE") {
+            Ok(value) if !value.trim().is_empty() => {
+                match normalize_origin("PUBLIC_API_BASE", value.trim().trim_matches('"')) {
+                    Ok(origin) => Some(origin),
+                    Err(error) => {
+                        tracing::error!(
+                            %error,
+                            "PUBLIC_API_BASE is set but unusable; /api/md/* and report.md will \
+                             answer 503 until it is a scheme-qualified origin such as \
+                             https://api.example.com. Every other endpoint is unaffected."
+                        );
+                        None
+                    }
+                }
+            }
+            _ if cfg!(debug_assertions) => Some("http://localhost:8787".to_string()),
+            _ => {
+                tracing::error!(
+                    "PUBLIC_API_BASE is not set; /api/md/* and report.md will answer 503 until \
+                     it is. Every other endpoint is unaffected. Set it to this API's own public \
+                     origin, e.g. https://api.example.com"
+                );
+                None
+            }
         };
-        let api_origin = normalize_origin("PUBLIC_API_BASE", &api_origin_raw)?;
         let metrics_token = match std::env::var("METRICS_TOKEN")
             .ok()
             .filter(|token| !token.trim().is_empty())
@@ -216,7 +250,7 @@ impl ApiState {
         storage: std::sync::Arc<crate::repo_history::RepoStorage>,
         redis: Option<std::sync::Arc<RedisHandle>>,
         frontend_origin: String,
-        api_origin: String,
+        api_origin: Option<String>,
         metrics_token: Option<String>,
     ) -> anyhow::Result<Self> {
         let day = Duration::from_secs(24 * 60 * 60);
@@ -1107,7 +1141,7 @@ async fn repo_markdown_page(
     enqueue: bool,
 ) -> Result<MarkdownPage, ApiError> {
     if !is_valid_slug(owner) || !is_valid_slug(repo) {
-        return Ok(md_rejected(state));
+        return Ok(md_rejected(state, markdown_api_origin(state)?));
     }
     let owner = owner.to_ascii_lowercase();
     let repo = repo.to_ascii_lowercase();
@@ -1149,7 +1183,7 @@ async fn build_report(
     let mut view = crate::agent_report::ReportView {
         slug: slug.to_string(),
         site_origin: state.frontend_origin.clone(),
-        api_origin: state.api_origin.clone(),
+        api_origin: markdown_api_origin(state)?.to_string(),
         state: crate::agent_report::ReportState::NotPublic,
     };
     let canonical = format!("/{slug}");
@@ -1513,8 +1547,11 @@ fn md_repo(owner: &str, repo: &str) -> Option<MdRepo> {
 
 /// `GET /api/md` and `GET /api/md/` — the home page. A catch-all parameter
 /// never matches an empty remainder, so these cannot ride the same route.
-async fn agent_md_home(State(state): State<ApiState>) -> axum::response::Response {
-    md_home(&state).respond(&state.frontend_origin)
+async fn agent_md_home(
+    State(state): State<ApiState>,
+) -> Result<axum::response::Response, ApiError> {
+    let api = markdown_api_origin(&state)?;
+    Ok(md_home(&state, api).respond(&state.frontend_origin))
 }
 
 /// `GET /api/md/{*path}` — the Markdown representation of any site page.
@@ -1533,15 +1570,25 @@ async fn agent_md(
     Ok(page.respond(&state.frontend_origin))
 }
 
+/// The one thing every Markdown body needs and cannot invent: this API's own
+/// public origin, for the embed URLs a reader will paste into a README. Absent
+/// it, the honest answer is to serve nothing rather than a plausible-looking
+/// wrong host — but only here, and only for these routes.
+fn markdown_api_origin(state: &ApiState) -> Result<&str, ApiError> {
+    state.api_origin.as_deref().ok_or_else(|| {
+        ApiError::unavailable("Markdown representations are not configured on this deployment.")
+    })
+}
+
 async fn render_agent_md(
     state: &ApiState,
     path: &str,
     enqueue: bool,
 ) -> Result<MarkdownPage, ApiError> {
     let site = &state.frontend_origin;
-    let api = &state.api_origin;
+    let api = markdown_api_origin(state)?;
     match md_route(path) {
-        MdRoute::Home => Ok(md_home(state)),
+        MdRoute::Home => Ok(md_home(state, api)),
         MdRoute::Badges => Ok(MarkdownPage::compiled(
             "/badges",
             crate::agent_docs::render_badge_catalog(site, api),
@@ -1555,34 +1602,36 @@ async fn render_agent_md(
             crate::agent_pages::render_category(&category, site, api),
         )),
         MdRoute::Comparison(first, second) => {
-            comparison_markdown_page(state, &first, &second, enqueue).await
+            comparison_markdown_page(state, api, &first, &second, enqueue).await
         }
-        MdRoute::Profile(login) => profile_markdown_page(state, &login, enqueue).await,
+        MdRoute::Profile(login) => profile_markdown_page(state, api, &login, enqueue).await,
         MdRoute::Repo(repo) => repo_markdown_page(state, &repo.owner, &repo.repo, enqueue).await,
         MdRoute::NotFound => Ok(md_notice(
             state,
+            api,
             StatusCode::NOT_FOUND,
             "/",
             "No Markdown at this path",
             "gitdebt has no page here, so there is nothing to represent.",
         )),
-        MdRoute::Invalid => Ok(md_rejected(state)),
+        MdRoute::Invalid => Ok(md_rejected(state, api)),
     }
 }
 
-fn md_home(state: &ApiState) -> MarkdownPage {
+fn md_home(state: &ApiState, api: &str) -> MarkdownPage {
     MarkdownPage::compiled(
         "/",
-        crate::agent_docs::render_home(&state.frontend_origin, &state.api_origin),
+        crate::agent_docs::render_home(&state.frontend_origin, api),
     )
 }
 
 /// The Markdown 400. The rejected path is echoed nowhere — not in the body,
 /// and not in the canonical link, which points at the live discovery route
 /// instead of at a URL built from the input.
-fn md_rejected(state: &ApiState) -> MarkdownPage {
+fn md_rejected(state: &ApiState, api: &str) -> MarkdownPage {
     md_notice(
         state,
+        api,
         StatusCode::BAD_REQUEST,
         "/report",
         "Invalid path",
@@ -1596,13 +1645,13 @@ fn md_rejected(state: &ApiState) -> MarkdownPage {
 /// bodies carries the route table so a wrong guess self-corrects on the spot.
 fn md_notice(
     state: &ApiState,
+    api: &str,
     status: StatusCode,
     canonical_path: &str,
     headline: &str,
     lead: &str,
 ) -> MarkdownPage {
     let site = &state.frontend_origin;
-    let api = &state.api_origin;
     let body = format!(
         "# {headline}\n\n\
          {lead}\n\n\
@@ -1626,6 +1675,7 @@ fn md_notice(
 /// codebase, so this shares the analyze memo the same way the report does.
 async fn profile_markdown_page(
     state: &ApiState,
+    api: &str,
     login: &str,
     enqueue: bool,
 ) -> Result<MarkdownPage, ApiError> {
@@ -1636,7 +1686,7 @@ async fn profile_markdown_page(
         format!("md:profile:readonly:{login}")
     };
     let (payload, _live) = single_flight_analyze(&state.analyze_cache, flight_key, async {
-        let page = build_profile_markdown(state, &login, enqueue).await?;
+        let page = build_profile_markdown(state, api, &login, enqueue).await?;
         let live = page.status == StatusCode::ACCEPTED.as_u16();
         Ok((serde_json::to_string(&page)?, live))
     })
@@ -1646,6 +1696,7 @@ async fn profile_markdown_page(
 
 async fn build_profile_markdown(
     state: &ApiState,
+    api: &str,
     login: &str,
     enqueue: bool,
 ) -> Result<MarkdownPage, ApiError> {
@@ -1663,6 +1714,7 @@ async fn build_profile_markdown(
         Err(error) if error.status == StatusCode::NOT_FOUND => {
             return Ok(md_notice(
                 state,
+                api,
                 StatusCode::NOT_FOUND,
                 &canonical,
                 &format!("{login} — not a public GitHub account"),
@@ -1723,7 +1775,7 @@ async fn build_profile_markdown(
     Ok(MarkdownPage::live(
         status,
         &canonical,
-        crate::agent_pages::render_profile(&view, &state.frontend_origin, &state.api_origin),
+        crate::agent_pages::render_profile(&view, &state.frontend_origin, api),
     ))
 }
 
@@ -1731,6 +1783,7 @@ async fn build_profile_markdown(
 /// pair routinely has one analyzed repository and one that nobody has opened.
 async fn comparison_markdown_page(
     state: &ApiState,
+    api: &str,
     first: &MdRepo,
     second: &MdRepo,
     enqueue: bool,
@@ -1742,7 +1795,7 @@ async fn comparison_markdown_page(
         format!("md:vs:readonly:{first_slug}:{second_slug}")
     };
     let (payload, _live) = single_flight_analyze(&state.analyze_cache, flight_key, async {
-        let page = build_comparison_markdown(state, first, second, enqueue).await?;
+        let page = build_comparison_markdown(state, api, first, second, enqueue).await?;
         let live = page.status == StatusCode::ACCEPTED.as_u16();
         Ok((serde_json::to_string(&page)?, live))
     })
@@ -1752,6 +1805,7 @@ async fn comparison_markdown_page(
 
 async fn build_comparison_markdown(
     state: &ApiState,
+    api: &str,
     first: &MdRepo,
     second: &MdRepo,
     enqueue: bool,
@@ -1768,6 +1822,7 @@ async fn build_comparison_markdown(
     {
         return Ok(md_notice(
             state,
+            api,
             StatusCode::NOT_FOUND,
             &canonical,
             "Comparison unavailable",
@@ -1795,7 +1850,7 @@ async fn build_comparison_markdown(
             &first_leg.leg,
             &second_leg.leg,
             &state.frontend_origin,
-            &state.api_origin,
+            api,
         ),
     ))
 }
@@ -8181,7 +8236,7 @@ mod tests {
                 std::sync::Arc::new(crate::repo_history::RepoStorage::from_env()),
                 None,
                 "http://localhost:14321".to_string(),
-                "http://localhost:8787".to_string(),
+                Some("http://localhost:8787".to_string()),
                 None,
             )
             .expect("api state"),

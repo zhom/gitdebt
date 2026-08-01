@@ -88,17 +88,23 @@ async fn main() -> Result<()> {
     }
 
     // Deployment bootstrap: the comparison catalog is embedded from the
-    // frontend's single source of truth. Offer every curated repo to both
-    // durable queues before starting the pools, so a fresh deployment begins
-    // useful work immediately instead of waiting for a visitor to discover
-    // each comparison page. Fresh jobs and active jobs are deduplicated.
-    let catalog_size = gitdebt::catalog::curated_repos().len();
-    let (catalog_star_jobs, catalog_analysis_jobs) = gitdebt::catalog::enqueue_curated(&db).await?;
+    // frontend's single source of truth. An empty parse means the embedded
+    // source moved or was renamed, which must fail the deployment rather than
+    // silently publish comparison pages with no data behind them.
+    let catalog = gitdebt::catalog::curated_repos();
+    if catalog.is_empty() {
+        anyhow::bail!("curated comparison catalog unexpectedly contains no repositories");
+    }
+    // Star history: one set-based statement that only touches cold or stale
+    // rows, against a queue whose cost is GH Archive scans rather than worker
+    // slots. Safe to offer in full, once, at startup.
+    let catalog_star_jobs = gitdebt::queue::enqueue_cold_or_stale_many(&db, &catalog, 0)
+        .await
+        .context("enqueue curated star histories")?;
     tracing::info!(
-        catalog_size,
+        catalog_size = catalog.len(),
         catalog_star_jobs,
-        catalog_analysis_jobs,
-        "curated comparison catalog offered to durable queues"
+        "curated comparison catalog offered to the star-history queue"
     );
 
     gitdebt::repo_analysis::spawn_pool(
@@ -111,6 +117,12 @@ async fn main() -> Result<()> {
         analysis_workers,
     );
     tracing::info!(analysis_workers, "repo-analysis worker pool started");
+    // Repo health: a bounded drip *after* the pool exists, never a boot-time
+    // flood. Offering all ~117 curated repositories at once filled the queue's
+    // global capacity with priority-0 rows before a single worker was running,
+    // so a visitor's own enqueue was rejected as `AtCapacity` and every
+    // profile fan-out queued behind the whole backfill.
+    gitdebt::repo_analysis::spawn_catalog_backfill(db.clone(), catalog);
     // Heal legacy rows with complete history but no public-metadata stamp
     // (invisible to every reader). Startup + hourly, bounded, idempotent;
     // the star-fetch claim path writes the metadata. Runs in archive and

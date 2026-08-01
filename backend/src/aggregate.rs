@@ -27,6 +27,16 @@
 //!      (readers never trust partial data); cold/incomplete repos are
 //!      enqueued on the existing `star_fetch_queue` — the request NEVER
 //!      blocks on fetching stars — and reported in `repos_pending`.
+//!   3. **Offer a bounded slice of code-health work.** Repository analysis
+//!      is a *separate, much slower* pipeline (clone + commit walk) from the
+//!      star history above, so it is never allowed to gate what the star
+//!      half already knows. One build enqueues at most
+//!      [`PROFILE_ANALYSIS_HEAD_DEFAULT`] repositories in the visitor
+//!      priority band (the stars-leading ones the report renders — the only
+//!      ones `repos_analyzing` counts) plus a
+//!      [`PROFILE_ANALYSIS_TAIL_DEFAULT`]-row drip of the long tail at the
+//!      background band. A 500-repository account therefore costs the queue
+//!      a handful of rows per view, not one per repository.
 //!
 //! NOTE (2026-06 stargazers-endpoint restriction): this module adds no new
 //! stargazer pagination. Star data is read exclusively from Postgres, and
@@ -68,10 +78,52 @@ pub const MAX_AGGREGATE_REPOS: usize = 50;
 /// aggregate is memoized ~5 min upstream) as earlier batches drain.
 pub const MAX_ENQUEUES_PER_BUILD: usize = 10;
 
-/// Repo-history work offered by one uncached profile build. Profile discovery
-/// initializes code-health data as well as star history, while clones remain
-/// background-only and globally capacity bounded.
-const MAX_ANALYSIS_ENQUEUES_PER_BUILD: usize = 8;
+/// Repositories one profile build may put into the *visitor* priority band.
+///
+/// A profile used to offer one analysis job per owned repository at visitor
+/// priority, so a single organization page could park dozens of 20-minute
+/// clone jobs ahead of everyone else's work and ten visitors could fill the
+/// whole queue with each other's backlogs. The report only renders code
+/// signals for the leading repositories by stars, so those are the only ones
+/// a visitor is actually waiting on: the head rides the visitor band, the
+/// tail drips through the background band ([`PROFILE_ANALYSIS_TAIL_DEFAULT`])
+/// and converges across builds without ever holding the page.
+const PROFILE_ANALYSIS_HEAD_DEFAULT: usize = 4;
+
+/// Long-tail repositories one profile build may offer to the *background*
+/// band. Small on purpose: the tail is what makes a large account converge
+/// eventually, not what a visitor is waiting for, and every row it adds is a
+/// row of the global `MAX_PENDING_ANALYSES` ceiling that a live viewer's
+/// repository could have used.
+const PROFILE_ANALYSIS_TAIL_DEFAULT: usize = 2;
+
+/// Env-tunable ([`PROFILE_ANALYSIS_HEAD_DEFAULT`]). Zero is refused: a
+/// profile with no head would enqueue nothing a visitor can see land.
+fn profile_analysis_head() -> usize {
+    std::env::var("PROFILE_ANALYSIS_HEAD")
+        .ok()
+        .and_then(|value| value.parse().ok())
+        .filter(|value: &usize| *value > 0)
+        .unwrap_or(PROFILE_ANALYSIS_HEAD_DEFAULT)
+        .min(MAX_AGGREGATE_REPOS)
+}
+
+/// Env-tunable ([`PROFILE_ANALYSIS_TAIL_DEFAULT`]). Zero is allowed and
+/// means "never spend queue capacity on the tail from a request path".
+fn profile_analysis_tail() -> usize {
+    std::env::var("PROFILE_ANALYSIS_TAIL")
+        .ok()
+        .and_then(|value| value.parse().ok())
+        .unwrap_or(PROFILE_ANALYSIS_TAIL_DEFAULT)
+        .min(MAX_AGGREGATE_REPOS)
+}
+
+/// Split stars-descending analysis candidates into the bounded head a
+/// visitor is waiting on and the long tail offered to the background band.
+/// Pure so the fan-out bound is testable without a database.
+fn split_analysis_fanout(candidates: &[String], head: usize) -> (&[String], &[String]) {
+    candidates.split_at(head.min(candidates.len()))
+}
 
 /// How long a cached `login → repos` mapping is trusted before a live
 /// repos-list refresh is attempted. Repo lists move slowly (new repos +
@@ -202,10 +254,23 @@ pub struct UserAggregate {
     /// Owned repositories whose code-health analysis is complete and not
     /// currently being refreshed.
     pub repos_analyzed: u32,
-    /// Owned repositories still waiting on or running code-health analysis.
-    /// This counts every unfinished candidate, not only rows that happen to
-    /// be active in the bounded worker queue right now.
+    /// Repositories whose code history *this visitor is waiting on right
+    /// now*: the bounded, stars-leading head this build put into the visitor
+    /// priority band. It reaches zero when the repositories the report
+    /// actually renders have landed, which is what lets a profile stop
+    /// reading as "still loading" while the star half — a separate, already
+    /// complete pipeline — is on screen.
+    ///
+    /// It is deliberately NOT "every owned repository without analysis":
+    /// that number is [`UserAggregate::repos_unanalyzed`], it can only drain
+    /// over hours, and reporting it here kept every profile page pinned to a
+    /// spinner and an open progress stream for the whole time.
     pub repos_analyzing: u32,
+    /// Owned repositories with no current analysis at all, head and tail
+    /// together. Fills in behind the report through the background band;
+    /// a reader should present it as coverage ("code signals cover N of M"),
+    /// never as something the page is blocked on.
+    pub repos_unanalyzed: u32,
     /// The account's public-repository count as GitHub reports it, when
     /// known. The aggregate covers at most [`MAX_AGGREGATE_REPOS`] of them,
     /// so this is what makes the coverage of a large organization legible
@@ -227,7 +292,8 @@ impl UserAggregate {
     /// The `/api/users/:login/analyze` JSON body. Locked contract:
     /// `{login,repos_included,repos_pending,repos_analyzed,repos_analyzing,`
     /// `total_stars,history:[{date,stars}]}`, plus the additive coverage
-    /// keys `{repos_total,repos_cap,account_type,list_truncated}`.
+    /// keys `{repos_total,repos_cap,account_type,list_truncated,`
+    /// `repos_unanalyzed}`.
     /// `history` is downsampled to ≤ [`MAX_HISTORY_POINTS`], same policy as
     /// the repo `/analyze` payload.
     pub fn to_json(&self) -> serde_json::Value {
@@ -237,6 +303,7 @@ impl UserAggregate {
             "repos_pending": self.repos_pending,
             "repos_analyzed": self.repos_analyzed,
             "repos_analyzing": self.repos_analyzing,
+            "repos_unanalyzed": self.repos_unanalyzed,
             "repos_total": self.repos_total,
             "repos_cap": MAX_AGGREGATE_REPOS,
             "account_type": self.account_type,
@@ -505,51 +572,60 @@ async fn build_from_repos(
     }
 
     // A profile report promises commit/contributor statistics as well as star
-    // history. Offer a bounded batch to the durable analysis queue so those
-    // fields cannot remain at an unexplained zero forever. This is
-    // Postgres-only on the request path; cloning and author enrichment happen
-    // asynchronously in the existing worker pool.
+    // history. Offer a *bounded* batch to the durable analysis queue so those
+    // fields cannot remain at an unexplained zero forever, split across two
+    // priority bands so one page view cannot rearrange the queue for everyone
+    // else. `analysis_candidates` inherits the stars-descending order of
+    // `top_repos_by_stars`, so the head is exactly the set the report renders.
+    // This is Postgres-only on the request path; cloning and author enrichment
+    // happen asynchronously in the existing worker pool.
+    let (awaited, tail) = split_analysis_fanout(&analysis_candidates, profile_analysis_head());
     if enqueue {
-        if let Some(user_id) = user_id {
-            // Bounded exactly like the anonymous branch below: a profile with
-            // hundreds of repositories must not convert one page view into
-            // hundreds of durable clone jobs.
-            for repo in analysis_candidates
-                .iter()
-                .take(MAX_ANALYSIS_ENQUEUES_PER_BUILD)
+        // A signed-in self-profile is a stronger, authenticated signal than an
+        // anonymous page view, so it keeps the warm band; an anonymous view
+        // lands on the visitor floor, which is what the reserved worker lane
+        // claims from and what keeps it out of the curated-catalog band.
+        let head_priority = if user_id.is_some() {
+            repo_analysis::WARM_PRIORITY
+        } else {
+            repo_analysis::VISITOR_PRIORITY_FLOOR
+        };
+        for repo in awaited {
+            if let Err(error) =
+                repo_analysis::enqueue_prioritized(db, repo, head_priority, user_id).await
             {
-                if let Err(error) = repo_analysis::enqueue_prioritized(
-                    db,
-                    repo,
-                    repo_analysis::WARM_PRIORITY,
-                    Some(user_id),
-                )
-                .await
-                {
-                    tracing::warn!(login, %repo, %error, "profile analysis enqueue failed");
-                }
+                tracing::warn!(login, %repo, %error, "profile analysis enqueue failed");
             }
-        } else if let Err(error) =
-            repo_analysis::enqueue_many(db, &analysis_candidates, MAX_ANALYSIS_ENQUEUES_PER_BUILD)
-                .await
+        }
+        // The tail is background work by definition: nothing on the rendered
+        // page is waiting for it, so it goes in at the lowest band and only a
+        // couple of rows at a time. Fresh and already-queued repositories do
+        // not consume the allowance, so repeat builds keep walking outward.
+        let tail_limit = profile_analysis_tail();
+        if tail_limit > 0
+            && let Err(error) = repo_analysis::enqueue_many(db, tail, tail_limit).await
         {
-            tracing::warn!(login, %error, "profile repo-analysis enqueue failed");
+            tracing::warn!(login, %error, "profile repo-analysis tail enqueue failed");
         }
     }
 
     let merged = load_merged_day_deltas(db, &included).await?;
     let (series, total_stars) = deltas_to_series(&merged);
-    let repos_analyzed = if analysis_candidates.is_empty() {
-        0
+    // Same definition of "analyzed" as the profile card
+    // (`api.rs::load_user_card_data`) and the enqueue-freshness predicate
+    // (`repo_analysis::ANALYSIS_IS_CURRENT_SQL`): the walk ran, under the
+    // current revision, and reached the head it observed. Author enrichment
+    // is not part of it — see `repo_analysis::sweep_author_enrichment`.
+    //
+    // Counted twice in one round trip: over every candidate (coverage) and
+    // over the awaited head (what the visitor is blocked on).
+    let (repos_analyzed, awaited_analyzed) = if analysis_candidates.is_empty() {
+        (0, 0)
     } else {
-        // Same definition of "analyzed" as the profile card
-        // (`api.rs::load_user_card_data`) and the enqueue-freshness
-        // predicate (`repo_analysis::ANALYSIS_IS_CURRENT_SQL`): the walk
-        // ran, under the current revision, and reached the head it
-        // observed. Author enrichment is not part of it — see
-        // `repo_analysis::sweep_author_enrichment`.
-        sqlx::query_scalar::<_, i64>(
-            "SELECT COUNT(*)::BIGINT FROM repo_history history \
+        let row = sqlx::query(
+            "SELECT COUNT(*)::BIGINT AS analyzed, \
+                    COUNT(*) FILTER (WHERE history.repo = ANY($3))::BIGINT AS awaited_analyzed \
+             FROM repo_history history \
              WHERE history.repo = ANY($1) \
                AND history.last_analyzed_at IS NOT NULL \
                AND history.analysis_revision >= $2 \
@@ -561,18 +637,23 @@ async fn build_from_repos(
         )
         .bind(&analysis_candidates)
         .bind(repo_analysis::CURRENT_ANALYSIS_REVISION)
+        .bind(awaited)
         .fetch_one(&db.pool)
         .await
-        .map_err(anyhow::Error::from)?
-        .max(0) as u32
+        .map_err(anyhow::Error::from)?;
+        let count = |column| -> Result<u32, anyhow::Error> {
+            Ok(row.try_get::<i64, _>(column)?.max(0) as u32)
+        };
+        (count("analyzed")?, count("awaited_analyzed")?)
     };
-    // `enqueue_many` deliberately admits only a small batch per build. Using
-    // active queue rows here made a profile look settled in the gap between
-    // batches: the frontend stopped observing it, so the remaining repos were
-    // never offered to the queue. Report the actual unfinished candidate set;
-    // every completion event triggers another aggregate build, which admits
-    // the next bounded batch until this reaches zero.
-    let repos_analyzing = u32::try_from(analysis_candidates.len())
+    // Only the awaited head holds the page. The rest is reported as coverage
+    // (`repos_unanalyzed`) so a large account still says how much of itself
+    // has code signals, without a spinner and without holding the progress
+    // stream open for the hours the tail legitimately takes.
+    let repos_analyzing = u32::try_from(awaited.len())
+        .unwrap_or(u32::MAX)
+        .saturating_sub(awaited_analyzed);
+    let repos_unanalyzed = u32::try_from(analysis_candidates.len())
         .unwrap_or(u32::MAX)
         .saturating_sub(repos_analyzed);
 
@@ -582,6 +663,7 @@ async fn build_from_repos(
         repos_pending: pending,
         repos_analyzed,
         repos_analyzing,
+        repos_unanalyzed,
         repos_total: resolved
             .public_repos
             .and_then(|count| u64::try_from(count).ok()),
@@ -822,6 +904,7 @@ mod tests {
             repos_pending: 1,
             repos_analyzed: 1,
             repos_analyzing: 1,
+            repos_unanalyzed: 3,
             repos_total,
             account_type: Some("Organization".into()),
             list_truncated: false,
@@ -1050,6 +1133,7 @@ mod tests {
         assert_eq!(v["repos_pending"], 1);
         assert_eq!(v["repos_analyzed"], 1);
         assert_eq!(v["repos_analyzing"], 1);
+        assert_eq!(v["repos_unanalyzed"], 3);
         assert_eq!(v["total_stars"], 4);
         // history entries are {date, stars} — Point's serde rename.
         assert_eq!(v["history"][0]["date"], "2020-01-01T00:00:00Z");
@@ -1058,7 +1142,50 @@ mod tests {
         assert!(v["history"][0].get("at").is_none());
         // Exactly the contract keys, nothing extra.
         let keys: Vec<&String> = v.as_object().unwrap().keys().collect();
-        assert_eq!(keys.len(), 11);
+        assert_eq!(keys.len(), 12);
+    }
+
+    /// A profile view costs the analysis queue a bounded number of
+    /// visitor-band rows regardless of how many repositories the account
+    /// owns — the whole reason ten visitors no longer put hundreds of jobs
+    /// in front of each other.
+    #[test]
+    fn analysis_fanout_head_is_bounded_and_stars_leading() {
+        let candidates: Vec<String> = (0..MAX_AGGREGATE_REPOS)
+            .map(|i| format!("o/repo{i:02}"))
+            .collect();
+        let (head, tail) = split_analysis_fanout(&candidates, 4);
+        assert_eq!(head, &candidates[..4]);
+        assert_eq!(tail.len(), MAX_AGGREGATE_REPOS - 4);
+        // The candidate order is `top_repos_by_stars`' stars-descending
+        // order, so the head is what the report actually renders.
+        assert_eq!(head[0], "o/repo00");
+    }
+
+    #[test]
+    fn analysis_fanout_survives_short_and_empty_accounts() {
+        let two = vec!["o/a".to_string(), "o/b".to_string()];
+        let (head, tail) = split_analysis_fanout(&two, 4);
+        assert_eq!(head.len(), 2);
+        assert!(tail.is_empty());
+
+        let (head, tail) = split_analysis_fanout(&[], 4);
+        assert!(head.is_empty() && tail.is_empty());
+    }
+
+    /// The configured head is what `repos_analyzing` can ever report, so it
+    /// must stay small enough that a visitor watches a handful of jobs, not
+    /// a whole account.
+    #[test]
+    fn profile_fanout_defaults_stay_bounded() {
+        const {
+            assert!(PROFILE_ANALYSIS_HEAD_DEFAULT > 0);
+            assert!(
+                PROFILE_ANALYSIS_HEAD_DEFAULT + PROFILE_ANALYSIS_TAIL_DEFAULT
+                    < MAX_ENQUEUES_PER_BUILD,
+                "one profile build must cost the analysis queue less than the star queue"
+            );
+        }
     }
 
     /// An organization with more public repositories than the cap must say

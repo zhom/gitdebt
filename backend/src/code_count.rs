@@ -4,14 +4,14 @@
 //! and counts blank / comment / code lines per language for the blobs that
 //! can hold code.
 //!
-//! **Nothing materializes the working tree.** Clones are
-//! `--filter=blob:none`, so any command that needs blob *content* — `git
-//! archive`, a checkout, `ls-tree --long` — makes git lazily fetch the whole
-//! tree from the remote, including every image, video, font and archive the
-//! repository commits. This module therefore selects the paths worth counting
-//! from the tree listing alone (local, no network), fetches exactly those
-//! objects in one bounded request, and reads them with lazy fetching disabled
-//! so a missed object is an error instead of a silent second download.
+//! **Nothing materializes the working tree.** Clones are bare and complete, so
+//! every object is already local and there is no download to avoid — but a
+//! checkout would still write a second full copy of the repository onto the
+//! volume the quota accountant is trying to keep under control, and `ls-tree
+//! --long` would read every blob header in the tree to report sizes this
+//! module does not need. So paths worth counting are selected from the tree
+//! listing alone, and their contents are streamed out of the local object
+//! store through one `cat-file --batch`.
 //!
 //! Why hand-rolled instead of `tokei`: it is a 100+ language dependency for
 //! the ~12 languages this renders, and it counts a working directory, which
@@ -24,7 +24,7 @@
 //! and code buckets — irrelevant at the order of magnitude this chart
 //! shows.
 
-use std::collections::{HashMap, HashSet};
+use std::collections::HashMap;
 use std::io::{BufRead, BufReader, Read, Write};
 use std::path::Path;
 use std::process::Stdio;
@@ -50,20 +50,28 @@ const BINARY_SNIFF_BYTES: usize = 8 * 1024;
 /// census. A property of the tree, so the same repository always resolves the
 /// same way — the choice must never depend on how a particular run raced a
 /// clock, or one repository's stored metric flips between runs.
-const DEFAULT_EXACT_LINE_COUNT_MAX_FILES: usize = 20_000;
-// Exact lines are a refinement over the cheap, always-saved language census.
-// Do not let that refinement hold an otherwise complete interactive report
-// open for tens of seconds.
-const DEFAULT_EXACT_LINE_COUNT_TIMEOUT_SECS: u64 = 8;
+///
+/// It was twenty thousand when every one of those files had to be downloaded
+/// from a promisor remote first, which put the largest repositories — the ones
+/// whose language breakdown is most worth having — permanently on the census.
+/// Reading them out of a local pack is a different order of cost, so the
+/// ceiling is now sized to cover a kernel-scale tree rather than to bound a
+/// network transfer.
+const DEFAULT_EXACT_LINE_COUNT_MAX_FILES: usize = 200_000;
+// Exact lines are a refinement over the cheap, always-saved language census,
+// so this stays a ceiling rather than an open-ended phase — but it has to be
+// larger than the work it bounds or it decides the outcome by itself, which is
+// exactly what happened when it was eight seconds and the files had to be
+// fetched. The read phase below carries its own deadline; this one is the
+// backstop over the whole call.
+const DEFAULT_EXACT_LINE_COUNT_TIMEOUT_SECS: u64 = 180;
 
-/// Ceiling on the bytes one exact count may hydrate from the remote. Only
-/// countable source files are ever requested, so this is reached by
-/// repositories that commit very large generated or vendored text.
-const DEFAULT_EXACT_LINE_COUNT_MAX_BYTES: u64 = 512 * 1024 * 1024;
-
-/// Objects requested per hydrate round trip. Bounds how far past the byte
-/// budget a single round trip can overshoot.
-const HYDRATE_CHUNK: usize = 512;
+/// Wall-clock ceiling for the read phase. It degrades to the file census,
+/// which is always saved, so it cannot fail an analysis.
+const DEFAULT_EXACT_LINE_COUNT_READ_TIMEOUT_SECS: u64 = 120;
+/// Ceiling on the tree listing itself. Local and cheap even on a monorepo;
+/// this exists so a damaged object store cannot stall the phase forever.
+const DEFAULT_TREE_LISTING_TIMEOUT_SECS: u64 = 120;
 
 #[derive(Debug, Clone)]
 pub struct LanguageCount {
@@ -103,30 +111,49 @@ pub(crate) struct TreeBlob {
 
 /// HEAD's blobs, straight from the tree listing.
 ///
-/// `--long` would add each blob's size, which is exactly what must be avoided:
-/// the size lives in the object header, not the tree, so on a partial clone
-/// git lazily fetches every blob in the repository to answer it. Symlinks
+/// `--long` is deliberately not passed: a blob's size lives in its object
+/// header rather than in the tree, so asking for it reads every object in the
+/// repository to answer a question the selection below does not ask. Symlinks
 /// (mode 120000) and submodule gitlinks (type `commit`) are dropped here.
 ///
 /// Callers hoist one listing and feed it to every consumer: readiness, the
 /// census, and the exact count all describe the same tree, so three separate
 /// `ls-tree` passes would be three walks of it for one answer.
 pub(crate) async fn head_blobs(repo_path: &Path) -> Result<Vec<TreeBlob>> {
-    let output = Command::new("git")
+    let mut command = Command::new("git");
+    command
         .arg("-C")
         .arg(repo_path)
         .args(["ls-tree", "-rz", "HEAD"])
-        .kill_on_drop(true)
-        .output()
-        .await
-        .context("git ls-tree")?;
+        .kill_on_drop(true);
+    let budget = budget_from_env(
+        "REPO_LINE_COUNT_TREE_TIMEOUT_SECONDS",
+        DEFAULT_TREE_LISTING_TIMEOUT_SECS,
+    );
+    let Ok(output) = tokio::time::timeout(budget, command.output()).await else {
+        bail!("git ls-tree did not finish in {}s", budget.as_secs());
+    };
+    let output = output.context("git ls-tree")?;
     if !output.status.success() {
         bail!("git ls-tree exited {}", output.status);
     }
     Ok(parse_tree_listing(&output.stdout))
 }
 
-/// Inspect contributor-facing files without hydrating any blobs.
+/// Wall-clock ceiling read from `name`, in seconds. Zero and unparseable
+/// values fall back to the default: a ceiling of zero would mean "no
+/// repository is ever counted exactly", which is never what an operator means.
+fn budget_from_env(name: &str, default_seconds: u64) -> std::time::Duration {
+    std::time::Duration::from_secs(
+        std::env::var(name)
+            .ok()
+            .and_then(|value| value.parse().ok())
+            .filter(|value| *value > 0)
+            .unwrap_or(default_seconds),
+    )
+}
+
+/// Inspect contributor-facing files from their paths alone, reading no blob.
 pub(crate) fn readiness_from_blobs(blobs: &[TreeBlob]) -> RepositoryReadiness {
     let mut readiness = RepositoryReadiness::default();
     for blob in blobs {
@@ -304,107 +331,39 @@ pub(crate) async fn count_lines_for(
     if candidates.is_empty() || candidates.len() > exact_line_count_max_files() {
         return Ok(None);
     }
-    if !hydrate_blobs(repo_path, &candidates).await? {
-        return Ok(None);
-    }
     let repo_path = repo_path.to_path_buf();
     // Reading and counting is local I/O plus a per-file scan; keep it off the
-    // runtime threads.
-    task::spawn_blocking(move || read_and_count(&repo_path, &candidates))
+    // runtime threads. It carries its own deadline because a blocking task is
+    // not cancellable: an outer `tokio::time::timeout` returns while the
+    // thread — and the `git cat-file` child it is feeding — keep running.
+    let deadline = std::time::Instant::now()
+        + budget_from_env(
+            "REPO_LINE_COUNT_READ_TIMEOUT_SECONDS",
+            DEFAULT_EXACT_LINE_COUNT_READ_TIMEOUT_SECS,
+        );
+    task::spawn_blocking(move || read_and_count(&repo_path, &candidates, deadline))
         .await
         .context("line-count task")?
         .map(Some)
 }
 
-/// Fetch the selected objects — and only those — from the promisor remote.
-///
-/// Returns `false` when the hydrated volume exceeds the byte budget, i.e. the
-/// caller should fall back to the census. Chunking bounds the overshoot to one
-/// round trip, and the fetch is a direct child so a cancelled analysis reaps it
-/// instead of leaving git pulling a multi-gigabyte pack in the background.
-///
-/// There is deliberately no "which of these are missing?" probe first.
-/// `git cat-file --batch-check` cannot answer that question on a promisor
-/// clone: with `GIT_NO_LAZY_FETCH=1` it dies with exit 128 on the first absent
-/// object having written nothing to stdout, and without it, it silently
-/// lazy-fetches each object one round trip at a time — which is the cost this
-/// function exists to avoid. Asking the remote for an object already present
-/// is free, so the whole selected set goes to one batched fetch instead.
-async fn hydrate_blobs(repo_path: &Path, blobs: &[TreeBlob]) -> Result<bool> {
-    // A clone with no blob filter already holds every object, so the fetch
-    // below would be a pointless network round trip on the critical path.
-    if crate::repo_history::partial_clone_filter(repo_path)
-        .await?
-        .is_none()
-    {
-        return Ok(true);
-    }
-    // One blob can sit at many paths; the remote should hear about it once.
-    let mut seen = HashSet::new();
-    let wanted: Vec<String> = blobs
-        .iter()
-        .filter(|blob| seen.insert(blob.oid.as_str()))
-        .map(|blob| blob.oid.clone())
-        .collect();
-    if wanted.is_empty() {
-        return Ok(true);
-    }
-    let budget = exact_line_count_max_bytes();
-    let before = crate::repo_history::clone_size_bytes(repo_path);
-    for chunk in wanted.chunks(HYDRATE_CHUNK) {
-        let mut child = Command::new("git")
-            .arg("-C")
-            .arg(repo_path)
-            .args([
-                // Object-id fetches must not pay ref negotiation; git's own
-                // promisor path sets this for the same reason.
-                "-c",
-                "fetch.negotiationAlgorithm=noop",
-                "fetch",
-                "origin",
-                "--no-tags",
-                "--no-write-fetch-head",
-                "--recurse-submodules=no",
-                "--filter=blob:none",
-                "--stdin",
-            ])
-            .stdin(Stdio::piped())
-            .stdout(Stdio::null())
-            .stderr(Stdio::piped())
-            .kill_on_drop(true)
-            .spawn()
-            .context("spawn selective blob fetch")?;
-        {
-            use tokio::io::AsyncWriteExt;
-            let mut stdin = child.stdin.take().context("fetch stdin")?;
-            for oid in chunk {
-                stdin.write_all(oid.as_bytes()).await?;
-                stdin.write_all(b"\n").await?;
-            }
-            stdin.shutdown().await?;
-        }
-        let output = child.wait_with_output().await.context("selective fetch")?;
-        if !output.status.success() {
-            bail!(
-                "selective blob fetch failed: {}",
-                String::from_utf8_lossy(&output.stderr)
-            );
-        }
-        if crate::repo_history::clone_size_bytes(repo_path).saturating_sub(before) > budget {
-            tracing::info!(
-                budget,
-                "exact line count exceeded its hydration budget; using the file census"
-            );
-            return Ok(false);
-        }
-    }
-    Ok(true)
-}
-
 /// Stream the selected blobs out of the local object store and count them.
-/// Lazy fetching is disabled: after [`hydrate_blobs`] every object is present,
-/// and an unexpected miss must surface rather than trigger another download.
-fn read_and_count(repo_path: &Path, blobs: &[TreeBlob]) -> Result<Vec<LanguageCount>> {
+/// Lazy fetching is disabled. The clone is complete, so every object is
+/// already present; the env var is the guard that keeps an unexpected miss —
+/// a damaged pack — surfacing as an error rather than turning a local read
+/// into one network round trip per file.
+///
+/// `deadline` is enforced here rather than by the caller because this runs on
+/// a blocking thread, which `tokio::time::timeout` cannot cancel: without it a
+/// lapsed timeout returned to the caller while this thread and its `cat-file`
+/// child kept reading a repository nobody was waiting for. A lapse is an error
+/// so the caller stores the file census — a truncated count persisted as exact
+/// is the one outcome worse than not counting at all.
+fn read_and_count(
+    repo_path: &Path,
+    blobs: &[TreeBlob],
+    deadline: std::time::Instant,
+) -> Result<Vec<LanguageCount>> {
     let mut child = std::process::Command::new("git")
         .arg("-C")
         .arg(repo_path)
@@ -417,10 +376,14 @@ fn read_and_count(repo_path: &Path, blobs: &[TreeBlob]) -> Result<Vec<LanguageCo
         .context("spawn git cat-file --batch")?;
     let mut stdin = child.stdin.take().context("cat-file stdin")?;
     let requested: Vec<TreeBlob> = blobs.to_vec();
-    let feed = requested.clone();
+    // The writer thread needs owned data, but only the object ids: copying the
+    // whole blob list would duplicate every path string a second time, and the
+    // tree this may be handed is now an order of magnitude larger than when
+    // the ceiling assumed a network transfer.
+    let feed: Vec<String> = requested.iter().map(|blob| blob.oid.clone()).collect();
     let writer = std::thread::spawn(move || {
-        for blob in &feed {
-            if writeln!(stdin, "{}", blob.oid).is_err() {
+        for oid in &feed {
+            if writeln!(stdin, "{oid}").is_err() {
                 break;
             }
         }
@@ -430,7 +393,14 @@ fn read_and_count(repo_path: &Path, blobs: &[TreeBlob]) -> Result<Vec<LanguageCo
     let mut totals: HashMap<&'static str, LanguageCount> = HashMap::new();
     let mut header = String::new();
     let mut content = Vec::new();
-    for blob in &requested {
+    let mut lapsed = false;
+    for (index, blob) in requested.iter().enumerate() {
+        // Checking every file would put a clock read in front of every blob;
+        // a batch of 256 bounds the overshoot to a fraction of a second.
+        if index % 256 == 0 && std::time::Instant::now() >= deadline {
+            lapsed = true;
+            break;
+        }
         header.clear();
         if reader.read_line(&mut header)? == 0 {
             break;
@@ -474,12 +444,24 @@ fn read_and_count(repo_path: &Path, blobs: &[TreeBlob]) -> Result<Vec<LanguageCo
         row.lines_comment += comment;
         row.lines_code += code;
     }
+    if lapsed {
+        // Killing the child is what unblocks the writer thread: it is parked
+        // in a `writeln!` on a pipe nobody is draining any more.
+        let _ = child.kill();
+    }
     let _ = writer.join();
     // A mid-stream death ends the loop above at EOF with whatever it had, and
     // the result is persisted as an *exact* count. Truncated-but-confident is
     // the one outcome worse than falling back to the file census, so a failed
     // probe becomes an error the caller can degrade on.
     let status = child.wait().context("wait for git cat-file --batch")?;
+    if lapsed {
+        tracing::info!(
+            files = requested.len(),
+            "exact line count exceeded its read budget; using the file census"
+        );
+        bail!("exact line count exceeded its read budget");
+    }
     if !status.success() {
         bail!("git cat-file --batch exited with {status}");
     }
@@ -498,14 +480,6 @@ pub fn exact_line_count_max_files() -> usize {
         .and_then(|value| value.parse().ok())
         .filter(|value| *value > 0)
         .unwrap_or(DEFAULT_EXACT_LINE_COUNT_MAX_FILES)
-}
-
-pub fn exact_line_count_max_bytes() -> u64 {
-    std::env::var("REPO_LINE_COUNT_MAX_BYTES")
-        .ok()
-        .and_then(|value| value.parse().ok())
-        .filter(|value| *value > 0)
-        .unwrap_or(DEFAULT_EXACT_LINE_COUNT_MAX_BYTES)
 }
 
 pub fn exact_line_count_timeout() -> std::time::Duration {
@@ -1188,6 +1162,76 @@ mod tests {
         assert!(!is_excluded_path(Path::new("src/bin/server.rs")));
         assert!(is_excluded_path(Path::new("web/node_modules/pkg/index.js")));
         assert!(!is_excluded_path(Path::new("src/main.rs")));
+    }
+
+    /// The read phase runs on a blocking thread, which no outer timeout can
+    /// cancel, so the deadline has to be enforced inside it — and a lapse must
+    /// leave the caller with an error to degrade on rather than a partial
+    /// count presented as exact.
+    #[tokio::test]
+    async fn the_read_phase_enforces_its_own_deadline() {
+        if std::process::Command::new("git")
+            .arg("--version")
+            .status()
+            .is_err()
+        {
+            eprintln!("skipping: git not available");
+            return;
+        }
+        let tmp = tempfile::tempdir().unwrap();
+        let dir = tmp.path();
+        for args in [
+            vec!["init", "-q"],
+            vec!["config", "user.email", "a@example.com"],
+            vec!["config", "user.name", "Alice"],
+        ] {
+            assert!(
+                std::process::Command::new("git")
+                    .arg("-C")
+                    .arg(dir)
+                    .args(&args)
+                    .status()
+                    .unwrap()
+                    .success()
+            );
+        }
+        std::fs::write(dir.join("main.rs"), "fn main() {}\n// note\n\n").unwrap();
+        assert!(
+            std::process::Command::new("git")
+                .arg("-C")
+                .arg(dir)
+                .args(["add", "-A"])
+                .status()
+                .unwrap()
+                .success()
+        );
+        assert!(
+            std::process::Command::new("git")
+                .arg("-C")
+                .arg(dir)
+                .args(["commit", "-qm", "init"])
+                .status()
+                .unwrap()
+                .success()
+        );
+
+        let blobs = head_blobs(dir).await.unwrap();
+        let counted = read_and_count(
+            dir,
+            &blobs,
+            std::time::Instant::now() + std::time::Duration::from_secs(30),
+        )
+        .unwrap();
+        assert_eq!(counted.len(), 1);
+        assert_eq!(counted[0].language, "Rust");
+        assert_eq!(counted[0].lines_code, 1);
+
+        let lapsed = read_and_count(dir, &blobs, std::time::Instant::now());
+        assert!(
+            lapsed.is_err(),
+            "a lapsed read budget degrades to the census instead of reporting \
+             a partial count as exact"
+        );
     }
 
     #[test]

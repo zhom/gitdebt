@@ -1,63 +1,302 @@
 //! Local bare-clone management + incremental commit-history walking.
 //!
-//! Storage layout: `<REPOS_DIR>/<owner>/<repo>.git` (bare). Default
+//! Storage layout: `<REPOS_DIR>/<owner>/<repo>.git` (bare, complete). Default
 //! `REPOS_DIR=~/.cache/gitdebt/repos` for dev; set to your mounted volume
 //! path for container deployments. Disk usage is tracked in
 //! `repo_history.clone_size_bytes` and trimmed via `evict_to_quota`.
+//!
+//! Clones carry every object, and that single decision is the performance
+//! story of this module. `--filter=blob:none` makes the *clone* cheaper and
+//! everything after it ruinous: `--numstat`, which every churn, ownership and
+//! cadence signal is derived from, can only be computed by diffing blob
+//! content, so a blobless clone re-buys the very bytes it skipped one promisor
+//! round trip at a time. Measured on this host: hexo (3,751 commits) clones
+//! complete in 10.6 s and walks its entire history in 0.41 s, against 55 s for
+//! the filtered pipeline locally and 132 s in production; django (34,838
+//! commits) clones complete in 134 s and walks all of it in 15.2 s, against a
+//! filtered run that burned a twenty-minute budget without finishing.
+//!
+//! A commit is therefore not the expensive dimension — 0.44 ms of local walk
+//! each — and there is no cap on how many of them an analysis covers. The
+//! clone is paid once; later runs fetch only new objects and walk only the
+//! commits between the stored cursor and the new head.
 
-use std::collections::HashSet;
 use std::path::{Path, PathBuf};
-use std::process::Stdio;
+use std::process::{Output, Stdio};
+use std::time::{Duration, Instant};
 
 use anyhow::{Context, Result, bail};
 use chrono::{DateTime, NaiveDate, Utc};
 use serde::Serialize;
-use tokio::io::AsyncWriteExt;
+use tokio::io::AsyncReadExt;
 use tokio::process::Command;
 
-// Five thousand recent non-merge commits is enough to stabilize ownership,
-// churn, cadence, and fix-concentration signals while keeping a cold
-// interactive report bounded. The exact reachable commit total is still
-// computed from the full graph and the UI labels a capped analysis window.
-const DEFAULT_ANALYSIS_COMMIT_LIMIT: usize = 5_000;
-const MIN_ANALYSIS_COMMIT_LIMIT: usize = 5_000;
-const HARD_ANALYSIS_COMMIT_LIMIT: usize = 50_000;
-/// Patch bodies are substantially more expensive than commit metadata because
-/// partial clones must hydrate historical blobs. Contributor, cadence, churn,
-/// and fix signals use the full bounded window; TODO/FIXME churn uses only the
-/// newest commits so it cannot hold the primary analysis hostage.
+/// Patch bodies are substantially more expensive than commit metadata: `-p`
+/// makes git generate, and this process decode, the full text of every diff
+/// rather than three integers per file. Contributor, cadence, churn and fix
+/// signals cover every commit; TODO/FIXME churn is one auxiliary marker count
+/// measured over the newest commits so it cannot hold the primary analysis
+/// hostage. This bounds one signal's *input*, never the history that is
+/// analyzed.
 pub(crate) const TODO_PATCH_COMMIT_LIMIT: usize = 100;
 /// Stable cursor for a valid repository whose default branch has no commits.
 /// It cannot collide with a Git object id and lets the normal freshness/cache
 /// contract complete instead of retrying an empty repository forever.
 pub(crate) const EMPTY_REPOSITORY_HEAD: &str = "empty-repository";
-const CACHE_FORMAT_VERSION: &str = "2";
+/// Bumped from `2` when the blob filter was dropped. Every cache built by an
+/// older release is a partial clone whose historical blobs are promisor stubs,
+/// and relaxing a filter on a later fetch does not reliably backfill them, so
+/// those caches are rebuilt once instead of being walked forever at network
+/// speed.
+const CACHE_FORMAT_VERSION: &str = "3";
 
-/// Ceiling on the bytes one run may pull down ahead of the metadata walk.
-/// Reached only by repositories whose recent window churns very large files;
-/// past it the walk falls back to git's own lazy fetching rather than filling
-/// the volume for a speed optimization.
-const DEFAULT_ANALYSIS_HYDRATE_MAX_BYTES: u64 = 2 * 1024 * 1024 * 1024;
+/// Wall-clock ceilings, all env-tunable, with defaults sized for a
+/// 12 vCPU / 32 GB host running the default analysis pool. Each one bounds a
+/// single phase, so a repository that is slow in one of them no longer spends
+/// another job's worth of wall clock discovering that: a lapsed refresh
+/// analyzes the revision already on disk, a lapsed TODO scan drops one
+/// auxiliary signal. Only the clone gives up on the run, because there is
+/// nothing to analyze without one.
+///
+/// The transfer ceilings are large on purpose. A complete clone is the one
+/// unavoidable network cost, it is paid once per repository, and the
+/// repositories that need it most are the ones it must not cut off: the
+/// largest failing catalog entries are 1.8 GB (godot), 2.5 GB (next.js) and
+/// 6.1 GB (linux), and at the ~1.8 MB/s the measured django clone sustained
+/// the last of those needs the better part of an hour. Every phase after the
+/// clone is local and correspondingly tight.
+///
+/// The clone ceiling is only *reachable* because the transfer phases report
+/// liveness through [`Progress`]. The caller kills a run after a much shorter
+/// silence, so one hour-long await with no signal would have parked the
+/// largest repositories long before this budget ever applied.
+const DEFAULT_CLONE_TIMEOUT_SECS: u64 = 3_600;
+const DEFAULT_FETCH_TIMEOUT_SECS: u64 = 1_800;
+const DEFAULT_MAINTENANCE_TIMEOUT_SECS: u64 = 600;
+const DEFAULT_COMMIT_COUNT_TIMEOUT_SECS: u64 = 300;
+const DEFAULT_PLAN_TIMEOUT_SECS: u64 = 300;
+const DEFAULT_WALK_TIMEOUT_SECS: u64 = 300;
+const DEFAULT_PATCH_WALK_TIMEOUT_SECS: u64 = 120;
 
-/// Object ids requested per hydrate round trip. Bounds how far past the byte
-/// budget a single round trip can overshoot.
-const HYDRATE_CHUNK: usize = 512;
+/// Smallest slice of commits worth its own `git log` subprocess. Below this
+/// the fan-out in [`walk_commit_metadata_batch`] would spend more on process
+/// startup than it saves on parallelism.
+const MIN_WALK_CHUNK_COMMITS: usize = 50;
 
-pub(crate) fn analysis_commit_limit() -> usize {
-    std::env::var("REPO_ANALYSIS_COMMIT_LIMIT")
-        .ok()
-        .and_then(|value| value.parse().ok())
-        .unwrap_or(DEFAULT_ANALYSIS_COMMIT_LIMIT)
-        .clamp(MIN_ANALYSIS_COMMIT_LIMIT, HARD_ANALYSIS_COMMIT_LIMIT)
+/// Concurrent `git log --numstat` subprocesses one commit walk may run.
+///
+/// The walk was a single subprocess on a single core — 13.8 s of user CPU for
+/// django's 34,838 commits — even though its batches are independent and, now
+/// that the clone is complete, entirely local. The share is the cores this
+/// analysis is entitled to rather than every core on the host, for the same
+/// reason [`pack_threads_config`] divides them: the pool runs this many
+/// analyses, and therefore this many walks, at once.
+fn walk_concurrency() -> usize {
+    let cores = std::thread::available_parallelism()
+        .map(|value| value.get())
+        .unwrap_or(2);
+    let share = (cores / crate::repo_analysis::configured_analysis_workers().max(1)).max(1);
+    usize_from_env("REPO_ANALYSIS_WALK_CONCURRENCY", share).clamp(1, 16)
 }
 
-fn analysis_hydrate_max_bytes() -> u64 {
-    std::env::var("REPO_ANALYSIS_HYDRATE_MAX_BYTES")
+fn usize_from_env(name: &str, default: usize) -> usize {
+    std::env::var(name)
         .ok()
         .and_then(|value| value.parse().ok())
-        .unwrap_or(DEFAULT_ANALYSIS_HYDRATE_MAX_BYTES)
+        .filter(|value| *value > 0)
+        .unwrap_or(default)
 }
 
+/// Wall-clock ceiling read from `name`, in seconds. Zero and unparseable
+/// values fall back to the default: a ceiling of zero would mean "every
+/// repository is too slow", which is never what an operator means.
+fn budget_from_env(name: &str, default_seconds: u64) -> Duration {
+    Duration::from_secs(
+        std::env::var(name)
+            .ok()
+            .and_then(|value| value.parse().ok())
+            .filter(|value| *value > 0)
+            .unwrap_or(default_seconds),
+    )
+}
+
+/// Run one git subprocess under a wall-clock ceiling. `Ok(None)` means the
+/// ceiling lapsed: the future is dropped, and the `kill_on_drop` set by
+/// [`git`] reaps the subprocess instead of leaving it pulling a pack into a
+/// clone nobody is waiting for any more.
+async fn output_within(mut command: Command, budget: Duration) -> Result<Option<Output>> {
+    match tokio::time::timeout(budget, command.output()).await {
+        Ok(result) => Ok(Some(result?)),
+        Err(_) => Ok(None),
+    }
+}
+
+/// Liveness callback handed to the long-running transfer phases.
+///
+/// Invoked at least every [`PROGRESS_BEAT_INTERVAL`] while the operation is
+/// demonstrably making progress, and never invoked while it is wedged. That
+/// distinction is the whole contract: the caller's stall guard converts
+/// silence into a killed and eventually parked job, so a beat must be evidence
+/// and not a timer.
+pub(crate) type Progress<'a> = &'a (dyn Fn() + Send + Sync);
+
+/// Floor between two liveness beats. The stall guard measures silence in
+/// half-hours, so anything in the seconds range is ample, and coalescing keeps
+/// a chatty transfer from turning git's per-percent progress lines into a
+/// write per line on whatever the consumer does with the beat.
+const PROGRESS_BEAT_INTERVAL: Duration = Duration::from_secs(5);
+
+/// Retained tail of a progress-enabled subprocess's stderr. Enough to hold any
+/// realistic git failure message, small enough that an hour of progress lines
+/// cannot grow the process.
+const STDERR_TAIL_BYTES: usize = 16 * 1024;
+
+/// [`output_within`] for the phases that can legitimately run for an hour.
+///
+/// Liveness is taken from the bytes git writes to its own `--progress` stream,
+/// not from a timer beside the future. A ticker would beat just as steadily
+/// through a TCP connection that has stopped delivering data, which is exactly
+/// the state the caller's stall guard exists to catch; git's progress stream
+/// only advances when objects are being counted, received, or resolved, so a
+/// genuinely hung transfer stays silent and is still killed. The wall-clock
+/// ceiling is unchanged and still bounds the whole run.
+async fn output_within_progress(
+    mut command: Command,
+    budget: Duration,
+    progress: Option<Progress<'_>>,
+) -> Result<Option<Output>> {
+    let Some(progress) = progress else {
+        return output_within(command, budget).await;
+    };
+    command
+        .stdin(Stdio::null())
+        .stdout(Stdio::piped())
+        .stderr(Stdio::piped());
+    let run = async move {
+        let mut child = command.spawn().context("spawn git")?;
+        let mut stdout = child.stdout.take().context("git stdout pipe")?;
+        let mut stderr = child.stderr.take().context("git stderr pipe")?;
+        // Both pipes are drained concurrently on this task rather than in a
+        // spawned one: the progress callback is borrowed, and draining only
+        // stderr would let a subprocess that does write to stdout block on a
+        // full pipe and look exactly like a wedged transfer.
+        let (stdout_bytes, stderr_tail) = tokio::join!(
+            async {
+                let mut bytes = Vec::new();
+                stdout.read_to_end(&mut bytes).await.map(|_| bytes)
+            },
+            drain_with_progress(&mut stderr, progress),
+        );
+        let status = child.wait().await.context("wait for git")?;
+        Ok::<Output, anyhow::Error>(Output {
+            status,
+            stdout: stdout_bytes.context("read git stdout")?,
+            stderr: stderr_tail.context("read git stderr")?,
+        })
+    };
+    // Dropping the future on timeout drops the `Child`, and the `kill_on_drop`
+    // set by [`git`] reaps the subprocess.
+    match tokio::time::timeout(budget, run).await {
+        Ok(result) => Ok(Some(result?)),
+        Err(_) => Ok(None),
+    }
+}
+
+/// Read a progress stream to EOF, beating liveness as bytes arrive and keeping
+/// only the last [`STDERR_TAIL_BYTES`] for error reporting.
+async fn drain_with_progress<R>(reader: &mut R, progress: Progress<'_>) -> std::io::Result<Vec<u8>>
+where
+    R: tokio::io::AsyncRead + Unpin,
+{
+    let mut tail: Vec<u8> = Vec::new();
+    let mut buffer = [0u8; 8 * 1024];
+    let mut last_beat: Option<Instant> = None;
+    loop {
+        let read = reader.read(&mut buffer).await?;
+        if read == 0 {
+            return Ok(tail);
+        }
+        tail.extend_from_slice(&buffer[..read]);
+        if tail.len() > STDERR_TAIL_BYTES {
+            tail.drain(..tail.len() - STDERR_TAIL_BYTES);
+        }
+        if last_beat.is_none_or(|beat| beat.elapsed() >= PROGRESS_BEAT_INTERVAL) {
+            progress();
+            last_beat = Some(Instant::now());
+        }
+    }
+}
+
+/// Human-readable failure detail from a `--progress` stderr stream.
+///
+/// Progress is written as carriage-return-separated redraws of the same line,
+/// so the raw bytes are mostly `Receiving objects:  41% (…)` frames that would
+/// bury the one line an operator needs. Keep the last few non-progress lines.
+fn git_failure_detail(stderr: &[u8]) -> String {
+    let text = String::from_utf8_lossy(stderr);
+    let lines: Vec<&str> = text
+        .split(['\r', '\n'])
+        .map(str::trim)
+        .filter(|line| !line.is_empty() && !is_progress_line(line))
+        .collect();
+    if lines.is_empty() {
+        return "no diagnostic output".to_string();
+    }
+    let kept = lines.len().saturating_sub(4);
+    lines[kept..].join("; ")
+}
+
+/// `Counting objects:  73% (…)` and friends, in either the local or the
+/// `remote: `-prefixed form.
+fn is_progress_line(line: &str) -> bool {
+    line.contains("% (") || line.ends_with('%')
+}
+
+/// `owner/name` for a clone directory, for logs. Analysis code below only ever
+/// holds a path, and an operator reading "which repositories are hitting the
+/// ceilings" needs the slug, not a volume-relative directory.
+fn repo_label(path: &Path) -> String {
+    let name = path
+        .file_stem()
+        .map(|stem| stem.to_string_lossy().into_owned())
+        .unwrap_or_default();
+    match path
+        .parent()
+        .and_then(|parent| parent.file_name())
+        .map(|owner| owner.to_string_lossy().into_owned())
+    {
+        Some(owner) if !owner.is_empty() && !name.is_empty() => format!("{owner}/{name}"),
+        _ => name,
+    }
+}
+
+/// Bytes of clone storage `REPOS_DIR` may hold before [`evict_clone`] starts
+/// trimming, when `REPOS_QUOTA_BYTES` is unset.
+///
+/// **This default assumes a 500 GB data volume mounted for `REPOS_DIR`, with
+/// Postgres and the OS living outside it.** That is an assumption, not a
+/// measurement — the operator has not stated a disk budget — so it is written
+/// here as one number to change rather than spread across the module.
+///
+/// Sizing, at the clone sizes this module now produces: a few hundred catalog
+/// repositories average a few hundred megabytes each (django is 275 MB), which
+/// is roughly 75-100 GB, and the handful of giants that must also stay warm add
+/// about 20 GB more (godot 1.8 GB, next.js 2.5 GB, linux 6.1 GB). 250 GiB
+/// therefore holds the whole intended working set with headroom of the same
+/// order again — which the sweep needs, because a repack transiently doubles
+/// one repository on disk and an in-flight clone is not yet counted against
+/// anything. The other half of the volume is deliberately left unclaimed.
+const DEFAULT_REPOS_QUOTA_BYTES: u64 = 250 * 1024 * 1024 * 1024;
+
+/// Where clones live and how much of the volume they may hold.
+///
+/// Complete clones are the whole point of this module and they are large:
+/// 275 MB for django, 1.8 GB for godot, 2.5 GB for next.js, 6.1 GB for linux,
+/// against tens of megabytes each when the same repositories were cloned
+/// blobless. Disk is now the only ceiling on what gitdebt can analyze, so
+/// `REPOS_QUOTA_BYTES` and the volume behind it are the knob that decides how
+/// many repositories stay warm — set it from your mount rather than inheriting
+/// [`DEFAULT_REPOS_QUOTA_BYTES`], whose assumed volume is written down there.
 #[derive(Clone, Debug)]
 pub struct RepoStorage {
     pub root: PathBuf,
@@ -76,7 +315,7 @@ impl RepoStorage {
         let quota_bytes: u64 = std::env::var("REPOS_QUOTA_BYTES")
             .ok()
             .and_then(|s| s.parse().ok())
-            .unwrap_or(80 * 1024 * 1024 * 1024);
+            .unwrap_or(DEFAULT_REPOS_QUOTA_BYTES);
         let high_watermark_pct: u8 = std::env::var("REPOS_HIGH_WATERMARK_PCT")
             .ok()
             .and_then(|s| s.parse().ok())
@@ -131,10 +370,24 @@ fn pack_threads_config() -> &'static str {
 /// Every git invocation goes through here. `kill_on_drop` is the load-bearing
 /// part: a dropped future (job timeout, shutdown) must reap the subprocess
 /// instead of orphaning a clone that keeps writing to the volume.
+///
+/// Auto-maintenance is disabled for the same reason. Each incremental fetch
+/// writes another packfile, and git repacks the whole object store once
+/// `gc.autoPackLimit` (50 by default) is crossed — a repository refreshed
+/// fifty times would then repack multiple gigabytes in the middle of an
+/// analysis, on every worker at once. Repacking belongs to the eviction sweep,
+/// not to a request-facing job.
 fn git() -> Command {
     let mut command = Command::new("git");
     command
-        .args(["-c", pack_threads_config()])
+        .args([
+            "-c",
+            pack_threads_config(),
+            "-c",
+            "gc.auto=0",
+            "-c",
+            "maintenance.auto=false",
+        ])
         .kill_on_drop(true);
     command
 }
@@ -147,34 +400,53 @@ fn git_in(path: &Path) -> Command {
 }
 
 /// Open the bare clone if present, otherwise clone fresh from GitHub.
-/// Idempotent — repeated calls fast-fetch updates rather than re-cloning.
-/// The complete commit graph is retained even after aggregate analysis is
-/// bounded, so exact repository totals never depend on the sampling window.
-pub async fn open_or_clone(
+/// Idempotent — repeated calls fetch only the objects that appeared since the
+/// last run rather than re-cloning, which is what keeps a complete-history
+/// analysis cheap in steady state.
+///
+/// `progress` is the liveness contract described on [`Progress`]. A cold clone
+/// of the largest catalog entries runs for the better part of an hour, which is
+/// longer than the caller's stall patience, so a caller that passes `None` is
+/// asserting that nothing is watching this run for silence.
+pub(crate) async fn open_or_clone(
     storage: &RepoStorage,
     repo: &str,
-    _last_analyzed_sha: Option<&str>,
+    _since_sha: Option<&str>,
+    progress: Option<Progress<'_>>,
 ) -> Result<RepoHandle> {
     let path = storage.path_for(repo);
     tokio::fs::create_dir_all(path.parent().unwrap_or_else(|| Path::new("."))).await?;
 
     if path.exists() && !cache_format_is_current(&path).await {
-        // Older tree-filtered clones can contain the commit graph without the
-        // historical trees required by `--name-only`. Relaxing the filter on
-        // a later fetch does not reliably backfill those promisor objects, so
-        // metadata walks degrade into thousands of serial lazy fetches. A
-        // versioned one-time rebuild is faster and makes every later scan
-        // fully local.
+        // Older caches were cloned under an object filter, so they hold the
+        // commit graph without the blobs (and, older still, without the trees)
+        // that a diff needs. Relaxing a filter on a later fetch does not
+        // reliably backfill those promisor objects, so walks degrade into
+        // thousands of serial lazy fetches. A versioned one-time rebuild is
+        // faster and makes every later scan fully local.
         tracing::info!(repo, "rebuilding legacy repository cache");
         tokio::fs::remove_dir_all(&path)
             .await
             .context("remove legacy bare clone")?;
-        if let Err(clone_error) = clone_bare(repo, &path).await {
+        if let Err(clone_error) = clone_bare(repo, &path, progress).await {
             let _ = tokio::fs::remove_dir_all(&path).await;
             return Err(clone_error);
         }
     } else if path.exists() {
-        if let Err(error) = fetch_updates(&path).await {
+        if let Err(error) = fetch_updates(&path, progress).await {
+            if budget_lapsed(&error) {
+                // A refresh that cannot finish inside its ceiling is not a
+                // reason to produce nothing: the clone on disk still resolves
+                // a real revision, and a report one push behind is worth far
+                // more than a failed job that re-downloads the same objects
+                // on the next attempt.
+                tracing::info!(
+                    repo,
+                    "repository refresh exceeded its budget; analyzing the cached revision"
+                );
+                let head_sha = rev_parse_head(&path).await?;
+                return Ok(RepoHandle { path, head_sha });
+            }
             if !fetch_requires_reclone(&error) {
                 return Err(error);
             }
@@ -182,7 +454,7 @@ pub async fn open_or_clone(
             tokio::fs::remove_dir_all(&path)
                 .await
                 .context("remove stale bare clone")?;
-            if let Err(clone_error) = clone_bare(repo, &path).await {
+            if let Err(clone_error) = clone_bare(repo, &path, progress).await {
                 // A failed clone can leave a non-repository directory that
                 // would otherwise turn every later retry into a fetch error.
                 let _ = tokio::fs::remove_dir_all(&path).await;
@@ -190,7 +462,7 @@ pub async fn open_or_clone(
             }
         }
     } else {
-        clone_bare(repo, &path).await?;
+        clone_bare(repo, &path, progress).await?;
     }
     let head_sha = rev_parse_head(&path).await?;
     Ok(RepoHandle { path, head_sha })
@@ -202,30 +474,110 @@ fn fetch_requires_reclone(error: &anyhow::Error) -> bool {
         || detail.contains("could not find remote ref refs/heads/")
 }
 
-async fn clone_bare(repo: &str, path: &Path) -> Result<()> {
+/// Marker embedded in the errors this module raises when one of its own
+/// wall-clock ceilings lapsed, as opposed to git reporting a real failure.
+/// Callers degrade on the former and surface the latter.
+pub(crate) const BUDGET_MARKER: &str = "gitdebt budget exceeded";
+
+/// Did this error come from one of *this process's own* wall-clock ceilings
+/// lapsing, rather than from git or the remote reporting a real failure?
+///
+/// The whole error chain is searched, not just its outermost frame: every
+/// caller wraps these errors in `.context(...)` before the queue ever sees
+/// them, and `Error::to_string` renders only the last context added.
+///
+/// The distinction is load-bearing outside this module. A lapse is a
+/// statement about the ceiling an operator configured, never about the
+/// repository, so it must never be allowed to retire a repository
+/// permanently — raising the ceiling and redeploying has to bring the row
+/// back. See `repo_analysis::Failure::terminal`.
+pub(crate) fn budget_lapsed(error: &anyhow::Error) -> bool {
+    error
+        .chain()
+        .any(|cause| cause.to_string().contains(BUDGET_MARKER))
+}
+
+/// Marks a failure caused by the state of the clone on THIS host's disk —
+/// unreadable objects, a pack damaged by a full volume, a child killed by the
+/// OOM reaper — rather than by anything true of the repository.
+pub(crate) const LOCAL_CLONE_MARKER: &str = "gitdebt local clone unusable";
+
+/// Is this error about our own copy rather than about the repository?
+///
+/// Same reasoning as [`budget_lapsed`], and the same consequence: it must
+/// never retire a repository permanently. It carries one extra obligation,
+/// though. A lapse can be fixed by raising a ceiling, but an unreadable clone
+/// is fixed only by getting a new one — so every attempt would otherwise meet
+/// the identical bytes on disk and fail identically until the attempt ceiling
+/// retired a perfectly healthy repository. Callers must discard the clone.
+pub(crate) fn local_clone_unusable(error: &anyhow::Error) -> bool {
+    error
+        .chain()
+        .any(|cause| cause.to_string().contains(LOCAL_CLONE_MARKER))
+}
+
+/// Delete a clone so the next attempt fetches a fresh one. Best-effort: if the
+/// directory cannot be removed, the retry re-reads the same bytes and fails the
+/// same way, which is the behaviour this exists to end — so it is logged.
+pub(crate) async fn discard_clone(path: &Path) {
+    if let Err(error) = tokio::fs::remove_dir_all(path).await {
+        tracing::warn!(
+            path = %path.display(),
+            %error,
+            "could not discard an unusable clone; the next attempt will re-read it"
+        );
+    }
+}
+
+async fn clone_bare(repo: &str, path: &Path, progress: Option<Progress<'_>>) -> Result<()> {
     let url = format!("https://github.com/{repo}.git");
-    // Fetch the complete commit graph and trees so exact totals and path-only
-    // history scans stay local. Historical file bodies remain promisor objects
-    // and are hydrated only for the small TODO patch window.
-    let output = git()
+    // No object filter. One bulk pack transfer of everything the default
+    // branch reaches is cheaper end to end than a filtered clone plus the
+    // thousands of promisor round trips the diff walks would then need, and it
+    // is what makes every phase after this one local. `--no-tags` and
+    // `--single-branch` still apply: gitdebt only ever analyzes the default
+    // branch, so release tags and other branches are bytes nothing reads.
+    let mut command = git();
+    // `--progress` forces the counting/receiving/resolving stream even though
+    // stderr is a pipe. It is the evidence [`output_within_progress`] reads to
+    // tell a multi-gigabyte transfer apart from a wedged one.
+    command
         .args([
             "clone",
             "--bare",
             "--no-tags",
             "--single-branch",
-            "--filter=blob:none",
+            "--progress",
             "--",
         ])
         .arg(&url)
-        .arg(path)
-        .output()
+        .arg(path);
+    let budget = budget_from_env(
+        "REPO_ANALYSIS_CLONE_TIMEOUT_SECONDS",
+        DEFAULT_CLONE_TIMEOUT_SECS,
+    );
+    let Some(output) = output_within_progress(command, budget, progress)
         .await
-        .context("spawn full git clone")?;
-    if !output.status.success() {
-        bail!(
-            "git clone failed: {}",
-            String::from_utf8_lossy(&output.stderr)
+        .context("spawn full git clone")?
+    else {
+        // git cleans up after itself when it fails, but not when it is killed:
+        // the half-written object store left behind would be read as a cached
+        // clone by the next attempt. Nothing about it is resumable — git has
+        // no resumable clone — so the honest move is to discard it and let the
+        // operator see the ceiling in the log.
+        let _ = tokio::fs::remove_dir_all(path).await;
+        tracing::info!(
+            repo,
+            budget_seconds = budget.as_secs(),
+            "clone exceeded its budget; discarding the partial clone"
         );
+        bail!(
+            "{BUDGET_MARKER}: clone did not finish in {}s",
+            budget.as_secs()
+        );
+    };
+    if !output.status.success() {
+        bail!("git clone failed: {}", git_failure_detail(&output.stderr));
     }
     let config = git_in(path)
         .args(["config", "gitdebt.cacheFormat", CACHE_FORMAT_VERSION])
@@ -238,7 +590,7 @@ async fn clone_bare(repo: &str, path: &Path) -> Result<()> {
             String::from_utf8_lossy(&config.stderr)
         );
     }
-    write_commit_graph(path).await;
+    write_commit_graph(path, progress).await;
     Ok(())
 }
 
@@ -248,16 +600,36 @@ async fn clone_bare(repo: &str, path: &Path) -> Result<()> {
 /// parses every commit object out of the pack — seconds of CPU per run on a
 /// large repository, paid to refresh one integer. Best-effort: a failure only
 /// means the next count is slower.
-async fn write_commit_graph(path: &Path) {
-    match git_in(path)
-        .args(["commit-graph", "write", "--reachable", "--split"])
-        .output()
-        .await
-    {
-        Ok(output) if output.status.success() => {}
-        Ok(output) => tracing::debug!(
+///
+/// This runs immediately after a clone that may already have consumed most of
+/// the caller's stall patience, so it takes the same liveness callback rather
+/// than adding its own budget's worth of silence on top.
+async fn write_commit_graph(path: &Path, progress: Option<Progress<'_>>) {
+    let mut command = git_in(path);
+    command.args([
+        "commit-graph",
+        "write",
+        "--reachable",
+        "--split",
+        "--progress",
+    ]);
+    let budget = budget_from_env(
+        "REPO_ANALYSIS_GIT_MAINTENANCE_TIMEOUT_SECONDS",
+        DEFAULT_MAINTENANCE_TIMEOUT_SECS,
+    );
+    match output_within_progress(command, budget, progress).await {
+        Ok(Some(output)) if output.status.success() => {}
+        Ok(Some(output)) => tracing::debug!(
             stderr = %String::from_utf8_lossy(&output.stderr),
             "commit-graph write failed"
+        ),
+        // The graph is an accelerator for the reachable-commit count, so a
+        // lapse costs a slower count rather than a wrong one. Logged at info
+        // because the count's own ceiling is the next thing to lapse.
+        Ok(None) => tracing::info!(
+            repo = repo_label(path),
+            budget_seconds = budget.as_secs(),
+            "commit-graph write exceeded its budget"
         ),
         Err(error) => tracing::debug!(%error, "commit-graph write could not run"),
     }
@@ -275,7 +647,7 @@ async fn cache_format_is_current(path: &Path) -> bool {
         && String::from_utf8_lossy(&output.stdout).trim() == CACHE_FORMAT_VERSION
 }
 
-async fn fetch_updates(path: &Path) -> Result<()> {
+async fn fetch_updates(path: &Path, progress: Option<Progress<'_>>) -> Result<()> {
     // Resolve the clone's default branch from its HEAD symref. A bare
     // single-branch clone has NO `remote.origin.fetch` refspec, so a plain
     // `git fetch origin` only writes `FETCH_HEAD` and never advances the
@@ -285,34 +657,36 @@ async fn fetch_updates(path: &Path) -> Result<()> {
     // local branch (and therefore HEAD) actually moves forward.
     let branch = default_branch(path).await?;
     let refspec = format!("+refs/heads/{branch}:refs/heads/{branch}");
-    let shallow = is_shallow_repository(path).await?;
-    let tree_less = partial_clone_filter(path)
-        .await?
-        .is_some_and(|filter| filter == "tree:0");
+    // No filter and no `--unshallow`/`--refetch` repair: [`open_or_clone`]
+    // rebuilds any cache not stamped with the current [`CACHE_FORMAT_VERSION`]
+    // before reaching here, so every clone this runs against is already
+    // complete and unfiltered. This transfers exactly the objects pushed since
+    // the last run — the whole reason a one-time full clone pays for itself.
     let mut command = git_in(path);
-    command.args(["fetch", "--no-tags", "--filter=blob:none"]);
-    if shallow {
-        command.arg("--unshallow");
-    } else if tree_less {
-        // Existing tree:0 caches have the full graph but omit historical
-        // trees. Reapply the less restrictive filter once so later metadata
-        // walks do not degrade into hundreds of lazy network fetches.
-        command.arg("--refetch");
-    }
-    let output = command
-        // `--` before the positional remote name: defense-in-depth so a
-        // future unvalidated positional arg can't be parsed as a flag.
-        .args(["--", "origin", &refspec])
-        .output()
+    // A steady-state fetch is a year's commits at most, but the first fetch
+    // after an eviction or a re-clone is another full transfer, so it reports
+    // liveness on exactly the same terms as the clone.
+    command.args(["fetch", "--no-tags", "--progress"]);
+    // `--` before the positional remote name: defense-in-depth so a future
+    // unvalidated positional arg can't be parsed as a flag.
+    command.args(["--", "origin", &refspec]);
+    let budget = budget_from_env(
+        "REPO_ANALYSIS_FETCH_TIMEOUT_SECONDS",
+        DEFAULT_FETCH_TIMEOUT_SECS,
+    );
+    let Some(output) = output_within_progress(command, budget, progress)
         .await
-        .context("spawn git fetch")?;
-    if !output.status.success() {
+        .context("spawn git fetch")?
+    else {
         bail!(
-            "git fetch failed: {}",
-            String::from_utf8_lossy(&output.stderr)
+            "{BUDGET_MARKER}: fetch did not finish in {}s",
+            budget.as_secs()
         );
+    };
+    if !output.status.success() {
+        bail!("git fetch failed: {}", git_failure_detail(&output.stderr));
     }
-    write_commit_graph(path).await;
+    write_commit_graph(path, progress).await;
     Ok(())
 }
 
@@ -492,52 +866,160 @@ const MAX_PATCH_BYTES: usize = 4 * 1024 * 1024;
 /// produce gigabytes of patch text; the parsed commit facts are much smaller,
 /// so walk a fixed number of explicitly listed commits per subprocess and
 /// discard each raw batch before continuing.
-// Keep progress and cancellation responsive on large repositories. A large
-// `git log -p` batch can run for several minutes without emitting a durable
-// progress update; 100 still amortizes process startup while giving the UI
-// five measured checkpoints across the production first-pass window.
+// Keep progress and cancellation responsive. A large `git log -p` batch can
+// run for a long time without emitting a durable progress update; 100 still
+// amortizes process startup while giving the UI measured checkpoints.
 pub(crate) const LOG_BATCH_COMMITS: usize = 100;
-/// Metadata-only walks retain far less output and do not hydrate file bodies,
-/// so larger batches reduce git/network startup cost without hiding progress
-/// for minutes at a time.
+/// Metadata-only walks retain far less output than patch walks, so larger
+/// batches reduce process startup cost without hiding progress. This is the
+/// unit the caller reports progress in; [`walk_commit_metadata_batch`] splits
+/// each batch further across cores internally.
 pub(crate) const METADATA_BATCH_COMMITS: usize = 500;
 
-/// Bounded newest-history plan used by the production worker. Large projects
-/// such as Linux have more than a million reachable commits; repository-health
-/// signals are useful over a recent, explicitly reported window and must not
-/// require an unbounded full-history walk before anything becomes visible.
+/// The commits one analysis run will walk, oldest-first.
 #[derive(Clone, Debug, Eq, PartialEq)]
 pub(crate) struct CommitWalkPlan {
     pub shas: Vec<String>,
+    /// Always `false`. Analyzing complete history is the product, so no plan
+    /// this module produces omits reachable commits. The field stays because
+    /// `analysis_truncated` is a persisted column that the overview API and
+    /// the report page still read, and "this window covers everything" is the
+    /// honest value to keep writing into it — not a reason to drop the column
+    /// out from under its readers.
     pub truncated: bool,
 }
 
-/// Select at most `limit` newest non-merge commits, returned oldest-first.
-/// Asking git for `limit + 1` lets us report that the analysis window was
-/// capped without ever materializing a million-SHA rev-list in memory.
-pub(crate) async fn plan_recent_commits(
+/// Why a stored cursor could not be used to plan an incremental run.
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub(crate) enum CursorRejection {
+    /// `git cat-file -e <sha>^{commit}` failed: the object is not in the local
+    /// store. The clone was evicted and re-created, or the commit was garbage
+    /// collected after a force-push. `<sha>..HEAD` would fail outright.
+    Missing,
+    /// The object exists but `git merge-base --is-ancestor <sha> HEAD` says it
+    /// is not on the branch any more — a rebase or force-push rewrote history
+    /// under the stored aggregates. This is the dangerous one: `<sha>..HEAD`
+    /// still exits 0 and still prints a plausible commit list, which appended
+    /// on top of aggregates that already counted the rewritten commits drifts
+    /// commit counts, per-file churn and per-author totals upward forever.
+    Diverged,
+}
+
+impl CursorRejection {
+    /// Stable label for logs and for the caller's own reporting.
+    pub(crate) fn as_str(self) -> &'static str {
+        match self {
+            Self::Missing => "cursor object absent from the local clone",
+            Self::Diverged => "cursor is not an ancestor of HEAD",
+        }
+    }
+}
+
+/// The outcome of planning one analysis run.
+///
+/// Both variants carry a complete, walkable plan; the variant states how the
+/// caller must persist the result. `Rebuild` is expensive and deliberately
+/// loud — it means the stored aggregates describe a history that no longer
+/// exists, so appending to them is what would be wrong.
+#[derive(Clone, Debug, Eq, PartialEq)]
+pub(crate) enum CommitPlan {
+    /// The cursor was usable, or the caller asked for full history to begin
+    /// with. Persist however the caller already intended.
+    Planned(CommitWalkPlan),
+    /// The cursor failed validation. `plan` is complete history from HEAD, and
+    /// the caller MUST replace the stored aggregates rather than append.
+    Rebuild {
+        plan: CommitWalkPlan,
+        reason: CursorRejection,
+    },
+}
+
+impl CommitPlan {
+    pub(crate) fn plan(&self) -> &CommitWalkPlan {
+        match self {
+            Self::Planned(plan) | Self::Rebuild { plan, .. } => plan,
+        }
+    }
+
+    /// True when this run must replace stored aggregates even if the caller
+    /// intended to append. Never the other way round: a caller that already
+    /// decided to rebuild (revision bump, empty-repository cursor) still does.
+    pub(crate) fn requires_full_rebuild(&self) -> bool {
+        matches!(self, Self::Rebuild { .. })
+    }
+
+    pub(crate) fn rejection(&self) -> Option<CursorRejection> {
+        match self {
+            Self::Planned(_) => None,
+            Self::Rebuild { reason, .. } => Some(*reason),
+        }
+    }
+
+    pub(crate) fn into_plan(self) -> CommitWalkPlan {
+        match self {
+            Self::Planned(plan) | Self::Rebuild { plan, .. } => plan,
+        }
+    }
+}
+
+/// Every non-merge commit reachable from HEAD that `since_sha` does not
+/// already cover, oldest-first.
+///
+/// There is no cap and no sampling window. A commit costs about 0.44 ms to
+/// walk against a complete local clone, so the dimension that used to make
+/// full history unaffordable was never the commit count — it was the promisor
+/// round trip per commit that a blob-filtered clone forced, and that is gone.
+/// `since_sha` is what keeps steady state cheap: on a repository already
+/// analyzed at an older head this enumerates only the commits pushed since.
+///
+/// A cursor is only trusted after [`validate_cursor`] proves it still names a
+/// commit on this branch. Rebases and force-pushes are routine, and the range
+/// syntax reports neither failure mode usefully on its own.
+pub(crate) async fn plan_commits(
     handle: &RepoHandle,
     since_sha: Option<&str>,
-    limit: usize,
-) -> Result<CommitWalkPlan> {
+) -> Result<CommitPlan> {
     if handle.is_empty() {
-        return Ok(CommitWalkPlan {
+        return Ok(CommitPlan::Planned(CommitWalkPlan {
             shas: Vec::new(),
             truncated: false,
-        });
+        }));
+    }
+    let mut rejection = None;
+    if let Some(sha) = since_sha {
+        rejection = validate_cursor(&handle.path, sha).await?;
+        if let Some(reason) = rejection {
+            // A rebuild is correct but costs the whole history again, so it is
+            // never silent: an operator seeing these repeatedly for one
+            // repository is seeing a rewritten branch, not a gitdebt bug.
+            tracing::info!(
+                repo = repo_label(&handle.path),
+                cursor = sha,
+                head = handle.head_sha,
+                reason = reason.as_str(),
+                "stored analysis cursor rejected; rebuilding complete history"
+            );
+        }
     }
     let range = match since_sha {
-        Some(sha) => format!("{sha}..HEAD"),
-        None => "HEAD".to_string(),
+        Some(sha) if rejection.is_none() => format!("{sha}..HEAD"),
+        _ => "HEAD".to_string(),
     };
-    let bounded = limit.max(1);
-    let probe = bounded.saturating_add(1);
-    let max_count = format!("--max-count={probe}");
-    let output = git_in(&handle.path)
-        .args(["rev-list", "--no-merges", &max_count, &range])
-        .output()
+    let mut command = git_in(&handle.path);
+    command.args(["rev-list", "--reverse", "--no-merges", &range]);
+    let budget = budget_from_env(
+        "REPO_ANALYSIS_PLAN_TIMEOUT_SECONDS",
+        DEFAULT_PLAN_TIMEOUT_SECS,
+    );
+    let Some(output) = output_within(command, budget)
         .await
-        .context("git bounded rev-list")?;
+        .context("git rev-list")?
+    else {
+        bail!(
+            "{BUDGET_MARKER}: commit selection did not finish in {}s",
+            budget.as_secs()
+        );
+    };
     if !output.status.success() {
         bail!(
             "git rev-list failed: {}",
@@ -545,65 +1027,95 @@ pub(crate) async fn plan_recent_commits(
         );
     }
     let sha_output = std::str::from_utf8(&output.stdout).context("git rev-list non-UTF-8")?;
-    let mut shas: Vec<String> = sha_output
+    let shas: Vec<String> = sha_output
         .lines()
         .map(str::trim)
         .filter(|sha| !sha.is_empty())
         .map(str::to_string)
         .collect();
     validate_shas(&shas)?;
-    let truncated = shas.len() > bounded;
-    shas.truncate(bounded);
-    shas.reverse();
-    Ok(CommitWalkPlan { shas, truncated })
+    let plan = CommitWalkPlan {
+        shas,
+        truncated: false,
+    };
+    Ok(match rejection {
+        Some(reason) => CommitPlan::Rebuild { plan, reason },
+        None => CommitPlan::Planned(plan),
+    })
 }
 
-async fn is_shallow_repository(path: &Path) -> Result<bool> {
-    let output = git_in(path)
-        .args(["rev-parse", "--is-shallow-repository"])
+/// Prove a stored cursor can still anchor an incremental walk. `Ok(None)` is
+/// the usable case.
+///
+/// Both probes are graph reads against a local clone and cost milliseconds
+/// even on linux, which is the entire argument for running them on every
+/// incremental plan rather than trying to guess when history was rewritten.
+async fn validate_cursor(path: &Path, sha: &str) -> Result<Option<CursorRejection>> {
+    // A cursor that is not an object id never reaches git. `EMPTY_REPOSITORY_HEAD`
+    // is a real stored value, and beyond it this keeps any future caller from
+    // handing a revision expression — or an argument — to the commands below.
+    if !(40..=64).contains(&sha.len()) || !sha.bytes().all(|byte| byte.is_ascii_hexdigit()) {
+        return Ok(Some(CursorRejection::Missing));
+    }
+    let exists = git_in(path)
+        .args(["cat-file", "-e", &format!("{sha}^{{commit}}")])
         .output()
         .await
-        .context("git shallow-repository probe")?;
-    if !output.status.success() {
-        bail!(
-            "git shallow-repository probe failed: {}",
-            String::from_utf8_lossy(&output.stderr)
-        );
+        .context("probe cursor object")?;
+    if !exists.status.success() {
+        return Ok(Some(CursorRejection::Missing));
     }
-    Ok(String::from_utf8_lossy(&output.stdout).trim() == "true")
-}
-
-pub(crate) async fn partial_clone_filter(path: &Path) -> Result<Option<String>> {
-    let output = git_in(path)
-        .args(["config", "--get", "remote.origin.partialclonefilter"])
+    let ancestor = git_in(path)
+        .args(["merge-base", "--is-ancestor", sha, "HEAD"])
         .output()
         .await
-        .context("git partial clone filter")?;
-    if output.status.success() {
-        let filter = String::from_utf8_lossy(&output.stdout).trim().to_string();
-        return Ok((!filter.is_empty()).then_some(filter));
-    }
-    if output.status.code() == Some(1) {
+        .context("probe cursor ancestry")?;
+    if ancestor.status.success() {
         return Ok(None);
     }
-    bail!(
-        "git partial clone filter failed: {}",
-        String::from_utf8_lossy(&output.stderr)
-    )
+    // Exit 1 is the documented "not an ancestor". Anything else means git
+    // could not answer, and an unanswerable cursor is not a trustworthy one
+    // either — a rebuild is expensive but it is never wrong.
+    if ancestor.status.code() != Some(1) {
+        tracing::info!(
+            repo = repo_label(path),
+            detail = %git_failure_detail(&ancestor.stderr),
+            "cursor ancestry probe failed; treating the cursor as diverged"
+        );
+    }
+    Ok(Some(CursorRejection::Diverged))
 }
 
 /// Exact number of commits reachable from the default branch, including
-/// merges. The clone always carries the complete commit graph, so this is a
-/// cheap local graph walk even when patch-level health analysis is bounded.
+/// merges — the denominator the analyzed non-merge total is reported against.
+/// The clone always carries the complete commit graph, so this is a cheap
+/// local graph walk.
 pub(crate) async fn reachable_commit_count(handle: &RepoHandle) -> Result<usize> {
     if handle.is_empty() {
         return Ok(0);
     }
-    let output = git_in(&handle.path)
-        .args(["rev-list", "--count", "HEAD"])
-        .output()
+    let mut command = git_in(&handle.path);
+    command.args(["rev-list", "--count", "HEAD"]);
+    let budget = budget_from_env(
+        "REPO_ANALYSIS_COMMIT_COUNT_TIMEOUT_SECONDS",
+        DEFAULT_COMMIT_COUNT_TIMEOUT_SECS,
+    );
+    // This is the one phase with no honest degradation. The number is the
+    // repository's exact commit total; substituting the analyzed non-merge
+    // count, or zero, would state something false about the repository. A
+    // ceiling here therefore converts an unbounded graph walk into a bounded,
+    // explicitly named failure — and with
+    // the commit-graph written above it is a sub-second read even at a million
+    // commits, so lapsing means the clone itself is damaged.
+    let Some(output) = output_within(command, budget)
         .await
-        .context("git reachable commit count")?;
+        .context("git reachable commit count")?
+    else {
+        bail!(
+            "{BUDGET_MARKER}: reachable commit count did not finish in {}s",
+            budget.as_secs()
+        );
+    };
     if !output.status.success() {
         bail!(
             "git rev-list --count failed: {}",
@@ -706,12 +1218,26 @@ pub(crate) async fn walk_commit_batch(
     ]);
     command.args(shas).arg("--");
     // Exclude paths that cannot carry a TODO before git diffs them. This is
-    // not only noise control: on a `--filter=blob:none` clone `git log -p`
-    // hydrates both sides of every changed file from the remote, so without
-    // this a commit that touches a video or a generated bundle downloads it
-    // in full to produce the line "Binary files ... differ".
+    // not only noise control: producing "Binary files ... differ" still costs
+    // reading and hashing both sides of a file that may be hundreds of
+    // megabytes, for a line the TODO scanner then throws away.
     command.args(NON_TEXT_PATHSPECS);
-    let output = command.output().await.context("batched git log")?;
+    let budget = budget_from_env(
+        "REPO_ANALYSIS_PATCH_WALK_TIMEOUT_SECONDS",
+        DEFAULT_PATCH_WALK_TIMEOUT_SECS,
+    );
+    let Some(output) = output_within(command, budget)
+        .await
+        .context("batched git log")?
+    else {
+        tracing::info!(
+            repo = repo_label(&handle.path),
+            commits = shas.len(),
+            budget_seconds = budget.as_secs(),
+            "TODO patch scan exceeded its budget; TODO deltas omitted for this batch"
+        );
+        return Ok(Vec::new());
+    };
     if !output.status.success() {
         bail!(
             "batched git log failed: {}",
@@ -721,67 +1247,284 @@ pub(crate) async fn walk_commit_batch(
     Ok(parse_log_records(&output.stdout))
 }
 
-/// Pull down every object the window's diffs touch, in a few batched fetches,
-/// so the `--numstat` walk that follows runs entirely against local objects.
+/// One batch of walked commits plus whether any of it lost line movement.
 ///
-/// `--numstat` reports line counts, which git can only produce by diffing blob
-/// *content*. On a `--filter=blob:none` clone that means one promisor round
-/// trip per commit — three orders of magnitude more wall time than the walk
-/// itself. This pass asks for the same diffs in `--raw` form, which reads only
-/// trees, collects the object ids from both sides, and fetches them in chunks.
+/// `incomplete_objects` means at least one commit in `commits` came from the
+/// tree-only fallback: its paths are exact but its `lines_added`/
+/// `lines_deleted` are zero because no blob could be read, which is
+/// indistinguishable from a commit that genuinely moved no lines. Persisting
+/// such a batch as exact is permanent: an incremental run never re-walks a
+/// commit behind the cursor, so the churn and ownership charts would stay
+/// wrong forever. Worse, the chunk size derives from [`walk_concurrency`], so
+/// under the same fault two replicas zero *different* commits for the same
+/// repository.
 ///
-/// Every collected id is requested, without first asking which are already
-/// local. `git cat-file --batch-check` cannot answer that question here: under
-/// `GIT_NO_LAZY_FETCH=1` it dies with exit 128 on the first missing object and
-/// writes nothing at all to stdout (verified on git 2.39.5, the runtime
-/// image's version), so a probe reports "nothing missing" for exactly the cold
-/// clone this pass exists to serve. Without the env var the probe hydrates
-/// every id one at a time, which is the cost being removed. Re-asking for
-/// objects the clone already has is free by comparison: git negotiates them
-/// away and returns an empty pack.
+/// It is deliberately narrower than the old `degraded` flag, which also fired
+/// when a chunk merely lapsed [`DEFAULT_WALK_TIMEOUT_SECS`]. Conflating the
+/// two meant one slow chunk on a busy host threw away a walk that had already
+/// completed a million commits, and the retry started from zero. Slowness is
+/// now answered where it happens — see [`walk_with_retry`] — and never
+/// reported as damage.
+#[derive(Clone, Debug)]
+pub(crate) struct CommitWalk {
+    pub commits: Vec<CommitInfo>,
+    pub incomplete_objects: bool,
+}
+
+/// What one `git log --numstat` subprocess over an explicit SHA list learned.
 ///
-/// `size_before` is the clone size the whole window's budget is measured
-/// against, so calling this once per walk batch still enforces one ceiling
-/// rather than one per batch. Returns `false` once that budget is exhausted:
-/// the caller stops hydrating and git fetches whatever is left lazily, exactly
-/// as before. Hydration is a speed optimization and must never fail a run.
+/// The three arms are the three distinct events that used to collapse into a
+/// single `degraded` boolean, and only one of them says anything about the
+/// repository.
+enum ChunkOutcome {
+    /// Exact: line movement for every commit in the slice.
+    Exact(Vec<CommitInfo>),
+    /// git exited non-zero. Lazy fetching is off and the clone is complete,
+    /// so the reachable cause is an object git could not read; the slice was
+    /// re-walked from trees alone, which keeps every path-shaped signal exact
+    /// and reports zero line movement.
+    PathsOnly(Vec<CommitInfo>),
+    /// The wall-clock ceiling lapsed and nothing at all was learned — about
+    /// the objects least of all.
+    Lapsed,
+}
+
+/// How many times one lapsed slice may be halved before the walk gives up.
 ///
-/// `git rev-list --objects --missing=print` is deliberately not used here: it
-/// enumerates every blob in every window commit's full tree, which would
-/// download the repository the blob filter exists to avoid.
-pub(crate) async fn hydrate_window_blobs(
-    handle: &RepoHandle,
-    shas: &[String],
-    size_before: u64,
-) -> Result<bool> {
-    if handle.is_empty() || shas.is_empty() {
-        return Ok(true);
-    }
-    // A clone with no blob filter already holds every object the walk reads,
-    // so the `--raw` enumeration below would be pure added latency on the
-    // critical path it exists to shorten.
-    if partial_clone_filter(&handle.path).await?.is_none() {
-        return Ok(true);
-    }
-    validate_shas(shas)?;
-    let budget = analysis_hydrate_max_bytes();
-    for batch in shas.chunks(METADATA_BATCH_COMMITS) {
-        let touched = raw_diff_oids(&handle.path, batch).await?;
-        for chunk in touched.chunks(HYDRATE_CHUNK) {
-            fetch_objects(&handle.path, chunk).await?;
-            if clone_size_bytes(&handle.path).saturating_sub(size_before) > budget {
-                tracing::info!(budget, "commit-window hydration hit its byte budget");
-                return Ok(false);
+/// The budget is per subprocess, so halving a slow slice hands each half the
+/// full budget again: the retry is a real second chance rather than the same
+/// race re-run. Five halvings take a [`METADATA_BATCH_COMMITS`] batch down to
+/// ~16 commits per subprocess. A repository that still cannot walk sixteen
+/// commits inside the ceiling surfaces a [`BUDGET_MARKER`] lapse, which the
+/// queue classifies as non-terminal and retries against a now-warm clone —
+/// slow must stay convergent, and it never earns the zeroed churn that a
+/// damaged object store gets.
+const MAX_WALK_CHUNK_SPLITS: u32 = 5;
+
+/// Total lapsed subprocesses one chunk walk may absorb before it gives up.
+///
+/// Depth alone does not bound the wall clock: five levels of halving is up to
+/// 63 slices, and if every one of them lapsed the chunk would sit silent for
+/// 63 budgets. A batch boundary is the only place this walk beats its
+/// heartbeat, so anything longer than `REPO_ANALYSIS_STALL_SECONDS` gets the
+/// run killed as wedged — throwing away the completed prefix that the retry
+/// ladder exists to protect. Eight lapses at the default 300 s ceiling is
+/// 40 minutes of retrying inside a 60-minute stall window, which is far more
+/// slack than a transiently busy host ever needs and still leaves the guard
+/// its margin.
+const MAX_WALK_CHUNK_LAPSES: u32 = 8;
+
+/// Where to halve a lapsed slice, or `None` when the ladder is spent.
+fn retry_split(len: usize, splits: u32) -> Option<usize> {
+    (len > 1 && splits < MAX_WALK_CHUNK_SPLITS).then(|| len.div_ceil(2))
+}
+
+/// Walk `shas` through `run`, halving and retrying any slice that lapsed.
+///
+/// Generic over the subprocess so the retry ladder is testable without a
+/// repository that happens to be slow on the day the test runs. What it must
+/// preserve is the ordering contract every caller depends on: records come
+/// back in `shas` order no matter how many times a slice was split, which is
+/// why the halves go back on the *front* of the worklist, left before right.
+async fn walk_with_retry<'a, R, F>(shas: &'a [String], run: R) -> Result<CommitWalk>
+where
+    R: Fn(&'a [String]) -> F,
+    F: std::future::Future<Output = Result<ChunkOutcome>>,
+{
+    let mut commits = Vec::new();
+    let mut incomplete_objects = false;
+    let mut lapses = 0;
+    let mut pending: std::collections::VecDeque<(&'a [String], u32)> =
+        std::collections::VecDeque::new();
+    pending.push_back((shas, 0));
+    while let Some((slice, splits)) = pending.pop_front() {
+        match run(slice).await? {
+            ChunkOutcome::Exact(walked) => commits.extend(walked),
+            ChunkOutcome::PathsOnly(walked) => {
+                commits.extend(walked);
+                incomplete_objects = true;
+            }
+            ChunkOutcome::Lapsed => {
+                lapses += 1;
+                let split =
+                    retry_split(slice.len(), splits).filter(|_| lapses < MAX_WALK_CHUNK_LAPSES);
+                let Some(mid) = split else {
+                    bail!(
+                        "{BUDGET_MARKER}: commit walk did not finish for a slice of {} commits \
+                         after {lapses} lapsed attempts",
+                        slice.len()
+                    );
+                };
+                let (left, right) = slice.split_at(mid);
+                pending.push_front((right, splits + 1));
+                pending.push_front((left, splits + 1));
             }
         }
     }
-    Ok(true)
+    Ok(CommitWalk {
+        commits,
+        incomplete_objects,
+    })
 }
 
-/// One local `--raw` pass over a batch of commits, yielding the object ids
-/// their diffs read. Lazy fetching is disabled: a pass whose whole purpose is
-/// to batch promisor traffic must never issue any of its own.
-async fn raw_diff_oids(path: &Path, shas: &[String]) -> Result<Vec<String>> {
+/// Read author, date, message, changed paths, and line movement for a batch
+/// of commits.
+///
+/// `--numstat` is what makes `lines_added`/`lines_deleted` — and therefore
+/// `repo_commit_days` and every churn chart — possible, and git can only
+/// produce those counts by diffing blob content. Against a complete clone that
+/// is pure local work: 15.2 s for all 34,838 of django's commits, of which
+/// 13.8 s is a single core's user time. So the batch is split across cores
+/// here rather than handed to one subprocess.
+///
+/// The split cannot change the result. Each chunk is an explicit, ordered SHA
+/// list walked with `--no-walk=unsorted`, git emits one record per named
+/// commit in the order given, and the chunks are re-concatenated in plan
+/// order — so the bytes this returns are identical to the sequential walk's,
+/// whatever the completion order was.
+///
+/// `--no-renames` preserves the old path-set contract for renames (delete +
+/// add); rename-only commits can therefore report line movement, which is
+/// intentional and documented as Git numstat churn rather than edit distance.
+pub(crate) async fn walk_commit_metadata_batch(
+    handle: &RepoHandle,
+    shas: &[String],
+) -> Result<CommitWalk> {
+    if shas.is_empty() {
+        return Ok(CommitWalk {
+            commits: Vec::new(),
+            incomplete_objects: false,
+        });
+    }
+    validate_shas(shas)?;
+    let budget = budget_from_env(
+        "REPO_ANALYSIS_WALK_TIMEOUT_SECONDS",
+        DEFAULT_WALK_TIMEOUT_SECS,
+    );
+    let chunk = shas
+        .len()
+        .div_ceil(walk_concurrency())
+        .max(MIN_WALK_CHUNK_COMMITS);
+    let path = handle.path.as_path();
+    let walks = shas
+        .chunks(chunk)
+        .map(|chunk| walk_metadata_chunk(path, chunk, budget));
+    // `try_join_all` drives every chunk on this one task: the work being
+    // parallelized lives in the git child processes and in the blocking pool,
+    // so nothing here needs a `'static` spawn or a clone of the SHA list.
+    let chunks = futures::future::try_join_all(walks).await?;
+    // One unreadable chunk makes the whole batch inexact. The caller cannot
+    // tell which commits lost their line counts from the records alone, so
+    // the honest report is that this batch is not exact.
+    let incomplete_objects = chunks.iter().any(|chunk| chunk.incomplete_objects);
+    Ok(CommitWalk {
+        commits: chunks.into_iter().flat_map(|chunk| chunk.commits).collect(),
+        incomplete_objects,
+    })
+}
+
+/// One `git log --numstat` slice, retried on slowness and downgraded only on
+/// damage.
+///
+/// Lazy fetching is disabled. On a complete clone nothing is missing, so this
+/// costs nothing and is the guard that keeps it that way: were an object ever
+/// absent — a damaged pack, a cache built by some future filtered path — git
+/// left to itself would download the missing ones one object per round trip,
+/// and the walk would again cost what the *repository* churns rather than what
+/// it contains. Instead the slice degrades to [`walk_commit_paths_chunk`]:
+/// exact changed paths, no line movement, one info log naming the repository,
+/// and — the part the caller cannot reconstruct afterwards —
+/// `incomplete_objects` set on the [`CommitWalk`] it returns.
+///
+/// A lapsed ceiling gets none of that. It is not evidence about any object,
+/// so it is answered by halving the slice and walking it again
+/// ([`walk_with_retry`]).
+async fn walk_metadata_chunk(path: &Path, shas: &[String], budget: Duration) -> Result<CommitWalk> {
+    walk_with_retry(shas, |slice| numstat_chunk(path, slice, budget)).await
+}
+
+/// One `git log --numstat` subprocess over an explicit SHA list.
+async fn numstat_chunk(path: &Path, shas: &[String], budget: Duration) -> Result<ChunkOutcome> {
+    let log_format = "%x00%x00GDCOMMIT%x00%H%x00%P%x00%ae%x00%an%x00%aI%x00%s%x00";
+    let mut command = git_in(path);
+    command
+        .args([
+            "log",
+            "--no-walk=unsorted",
+            "--numstat",
+            "-z",
+            "--no-renames",
+            &format!("--format={log_format}"),
+        ])
+        .env("GIT_NO_LAZY_FETCH", "1");
+    command.args(shas).arg("--");
+    let detail = match output_within(command, budget)
+        .await
+        .context("batched metadata git log")?
+    {
+        Some(output) if output.status.success() => {
+            return Ok(ChunkOutcome::Exact(
+                parse_off_thread(output.stdout, parse_metadata_records).await?,
+            ));
+        }
+        Some(output) => String::from_utf8_lossy(&output.stderr)
+            .lines()
+            .next_back()
+            .unwrap_or("git log --numstat failed")
+            .to_string(),
+        None => {
+            tracing::info!(
+                repo = repo_label(path),
+                commits = shas.len(),
+                budget_seconds = budget.as_secs(),
+                "commit walk slice exceeded its budget; retrying it in halves"
+            );
+            return Ok(ChunkOutcome::Lapsed);
+        }
+    };
+    tracing::info!(
+        repo = repo_label(path),
+        commits = shas.len(),
+        detail,
+        "commit walk could not read every changed blob locally; \
+         recording changed paths without line movement"
+    );
+    Ok(ChunkOutcome::PathsOnly(
+        walk_commit_paths_chunk(path, shas).await?,
+    ))
+}
+
+/// Decode one subprocess's stdout on the blocking pool.
+///
+/// A full-history walk parses millions of records, and the analysis pool runs
+/// several of these at once; leaving that on the runtime threads starves every
+/// other task in the process, including the ones writing progress rows.
+async fn parse_off_thread(
+    stdout: Vec<u8>,
+    parse: fn(&[u8]) -> Vec<CommitInfo>,
+) -> Result<Vec<CommitInfo>> {
+    tokio::task::spawn_blocking(move || parse(&stdout))
+        .await
+        .context("parse commit records")
+}
+
+/// Changed paths for a chunk of commits, read from trees alone.
+///
+/// The degraded form of [`walk_metadata_chunk`]: `--raw` compares the object
+/// ids recorded in each commit's trees, so it produces a changed-path set
+/// without reading a single byte of file content. Ownership, coupling, and
+/// change-frequency signals stay exact; line movement is reported as zero for
+/// these commits. On a complete clone this should never run — it is the
+/// answer to a damaged object store, not to a missing download.
+pub(crate) async fn walk_commit_paths_chunk(
+    path: &Path,
+    shas: &[String],
+) -> Result<Vec<CommitInfo>> {
+    if shas.is_empty() {
+        return Ok(Vec::new());
+    }
+    validate_shas(shas)?;
+    let log_format = "%x00%x00GDCOMMIT%x00%H%x00%P%x00%ae%x00%an%x00%aI%x00%s%x00";
     let mut command = git_in(path);
     command
         .args([
@@ -791,57 +1534,120 @@ async fn raw_diff_oids(path: &Path, shas: &[String]) -> Result<Vec<String>> {
             "-z",
             "--no-renames",
             "--no-abbrev",
-            "--format=%x00",
+            &format!("--format={log_format}"),
         ])
         .env("GIT_NO_LAZY_FETCH", "1");
     command.args(shas).arg("--");
-    let output = command.output().await.context("batched raw diff listing")?;
+    let budget = budget_from_env(
+        "REPO_ANALYSIS_WALK_TIMEOUT_SECONDS",
+        DEFAULT_WALK_TIMEOUT_SECS,
+    );
+    let Some(output) = output_within(command, budget)
+        .await
+        .context("batched path-only git log")?
+    else {
+        bail!(
+            "{BUDGET_MARKER}: path-only commit walk did not finish in {}s",
+            budget.as_secs()
+        );
+    };
     if !output.status.success() {
         bail!(
-            "batched raw diff listing failed: {}",
+            "batched path-only git log failed: {}",
             String::from_utf8_lossy(&output.stderr)
         );
     }
-    Ok(parse_raw_diff_oids(&output.stdout))
+    parse_off_thread(output.stdout, parse_raw_metadata_records).await
 }
 
-/// Object ids both sides of every diff in a `--raw -z` stream touch, de-duped
-/// in first-seen order.
-///
-/// Each entry is `:<srcmode> <dstmode> <srcoid> <dstoid> <status>` in one NUL
-/// segment, followed by its path in the next. The all-zero id on the absent
-/// side of an add or a delete is dropped, and so are submodule gitlinks
-/// (mode 160000) — those ids name commits in another repository and asking
-/// this remote for one fails the whole fetch.
-pub(crate) fn parse_raw_diff_oids(stdout: &[u8]) -> Vec<String> {
-    let segments: Vec<&[u8]> = stdout.split(|byte| *byte == 0).collect();
-    let mut seen = HashSet::new();
-    let mut oids = Vec::new();
-    let mut index = 0;
+/// Pure parser for the `git log --raw -z` stream the path-only walk produces.
+/// The header is identical to the numstat walk's; each changed file is one
+/// `:<modes> <oids> <status>` segment followed by its path segment, and line
+/// movement is unknowable from trees alone.
+fn parse_raw_metadata_records(stdout: &[u8]) -> Vec<CommitInfo> {
+    split_on(stdout, COMMIT_SENTINEL)
+        .into_iter()
+        .filter(|record| !record.is_empty())
+        .filter_map(parse_raw_metadata_record)
+        .collect()
+}
+
+fn parse_raw_metadata_record(record: &[u8]) -> Option<CommitInfo> {
+    let segments: Vec<&[u8]> = record.split(|&byte| byte == 0).collect();
+    let mut header = segments.iter();
+    let sha = String::from_utf8_lossy(header.next()?).trim().to_string();
+    if sha.is_empty() {
+        return None;
+    }
+    let is_root = String::from_utf8_lossy(header.next()?).trim().is_empty();
+    let author_email = String::from_utf8_lossy(header.next()?).to_lowercase();
+    let author_name = String::from_utf8_lossy(header.next()?).to_string();
+    let iso = String::from_utf8_lossy(header.next()?).to_string();
+    let message_first_line = String::from_utf8_lossy(header.next()?).to_string();
+    let committed_at = DateTime::parse_from_rfc3339(iso.trim())
+        .map(|date| date.with_timezone(&Utc))
+        .unwrap_or_else(|_| Utc::now());
+
+    let mut file_changes = Vec::new();
+    // The first six segments are the header; entries and their paths follow in
+    // fixed pairs, so paths are consumed by position and never re-parsed as
+    // entries (a committed file may be named like one).
+    let mut index = 6;
     while index < segments.len() {
         let segment = String::from_utf8_lossy(segments[index]);
         let Some(entry) = parse_raw_diff_entry(segment.as_ref()) else {
             index += 1;
             continue;
         };
-        for oid in entry.oids {
-            if seen.insert(oid.clone()) {
-                oids.push(oid);
+        if !is_root {
+            for offset in 1..=entry.path_segments {
+                let Some(path) = segments.get(index + offset) else {
+                    break;
+                };
+                let path = String::from_utf8_lossy(path).trim().to_string();
+                if !path.is_empty() {
+                    file_changes.push(FileChange {
+                        path,
+                        lines_added: 0,
+                        lines_deleted: 0,
+                        binary: false,
+                    });
+                }
             }
         }
         index += 1 + entry.path_segments;
     }
-    oids
+    let paths_changed = file_changes
+        .iter()
+        .map(|change| change.path.clone())
+        .collect();
+
+    Some(CommitInfo {
+        sha,
+        author_email,
+        author_name,
+        committed_day: committed_at.date_naive(),
+        committed_at,
+        is_fix: is_fix_message(&message_first_line),
+        message_first_line,
+        paths_changed,
+        file_changes,
+        lines_added: 0,
+        lines_deleted: 0,
+        binary_files: 0,
+        todo_added: 0,
+        todo_removed: 0,
+    })
 }
 
-struct RawDiffEntry {
-    oids: Vec<String>,
-    /// Rename/copy statuses carry two path segments instead of one. `--raw`
-    /// is always invoked with `--no-renames`, so this is defense against a
-    /// caller that forgets rather than a shape we expect.
-    path_segments: usize,
-}
-
+/// How many path segments follow one `--raw -z` entry header, or `None` when
+/// the segment is not an entry header at all.
+///
+/// An entry is `:<srcmode> <dstmode> <srcoid> <dstoid> <status>` in one NUL
+/// segment, followed by its path in the next. Recognizing the shape is what
+/// lets the caller consume paths by position: `-z` emits paths raw and
+/// unquoted, so a committed file can be named byte-for-byte like an entry
+/// header, and re-parsing segments would read that path as a diff entry.
 fn parse_raw_diff_entry(segment: &str) -> Option<RawDiffEntry> {
     // The first entry of each commit is preceded by the newline that follows
     // the `--format` block.
@@ -849,8 +1655,8 @@ fn parse_raw_diff_entry(segment: &str) -> Option<RawDiffEntry> {
     let mut fields = rest.split(' ');
     let src_mode = fields.next()?;
     let dst_mode = fields.next()?;
-    let src_oid = fields.next()?;
-    let dst_oid = fields.next()?;
+    let _src_oid = fields.next()?;
+    let _dst_oid = fields.next()?;
     let status = fields.next()?;
     if fields.next().is_some() || !is_diff_mode(src_mode) || !is_diff_mode(dst_mode) {
         return None;
@@ -860,110 +1666,20 @@ fn parse_raw_diff_entry(segment: &str) -> Option<RawDiffEntry> {
     if !letter.is_ascii_uppercase() || !status.all(|char| char.is_ascii_digit()) {
         return None;
     }
-    let oids = [(src_mode, src_oid), (dst_mode, dst_oid)]
-        .into_iter()
-        .filter(|(mode, oid)| *mode != "160000" && is_fetchable_oid(oid))
-        .map(|(_, oid)| oid.to_string())
-        .collect();
     Some(RawDiffEntry {
-        oids,
+        // Rename/copy statuses carry two path segments instead of one. `--raw`
+        // is always invoked with `--no-renames`, so this is defense against a
+        // caller that forgets rather than a shape we expect.
         path_segments: usize::from(matches!(letter, 'R' | 'C')) + 1,
     })
 }
 
+struct RawDiffEntry {
+    path_segments: usize,
+}
+
 fn is_diff_mode(mode: &str) -> bool {
     mode.len() == 6 && mode.bytes().all(|byte| byte.is_ascii_digit())
-}
-
-/// An id worth asking the remote for: well-formed, and not the all-zero
-/// placeholder git prints for the missing side of an add or a delete.
-fn is_fetchable_oid(oid: &str) -> bool {
-    (40..=64).contains(&oid.len())
-        && oid.bytes().all(|byte| byte.is_ascii_hexdigit())
-        && oid.bytes().any(|byte| byte != b'0')
-}
-
-/// Fetch exactly the listed objects from the promisor remote. `--filter` keeps
-/// the traversal from dragging in anything the explicit ids do not name, and
-/// the `noop` negotiation algorithm — what git's own promisor path in
-/// `promisor-remote.c` uses — keeps an object-id request from paying ref
-/// negotiation once per chunk.
-async fn fetch_objects(path: &Path, oids: &[String]) -> Result<()> {
-    let mut child = git_in(path)
-        .args([
-            "-c",
-            "fetch.negotiationAlgorithm=noop",
-            "fetch",
-            "origin",
-            "--no-tags",
-            "--no-write-fetch-head",
-            "--recurse-submodules=no",
-            "--filter=blob:none",
-            "--stdin",
-        ])
-        .stdin(Stdio::piped())
-        .stdout(Stdio::null())
-        .stderr(Stdio::piped())
-        .spawn()
-        .context("spawn window blob fetch")?;
-    {
-        let mut stdin = child.stdin.take().context("fetch stdin")?;
-        for oid in oids {
-            stdin.write_all(oid.as_bytes()).await?;
-            stdin.write_all(b"\n").await?;
-        }
-        stdin.shutdown().await?;
-    }
-    let output = child
-        .wait_with_output()
-        .await
-        .context("window blob fetch")?;
-    if !output.status.success() {
-        bail!(
-            "window blob fetch failed: {}",
-            String::from_utf8_lossy(&output.stderr)
-        );
-    }
-    Ok(())
-}
-
-/// Read author, date, message, changed paths, and line movement.
-///
-/// `--numstat` is what makes `lines_added`/`lines_deleted` — and therefore
-/// `repo_commit_days` and every churn chart — possible, and git can only
-/// produce those counts by diffing blob content. On a blobless clone that is
-/// one promisor round trip per commit unless [`hydrate_window_blobs`] has
-/// already pulled the window's objects down. `--no-renames` preserves the old
-/// path-set contract for renames (delete + add); rename-only commits can
-/// therefore report line movement, which is intentional and documented as Git
-/// numstat churn rather than edit distance.
-pub(crate) async fn walk_commit_metadata_batch(
-    handle: &RepoHandle,
-    shas: &[String],
-) -> Result<Vec<CommitInfo>> {
-    if shas.is_empty() {
-        return Ok(Vec::new());
-    }
-    validate_shas(shas)?;
-    let log_format = "%x00%x00GDCOMMIT%x00%H%x00%P%x00%ae%x00%an%x00%aI%x00%s%x00";
-    let mut command = git_in(&handle.path);
-    command.args([
-        "log",
-        "--no-walk=unsorted",
-        "--numstat",
-        "-z",
-        "--no-renames",
-        &format!("--format={log_format}"),
-    ]);
-    command.args(shas).arg("--");
-    let output = command.output().await.context("batched metadata git log")?;
-    if !output.status.success() {
-        bail!(
-            "batched metadata git log failed: {}",
-            String::from_utf8_lossy(&output.stderr)
-        );
-    }
-    Ok(parse_metadata_records(&output.stdout))
 }
 
 fn parse_metadata_records(stdout: &[u8]) -> Vec<CommitInfo> {
@@ -1401,11 +2117,10 @@ fn is_fix_message(msg: &str) -> bool {
 /// on-disk bytes live in the packs — refs, config, and the commit-graph
 /// are kilobytes — so this is within a rounding error of the true size at
 /// a fraction of the syscalls (one shallow `read_dir`, not a recursive
-/// stat of every loose object). Lazily-backfilled loose blobs (from
-/// `git show`/`git archive` on a blobless clone) are added in too via the
-/// `objects/<xx>/` shards, keeping the scorer honest after a HEAD
-/// materialization. The eviction scorer only needs a relative ranking, so
-/// approximate-but-cheap is the right trade.
+/// stat of every loose object). Loose objects are summed too via the
+/// `objects/<xx>/` shards, since an incremental fetch of a handful of new
+/// objects may write them loose rather than packed. The eviction scorer only
+/// needs a relative ranking, so approximate-but-cheap is the right trade.
 pub fn clone_size_bytes(path: &Path) -> u64 {
     if !path.exists() {
         return 0;
@@ -1474,6 +2189,148 @@ mod tests {
         assert!(is_fix_message("fix: off-by-one"));
     }
 
+    /// Cheap stand-in for a walked record: the retry ladder only ever moves
+    /// these around, so identity by SHA is the whole contract under test.
+    fn stub_commit(sha: &str) -> CommitInfo {
+        CommitInfo {
+            sha: sha.to_string(),
+            author_email: "a@example.com".into(),
+            author_name: "A".into(),
+            committed_at: Utc::now(),
+            committed_day: Utc::now().date_naive(),
+            message_first_line: String::new(),
+            is_fix: false,
+            paths_changed: Vec::new(),
+            file_changes: Vec::new(),
+            lines_added: 0,
+            lines_deleted: 0,
+            binary_files: 0,
+            todo_added: 0,
+            todo_removed: 0,
+        }
+    }
+
+    fn stub_shas(count: usize) -> Vec<String> {
+        (0..count).map(|index| format!("{index:040x}")).collect()
+    }
+
+    /// The failure the operator spent a session fighting: one slow slice used
+    /// to mark the whole batch degraded, which discarded a walk that had
+    /// already completed a million commits. A lapse must cost the slice, not
+    /// the run — and it must never be reported as a damaged object store.
+    #[tokio::test]
+    async fn a_slow_slice_is_retried_and_the_completed_prefix_survives() {
+        let shas = stub_shas(400);
+        let walk = walk_with_retry(&shas, |slice| {
+            let commits: Vec<CommitInfo> = slice.iter().map(|sha| stub_commit(sha)).collect();
+            // Stands for a host that can walk a hundred commits inside the
+            // ceiling but not four hundred.
+            let lapsed = slice.len() > 100;
+            async move {
+                Ok(if lapsed {
+                    ChunkOutcome::Lapsed
+                } else {
+                    ChunkOutcome::Exact(commits)
+                })
+            }
+        })
+        .await
+        .expect("a slice that is merely slow must not fail the walk");
+
+        assert!(
+            !walk.incomplete_objects,
+            "slowness says nothing about the object store"
+        );
+        let walked: Vec<String> = walk.commits.into_iter().map(|commit| commit.sha).collect();
+        assert_eq!(
+            walked, shas,
+            "records stay in plan order however often a slice was halved"
+        );
+    }
+
+    /// When the ladder really is spent the run still must not be retired: the
+    /// error carries [`BUDGET_MARKER`], which is what keeps the queue row
+    /// revivable after the operator raises the ceiling.
+    #[tokio::test]
+    async fn an_exhausted_retry_ladder_reports_a_budget_lapse_not_damage() {
+        let shas = stub_shas(64);
+        let error = walk_with_retry(&shas, |_| async { Ok(ChunkOutcome::Lapsed) })
+            .await
+            .expect_err("a walk that never completes a slice cannot succeed");
+        assert!(
+            budget_lapsed(&error),
+            "a lapse must be recognisable as this process's own ceiling: {error:#}"
+        );
+    }
+
+    /// Depth bounds one branch; nothing bounds the tree. Enough independently
+    /// slow siblings would keep the chunk retrying for dozens of budgets, and
+    /// a batch boundary is the only place this walk beats its heartbeat — so
+    /// the stall guard would kill the run and discard the very prefix the
+    /// ladder exists to keep.
+    #[tokio::test]
+    async fn total_retry_time_is_bounded_so_the_stall_guard_never_fires_first() {
+        let shas = stub_shas(2_000);
+        let lapses = std::cell::Cell::new(0_u32);
+        let error = walk_with_retry(&shas, |slice| {
+            let commits: Vec<CommitInfo> = slice.iter().map(|sha| stub_commit(sha)).collect();
+            // Slow for anything wider than a hundred commits, so the ladder
+            // reaches its depth limit on several sibling branches rather than
+            // on one.
+            let lapsed = slice.len() > 100;
+            if lapsed {
+                lapses.set(lapses.get() + 1);
+            }
+            async move {
+                Ok(if lapsed {
+                    ChunkOutcome::Lapsed
+                } else {
+                    ChunkOutcome::Exact(commits)
+                })
+            }
+        })
+        .await
+        .expect_err("this fixture cannot finish and must say so");
+        assert!(budget_lapsed(&error), "{error:#}");
+        assert_eq!(
+            lapses.get(),
+            MAX_WALK_CHUNK_LAPSES,
+            "the walk must stop at its lapse budget, not run the whole tree"
+        );
+    }
+
+    /// The one case that still has to abandon exactness, unchanged.
+    #[tokio::test]
+    async fn an_unreadable_slice_still_marks_the_batch_inexact() {
+        let shas = stub_shas(8);
+        let walk = walk_with_retry(&shas, |slice| {
+            let commits: Vec<CommitInfo> = slice.iter().map(|sha| stub_commit(sha)).collect();
+            async move { Ok(ChunkOutcome::PathsOnly(commits)) }
+        })
+        .await
+        .unwrap();
+        assert!(walk.incomplete_objects);
+        assert_eq!(walk.commits.len(), shas.len());
+    }
+
+    /// The ladder has to shrink and then stop; an unbounded one would let a
+    /// pathological repository spawn a subprocess per commit forever.
+    #[test]
+    fn the_retry_ladder_halves_and_terminates() {
+        let mut len = METADATA_BATCH_COMMITS;
+        let mut splits = 0;
+        while let Some(mid) = retry_split(len, splits) {
+            assert!(mid < len);
+            // `split_at(mid)` leaves the larger half at `mid`, so that is what
+            // bounds the worst slice the ladder ever hands a subprocess.
+            len = mid;
+            splits += 1;
+        }
+        assert_eq!(splits, MAX_WALK_CHUNK_SPLITS);
+        assert!(len <= METADATA_BATCH_COMMITS / 16);
+        assert_eq!(retry_split(1, 0), None, "a single commit cannot be halved");
+    }
+
     #[test]
     fn fix_message_word_boundary() {
         assert!(is_fix_message("fix: typo"));
@@ -1492,21 +2349,43 @@ mod tests {
         assert_eq!(count_todo_words(""), 0);
     }
 
+    #[test]
+    fn repo_label_reads_owner_and_name_from_the_clone_path() {
+        assert_eq!(
+            repo_label(Path::new("/data/repos/facebook/react.git")),
+            "facebook/react"
+        );
+        assert_eq!(repo_label(Path::new("react.git")), "react");
+    }
+
     /// Build the byte stream `git log --raw -z --no-renames --no-abbrev
-    /// --format=%x00` produces for one commit: the format block's NUL, the
-    /// `-z` record terminator, then a newline before the first raw entry.
-    /// Entries are `(src_mode, dst_mode, src_oid, dst_oid, status, path)`.
-    fn raw_commit(entries: &[(&str, &str, &str, &str, &str, &str)]) -> Vec<u8> {
-        let mut bytes = vec![0u8, 0u8];
-        for (index, (src_mode, dst_mode, src_oid, dst_oid, status, path)) in
-            entries.iter().enumerate()
-        {
+    /// --format=<header>` produces for one commit: the header block, then the
+    /// newline git writes before the first raw entry, then `entry\0path\0`
+    /// pairs. Entries are `(src_oid, dst_oid, status, path)`.
+    fn raw_metadata_record(
+        sha: &str,
+        parents: &str,
+        subject: &str,
+        entries: &[(&str, &str, &str, &str)],
+    ) -> Vec<u8> {
+        let mut bytes = Vec::new();
+        bytes.extend_from_slice(COMMIT_SENTINEL);
+        for field in [
+            sha,
+            parents,
+            "Alice@Example.com",
+            "Alice",
+            "2021-01-01T00:00:00+00:00",
+            subject,
+        ] {
+            bytes.extend_from_slice(field.as_bytes());
+            bytes.push(0);
+        }
+        for (index, (src, dst, status, path)) in entries.iter().enumerate() {
             if index == 0 {
                 bytes.push(b'\n');
             }
-            bytes.extend_from_slice(
-                format!(":{src_mode} {dst_mode} {src_oid} {dst_oid} {status}").as_bytes(),
-            );
+            bytes.extend_from_slice(format!(":100644 100644 {src} {dst} {status}").as_bytes());
             bytes.push(0);
             bytes.extend_from_slice(path.as_bytes());
             bytes.push(0);
@@ -1514,75 +2393,63 @@ mod tests {
         bytes
     }
 
+    /// The degraded walk must keep every changed path exact — ownership,
+    /// coupling and change-frequency all read the path set — and must not
+    /// invent line movement it cannot know without downloading the blobs.
     #[test]
-    fn raw_diff_oids_collects_both_sides_once() {
+    fn path_only_walk_keeps_paths_and_reports_no_line_movement() {
+        let before = "a".repeat(40);
+        let after = "b".repeat(40);
         let zero = "0".repeat(40);
-        let modified_before = "a".repeat(40);
-        let modified_after = "b".repeat(40);
         let added = "c".repeat(40);
-        let deleted = "d".repeat(40);
-        let executable = "e".repeat(40);
-        let submodule_before = "f".repeat(40);
-        let submodule_after = "1".repeat(40);
-        let later = "9".repeat(40);
-
-        let mut stream = raw_commit(&[
-            (
-                "100644",
-                "100644",
-                &modified_before,
-                &modified_after,
-                "M",
-                "src/lib.rs",
-            ),
-            ("000000", "100644", &zero, &added, "A", "src/new.rs"),
-            ("100644", "000000", &deleted, &zero, "D", "src/old.rs"),
-            // Mode-only change: one object id on both sides.
-            ("100644", "100755", &executable, &executable, "M", "run.sh"),
-            (
-                "160000",
-                "160000",
-                &submodule_before,
-                &submodule_after,
-                "M",
-                "vendor/dep",
-            ),
-        ]);
-        // A second commit that edits the same file again: the shared id must
-        // be requested once, not twice.
-        stream.extend_from_slice(&raw_commit(&[(
-            "100644",
-            "100644",
-            &modified_after,
-            &later,
-            "M",
-            "src/lib.rs",
-        )]));
-
-        assert_eq!(
-            parse_raw_diff_oids(&stream),
-            vec![
-                modified_before,
-                modified_after,
-                added,
-                deleted,
-                executable,
-                later
+        let mut stream = raw_metadata_record(
+            "abc123",
+            "p0",
+            "fix: parser",
+            &[
+                (&before, &after, "M", "src/lib.rs"),
+                (&zero, &added, "A", "src/new file.rs"),
             ],
-            "all-zero placeholders and submodule gitlinks are never requested"
         );
+        stream.extend_from_slice(&raw_metadata_record("def456", "p1", "docs", &[]));
+
+        let parsed = parse_raw_metadata_records(&stream);
+        assert_eq!(parsed.len(), 2);
+        let first = &parsed[0];
+        assert_eq!(first.sha, "abc123");
+        assert_eq!(first.author_email, "alice@example.com");
+        assert!(first.is_fix);
+        assert_eq!(first.paths_changed, vec!["src/lib.rs", "src/new file.rs"]);
+        assert_eq!((first.lines_added, first.lines_deleted), (0, 0));
+        assert_eq!(
+            first.binary_files, 0,
+            "a path whose blob was never read is not evidence of a binary file"
+        );
+        assert!(parsed[1].paths_changed.is_empty());
     }
 
-    /// `-z` emits paths raw and unquoted, so a committed file name can be
-    /// byte-identical to an entry header. Path segments are skipped by
-    /// position, never re-parsed.
+    /// A root commit's whole tree is not a change set, exactly as in the
+    /// numstat walk.
     #[test]
-    fn raw_diff_oids_ignores_paths_that_look_like_entries() {
+    fn path_only_walk_suppresses_root_commit_paths() {
+        let zero = "0".repeat(40);
+        let added = "c".repeat(40);
+        let stream = raw_metadata_record("root1", "", "init", &[(&zero, &added, "A", "a.txt")]);
+        let parsed = parse_raw_metadata_records(&stream);
+        assert_eq!(parsed.len(), 1);
+        assert!(parsed[0].paths_changed.is_empty());
+    }
+
+    /// `-z` paths are raw and unquoted, so a committed file can be named like
+    /// a raw entry header. Path segments are consumed by position.
+    #[test]
+    fn path_only_walk_ignores_paths_that_look_like_entries() {
         let before = "a".repeat(40);
         let after = "b".repeat(40);
         let decoy = format!(":100644 100644 {} {} M", "c".repeat(40), "d".repeat(40));
-        let stream = raw_commit(&[("100644", "100644", &before, &after, "M", &decoy)]);
-        assert_eq!(parse_raw_diff_oids(&stream), vec![before, after]);
+        let stream = raw_metadata_record("abc123", "p0", "edit", &[(&before, &after, "M", &decoy)]);
+        let parsed = parse_raw_metadata_records(&stream);
+        assert_eq!(parsed[0].paths_changed, vec![decoy]);
     }
 
     #[test]
@@ -1619,9 +2486,10 @@ mod tests {
             path: tmp.path().to_path_buf(),
             head_sha,
         };
-        let plan = plan_recent_commits(&handle, None, 5_000).await.unwrap();
-        assert!(plan.shas.is_empty());
-        assert!(!plan.truncated);
+        let plan = plan_commits(&handle, None).await.unwrap();
+        assert!(!plan.requires_full_rebuild());
+        assert!(plan.plan().shas.is_empty());
+        assert!(!plan.plan().truncated);
         assert_eq!(reachable_commit_count(&handle).await.unwrap(), 0);
     }
 
@@ -1654,6 +2522,211 @@ mod tests {
             .unwrap();
         assert!(current.success());
         assert!(cache_format_is_current(tmp.path()).await);
+    }
+
+    /// Progress redraws must not bury the one line that says what went wrong.
+    #[test]
+    fn git_failure_detail_drops_progress_frames() {
+        let stderr = b"Counting objects:  42% (100/238)\rCounting objects: 100% (238/238), done.\n\
+            remote: Enumerating objects: 55%\r\
+            fatal: couldn't find remote ref refs/heads/main\n";
+        let detail = git_failure_detail(stderr);
+        assert!(detail.contains("couldn't find remote ref refs/heads/main"));
+        assert!(!detail.contains("42%"));
+        assert!(!detail.contains("55%"));
+    }
+
+    /// The liveness contract, both halves: a subprocess that is writing
+    /// progress beats, and one that has gone silent does not.
+    #[cfg(test)]
+    mod liveness {
+        use super::*;
+        use std::sync::Arc;
+        use std::sync::atomic::{AtomicUsize, Ordering};
+
+        fn shell(script: &str) -> Command {
+            let mut command = Command::new("sh");
+            command.args(["-c", script]).kill_on_drop(true);
+            command
+        }
+
+        #[tokio::test]
+        async fn bytes_on_the_progress_stream_beat_liveness() {
+            let beats = Arc::new(AtomicUsize::new(0));
+            let counter = beats.clone();
+            let tick = move || {
+                counter.fetch_add(1, Ordering::Relaxed);
+            };
+            let output = output_within_progress(
+                shell("printf 'Receiving objects: 50%%\\r' >&2; printf 'done.\\n' >&2"),
+                Duration::from_secs(30),
+                Some(&tick),
+            )
+            .await
+            .unwrap()
+            .expect("well inside the budget");
+            assert!(output.status.success());
+            assert!(String::from_utf8_lossy(&output.stderr).contains("done."));
+            assert!(beats.load(Ordering::Relaxed) >= 1);
+        }
+
+        /// The entire point of reading real evidence rather than running a
+        /// ticker: a transfer that has stopped delivering data must stay
+        /// silent so the caller's stall guard can still kill it.
+        #[tokio::test]
+        async fn a_wedged_subprocess_never_beats() {
+            let beats = Arc::new(AtomicUsize::new(0));
+            let counter = beats.clone();
+            let tick = move || {
+                counter.fetch_add(1, Ordering::Relaxed);
+            };
+            let lapsed =
+                output_within_progress(shell("sleep 30"), Duration::from_millis(250), Some(&tick))
+                    .await
+                    .unwrap();
+            assert!(lapsed.is_none(), "the wall-clock ceiling still applies");
+            assert_eq!(beats.load(Ordering::Relaxed), 0);
+        }
+    }
+
+    /// Incremental-cursor validation against a real repository.
+    ///
+    /// `{cursor}..HEAD` misreports both of the ways a stored cursor goes bad,
+    /// and the second one misreports it *silently*: after a force-push or a
+    /// rebase the range still exits 0 with a plausible commit list, which
+    /// appended to aggregates that already counted the rewritten commits
+    /// drifts every total upward permanently.
+    #[cfg(test)]
+    mod cursor {
+        use super::*;
+        use std::process::Command as SyncCommand;
+
+        fn git_available() -> bool {
+            SyncCommand::new("git")
+                .arg("--version")
+                .output()
+                .map(|output| output.status.success())
+                .unwrap_or(false)
+        }
+
+        fn git_stdout(dir: &Path, args: &[&str]) -> String {
+            let output = SyncCommand::new("git")
+                .arg("-C")
+                .arg(dir)
+                .args(args)
+                .output()
+                .expect("spawn git");
+            assert!(
+                output.status.success(),
+                "git {args:?} failed: {}",
+                String::from_utf8_lossy(&output.stderr)
+            );
+            String::from_utf8_lossy(&output.stdout).trim().to_string()
+        }
+
+        /// Three commits on `main`, returned with its handle.
+        fn fixture(dir: &Path) -> RepoHandle {
+            git_stdout(dir, &["init", "-q"]);
+            git_stdout(dir, &["config", "user.email", "a@example.com"]);
+            git_stdout(dir, &["config", "user.name", "Alice"]);
+            git_stdout(dir, &["symbolic-ref", "HEAD", "refs/heads/main"]);
+            for step in 0..3 {
+                std::fs::write(dir.join("a.txt"), format!("line {step}\n")).unwrap();
+                git_stdout(dir, &["add", "-A"]);
+                git_stdout(dir, &["commit", "-q", "-m", &format!("commit {step}")]);
+            }
+            RepoHandle {
+                path: dir.to_path_buf(),
+                head_sha: git_stdout(dir, &["rev-parse", "HEAD"]),
+            }
+        }
+
+        #[tokio::test]
+        async fn a_genuine_ancestor_yields_exactly_the_commits_in_between() {
+            if !git_available() {
+                eprintln!("skipping: git not available");
+                return;
+            }
+            let tmp = tempfile::tempdir().unwrap();
+            let handle = fixture(tmp.path());
+            let full = plan_commits(&handle, None).await.unwrap().into_plan();
+            assert_eq!(full.shas.len(), 3);
+
+            let cursor = full.shas[0].clone();
+            let planned = plan_commits(&handle, Some(&cursor)).await.unwrap();
+            assert_eq!(planned.rejection(), None);
+            assert!(!planned.requires_full_rebuild());
+            assert_eq!(planned.plan().shas, full.shas[1..].to_vec());
+        }
+
+        #[tokio::test]
+        async fn a_cursor_whose_object_is_absent_is_rejected() {
+            if !git_available() {
+                eprintln!("skipping: git not available");
+                return;
+            }
+            let tmp = tempfile::tempdir().unwrap();
+            let handle = fixture(tmp.path());
+            let full = plan_commits(&handle, None).await.unwrap().into_plan();
+
+            // The shape a quota eviction or a post-force-push gc leaves behind:
+            // a well-formed object id that names nothing locally. `rev-list`
+            // would fail outright on `{sha}..HEAD`.
+            let evicted = "0".repeat(40);
+            let plan = plan_commits(&handle, Some(&evicted)).await.unwrap();
+            assert_eq!(plan.rejection(), Some(CursorRejection::Missing));
+            assert!(plan.requires_full_rebuild());
+            assert_eq!(
+                plan.plan().shas,
+                full.shas,
+                "a rejected cursor plans complete history, not an empty append"
+            );
+
+            // A cursor that is not an object id at all never reaches git.
+            let sentinel = plan_commits(&handle, Some(EMPTY_REPOSITORY_HEAD))
+                .await
+                .unwrap();
+            assert_eq!(sentinel.rejection(), Some(CursorRejection::Missing));
+        }
+
+        #[tokio::test]
+        async fn a_cursor_that_is_not_an_ancestor_of_head_is_rejected() {
+            if !git_available() {
+                eprintln!("skipping: git not available");
+                return;
+            }
+            let tmp = tempfile::tempdir().unwrap();
+            let dir = tmp.path();
+            let handle = fixture(dir);
+            let full = plan_commits(&handle, None).await.unwrap().into_plan();
+
+            // A rewritten commit, exactly as a rebase or force-push leaves one:
+            // a real object, reachable from nothing, parented on the branch's
+            // first commit. `commit-tree` builds it without moving any ref.
+            let tree = git_stdout(dir, &["rev-parse", "HEAD^{tree}"]);
+            let diverged = git_stdout(
+                dir,
+                &["commit-tree", &tree, "-p", &full.shas[0], "-m", "rewritten"],
+            );
+            assert_ne!(diverged, handle.head_sha);
+            // The trap this guards: the range is not an error, so nothing
+            // downstream would ever notice.
+            let range = SyncCommand::new("git")
+                .arg("-C")
+                .arg(dir)
+                .args(["rev-list", &format!("{diverged}..HEAD")])
+                .output()
+                .unwrap();
+            assert!(
+                range.status.success(),
+                "a diverged cursor still produces a plausible commit list"
+            );
+
+            let plan = plan_commits(&handle, Some(&diverged)).await.unwrap();
+            assert_eq!(plan.rejection(), Some(CursorRejection::Diverged));
+            assert!(plan.requires_full_rebuild());
+            assert_eq!(plan.plan().shas, full.shas);
+        }
     }
 
     // #3 streaming-parser equivalence tests.
@@ -2118,13 +3191,24 @@ mod tests {
             // equivalence are covered without creating 500+ fixtures.
             let new_commits = walk_new_commits_batched(&handle, None, 2).await.unwrap();
 
-            let recent = plan_recent_commits(&handle, None, 3).await.unwrap();
-            assert_eq!(recent.shas.len(), 3);
-            assert!(recent.truncated);
-            assert_eq!(recent.shas.last(), Some(&handle.head_sha));
-            let complete = plan_recent_commits(&handle, None, 20).await.unwrap();
-            assert_eq!(complete.shas.len(), 7);
-            assert!(!complete.truncated);
+            // Complete history, never a window: every non-merge commit, in
+            // order, and nothing reported as truncated.
+            let full = plan_commits(&handle, None).await.unwrap().into_plan();
+            assert_eq!(full.shas.len(), 7);
+            assert!(!full.truncated);
+            assert_eq!(full.shas.last(), Some(&handle.head_sha));
+
+            // Re-analysis walks only what the cursor does not already cover.
+            // This is the whole steady-state argument for a complete clone: a
+            // repository analyzed at an older head costs the new commits, not
+            // the repository.
+            let fourth = full.shas[3].clone();
+            let incremental = plan_commits(&handle, Some(&fourth)).await.unwrap();
+            assert!(!incremental.requires_full_rebuild());
+            assert_eq!(incremental.plan().shas, full.shas[4..].to_vec());
+            let unchanged = plan_commits(&handle, Some(&handle.head_sha)).await.unwrap();
+            assert!(!unchanged.requires_full_rebuild());
+            assert!(unchanged.plan().shas.is_empty());
 
             // OLD oracle: sha list (oldest-first, no-merges) then per-commit.
             let log_out = SyncCommand::new("git")
@@ -2138,7 +3222,12 @@ mod tests {
                 .map(|s| s.to_string())
                 .collect();
 
-            let metadata = walk_commit_metadata_batch(&handle, &shas).await.unwrap();
+            let walk = walk_commit_metadata_batch(&handle, &shas).await.unwrap();
+            assert!(
+                !walk.incomplete_objects,
+                "a complete clone reads every blob it needs locally"
+            );
+            let metadata = walk.commits;
             assert_eq!(metadata.len(), new_commits.len());
             let mut saw_binary_in_metadata = false;
             for (fast, complete) in metadata.iter().zip(new_commits.iter()) {
@@ -2150,8 +3239,8 @@ mod tests {
                 assert_eq!(fast.is_fix, complete.is_fix);
                 // The metadata walk sees every changed path; the patch walk
                 // excludes non-text paths (it exists only to scan diffs for
-                // TODO markers, and diffing a binary on a partial clone means
-                // downloading it). So the patch walk's path set is a subset.
+                // TODO markers, and diffing a binary reads both sides of it
+                // for a line it discards). So its path set is a subset.
                 let mut fast_paths = fast.paths_changed.clone();
                 let mut complete_paths = complete.paths_changed.clone();
                 fast_paths.sort();
@@ -2171,6 +3260,26 @@ mod tests {
             assert!(
                 saw_binary_in_metadata,
                 "the metadata walk still reports non-text changed paths"
+            );
+
+            // Splitting the walk across cores is only safe because the chunks
+            // are explicit ordered SHA lists. The fixture is far below
+            // `MIN_WALK_CHUNK_COMMITS`, so drive the chunk walker directly at
+            // a size that forces several of them and compare the whole
+            // serialized result, not a chosen field.
+            let mut chunked = Vec::new();
+            for chunk in shas.chunks(2) {
+                chunked.extend(
+                    walk_metadata_chunk(dir, chunk, Duration::from_secs(300))
+                        .await
+                        .unwrap()
+                        .commits,
+                );
+            }
+            assert_eq!(
+                serde_json::to_string(&chunked).unwrap(),
+                serde_json::to_string(&metadata).unwrap(),
+                "a walk split across cores must be byte-identical to a serial one"
             );
 
             assert_eq!(
@@ -2224,6 +3333,28 @@ mod tests {
                 .unwrap();
             assert!(c3.paths_changed.contains(&"a.txt".to_string()));
             assert!(c3.paths_changed.contains(&"c.txt".to_string()));
+
+            // The degraded walk is what a damaged object store gets instead of
+            // a failed analysis. Every path-shaped signal must survive it
+            // exactly; only line movement is given up.
+            let path_only = walk_commit_paths_chunk(dir, &shas).await.unwrap();
+            assert_eq!(path_only.len(), metadata.len());
+            for (degraded, exact) in path_only.iter().zip(metadata.iter()) {
+                assert_eq!(degraded.sha, exact.sha);
+                assert_eq!(degraded.author_email, exact.author_email);
+                assert_eq!(degraded.committed_at, exact.committed_at);
+                assert_eq!(degraded.is_fix, exact.is_fix);
+                let mut degraded_paths = degraded.paths_changed.clone();
+                let mut exact_paths = exact.paths_changed.clone();
+                degraded_paths.sort();
+                exact_paths.sort();
+                assert_eq!(degraded_paths, exact_paths);
+                assert_eq!((degraded.lines_added, degraded.lines_deleted), (0, 0));
+            }
+            assert!(
+                metadata.iter().any(|commit| commit.lines_added > 0),
+                "the exact walk it degrades from does report line movement"
+            );
         }
     }
 }

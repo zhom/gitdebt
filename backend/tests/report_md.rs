@@ -74,6 +74,15 @@ async fn cleanup(db: &Db, owner: &str) {
     }
 }
 
+/// An `ApiState` built exactly as the deployment does, but with no
+/// `PUBLIC_API_BASE` — the state a container gets when the variable is missing
+/// from its service environment.
+async fn api_state_without_api_origin(db: Db) -> ApiState {
+    let mut state = api_state(db).await;
+    state.api_origin = None;
+    state
+}
+
 async fn api_state(db: Db) -> ApiState {
     let rate = std::sync::Arc::new(
         gitdebt::rate_limit::RateLimitTracker::load(db.clone())
@@ -91,7 +100,7 @@ async fn api_state(db: Db) -> ApiState {
         std::sync::Arc::new(RepoStorage::from_env()),
         None,
         SITE_ORIGIN.to_string(),
-        API_ORIGIN.to_string(),
+        Some(API_ORIGIN.to_string()),
         None,
     )
     .expect("api state")
@@ -726,4 +735,43 @@ async fn a_comparison_of_two_complete_histories_answers_200() {
     assert!(body.contains(&second));
 
     cleanup(&db, owner).await;
+}
+
+/// A missing `PUBLIC_API_BASE` used to abort startup, which took an entire
+/// deployment offline over a variable only these routes read. It must now cost
+/// exactly the Markdown surfaces and nothing else: every other endpoint keeps
+/// answering, and the ones that cannot are honest about why rather than
+/// inventing a plausible-looking wrong host.
+#[tokio::test]
+async fn markdown_routes_degrade_alone_when_the_api_origin_is_unconfigured() {
+    let Some(db) = test_db().await else {
+        eprintln!("skipping: set GITDEBT_TEST_DATABASE_URL to run");
+        return;
+    };
+    let state = api_state_without_api_origin(db).await;
+
+    for path in [
+        "/api/md/",
+        "/api/md/about",
+        "/api/md/badges",
+        "/api/md/facebook/react",
+        "/api/repos/facebook/react/report.md",
+    ] {
+        let response = get(state.clone(), path).await;
+        assert_eq!(
+            response.status(),
+            StatusCode::SERVICE_UNAVAILABLE,
+            "{path} should degrade, not guess an origin"
+        );
+        let body = body_text(response).await;
+        assert!(
+            !body.contains("http"),
+            "{path} must not name a host it had to invent"
+        );
+    }
+
+    // The rest of the API is untouched: this is one feature degrading, not an
+    // outage.
+    let healthy = get(state, "/health").await;
+    assert_eq!(healthy.status(), StatusCode::OK);
 }

@@ -5,9 +5,15 @@
 //! on `repo_history`. The walker only yields commits past that SHA, so
 //! re-running this aggregator over the same range double-counts —
 //! responsibility for "don't replay history" sits in `repo_history`.
+//!
+//! Memory: nothing here is proportional to the number of commits. Callers
+//! walking a full history fold each batch into a [`CommitAggregator`] and
+//! drop it; what survives is keyed by authors, files, days and file pairs,
+//! all of which describe the repository's shape rather than its age.
 
 use std::collections::{HashMap, HashSet};
 use std::path::{Path, PathBuf};
+use std::sync::Arc;
 use std::time::{Duration, SystemTime};
 
 use anyhow::{Context, Result};
@@ -101,6 +107,9 @@ struct CouplingAgg {
     fix_commits: i64,
 }
 
+/// One borrowed co-change row on its way to the chunked upsert.
+type CouplingRow<'a> = (&'a (Arc<str>, Arc<str>), &'a CouplingAgg);
+
 /// Per-day TODO delta for one batch.
 #[derive(Clone, Debug, Default, PartialEq)]
 struct TodoAgg {
@@ -108,81 +117,139 @@ struct TodoAgg {
     removed: i64,
 }
 
-/// Fully-reduced aggregates for a batch of commits. Computed in Rust so the
+/// Fully-reduced aggregates for a run of commits. Computed in Rust so the
 /// DB sees a handful of chunked multi-row upserts instead of ~O(commits ×
 /// paths) single-row statements. The reduction reproduces the OLD per-row
 /// upsert semantics exactly (see field docs on [`AuthorAgg`]); the SQL
-/// `ON CONFLICT` clauses then fold these per-batch values into any
-/// pre-existing DB rows with the same COALESCE / LEAST / GREATEST rules.
-struct BatchAggregates {
+/// `ON CONFLICT` clauses then fold these values into any pre-existing DB
+/// rows with the same COALESCE / LEAST / GREATEST rules.
+///
+/// Every map here is keyed by something the repository *has* — an author, a
+/// file, a day, a file pair — never by a commit. That is the whole point of
+/// the type: its size tracks the repository's SHAPE, not the length of its
+/// history, so a caller can stream a million commits through
+/// [`CommitAggregator`] and hold only this.
+pub struct Aggregates {
     authors: HashMap<String, AuthorAgg>,
     author_commit_days: HashMap<(String, NaiveDate), i64>,
-    files: HashMap<String, FileAgg>,
+    files: HashMap<Arc<str>, FileAgg>,
     commit_days: HashMap<NaiveDate, i64>,
     change_days: HashMap<NaiveDate, ChangeDayAgg>,
-    couplings: HashMap<(String, String), CouplingAgg>,
+    couplings: HashMap<(Arc<str>, Arc<str>), CouplingAgg>,
     todo_days: HashMap<NaiveDate, TodoAgg>,
+    commits_seen: usize,
+}
+
+impl Aggregates {
+    /// How many commits were folded in. This is the value the non-exact
+    /// `total_commits` upsert increments by, so it must survive the commits
+    /// themselves being dropped.
+    pub fn commits_seen(&self) -> usize {
+        self.commits_seen
+    }
+
+    pub fn is_empty(&self) -> bool {
+        self.commits_seen == 0
+    }
 }
 
 const LARGE_CHANGE_LINES: u64 = 1_000;
 const MAX_COUPLING_FILES_PER_COMMIT: usize = 12;
 const MAX_STORED_COUPLINGS: i64 = 2_000;
 
-/// Pure reduction of a commit batch into per-author / per-file / per-day
-/// aggregates. Order-sensitive only where the OLD code was: author name
-/// takes the last (newest) commit's value, while avatar/login keep the
-/// first non-null — matching the old `EXCLUDED.author_name` /
-/// `COALESCE(existing, EXCLUDED)` upsert. Kept pure + unit-tested to lock
-/// equivalence with the previous row-by-row path.
-fn aggregate_commits(commits: &[CommitInfo]) -> BatchAggregates {
-    let mut authors: HashMap<String, AuthorAgg> = HashMap::new();
-    let mut author_commit_days: HashMap<(String, NaiveDate), i64> = HashMap::new();
-    let mut files: HashMap<String, FileAgg> = HashMap::new();
-    let mut commit_days: HashMap<NaiveDate, i64> = HashMap::new();
-    let mut change_days: HashMap<NaiveDate, ChangeDayAgg> = HashMap::new();
-    let mut couplings: HashMap<(String, String), CouplingAgg> = HashMap::new();
-    let mut todo_days: HashMap<NaiveDate, TodoAgg> = HashMap::new();
+/// In-memory ceiling on distinct co-change pairs held while walking.
+///
+/// The per-commit `MAX_COUPLING_FILES_PER_COMMIT` guard bounds how many pairs
+/// ONE commit contributes (at most 66), but nothing bounded the accumulated
+/// set: a repository with a million commits can reach tens of millions of
+/// distinct pairs, and this is the only aggregate that grows combinatorially
+/// rather than with the repository's file/author/day counts. Since the write
+/// keeps just `MAX_STORED_COUPLINGS` rows, two orders of magnitude of
+/// headroom over that is ample to decide the winners correctly while capping
+/// this map in the low tens of MB.
+const MAX_TRACKED_COUPLINGS: usize = 250_000;
 
-    for commit in commits {
+/// Streaming reduction of commits into per-author / per-file / per-day
+/// aggregates.
+///
+/// Feed commits in oldest-first order with [`push`](Self::push) or
+/// [`extend`](Self::extend) and drop each batch as soon as it is folded in;
+/// only [`Aggregates`] survives. Order-sensitive exactly where the OLD
+/// row-by-row code was: author name takes the last (newest) commit's value,
+/// while avatar/login keep the first non-null — matching the old
+/// `EXCLUDED.author_name` / `COALESCE(existing, EXCLUDED)` upsert. Batch
+/// boundaries are NOT observable: every decision below is made per commit,
+/// so the same commits in the same order produce identical aggregates
+/// whatever chunking the caller uses.
+pub struct CommitAggregator {
+    out: Aggregates,
+    /// One `Arc<str>` per distinct path, shared by the `files` keys and by
+    /// both halves of every coupling key. A path in a 12-file commit would
+    /// otherwise be copied into up to 11 separate pair keys.
+    paths: HashSet<Arc<str>>,
+    /// Cochange count below which pairs are dropped by [`prune_couplings`].
+    /// Rises monotonically so that pruning cannot oscillate.
+    coupling_floor: i64,
+    pruned_couplings: u64,
+    wide_commits: u64,
+    wide_commit_logged: bool,
+}
+
+impl Default for CommitAggregator {
+    fn default() -> Self {
+        Self::new()
+    }
+}
+
+impl CommitAggregator {
+    pub fn new() -> Self {
+        Self {
+            out: Aggregates {
+                authors: HashMap::new(),
+                author_commit_days: HashMap::new(),
+                files: HashMap::new(),
+                commit_days: HashMap::new(),
+                change_days: HashMap::new(),
+                couplings: HashMap::new(),
+                todo_days: HashMap::new(),
+                commits_seen: 0,
+            },
+            paths: HashSet::new(),
+            coupling_floor: 0,
+            pruned_couplings: 0,
+            wide_commits: 0,
+            wide_commit_logged: false,
+        }
+    }
+
+    pub fn extend<'a, I>(&mut self, commits: I)
+    where
+        I: IntoIterator<Item = &'a CommitInfo>,
+    {
+        for commit in commits {
+            self.push(commit);
+        }
+    }
+
+    pub fn commits_seen(&self) -> usize {
+        self.out.commits_seen
+    }
+
+    pub fn push(&mut self, commit: &CommitInfo) {
+        self.out.commits_seen += 1;
         let committed_at = commit.committed_at;
         let day = commit.committed_day;
-        let avatar = avatar_for_email(&commit.author_email);
-        let login = github_login_for_email(&commit.author_email);
 
-        authors
-            .entry(commit.author_email.clone())
-            .and_modify(|a| {
-                // name: last-wins (oldest-first ⇒ newest commit's name).
-                a.name = commit.author_name.clone();
-                // avatar/login: first non-null sticks.
-                if a.avatar.is_none() {
-                    a.avatar = avatar.clone();
-                }
-                if a.login.is_none() {
-                    a.login = login.clone();
-                }
-                a.commits += 1;
-                if committed_at < a.first_commit_at {
-                    a.first_commit_at = committed_at;
-                }
-                if committed_at > a.last_commit_at {
-                    a.last_commit_at = committed_at;
-                }
-            })
-            .or_insert_with(|| AuthorAgg {
-                name: commit.author_name.clone(),
-                avatar: avatar.clone(),
-                login: login.clone(),
-                commits: 1,
-                first_commit_at: committed_at,
-                last_commit_at: committed_at,
-            });
+        self.push_author(commit, committed_at);
 
-        *author_commit_days
+        *self
+            .out
+            .author_commit_days
             .entry((commit.author_email.clone(), day))
             .or_insert(0) += 1;
-        *commit_days.entry(day).or_insert(0) += 1;
-        let change_day = change_days.entry(day).or_default();
+        *self.out.commit_days.entry(day).or_insert(0) += 1;
+
+        let change_day = self.out.change_days.entry(day).or_default();
         change_day.lines_added = change_day
             .lines_added
             .saturating_add(i64::try_from(commit.lines_added).unwrap_or(i64::MAX));
@@ -202,7 +269,7 @@ fn aggregate_commits(commits: &[CommitInfo]) -> BatchAggregates {
         }
 
         if commit.todo_added > 0 || commit.todo_removed > 0 {
-            let t = todo_days.entry(day).or_default();
+            let t = self.out.todo_days.entry(day).or_default();
             t.added += commit.todo_added as i64;
             t.removed += commit.todo_removed as i64;
         }
@@ -210,78 +277,213 @@ fn aggregate_commits(commits: &[CommitInfo]) -> BatchAggregates {
         let fix_inc: i64 = if commit.is_fix { 1 } else { 0 };
         // Tests and older callers may provide only the compatibility path
         // list. Real analysis uses file_changes populated by --numstat.
-        let changes = if commit.file_changes.is_empty() {
-            commit
-                .paths_changed
-                .iter()
-                .map(|path| (path, 0_u64, 0_u64, false))
-                .collect::<Vec<_>>()
+        if commit.file_changes.is_empty() {
+            for path in &commit.paths_changed {
+                self.push_file(path, 0, 0, false, committed_at, fix_inc);
+            }
         } else {
-            commit
-                .file_changes
-                .iter()
-                .map(|change| {
-                    (
-                        &change.path,
-                        change.lines_added,
-                        change.lines_deleted,
-                        change.binary,
-                    )
-                })
-                .collect::<Vec<_>>()
-        };
-        for (path, lines_added, lines_deleted, binary) in changes {
-            files
-                .entry(path.clone())
-                .and_modify(|f| {
-                    f.commits += 1;
-                    f.fix_commits += fix_inc;
-                    f.lines_added = f
-                        .lines_added
-                        .saturating_add(i64::try_from(lines_added).unwrap_or(i64::MAX));
-                    f.lines_deleted = f
-                        .lines_deleted
-                        .saturating_add(i64::try_from(lines_deleted).unwrap_or(i64::MAX));
-                    f.binary_changes += i64::from(binary);
-                    if committed_at > f.last_modified_at {
-                        f.last_modified_at = committed_at;
-                    }
-                })
-                .or_insert_with(|| FileAgg {
-                    commits: 1,
-                    fix_commits: fix_inc,
-                    lines_added: i64::try_from(lines_added).unwrap_or(i64::MAX),
-                    lines_deleted: i64::try_from(lines_deleted).unwrap_or(i64::MAX),
-                    binary_changes: i64::from(binary),
-                    last_modified_at: committed_at,
-                });
-        }
-
-        let mut coupled_paths = commit.paths_changed.clone();
-        coupled_paths.sort_unstable();
-        coupled_paths.dedup();
-        if (2..=MAX_COUPLING_FILES_PER_COMMIT).contains(&coupled_paths.len()) {
-            for left in 0..coupled_paths.len() - 1 {
-                for right in left + 1..coupled_paths.len() {
-                    let coupling = couplings
-                        .entry((coupled_paths[left].clone(), coupled_paths[right].clone()))
-                        .or_default();
-                    coupling.cochanges += 1;
-                    coupling.fix_commits += fix_inc;
-                }
+            for change in &commit.file_changes {
+                self.push_file(
+                    &change.path,
+                    change.lines_added,
+                    change.lines_deleted,
+                    change.binary,
+                    committed_at,
+                    fix_inc,
+                );
             }
         }
+
+        self.push_couplings(commit, fix_inc);
     }
 
-    BatchAggregates {
-        authors,
-        author_commit_days,
-        files,
-        commit_days,
-        change_days,
-        couplings,
-        todo_days,
+    /// Consume the accumulator. Takes `self` because the aggregates are the
+    /// only thing worth keeping and the caller should not be able to keep
+    /// pushing into a set it has already written.
+    pub fn finish(self) -> Aggregates {
+        if self.wide_commits > 0 || self.pruned_couplings > 0 {
+            tracing::info!(
+                commits = self.out.commits_seen,
+                files = self.out.files.len(),
+                authors = self.out.authors.len(),
+                couplings = self.out.couplings.len(),
+                wide_commits = self.wide_commits,
+                pruned_couplings = self.pruned_couplings,
+                coupling_floor = self.coupling_floor,
+                "coupling evidence was bounded during aggregation"
+            );
+        }
+        self.out
     }
+
+    fn intern(&mut self, path: &str) -> Arc<str> {
+        if let Some(existing) = self.paths.get(path) {
+            return existing.clone();
+        }
+        let interned: Arc<str> = Arc::from(path);
+        self.paths.insert(interned.clone());
+        interned
+    }
+
+    fn push_author(&mut self, commit: &CommitInfo, committed_at: DateTime<Utc>) {
+        // Derived lazily inside the closures: for a repository with a handful
+        // of authors and a million commits these two helpers would otherwise
+        // run an md5 and two allocations per commit for a value that is
+        // discarded on every hit after the first.
+        self.out
+            .authors
+            .entry(commit.author_email.clone())
+            .and_modify(|a| {
+                // name: last-wins (oldest-first ⇒ newest commit's name).
+                a.name.clear();
+                a.name.push_str(&commit.author_name);
+                // avatar/login: first non-null sticks.
+                if a.avatar.is_none() {
+                    a.avatar = avatar_for_email(&commit.author_email);
+                }
+                if a.login.is_none() {
+                    a.login = github_login_for_email(&commit.author_email);
+                }
+                a.commits += 1;
+                if committed_at < a.first_commit_at {
+                    a.first_commit_at = committed_at;
+                }
+                if committed_at > a.last_commit_at {
+                    a.last_commit_at = committed_at;
+                }
+            })
+            .or_insert_with(|| AuthorAgg {
+                name: commit.author_name.clone(),
+                avatar: avatar_for_email(&commit.author_email),
+                login: github_login_for_email(&commit.author_email),
+                commits: 1,
+                first_commit_at: committed_at,
+                last_commit_at: committed_at,
+            });
+    }
+
+    fn push_file(
+        &mut self,
+        path: &str,
+        lines_added: u64,
+        lines_deleted: u64,
+        binary: bool,
+        committed_at: DateTime<Utc>,
+        fix_inc: i64,
+    ) {
+        if let Some(f) = self.out.files.get_mut(path) {
+            f.commits += 1;
+            f.fix_commits += fix_inc;
+            f.lines_added = f
+                .lines_added
+                .saturating_add(i64::try_from(lines_added).unwrap_or(i64::MAX));
+            f.lines_deleted = f
+                .lines_deleted
+                .saturating_add(i64::try_from(lines_deleted).unwrap_or(i64::MAX));
+            f.binary_changes += i64::from(binary);
+            if committed_at > f.last_modified_at {
+                f.last_modified_at = committed_at;
+            }
+            return;
+        }
+        let key = self.intern(path);
+        self.out.files.insert(
+            key,
+            FileAgg {
+                commits: 1,
+                fix_commits: fix_inc,
+                lines_added: i64::try_from(lines_added).unwrap_or(i64::MAX),
+                lines_deleted: i64::try_from(lines_deleted).unwrap_or(i64::MAX),
+                binary_changes: i64::from(binary),
+                last_modified_at: committed_at,
+            },
+        );
+    }
+
+    fn push_couplings(&mut self, commit: &CommitInfo, fix_inc: i64) {
+        // Borrowed, sorted and deduped before anything is interned: a
+        // tree-wide commit must cost one pointer vector, not N string
+        // allocations, on its way to being skipped.
+        let mut coupled: Vec<&str> = commit
+            .paths_changed
+            .iter()
+            .map(String::as_str)
+            .collect::<Vec<_>>();
+        coupled.sort_unstable();
+        coupled.dedup();
+        if coupled.len() < 2 {
+            return;
+        }
+        if coupled.len() > MAX_COUPLING_FILES_PER_COMMIT {
+            // A commit touching this many files is a rename sweep, a
+            // reindent or a vendored-dependency bump. Every pair it would
+            // contribute is an artifact of the mechanical edit rather than
+            // evidence that the files are related, and there are O(n²) of
+            // them, so the widest commits are also the ones that would
+            // dominate the map.
+            self.wide_commits += 1;
+            if !self.wide_commit_logged {
+                self.wide_commit_logged = true;
+                tracing::info!(
+                    sha = %commit.sha,
+                    files = coupled.len(),
+                    limit = MAX_COUPLING_FILES_PER_COMMIT,
+                    "skipping file-coupling evidence from a tree-wide commit \
+                     (logged once per analysis run)"
+                );
+            }
+            return;
+        }
+
+        // Interned first so the O(n²) inner loop only ever clones `Arc`
+        // handles: a hit on an existing pair costs a refcount bump instead of
+        // two heap allocations, which at up to 66 pairs per commit over a
+        // million commits is the difference that matters.
+        let interned: Vec<Arc<str>> = coupled.iter().map(|path| self.intern(path)).collect();
+        for left in 0..interned.len() - 1 {
+            for right in left + 1..interned.len() {
+                let coupling = self
+                    .out
+                    .couplings
+                    .entry((interned[left].clone(), interned[right].clone()))
+                    .or_default();
+                coupling.cochanges += 1;
+                coupling.fix_commits += fix_inc;
+            }
+        }
+
+        // Checked per commit rather than per batch so the result cannot
+        // depend on how the caller chunks its walk.
+        if self.out.couplings.len() > MAX_TRACKED_COUPLINGS {
+            self.prune_couplings();
+        }
+    }
+
+    /// Drop the weakest co-change evidence until the map is back under half
+    /// its ceiling. Weakest-first is the defensible order: only the top
+    /// [`MAX_STORED_COUPLINGS`] pairs are ever written, and a pair seen once
+    /// or twice in a repository that has already produced a quarter of a
+    /// million distinct pairs cannot reach that set.
+    fn prune_couplings(&mut self) {
+        let before = self.out.couplings.len();
+        while self.out.couplings.len() > MAX_TRACKED_COUPLINGS / 2 {
+            // Terminates unconditionally: the floor rises every iteration and
+            // every entry's cochange count is finite.
+            self.coupling_floor += 1;
+            let floor = self.coupling_floor;
+            self.out.couplings.retain(|_, agg| agg.cochanges >= floor);
+        }
+        self.pruned_couplings += (before - self.out.couplings.len()) as u64;
+    }
+}
+
+/// Batch form of [`CommitAggregator`], kept so existing callers and tests
+/// read unchanged. Streaming the same commits through the accumulator
+/// produces an identical [`Aggregates`].
+fn aggregate_commits(commits: &[CommitInfo]) -> Aggregates {
+    let mut aggregator = CommitAggregator::new();
+    aggregator.extend(commits);
+    aggregator.finish()
 }
 
 /// Rows-per-chunk for the multi-row UNNEST upserts. A few thousand keeps
@@ -321,7 +523,15 @@ pub async fn apply_commits_at_head(
     commits: &[CommitInfo],
     analyzed_head_sha: &str,
 ) -> Result<()> {
-    write_commits_at_head(db, repo, commits, analyzed_head_sha, false, None).await
+    write_aggregates_at_head(
+        db,
+        repo,
+        &aggregate_commits(commits),
+        analyzed_head_sha,
+        false,
+        None,
+    )
+    .await
 }
 
 /// Increment commit-derived aggregates while pinning `total_commits` to the
@@ -333,13 +543,12 @@ pub async fn apply_commits_at_head_with_total(
     analyzed_head_sha: &str,
     reachable_commits: usize,
 ) -> Result<()> {
-    write_commits_at_head(
+    apply_aggregates_at_head_with_total(
         db,
         repo,
-        commits,
+        &aggregate_commits(commits),
         analyzed_head_sha,
-        false,
-        Some(i64::try_from(reachable_commits).unwrap_or(i64::MAX)),
+        reachable_commits,
     )
     .await
 }
@@ -355,10 +564,54 @@ pub async fn replace_commits_at_head(
     analyzed_head_sha: &str,
     reachable_commits: usize,
 ) -> Result<()> {
-    write_commits_at_head(
+    replace_aggregates_at_head(
         db,
         repo,
-        commits,
+        &aggregate_commits(commits),
+        analyzed_head_sha,
+        reachable_commits,
+    )
+    .await
+}
+
+/// [`apply_commits_at_head_with_total`] for a caller that folded the walk
+/// through a [`CommitAggregator`] instead of materializing it.
+///
+/// This is the shape a full-history walk should use: the commits themselves
+/// are dropped batch by batch, and only the aggregates — bounded by the
+/// repository's file/author/day counts rather than by its age — reach here.
+/// The atomicity contract is unchanged and is the reason this still takes the
+/// WHOLE run's aggregates in one call: see [`write_aggregates_in_tx`].
+pub async fn apply_aggregates_at_head_with_total(
+    db: &Db,
+    repo: &str,
+    aggregates: &Aggregates,
+    analyzed_head_sha: &str,
+    reachable_commits: usize,
+) -> Result<()> {
+    write_aggregates_at_head(
+        db,
+        repo,
+        aggregates,
+        analyzed_head_sha,
+        false,
+        Some(i64::try_from(reachable_commits).unwrap_or(i64::MAX)),
+    )
+    .await
+}
+
+/// [`replace_commits_at_head`] for a streamed walk.
+pub async fn replace_aggregates_at_head(
+    db: &Db,
+    repo: &str,
+    aggregates: &Aggregates,
+    analyzed_head_sha: &str,
+    reachable_commits: usize,
+) -> Result<()> {
+    write_aggregates_at_head(
+        db,
+        repo,
+        aggregates,
         analyzed_head_sha,
         true,
         Some(i64::try_from(reachable_commits).unwrap_or(i64::MAX)),
@@ -366,17 +619,58 @@ pub async fn replace_commits_at_head(
     .await
 }
 
-async fn write_commits_at_head(
+async fn write_aggregates_at_head(
     db: &Db,
     repo: &str,
-    commits: &[CommitInfo],
+    aggregates: &Aggregates,
     analyzed_head_sha: &str,
     replace: bool,
     exact_total: Option<i64>,
 ) -> Result<()> {
-    let agg = aggregate_commits(commits);
-
     let mut tx = db.pool.begin().await.context("begin tx")?;
+    write_aggregates_in_tx(
+        &mut tx,
+        repo,
+        aggregates,
+        analyzed_head_sha,
+        replace,
+        exact_total,
+    )
+    .await?;
+    tx.commit().await.context("commit tx")?;
+    Ok(())
+}
+
+/// Every aggregate table AND the `last_analyzed_sha` cursor, written inside
+/// ONE caller-supplied transaction.
+///
+/// The upserts below accumulate (`existing + EXCLUDED`, `commits + EXCLUDED.commits`),
+/// so they are *not* idempotent on their own: replaying a range adds it a
+/// second time and no constraint notices. What makes an incremental run safe
+/// is that the cursor advances in the same transaction as the delta it
+/// summarizes. A crash or error anywhere in here rolls back both, so the
+/// retry re-derives the identical commit range from the identical cursor and
+/// applies it exactly once. Two transactions would make a crash between them
+/// either double-count the range forever or skip it forever, with nothing
+/// able to tell afterwards which happened.
+///
+/// Taking the transaction as a parameter (rather than opening one here) is
+/// also what lets `rollback_leaves_aggregates_and_cursor_untouched` assert
+/// that property instead of assuming it.
+///
+/// This is also why a streaming caller must still write ONE `Aggregates` per
+/// run rather than flushing each walked batch: a per-batch write would have
+/// to advance the cursor per batch to stay crash-safe, and a cursor that
+/// advances mid-walk publishes a repository whose aggregates cover only part
+/// of the range a reader is being told is analyzed.
+async fn write_aggregates_in_tx(
+    tx: &mut sqlx::Transaction<'_, sqlx::Postgres>,
+    repo: &str,
+    agg: &Aggregates,
+    analyzed_head_sha: &str,
+    replace: bool,
+    exact_total: Option<i64>,
+) -> Result<()> {
     let now = Utc::now();
 
     if replace {
@@ -390,7 +684,7 @@ async fn write_commits_at_head(
             let sql = format!("DELETE FROM {table} WHERE repo = $1");
             sqlx::query(sqlx::AssertSqlSafe(sql))
                 .bind(repo)
-                .execute(&mut *tx)
+                .execute(&mut **tx)
                 .await
                 .with_context(|| format!("replace {table}"))?;
         }
@@ -405,7 +699,7 @@ async fn write_commits_at_head(
             "UPDATE repo_author_stats              SET commits = 0, first_commit_at = NULL, last_commit_at = NULL              WHERE repo = $1",
         )
         .bind(repo)
-        .execute(&mut *tx)
+        .execute(&mut **tx)
         .await
         .context("reset author commit aggregates")?;
     }
@@ -452,7 +746,7 @@ async fn write_commits_at_head(
         .bind(&counts)
         .bind(&firsts)
         .bind(&lasts)
-        .execute(&mut *tx)
+        .execute(&mut **tx)
         .await
         .context("upsert authors")?;
     }
@@ -482,7 +776,7 @@ async fn write_commits_at_head(
         .bind(&emails)
         .bind(&days)
         .bind(&counts)
-        .execute(&mut *tx)
+        .execute(&mut **tx)
         .await
         .context("upsert author commit days")?;
     }
@@ -529,7 +823,7 @@ async fn write_commits_at_head(
         .bind(&files_changed)
         .bind(&binary_files)
         .bind(&large_changes)
-        .execute(&mut *tx)
+        .execute(&mut **tx)
         .await
         .context("upsert commit days")?;
     }
@@ -556,13 +850,13 @@ async fn write_commits_at_head(
         .bind(&days)
         .bind(&added)
         .bind(&removed)
-        .execute(&mut *tx)
+        .execute(&mut **tx)
         .await
         .context("upsert todo deltas")?;
     }
 
     // Per-file aggregates
-    let file_rows: Vec<(&String, &FileAgg)> = agg.files.iter().collect();
+    let file_rows: Vec<(&Arc<str>, &FileAgg)> = agg.files.iter().collect();
     for chunk in file_rows.chunks(UPSERT_CHUNK) {
         let mut paths: Vec<String> = Vec::with_capacity(chunk.len());
         let mut counts: Vec<i64> = Vec::with_capacity(chunk.len());
@@ -572,7 +866,7 @@ async fn write_commits_at_head(
         let mut binary_changes: Vec<i64> = Vec::with_capacity(chunk.len());
         let mut modified: Vec<DateTime<Utc>> = Vec::with_capacity(chunk.len());
         for (path, f) in chunk {
-            paths.push((*path).clone());
+            paths.push(path.to_string());
             counts.push(f.commits);
             fixes.push(f.fix_commits);
             lines_added.push(f.lines_added);
@@ -603,22 +897,22 @@ async fn write_commits_at_head(
         .bind(&lines_deleted)
         .bind(&binary_changes)
         .bind(&modified)
-        .execute(&mut *tx)
+        .execute(&mut **tx)
         .await
         .context("upsert file stats")?;
     }
 
     // Strongest file-coupling relationships: each count is the number of
     // bounded commits in which the two files changed together.
-    let coupling_rows: Vec<(&(String, String), &CouplingAgg)> = agg.couplings.iter().collect();
+    let coupling_rows: Vec<CouplingRow<'_>> = agg.couplings.iter().collect();
     for chunk in coupling_rows.chunks(UPSERT_CHUNK) {
         let mut paths_a = Vec::with_capacity(chunk.len());
         let mut paths_b = Vec::with_capacity(chunk.len());
         let mut cochanges = Vec::with_capacity(chunk.len());
         let mut fix_commits = Vec::with_capacity(chunk.len());
         for ((path_a, path_b), coupling) in chunk {
-            paths_a.push(path_a.clone());
-            paths_b.push(path_b.clone());
+            paths_a.push(path_a.to_string());
+            paths_b.push(path_b.to_string());
             cochanges.push(coupling.cochanges);
             fix_commits.push(coupling.fix_commits);
         }
@@ -635,7 +929,7 @@ async fn write_commits_at_head(
         .bind(&paths_b)
         .bind(&cochanges)
         .bind(&fix_commits)
-        .execute(&mut *tx)
+        .execute(&mut **tx)
         .await
         .context("upsert file couplings")?;
     }
@@ -650,7 +944,7 @@ async fn write_commits_at_head(
     )
     .bind(repo)
     .bind(MAX_STORED_COUPLINGS)
-    .execute(&mut *tx)
+    .execute(&mut **tx)
     .await
     .context("bound stored file couplings")?;
 
@@ -669,11 +963,11 @@ async fn write_commits_at_head(
         .bind(analyzed_head_sha)
         .bind(now)
         .bind(total.max(0))
-        .execute(&mut *tx)
+        .execute(&mut **tx)
         .await
         .context("replace repo_history")?;
     } else {
-        let added = commits.len() as i64;
+        let added = i64::try_from(agg.commits_seen()).unwrap_or(i64::MAX);
         sqlx::query(
             "INSERT INTO repo_history (repo, last_analyzed_sha, last_analyzed_at, head_sha, total_commits) \
              VALUES ($1, $2, $3, $2, $4) \
@@ -687,7 +981,7 @@ async fn write_commits_at_head(
         .bind(analyzed_head_sha)
         .bind(now)
         .bind(added)
-        .execute(&mut *tx)
+        .execute(&mut **tx)
         .await
         .context("update repo_history")?;
     }
@@ -698,12 +992,11 @@ async fn write_commits_at_head(
         // people with no commits in the analyzed window.
         sqlx::query("DELETE FROM repo_author_stats WHERE repo = $1 AND commits = 0")
             .bind(repo)
-            .execute(&mut *tx)
+            .execute(&mut **tx)
             .await
             .context("drop authors outside the rebuilt window")?;
     }
 
-    tx.commit().await.context("commit tx")?;
     Ok(())
 }
 
@@ -792,9 +1085,154 @@ pub async fn record_analysis_details(
     Ok(())
 }
 
-/// Eviction pass. Sorts repos by `score = bytes / max(1, days_idle)` and
-/// removes biggest+stalest clones until we're under the high-watermark.
-/// Run after every analysis (cheap when nothing's near full).
+/// One local bare clone an eviction pass may consider.
+#[derive(Clone, Debug, PartialEq, Eq)]
+struct CloneEntry {
+    repo: String,
+    path: PathBuf,
+    bytes: u64,
+    last_visited: Option<DateTime<Utc>>,
+}
+
+/// An ordered eviction plan: work `scored` first, then `protected` as a last
+/// resort. Clones an analysis is currently walking appear in NEITHER list at
+/// any watermark, so executing a whole plan can only ever fail to free enough
+/// space — it can never delete a tree out from under a running walk.
+#[derive(Debug, Default, PartialEq, Eq)]
+struct EvictionPlan {
+    /// Idle clones, biggest × stalest first.
+    scored: Vec<CloneEntry>,
+    /// Recently-visited clones, least-recently-visited first.
+    protected: Vec<CloneEntry>,
+    /// Bytes held by in-flight clones. Counted against the quota (they do
+    /// occupy the disk) but never offered as victims.
+    in_flight_bytes: u64,
+    in_flight_clones: usize,
+}
+
+/// How stale an `in_progress` lease may be before its clone stops counting as
+/// in flight.
+///
+/// A live run heartbeats its lease every 30s and the claim path steals a job
+/// whose lease is over two minutes old, so any healthy analysis sits far
+/// inside this window. The grace is deliberately much wider than the steal
+/// window because the two errors are not symmetric: protecting a clone whose
+/// worker actually died costs one delayed eviction, while deleting a clone
+/// whose worker is merely starved of database round-trips costs a full
+/// re-clone — of a repository that is, by construction, one this replica is
+/// spending hours on.
+const IN_FLIGHT_LEASE_GRACE: chrono::TimeDelta = chrono::TimeDelta::minutes(15);
+
+/// Repositories whose analysis is in flight anywhere in the fleet.
+///
+/// The durable `repo_analysis_queue` rows are the source of truth here, not a
+/// process-local registry of this replica's own runs. Two reasons the local
+/// view is insufficient:
+///
+///   * Worker replicas can share one repos volume (`RepoStorage::path_for`
+///     derives the path from the slug alone, so every replica addresses repo X
+///     at the same path). On such a deployment a neighbour's in-flight clone is
+///     an ordinary local directory that this pass would happily delete, and no
+///     amount of local bookkeeping can see the neighbour's claim.
+///   * `mark_evicted` NULLs a globally shared `repo_history` row, so even on
+///     separate volumes a local-only decision desynchronizes another replica's
+///     accounting for a repository it is actively working on.
+///
+/// The queue rows also already cover this replica's own runs: `claim_one`
+/// writes `in_progress` before the clone is opened and `complete`/`fail`
+/// clears it only after the last aggregate transaction has committed, so the
+/// durable set is a superset of the local one for the whole window that
+/// matters.
+async fn in_flight_repos(db: &Db) -> Result<HashSet<String>> {
+    let repos: Vec<String> = sqlx::query_scalar(
+        "SELECT repo FROM repo_analysis_queue \
+         WHERE status = 'in_progress' \
+           AND (claimed_at IS NULL OR claimed_at >= $1)",
+    )
+    .bind(Utc::now() - IN_FLIGHT_LEASE_GRACE)
+    .fetch_all(&db.pool)
+    .await
+    .context("load in-flight analysis claims")?;
+    Ok(repos.into_iter().collect())
+}
+
+/// Anti-thrash window: a clone visited this recently is only evicted as a last
+/// resort. Without the guard a popular hot repo gets evicted, re-cloned by the
+/// next request, evicts another similar-sized repo, and the disk thrashes in a
+/// loop ("thundering herd of clones"). 24h matches the "weekly cron plus
+/// occasional ad-hoc analysis" cadence expected of the analysis worker.
+const MIN_AGE_HOURS: i64 = 24;
+
+/// Pure ordering half of [`evict_to_quota`]: partition local clones into the
+/// in-flight set (never evicted), the scored pass, and the last-resort pass.
+/// Kept pure so the "an analysis in flight is never a victim" invariant is
+/// unit-testable without a database or a filesystem.
+fn plan_evictions(
+    local: Vec<CloneEntry>,
+    in_flight: &HashSet<String>,
+    now: DateTime<Utc>,
+) -> EvictionPlan {
+    let mut plan = EvictionPlan::default();
+    let mut scored: Vec<(f64, CloneEntry)> = Vec::new();
+    for entry in local {
+        // Checked before anything else, and before the watermark is even
+        // consulted: `record_clone` stamps `last_visited_at` at the START of a
+        // run, so a clone being walked right now is otherwise the freshest —
+        // and, for the repositories that make quota pressure happen at all,
+        // the biggest — thing on the disk. Deleting it makes the run fail,
+        // retry, re-clone the same gigabytes and evict the next victim, which
+        // is a livelock rather than a cache policy.
+        if in_flight.contains(&entry.repo) {
+            plan.in_flight_bytes = plan.in_flight_bytes.saturating_add(entry.bytes);
+            plan.in_flight_clones += 1;
+            continue;
+        }
+        // Recently visited clones go to the back of the queue rather than out
+        // of it. Excluding them outright made the quota unenforceable exactly
+        // under load: a busy pool touches every clone it holds within the
+        // guard window, so the candidate set emptied and the pass freed
+        // nothing while the disk kept growing.
+        if let Some(visited) = entry.last_visited
+            && (now - visited).num_hours() < MIN_AGE_HOURS
+        {
+            plan.protected.push(entry);
+            continue;
+        }
+        let idle_days = entry
+            .last_visited
+            .map(|dt| (now - dt).num_days().max(1) as f64)
+            .unwrap_or(1.0);
+        scored.push((entry.bytes as f64 * idle_days, entry));
+    }
+    scored.sort_by(|a, b| b.0.partial_cmp(&a.0).unwrap_or(std::cmp::Ordering::Equal));
+    plan.scored = scored.into_iter().map(|(_score, entry)| entry).collect();
+    plan.protected
+        .sort_by_key(|entry| (entry.last_visited, entry.repo.clone()));
+    plan
+}
+
+/// Delete one clone and clear its row, returning the bytes actually freed.
+async fn evict_entry(db: &Db, entry: &CloneEntry, reason: &'static str) -> u64 {
+    if let Err(error) = evict_clone(&entry.path).await {
+        tracing::warn!(repo = %entry.repo, %error, "evict failed; skipping");
+        return 0;
+    }
+    mark_evicted(db, &entry.repo).await.ok();
+    tracing::info!(repo = %entry.repo, bytes = entry.bytes, reason, "evicted bare clone");
+    entry.bytes
+}
+
+/// Eviction pass. Sorts repos by `score = bytes × days_idle` and removes the
+/// biggest+stalest clones until we're under the high-watermark. Run after
+/// every analysis (cheap when nothing's near full).
+///
+/// In-flight safety: clones claimed by a live analysis anywhere in the fleet
+/// are excluded from both passes (see [`in_flight_repos`]). They still count
+/// toward `used`, so the pass keeps trying to free space elsewhere; it simply
+/// cannot pick them. If that leaves the volume over its watermark the pass
+/// says so at ERROR rather than returning quietly — a full disk that silently
+/// stops all analysis is worse than a slow one, and the operator response
+/// (more disk, a bigger quota, or less analysis concurrency) needs a signal.
 ///
 /// Replica safety: `repo_history` rows are global but clones live on ONE
 /// replica's local volume, so both the quota accounting and the candidate
@@ -835,97 +1273,80 @@ pub async fn evict_to_quota(db: &Db, storage: &RepoStorage) -> Result<u64> {
     .await?;
 
     // Only clones present on this replica's filesystem participate.
-    let local: Vec<(String, std::path::PathBuf, u64, Option<DateTime<Utc>>)> = rows
+    let local: Vec<CloneEntry> = rows
         .into_iter()
         .filter_map(|(repo, path, bytes, last_visited)| {
-            let path = path.map(std::path::PathBuf::from)?;
+            let path = PathBuf::from(path?);
             let bytes = bytes? as u64;
             if !path.exists() {
                 return None;
             }
-            Some((repo, path, bytes, last_visited))
+            Some(CloneEntry {
+                repo,
+                path,
+                bytes,
+                last_visited,
+            })
         })
         .collect();
-    let mut used: u64 = local.iter().map(|(_, _, bytes, _)| *bytes).sum();
+    let mut used: u64 = local.iter().map(|entry| entry.bytes).sum();
     if used <= target {
         return Ok(0);
     }
 
-    // Score each candidate. Repos visited within MIN_AGE_HOURS are
-    // protected — without that guard, a popular hot repo gets evicted,
-    // re-cloned by the next request, evicts another similar-sized repo,
-    // and we thrash the disk in a loop ("thundering herd of clones").
-    // 24h matches the "weekly cron + occasional ad-hoc analysis" cadence
-    // we expect for the analysis worker.
-    const MIN_AGE_HOURS: i64 = 24;
-    let now = Utc::now();
-    let mut protected: Vec<(String, std::path::PathBuf, u64, Option<DateTime<Utc>>)> = Vec::new();
-    let mut scored: Vec<(f64, String, std::path::PathBuf, u64)> = local
-        .into_iter()
-        .filter_map(|(repo, path, bytes, last_visited)| {
-            // Recently visited clones go to the back of the queue rather than
-            // out of it. Excluding them outright made the quota
-            // unenforceable exactly under load: a busy pool touches every
-            // clone it holds within the guard window, so the candidate set
-            // emptied and the pass freed nothing while the disk kept growing.
-            if let Some(visited) = last_visited
-                && (now - visited).num_hours() < MIN_AGE_HOURS
-            {
-                protected.push((repo, path, bytes, Some(visited)));
-                return None;
-            }
-            let idle_days = last_visited
-                .map(|dt| (now - dt).num_days().max(1) as f64)
-                .unwrap_or(1.0);
-            let score = bytes as f64 * idle_days;
-            Some((score, repo, path, bytes))
-        })
-        .collect();
-    scored.sort_by(|a, b| b.0.partial_cmp(&a.0).unwrap_or(std::cmp::Ordering::Equal));
+    // Read BEFORE the first delete, and propagated rather than defaulted to
+    // "nothing is running": a pass that cannot tell which clones are in use
+    // must free nothing at all. Skipping this sweep costs disk headroom until
+    // the next completed job calls it again; guessing costs a live analysis.
+    let in_flight = in_flight_repos(db).await?;
+    let plan = plan_evictions(local, &in_flight, Utc::now());
 
     let mut freed = 0u64;
-    for (_score, repo, path, bytes) in scored {
+    for entry in &plan.scored {
         if used <= target {
             break;
         }
-        if let Err(e) = evict_clone(&path).await {
-            tracing::warn!(repo, error = %e, "evict failed; skipping");
-            continue;
-        }
-        mark_evicted(db, &repo).await.ok();
+        let bytes = evict_entry(db, entry, "idle").await;
         used = used.saturating_sub(bytes);
         freed = freed.saturating_add(bytes);
-        tracing::info!(repo, bytes, "evicted bare clone");
     }
 
-    if used > target && !protected.is_empty() {
+    if used > target && !plan.protected.is_empty() {
         // The working set alone exceeds the quota. Fall back to plain LRU
         // over the protected clones: re-cloning one of them later is strictly
         // better than letting the volume fill.
         tracing::warn!(
             used,
             target,
-            protected = protected.len(),
+            protected = plan.protected.len(),
             "clone quota exceeded by the active working set; evicting least-recently-visited clones"
         );
-        protected.sort_by_key(|(_, _, _, last_visited)| *last_visited);
-        for (repo, path, bytes, _) in protected {
+        for entry in &plan.protected {
             if used <= target {
                 break;
             }
-            if let Err(e) = evict_clone(&path).await {
-                tracing::warn!(repo, error = %e, "evict failed; skipping");
-                continue;
-            }
-            mark_evicted(db, &repo).await.ok();
+            let bytes = evict_entry(db, entry, "recently-visited-under-pressure").await;
             used = used.saturating_sub(bytes);
             freed = freed.saturating_add(bytes);
-            tracing::info!(
-                repo,
-                bytes,
-                "evicted recently-visited bare clone under quota pressure"
-            );
         }
+    }
+
+    if used > target {
+        // Actionable on purpose: the numbers below say whether the volume is
+        // held by running analyses (raise the quota or lower analysis
+        // concurrency) or by clones whose deletion failed (a disk or
+        // permissions fault). Silence here means analysis stops fleet-wide the
+        // moment the volume actually fills, with no prior warning.
+        tracing::error!(
+            used,
+            target,
+            quota_bytes = storage.quota_bytes,
+            freed,
+            in_flight_clones = plan.in_flight_clones,
+            in_flight_bytes = plan.in_flight_bytes,
+            "clone quota still exceeded after a full eviction pass; the remaining clones are \
+             being analyzed right now or could not be deleted"
+        );
     }
     Ok(freed)
 }
@@ -1148,13 +1569,13 @@ mod tests {
     /// in plain Rust (no DB). Applying each commit in order with the same
     /// COALESCE/LEAST/GREATEST/last-wins rules the SQL used. The batched
     /// `aggregate_commits` must produce identical maps.
-    fn oracle(commits: &[CommitInfo]) -> BatchAggregates {
+    fn oracle(commits: &[CommitInfo]) -> Aggregates {
         let mut authors: HashMap<String, AuthorAgg> = HashMap::new();
         let mut author_commit_days: HashMap<(String, NaiveDate), i64> = HashMap::new();
-        let mut files: HashMap<String, FileAgg> = HashMap::new();
+        let mut files: HashMap<Arc<str>, FileAgg> = HashMap::new();
         let mut commit_days: HashMap<NaiveDate, i64> = HashMap::new();
         let mut change_days: HashMap<NaiveDate, ChangeDayAgg> = HashMap::new();
-        let mut couplings: HashMap<(String, String), CouplingAgg> = HashMap::new();
+        let mut couplings: HashMap<(Arc<str>, Arc<str>), CouplingAgg> = HashMap::new();
         let mut todo_days: HashMap<NaiveDate, TodoAgg> = HashMap::new();
         for c in commits {
             let avatar = avatar_for_email(&c.author_email);
@@ -1203,9 +1624,9 @@ mod tests {
                 t.removed += c.todo_removed as i64;
             }
             for change in &c.file_changes {
-                let p = &change.path;
+                let p: Arc<str> = Arc::from(change.path.as_str());
                 let fix_inc = if c.is_fix { 1 } else { 0 };
-                match files.get_mut(p) {
+                match files.get_mut(&p) {
                     None => {
                         files.insert(
                             p.clone(),
@@ -1229,7 +1650,11 @@ mod tests {
                     }
                 }
             }
-            let mut paths = c.paths_changed.clone();
+            let mut paths: Vec<Arc<str>> = c
+                .paths_changed
+                .iter()
+                .map(|path| Arc::from(path.as_str()))
+                .collect();
             paths.sort_unstable();
             paths.dedup();
             if (2..=MAX_COUPLING_FILES_PER_COMMIT).contains(&paths.len()) {
@@ -1244,7 +1669,7 @@ mod tests {
                 }
             }
         }
-        BatchAggregates {
+        Aggregates {
             authors,
             author_commit_days,
             files,
@@ -1252,22 +1677,43 @@ mod tests {
             change_days,
             couplings,
             todo_days,
+            commits_seen: commits.len(),
         }
     }
 
-    fn assert_equiv(commits: &[CommitInfo]) {
-        let a = aggregate_commits(commits);
-        let b = oracle(commits);
-        assert_eq!(a.authors, b.authors, "authors map");
+    fn pair(a: &str, b: &str) -> (Arc<str>, Arc<str>) {
+        (Arc::from(a), Arc::from(b))
+    }
+
+    fn assert_same_aggregates(a: &Aggregates, b: &Aggregates, what: &str) {
+        assert_eq!(a.authors, b.authors, "{what}: authors map");
         assert_eq!(
             a.author_commit_days, b.author_commit_days,
-            "author_commit_days map"
+            "{what}: author_commit_days map"
         );
-        assert_eq!(a.files, b.files, "files map");
-        assert_eq!(a.commit_days, b.commit_days, "commit_days map");
-        assert_eq!(a.change_days, b.change_days, "change_days map");
-        assert_eq!(a.couplings, b.couplings, "couplings map");
-        assert_eq!(a.todo_days, b.todo_days, "todo_days map");
+        assert_eq!(a.files, b.files, "{what}: files map");
+        assert_eq!(a.commit_days, b.commit_days, "{what}: commit_days map");
+        assert_eq!(a.change_days, b.change_days, "{what}: change_days map");
+        assert_eq!(a.couplings, b.couplings, "{what}: couplings map");
+        assert_eq!(a.todo_days, b.todo_days, "{what}: todo_days map");
+        assert_eq!(a.commits_seen, b.commits_seen, "{what}: commits_seen");
+    }
+
+    fn assert_equiv(commits: &[CommitInfo]) {
+        assert_same_aggregates(&aggregate_commits(commits), &oracle(commits), "batch");
+        // Every batching of the same commits must land on the same
+        // aggregates, because the streaming caller chooses the chunk size.
+        for chunk in [1usize, 2, 3, 7, 1024] {
+            let mut streamed = CommitAggregator::new();
+            for batch in commits.chunks(chunk) {
+                streamed.extend(batch);
+            }
+            assert_same_aggregates(
+                &streamed.finish(),
+                &oracle(commits),
+                &format!("streamed in chunks of {chunk}"),
+            );
+        }
     }
 
     #[test]
@@ -1286,7 +1732,7 @@ mod tests {
         assert_eq!(agg.files["x.rs"].lines_deleted, 2);
         assert_eq!(agg.files["y.rs"].commits, 1);
         assert_eq!(
-            agg.couplings[&("x.rs".to_string(), "y.rs".to_string())],
+            agg.couplings[&pair("x.rs", "y.rs")],
             CouplingAgg {
                 cochanges: 1,
                 fix_commits: 0,
@@ -1400,6 +1846,122 @@ mod tests {
         assert!(agg.change_days.is_empty());
         assert!(agg.couplings.is_empty());
         assert!(agg.todo_days.is_empty());
+        assert!(agg.is_empty());
+        assert_eq!(agg.commits_seen(), 0);
+    }
+
+    /// The property the whole streaming restructure rests on: a caller that
+    /// folds commits in batch by batch and drops each batch must land on
+    /// exactly the aggregates the all-at-once function produced, for every
+    /// batch size — otherwise "hold the aggregates, not the history" would be
+    /// a behaviour change rather than a memory fix.
+    #[test]
+    fn streaming_matches_the_batch_function_over_a_long_history() {
+        let names = ["Alice", "Bob", "Carol"];
+        let emails = [
+            "a@b.c",
+            "7+bob@users.noreply.github.com",
+            "carol@example.org",
+        ];
+        let paths = ["src/a.rs", "src/b.rs", "src/c.rs", "docs/d.md", "README"];
+        let commits: Vec<CommitInfo> = (0..500)
+            .map(|i| {
+                let touched: Vec<&str> = (0..=(i % 4))
+                    .map(|offset| paths[(i + offset) as usize % paths.len()])
+                    .collect();
+                commit(
+                    emails[i as usize % emails.len()],
+                    names[i as usize % names.len()],
+                    i * 3_600,
+                    i % 5 == 0,
+                    &touched,
+                    (i % 3) as u32,
+                    (i % 7) as u32,
+                )
+            })
+            .collect();
+
+        assert_equiv(&commits);
+        let batched = aggregate_commits(&commits);
+        assert_eq!(batched.commits_seen(), 500);
+        assert!(!batched.couplings.is_empty(), "fixture exercises couplings");
+        assert!(
+            batched.authors.len() == 3,
+            "fixture exercises author merges"
+        );
+    }
+
+    /// A tree-wide commit contributes O(files²) pairs that are artifacts of a
+    /// mechanical edit. It must contribute none of them, and the aggregator
+    /// must say so.
+    #[test]
+    fn wide_commits_contribute_no_coupling_evidence() {
+        let wide: Vec<String> = (0..MAX_COUPLING_FILES_PER_COMMIT + 1)
+            .map(|i| format!("f{i}"))
+            .collect();
+        let wide_refs: Vec<&str> = wide.iter().map(String::as_str).collect();
+        let commits = vec![
+            commit("a@b.c", "A", 0, false, &wide_refs, 0, 0),
+            commit("a@b.c", "A", 10, false, &["f0", "f1"], 0, 0),
+        ];
+
+        let mut aggregator = CommitAggregator::new();
+        aggregator.extend(&commits);
+        assert_eq!(aggregator.wide_commits, 1);
+        let agg = aggregator.finish();
+
+        // Only the narrow commit's single pair survives; per-file stats still
+        // count every path the wide commit touched.
+        assert_eq!(agg.couplings.len(), 1);
+        assert_eq!(agg.couplings[&pair("f0", "f1")].cochanges, 1);
+        assert_eq!(agg.files.len(), MAX_COUPLING_FILES_PER_COMMIT + 1);
+        assert_eq!(agg.files["f0"].commits, 2);
+    }
+
+    /// The one aggregate that grows combinatorially rather than with the
+    /// repository's shape has to stay bounded no matter how long the history
+    /// is, and it has to drop the weakest evidence rather than the newest.
+    #[test]
+    fn coupling_pruning_keeps_the_strongest_pairs_and_bounds_the_map() {
+        let mut aggregator = CommitAggregator::new();
+        // Each cold commit touches the widest still-eligible file set, all
+        // names unique, so it contributes 66 pairs that are never seen again
+        // — the long tail that makes this map grow without bound. One hot
+        // pair recurs alongside them.
+        let pairs_per_commit =
+            MAX_COUPLING_FILES_PER_COMMIT * (MAX_COUPLING_FILES_PER_COMMIT - 1) / 2;
+        let cold_commits = MAX_TRACKED_COUPLINGS / pairs_per_commit + 2;
+        for i in 0..cold_commits {
+            aggregator.push(&commit(
+                "a@b.c",
+                "A",
+                i as i64,
+                false,
+                &["hot/left", "hot/right"],
+                0,
+                0,
+            ));
+            let cold: Vec<String> = (0..MAX_COUPLING_FILES_PER_COMMIT)
+                .map(|f| format!("cold/{i}/{f}"))
+                .collect();
+            let cold_refs: Vec<&str> = cold.iter().map(String::as_str).collect();
+            aggregator.push(&commit("a@b.c", "A", i as i64, false, &cold_refs, 0, 0));
+        }
+        assert!(aggregator.pruned_couplings > 0, "the bound actually fired");
+        let agg = aggregator.finish();
+
+        assert!(
+            agg.couplings.len() <= MAX_TRACKED_COUPLINGS,
+            "the coupling map stays bounded across an unbounded history"
+        );
+        let hot = agg
+            .couplings
+            .get(&pair("hot/left", "hot/right"))
+            .expect("the strongest pair survives pruning");
+        assert_eq!(
+            hot.cochanges as usize, cold_commits,
+            "pruning drops the weakest evidence, never the strongest"
+        );
     }
 
     #[test]
@@ -1434,5 +1996,236 @@ mod tests {
             vec![root.join("owner/repo.git"), root.join("stray.git")],
             "exactly the layout-shaped real directories are candidates"
         );
+    }
+
+    fn clone_entry(repo: &str, gib: u64, visited_hours_ago: Option<i64>) -> CloneEntry {
+        CloneEntry {
+            repo: repo.to_string(),
+            path: PathBuf::from(format!("/repos/{repo}.git")),
+            bytes: gib * 1024 * 1024 * 1024,
+            last_visited: visited_hours_ago.map(|hours| at(0) - chrono::Duration::hours(hours)),
+        }
+    }
+
+    fn in_flight(repos: &[&str]) -> HashSet<String> {
+        repos.iter().map(|r| (*r).to_string()).collect()
+    }
+
+    fn repos_of(entries: &[CloneEntry]) -> Vec<&str> {
+        entries.iter().map(|e| e.repo.as_str()).collect()
+    }
+
+    /// The regression this exists for: an in-flight clone is exactly the
+    /// profile the scored pass likes best (huge) and the fallback reaches
+    /// first, so it must be off the table before either pass sees it.
+    #[test]
+    fn plan_never_offers_an_in_flight_clone_as_a_victim() {
+        let now = at(0);
+        let local = vec![
+            // Being walked right now: biggest on disk, and `record_clone`
+            // stamped last_visited at the start of the run.
+            clone_entry("torvalds/linux", 6, Some(0)),
+            // Idle for a week: the clone the pass is supposed to take.
+            clone_entry("hexojs/hexo", 1, Some(24 * 7)),
+            // Visited an hour ago by a finished run: last-resort material.
+            clone_entry("django/django", 2, Some(1)),
+        ];
+
+        let plan = plan_evictions(local, &in_flight(&["torvalds/linux"]), now);
+
+        assert_eq!(repos_of(&plan.scored), vec!["hexojs/hexo"]);
+        assert_eq!(repos_of(&plan.protected), vec!["django/django"]);
+        assert_eq!(plan.in_flight_clones, 1);
+        assert_eq!(plan.in_flight_bytes, 6 * 1024 * 1024 * 1024);
+    }
+
+    /// The failure the operator described: the working set alone is over
+    /// quota, so the fallback runs — and must still find nothing to delete
+    /// when every remaining clone is being analyzed.
+    #[test]
+    fn plan_is_empty_when_every_clone_is_in_flight() {
+        let now = at(0);
+        let local = vec![
+            clone_entry("torvalds/linux", 6, Some(0)),
+            clone_entry("vercel/next.js", 2, Some(24 * 30)),
+        ];
+
+        let plan = plan_evictions(
+            local,
+            &in_flight(&["torvalds/linux", "vercel/next.js"]),
+            now,
+        );
+
+        assert!(
+            plan.scored.is_empty() && plan.protected.is_empty(),
+            "a sweep may fail to free space, but never at the cost of a running walk"
+        );
+        assert_eq!(plan.in_flight_clones, 2);
+        assert_eq!(plan.in_flight_bytes, 8 * 1024 * 1024 * 1024);
+    }
+
+    /// Staleness beats size in the scored pass, and the fallback is plain LRU.
+    #[test]
+    fn plan_orders_scored_by_size_times_idle_days_and_fallback_by_lru() {
+        let now = at(0);
+        let local = vec![
+            clone_entry("small/ancient", 1, Some(24 * 100)), // 100 GiB-days
+            clone_entry("big/recent", 4, Some(24 * 2)),      // 8 GiB-days
+            clone_entry("never/visited", 2, None),           // 2 GiB-days
+            clone_entry("hot/newest", 1, Some(1)),
+            clone_entry("hot/older", 1, Some(20)),
+        ];
+
+        let plan = plan_evictions(local, &HashSet::new(), now);
+
+        assert_eq!(
+            repos_of(&plan.scored),
+            vec!["small/ancient", "big/recent", "never/visited"]
+        );
+        assert_eq!(repos_of(&plan.protected), vec!["hot/older", "hot/newest"]);
+    }
+
+    async fn purge_stats(db: &Db, repo: &str) {
+        for table in [
+            "repo_author_commit_days",
+            "repo_commit_days",
+            "repo_todo_deltas",
+            "repo_file_stats",
+            "repo_file_couplings",
+            "repo_author_stats",
+            "repo_history",
+        ] {
+            sqlx::query(sqlx::AssertSqlSafe(format!(
+                "DELETE FROM {table} WHERE repo = $1"
+            )))
+            .bind(repo)
+            .execute(&db.pool)
+            .await
+            .expect("purge stats fixture");
+        }
+    }
+
+    /// Everything the incremental write touches, in one comparable value:
+    /// the cursor plus every aggregate row.
+    type StatsSnapshot = (
+        Vec<(Option<String>, Option<String>, i64)>,
+        Vec<(String, i64, i64, i64, i64)>,
+        Vec<(String, i64)>,
+        Vec<(NaiveDate, i64, i64)>,
+        Vec<(NaiveDate, i64, i64)>,
+        Vec<(String, String, i64)>,
+    );
+
+    async fn snapshot_stats(db: &Db, repo: &str) -> StatsSnapshot {
+        let history = sqlx::query_as(
+            "SELECT last_analyzed_sha, head_sha, total_commits FROM repo_history WHERE repo = $1",
+        )
+        .bind(repo)
+        .fetch_all(&db.pool)
+        .await
+        .expect("read repo_history");
+        let files = sqlx::query_as(
+            "SELECT path, commits, fix_commits, lines_added, lines_deleted \
+             FROM repo_file_stats WHERE repo = $1 ORDER BY path",
+        )
+        .bind(repo)
+        .fetch_all(&db.pool)
+        .await
+        .expect("read repo_file_stats");
+        let authors = sqlx::query_as(
+            "SELECT author_email, commits FROM repo_author_stats WHERE repo = $1 \
+             ORDER BY author_email",
+        )
+        .bind(repo)
+        .fetch_all(&db.pool)
+        .await
+        .expect("read repo_author_stats");
+        let days = sqlx::query_as(
+            "SELECT day, commits, lines_added FROM repo_commit_days WHERE repo = $1 ORDER BY day",
+        )
+        .bind(repo)
+        .fetch_all(&db.pool)
+        .await
+        .expect("read repo_commit_days");
+        let todos = sqlx::query_as(
+            "SELECT day, todo_added, todo_removed FROM repo_todo_deltas WHERE repo = $1 \
+             ORDER BY day",
+        )
+        .bind(repo)
+        .fetch_all(&db.pool)
+        .await
+        .expect("read repo_todo_deltas");
+        let couplings = sqlx::query_as(
+            "SELECT path_a, path_b, cochanges FROM repo_file_couplings WHERE repo = $1 \
+             ORDER BY path_a, path_b",
+        )
+        .bind(repo)
+        .fetch_all(&db.pool)
+        .await
+        .expect("read repo_file_couplings");
+        (history, files, authors, days, todos, couplings)
+    }
+
+    /// The correctness core of incremental analysis: the aggregate delta and
+    /// the cursor advance are one transaction, so a failed apply leaves the
+    /// repository exactly where the previous successful run left it — and the
+    /// retry therefore re-derives the identical range from the identical
+    /// cursor. If the cursor moved on its own connection, the rollback below
+    /// would leave `last_analyzed_sha` at "head-2" with none of head-2's
+    /// commits counted, and that range would be lost permanently.
+    #[tokio::test]
+    async fn rollback_leaves_aggregates_and_cursor_untouched() {
+        let Some(db) = crate::test_db::shared().await else {
+            eprintln!("skipping: set GITDEBT_TEST_DATABASE_URL to run");
+            return;
+        };
+        let repo = "gitdebt-test-stats/rollback";
+        purge_stats(&db, repo).await;
+
+        let base = vec![commit("a@b.c", "A", 0, false, &["x.rs"], 1, 0)];
+        apply_commits_at_head(&db, repo, &base, "head-1")
+            .await
+            .expect("seed committed baseline");
+        let before = snapshot_stats(&db, repo).await;
+        assert_eq!(
+            before.0,
+            vec![(Some("head-1".into()), Some("head-1".into()), 1)]
+        );
+
+        let more = vec![
+            commit("a@b.c", "A", 100, true, &["x.rs", "y.rs"], 2, 1),
+            commit("d@e.f", "D", 200, false, &["y.rs"], 0, 0),
+        ];
+        let mut tx = db.pool.begin().await.expect("begin");
+        write_aggregates_in_tx(
+            &mut tx,
+            repo,
+            &aggregate_commits(&more),
+            "head-2",
+            false,
+            None,
+        )
+        .await
+        .expect("apply inside the caller's transaction");
+        // Read through the same transaction first: without this the test would
+        // also pass if the write silently did nothing at all.
+        let (staged_sha, staged_total): (Option<String>, i64) = sqlx::query_as(
+            "SELECT last_analyzed_sha, total_commits FROM repo_history WHERE repo = $1",
+        )
+        .bind(repo)
+        .fetch_one(&mut *tx)
+        .await
+        .expect("read staged cursor");
+        assert_eq!(staged_sha.as_deref(), Some("head-2"));
+        assert_eq!(staged_total, 3, "the delta is staged inside the tx");
+        tx.rollback().await.expect("rollback");
+
+        let after = snapshot_stats(&db, repo).await;
+        assert_eq!(
+            before, after,
+            "a rolled-back apply must move neither the aggregates nor the cursor"
+        );
+
+        purge_stats(&db, repo).await;
     }
 }

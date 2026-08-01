@@ -44,6 +44,25 @@ const RASTER_SCALE: f32 = 2.0;
 const MAX_AVATAR_BYTES: usize = 128 * 1024;
 const AVATAR_FETCH_CONCURRENCY: usize = 8;
 
+/// Priority for anonymous work a real visitor (or a real embed impression)
+/// asked for: popularity, ranked *inside* the visitor band.
+///
+/// Anonymous work used to be prioritized by `view_count` alone, which is `0`
+/// for a repository nobody has opened yet — the same band the curated-catalog
+/// bootstrap enqueues its whole list in. Since `enqueue_prioritized` never
+/// refreshes `enqueued_at` on conflict, the catalog's boot-time timestamps won
+/// every tie forever, so every first-time visitor queued behind the entire
+/// backfill and saw none of the reserved capacity
+/// [`repo_analysis::VISITOR_PRIORITY_FLOOR`] exists to give them.
+///
+/// The popularity bonus is clamped to the band: a repository with a million
+/// views must not climb into the warm-up band and outrank work a signed-in
+/// visitor is waiting on.
+pub fn view_priority(view_count: i64) -> i64 {
+    let span = repo_analysis::WARM_PRIORITY - repo_analysis::VISITOR_PRIORITY_FLOOR - 1;
+    repo_analysis::VISITOR_PRIORITY_FLOOR.saturating_add(view_count.clamp(0, span))
+}
+
 fn trusted_avatar_url(raw: &str) -> bool {
     let Ok(url) = url::Url::parse(raw) else {
         return false;
@@ -699,12 +718,14 @@ async fn enqueue_analysis(
     let priority = if user_id.is_some() {
         repo_analysis::INTERACTIVE_PRIORITY
     } else {
-        state
-            .analyzer
-            .cache
-            .get_repo_view_count(&full)
-            .await
-            .unwrap_or(0)
+        view_priority(
+            state
+                .analyzer
+                .cache
+                .get_repo_view_count(&full)
+                .await
+                .unwrap_or(0),
+        )
     };
     let summary = state.analyzer.cache.get_repo_summary(&full).await?;
     if summary.as_ref().is_some_and(|repo| repo.missing) {
@@ -739,9 +760,13 @@ async fn enqueue_analysis(
         });
     }
 
-    // Both pipelines receive the same popularity bump. Star history continues
-    // through the existing Postgres-backed GH Archive path; an OAuth token is
-    // never pooled into unrelated repositories or persisted on the queue.
+    // Both pipelines receive the same popularity bump, now from the organic
+    // band rather than from a bare `view_count` — a repository a person is
+    // looking at right now outranks the background backfill sweep in the star
+    // queue for the same reason it outranks the catalog in the analysis queue.
+    // Star history continues through the existing Postgres-backed GH Archive
+    // path; an OAuth token is never pooled into unrelated repositories or
+    // persisted on the queue.
     crate::analyzer::enqueue_fetch_known(&state.analyzer, &full, priority).await;
     let outcome =
         repo_analysis::enqueue_prioritized(state.analyzer.cache.db(), &full, priority, user_id)
@@ -906,10 +931,23 @@ async fn stat_dispatcher(
         // A repo-health embed for a repository nobody has opened on the site
         // is the only thing that will ever ask for its analysis. Offer the
         // durable job (bounded, deduplicated, and capacity-gated inside
-        // `enqueue`) and return immediately — without this the frame told
-        // embedders that "analysis is still running" when nothing was queued
-        // and nothing ever would be.
-        if let Err(error) = crate::repo_analysis::enqueue(state.analyzer.cache.db(), &full).await {
+        // `enqueue_prioritized`) and return immediately — without this the
+        // frame told embedders that "analysis is still running" when nothing
+        // was queued and nothing ever would be.
+        //
+        // An impression in somebody's README is organic demand, so it starts
+        // at the band floor rather than at the catalog band. It gets no
+        // popularity bonus: embeds are the highest-volume miss path here and
+        // must not add a `view_count` read to a render that already missed
+        // every cache.
+        if let Err(error) = crate::repo_analysis::enqueue_prioritized(
+            state.analyzer.cache.db(),
+            &full,
+            repo_analysis::VISITOR_PRIORITY_FLOOR,
+            None,
+        )
+        .await
+        {
             tracing::warn!(repo = %full, %error, "stat embed analysis enqueue failed");
         }
         let mut svg = render_analysis_pending(&full, theme);
@@ -1534,6 +1572,43 @@ fn stat_cache_control(pending: bool) -> HeaderValue {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    /// The whole point of the organic band: an anonymous view of a
+    /// repository nobody has opened before must still outrank every
+    /// curated-catalog row, which sits at priority 0 with an older
+    /// `enqueued_at` and would otherwise win the tie-break forever.
+    #[test]
+    fn organic_views_outrank_the_background_band() {
+        assert_eq!(
+            view_priority(0),
+            repo_analysis::VISITOR_PRIORITY_FLOOR,
+            "a repository nobody has opened yet must still reach the visitor lane"
+        );
+        // Popularity still orders repositories within the band.
+        assert!(view_priority(5) > view_priority(0));
+    }
+
+    /// Popularity is a ranking inside the band, never a way out of it: no
+    /// view count may promote anonymous work into the warm-up band or above
+    /// a signed-in visitor's single repository.
+    #[test]
+    fn view_priority_stays_inside_its_band() {
+        for count in [0, 1, 42, 999_999, i64::MAX] {
+            let priority = view_priority(count);
+            assert!(
+                priority >= repo_analysis::VISITOR_PRIORITY_FLOOR,
+                "{count} fell below the visitor band"
+            );
+            assert!(
+                priority < repo_analysis::WARM_PRIORITY,
+                "{count} escaped into the warm band"
+            );
+            assert!(priority < repo_analysis::INTERACTIVE_PRIORITY);
+        }
+        // A negative counter (impossible in the schema, cheap to survive)
+        // clamps to the floor instead of sinking below the catalog.
+        assert_eq!(view_priority(-5), repo_analysis::VISITOR_PRIORITY_FLOOR);
+    }
 
     /// Every table the health summary reads, for one test repository.
     #[cfg(test)]

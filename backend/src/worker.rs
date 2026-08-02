@@ -108,7 +108,7 @@ const BACKFILL_ENQUEUE_PACING: Duration = Duration::from_millis(50);
 /// purpose. What protects the host is [`MAX_STAR_FETCH_WORKERS`]; what this
 /// protects is the queue table from unbounded growth when acquisition is
 /// slower than enqueue for a long stretch.
-const MAX_PENDING_FETCHES: i64 = 5_000;
+pub(crate) const MAX_PENDING_FETCHES: i64 = 5_000;
 
 /// One pass of the profile-stats metadata backfill sweep.
 ///

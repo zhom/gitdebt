@@ -450,21 +450,6 @@ pub async fn star_series(owner: &str, repo: &str, ctx: &AnalyzerCtx) -> Result<V
     }
 }
 
-/// Global cap on the number of `pending` star-fetch jobs. Past this, new
-/// enqueues are skipped (the repo stays un-queued; a later request retries).
-/// Bounds queue growth so an attacker scripting `/api/ext/ping` can't grow
-/// `star_fetch_queue` unbounded (memory + cost). Overridable via
-/// `MAX_PENDING_FETCHES`.
-const DEFAULT_MAX_PENDING_FETCHES: i64 = 5_000;
-
-fn max_pending_fetches() -> i64 {
-    std::env::var("MAX_PENDING_FETCHES")
-        .ok()
-        .and_then(|s| s.parse::<i64>().ok())
-        .filter(|n| *n > 0)
-        .unwrap_or(DEFAULT_MAX_PENDING_FETCHES)
-}
-
 /// Enqueue a star-history fetch for `repo_full`, prioritized by the repo's
 /// current popularity (`view_count`). Best-effort: a queue error is logged,
 /// never propagated to the request.
@@ -489,7 +474,7 @@ pub async fn enqueue_fetch(ctx: &AnalyzerCtx, repo_full: &str) {
     let already_active = queue::is_active(db, repo_full).await.unwrap_or(false);
     if !already_active {
         let pending = queue::pending_only_count(db).await.unwrap_or(0);
-        if pending >= max_pending_fetches() {
+        if pending >= crate::worker::MAX_PENDING_FETCHES {
             tracing::warn!(
                 repo = %repo_full,
                 pending,
@@ -517,7 +502,7 @@ pub async fn enqueue_fetch_known(ctx: &AnalyzerCtx, repo_full: &str, priority: i
     let already_active = queue::is_active(db, repo_full).await.unwrap_or(false);
     if !already_active {
         let pending = queue::pending_only_count(db).await.unwrap_or(0);
-        if pending >= max_pending_fetches() {
+        if pending >= crate::worker::MAX_PENDING_FETCHES {
             tracing::warn!(
                 repo = %repo_full,
                 pending,

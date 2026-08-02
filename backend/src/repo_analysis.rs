@@ -13,10 +13,14 @@
 //!     [`catalog_concurrency_cap`] rows below it may run at once — otherwise a
 //!     few hundred queued catalog repositories hold every slot and a visitor's
 //!     top-priority row waits behind all of them regardless of its priority.
-//!   * **Silence is bounded, duration is not.** A run is killed when it stops
-//!     making progress, never for taking long. Killing a working job on a flat
-//!     wall clock guarantees a large repository never finishes: each attempt
-//!     dies at the same point and the next starts over.
+//!   * **Silence is what is bounded.** A run is killed when it stops making
+//!     progress, not for taking long: killing a working job on a flat wall
+//!     clock guarantees a large repository never finishes, because each
+//!     attempt dies at the same point and the next starts over. There is a
+//!     second, far wider ceiling at [`ABSOLUTE_JOB_CEILING`], set several
+//!     stall windows past the worst measured extrapolation so that it can only
+//!     ever catch a run that is beating steadily while making no real headway
+//!     — a loop, not a large repository.
 
 use std::collections::{HashMap, HashSet};
 use std::sync::Arc;
@@ -482,49 +486,32 @@ fn worker_host() -> String {
         .unwrap_or_else(|| "unknown".to_string())
 }
 
-/// Does `{host}:{pid}` really name this replica and no other?
-///
-/// Only when the deployment gave the process a hostname. Without one, two
-/// containers on the same host share `unknown` *and* pid 1, and a startup
-/// sweep keyed on that identity would reclaim a live peer's running jobs —
-/// so it is skipped rather than guessed.
-fn replica_identity_is_unique() -> bool {
-    std::env::var("HOSTNAME").is_ok_and(|value| !value.trim().is_empty())
-}
-
 /// Reclaim analysis jobs no live worker is running, once, before this
 /// process's own pool exists.
 ///
-/// Two disjoint reasons a row qualifies, and the second one is the fix:
+/// A row qualifies on one condition only: **the lease expired.** Nothing has
+/// heartbeated `claimed_at` for longer than the claim path's steal window, so
+/// the row is free by the same rule a peer would use.
 ///
-///   * **the lease expired.** Nothing has heartbeated `claimed_at` for longer
-///     than the claim path's steal window, so the row is free by the same rule
-///     a peer would use.
-///   * **the row is this replica's own.** A redeploy that was SIGKILLed (or
-///     died between the heartbeat and the release) leaves rows whose
-///     `claimed_at` was refreshed seconds before the process died — inside the
-///     steal window, so the lease rule skipped them, and they then sat
-///     `in_progress` under a `worker_id` belonging to a pool that no longer
-///     exists, spending [`catalog_concurrency_cap`] and
-///     [`MAX_PENDING_ANALYSES`] budget until some worker happened to steal them
-///     minutes later. This process has not claimed anything yet, so any row
-///     already carrying *its own* identity is by construction a ghost.
+/// Deliberately keyed on the lease alone, never on `{host}:{pid}`.
 ///
-/// The identity half needs a hostname to be safe (see
-/// [`replica_identity_is_unique`]); the lease half always applies. Both are
-/// backstops — an orderly shutdown hands the rows back itself in
-/// [`release_pool_claims`].
+/// Reclaiming rows that merely *look* like this process's own is unsafe: a
+/// container started with an explicit hostname (a compose `hostname:` key, a
+/// service-name hostname) runs as pid 1, so two replicas of the same service
+/// produce the identical identity. Replica B booting would then reclaim
+/// replica A's live, freshly-heartbeated rows; both would analyze the same
+/// repository, and A's `complete()` would delete the row B was running under.
+/// That is a corruption, traded for reclaiming ghosts a couple of minutes
+/// sooner — and the ghosts are already covered twice over, by
+/// [`release_pool_claims`] on an orderly shutdown (which is what a redeploy
+/// sends) and by the lease rule for everything else.
 pub async fn reset_inflight_on_startup(db: &Db) -> Result<u64> {
     let res = sqlx::query(
         "UPDATE repo_analysis_queue SET status = 'pending', phase = 'queued', \
          worker_id = NULL, claimed_at = NULL, started_at = NULL, updated_at = NOW() \
          WHERE status = 'in_progress' \
-           AND (claimed_at IS NULL \
-                OR claimed_at < NOW() - INTERVAL '2 minutes' \
-                OR ($1 AND starts_with(worker_id, $2)))",
+           AND (claimed_at IS NULL OR claimed_at < NOW() - INTERVAL '2 minutes')",
     )
-    .bind(replica_identity_is_unique())
-    .bind(replica_worker_prefix())
     .execute(&db.pool)
     .await?;
     Ok(res.rows_affected())
@@ -584,22 +571,30 @@ pub async fn revive_retryable_on_startup(db: &Db) -> Result<u64> {
 /// subprocess fan-out.
 ///
 /// **Three, because the box has 12 vCPU and does not belong to gitdebt.**
-/// Every per-analysis parallelism on this host is `cores / pool`, so the
-/// pool's total CPU appetite is a constant ~12 whatever this number is, and
-/// the only thing it actually chooses is how that budget is *shaped*:
+/// Every per-analysis parallelism on this host is
+/// `repo_history::GIT_CORE_BUDGET / pool`, so this number chooses both how
+/// much CPU the pool asks for in total and how that ask is *shaped*:
 ///
 ///   * at 8 (the previous production value) each clone indexed its pack with
-///     `12 / 8 = 1` thread and each walk ran one `git log`, so eight analyses
+///     `8 / 8 = 1` thread and each walk ran one `git log`, so eight analyses
 ///     crawled in lockstep: apache/kafka's 17,985 commits landed in 93 s while
 ///     microsoft/vscode (161k commits), postgres/postgres (64k) and rabbitmq
 ///     (62k) all ran past twenty minutes without finishing and torvalds/linux
 ///     never got a slot at all. The clones were finished and static on disk
 ///     throughout — the contention was CPU, disk and Postgres, not network;
-///   * at 3 the same budget buys `12 / 3 = 4` index-pack threads and a 4-way
-///     walk fan-out per analysis, three concurrent clones sharing the measured
-///     32 MiB/s instead of eight, and three concurrent aggregate transactions
-///     against a Postgres that lives on this same box and was already logging
-///     slow statements every second or two.
+///   * at 3, `repo_history`'s `GIT_CORE_BUDGET` of 8 — the host's 12 vCPU less
+///     the 4 left to Postgres and the co-tenant services — buys `8 / 3 = 2`
+///     index-pack threads and a 2-way walk fan-out per analysis, against
+///     `8 / 8 = 1` of each at the old pool of eight. Three concurrent clones
+///     share the measured 32 MiB/s instead of eight, and three concurrent
+///     aggregate transactions hit a Postgres that lives on this same box and
+///     was already logging slow statements every second or two.
+///
+/// The trade is deliberate and is *not* a constant-appetite reshuffle: total
+/// git parallelism falls from 8 x 1 to 3 x 2 = 6 cores, while per-repository
+/// parallelism doubles. Lowering the total is the point — it is what leaves
+/// Postgres and the co-tenants room — and doubling the per-repository share is
+/// what makes vscode, postgres and rabbitmq finish instead of crawl.
 ///
 /// A repository that finishes is worth more than a repository that started,
 /// and finishing is what frees the slot: three fat workers retire more work
@@ -871,9 +866,9 @@ const MAX_ANALYSIS_STALLS: u32 = 3;
 /// in 93 s — ~190 commits/s end to end at a pool of 8. torvalds/linux is
 /// 1.46M commits, so the same rate extrapolates to ~2.1 hours, and its 6.1 GB
 /// clone adds ~190 s of transfer at the measured 32 MiB/s plus an index-pack
-/// that now gets `12 / 3 = 4` threads instead of 1. Even tripling the whole
-/// estimate for a fully contended box lands near 6 hours, and 12 leaves a 2×
-/// margin on top of *that*. Nothing anyone points at this deployment reaches
+/// that now gets `GIT_CORE_BUDGET / 3 = 2` threads instead of 1. Even tripling
+/// the whole estimate for a fully contended box lands near 6 hours, and 12
+/// leaves a 2× margin on top of *that*. Nothing anyone points at this deployment reaches
 /// it while making progress.
 ///
 /// It is coherent with [`ANALYSIS_STALL_WINDOW`] by being a multiple of it: a
@@ -1623,7 +1618,26 @@ async fn process(job: &AnalysisJob, ctx: &AnalysisCtx, beat: &Heartbeat) -> Resu
         .await?;
         let mut todo_done = 0;
         for batch in todo_shas.chunks(repo_history::LOG_BATCH_COMMITS) {
-            let patch_commits = repo_history::walk_commit_batch(&handle, batch).await?;
+            // Never let this cost the walk. The TODO scan is one auxiliary
+            // signal over the newest few commits and it runs AFTER the entire
+            // history has been walked but BEFORE anything is written, so
+            // propagating its failure would throw away hours of completed work
+            // on a repository the size of linux — to avoid missing a debt
+            // marker. The commits simply keep their zeroed markers, and the
+            // shortfall is logged rather than persisted as a measurement.
+            let patch_commits = match repo_history::walk_commit_batch(&handle, batch).await {
+                Ok(commits) => commits,
+                Err(error) => {
+                    tracing::warn!(
+                        repo,
+                        %error,
+                        scanned = todo_done,
+                        of = todo_shas.len(),
+                        "TODO/FIXME scan fell short; keeping the completed history walk"
+                    );
+                    break;
+                }
+            };
             todo_done += patch_commits.len();
             todo_by_sha.extend(
                 patch_commits
@@ -2746,23 +2760,31 @@ mod tests {
             ]
         );
 
-        // The SIGKILL path: nothing released the rows, and a restart finds its
-        // own identity on them. Only meaningful where the deployment gives the
-        // replica a name to be recognized by.
-        if replica_identity_is_unique() {
-            purge(&db, prefix).await;
-            seed_claimed(&mine, format!("{}0", replica_worker_prefix())).await;
-            seed_claimed(&peer, "ra:another-host:1:1700000000000:0".to_string()).await;
-            reset_inflight_on_startup(&db).await.expect("startup reset");
-            assert_eq!(
-                statuses(&db, prefix).await,
-                vec![
-                    (mine, "pending".to_string()),
-                    (peer, "in_progress".to_string()),
-                ],
-                "a restart reclaims its predecessor's rows without touching a live peer's"
-            );
-        }
+        // The SIGKILL path is the lease's job, not an identity check's: a row
+        // whose heartbeat stopped is reclaimed once the steal window passes,
+        // and a peer that is still beating is never touched no matter whose
+        // hostname or pid it shares. Seeded here at both ages so the rule that
+        // replaced the identity clause is the one under test.
+        purge(&db, prefix).await;
+        seed_claimed(&mine, format!("{}0", pool_worker_prefix())).await;
+        sqlx::query(
+            "UPDATE repo_analysis_queue SET claimed_at = NOW() - INTERVAL '5 minutes' \
+             WHERE repo = $1",
+        )
+        .bind(&mine)
+        .execute(&db.pool)
+        .await
+        .expect("age the abandoned lease");
+        seed_claimed(&peer, "ra:another-host:1:1700000000000:0".to_string()).await;
+        reset_inflight_on_startup(&db).await.expect("startup reset");
+        assert_eq!(
+            statuses(&db, prefix).await,
+            vec![
+                (mine, "pending".to_string()),
+                (peer, "in_progress".to_string()),
+            ],
+            "an expired lease is reclaimed; a peer still inside its window is not"
+        );
 
         purge(&db, prefix).await;
     }

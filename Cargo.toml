@@ -38,10 +38,10 @@ cookie = "0.18"
 walkdir = "2"
 md-5 = "0.11"
 tempfile = "3"
-resvg = { version = "0.47", default-features = false, features = ["text", "raster-images"] }
+resvg = { version = "0.48", default-features = false, features = ["text", "raster-images"] }
 image = { version = "0.25", default-features = false, features = ["gif", "webp"] }
 aes-gcm = "0.11"
-base64 = "0.22"
-redis = { version = "0.32", features = ["tokio-comp", "connection-manager"] }
+base64 = "0.23"
+redis = { version = "1.5", features = ["tokio-comp", "connection-manager"] }
 gcp_auth = { version = "0.12.7", default-features = false, features = ["aws-lc-rs"] }
 flate2 = "1"

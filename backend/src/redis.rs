@@ -34,8 +34,8 @@ pub const INVALIDATION_CHANNEL: &str = "gitdebt:invalidate";
 /// Reconnect cadence while the initial Redis connection is unavailable.
 const ESTABLISH_RETRY: Duration = Duration::from_secs(5);
 /// Connection-manager-level ceiling on one command round-trip. Without it
-/// (redis 0.32 defaults to none) a TCP-connected-but-stalled Redis blocks
-/// every admitted request instead of failing open.
+/// (redis defaults to no response timeout) a TCP-connected-but-stalled Redis
+/// blocks every admitted request instead of failing open.
 const RESPONSE_TIMEOUT: Duration = Duration::from_millis(500);
 /// Ceiling on each (re)connection attempt inside the manager.
 const CONNECT_TIMEOUT: Duration = Duration::from_secs(1);
@@ -97,8 +97,8 @@ impl RedisHandle {
         tokio::spawn(async move {
             loop {
                 let config = ConnectionManagerConfig::new()
-                    .set_response_timeout(RESPONSE_TIMEOUT)
-                    .set_connection_timeout(CONNECT_TIMEOUT);
+                    .set_response_timeout(Some(RESPONSE_TIMEOUT))
+                    .set_connection_timeout(Some(CONNECT_TIMEOUT));
                 match establishing
                     .client
                     .get_connection_manager_with_config(config)

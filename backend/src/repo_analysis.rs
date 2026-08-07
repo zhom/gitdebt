@@ -39,18 +39,6 @@ use crate::github::GithubClient;
 use crate::repo_history::{self, RepoHandle, RepoStorage};
 use crate::repo_stats;
 
-/// Rows this replica lets accumulate in `pending` + `in_progress` before it
-/// starts answering `AtCapacity`.
-///
-/// Sized as a drain time, not as a memory bound: [`ANALYSIS_WORKERS`] run at
-/// once and a catalog-sized repository takes a couple of minutes on this host
-/// (apache/kafka's 17,985 commits measured 93 s end to end), so 200 rows is
-/// roughly two hours of queue — the longest backlog still worth reporting to a
-/// visitor as an ETA. The previous 500 was three times that, and a queue that
-/// deep is indistinguishable from a stuck one.
-const MAX_PENDING_ANALYSES: i64 = 200;
-/// How far above the ordinary ceiling interactive work may push the queue.
-const INTERACTIVE_CAPACITY_FACTOR: i64 = 4;
 /// How long a completed analysis is treated as current before a view may
 /// re-enqueue it.
 ///
@@ -112,7 +100,6 @@ pub enum EnqueueOutcome {
     Enqueued,
     AlreadyActive,
     Fresh,
-    AtCapacity,
 }
 
 #[derive(Debug, Clone)]
@@ -272,26 +259,14 @@ pub async fn enqueue_prioritized(
         return Ok(EnqueueOutcome::AlreadyActive);
     }
 
-    let active: i64 = sqlx::query_scalar(
-        "SELECT COUNT(*)::BIGINT FROM repo_analysis_queue \
-         WHERE status IN ('pending', 'in_progress')",
-    )
-    .fetch_one(&mut *tx)
-    .await?;
-    // Interactive work jumps the ordinary ceiling — someone is watching — but
-    // not an unlimited one. Without the outer bound the ceiling constrained
-    // anonymous traffic only, and signed-in bursts could grow the queue past
-    // any drain time worth reporting as an ETA.
-    let ceiling = if priority >= INTERACTIVE_PRIORITY {
-        MAX_PENDING_ANALYSES.saturating_mul(INTERACTIVE_CAPACITY_FACTOR)
-    } else {
-        MAX_PENDING_ANALYSES
-    };
-    if active >= ceiling {
-        tx.commit().await?;
-        return Ok(EnqueueOutcome::AtCapacity);
-    }
-
+    // No queue-depth ceiling. A depth cap could only ever refuse *new* work,
+    // which is the one thing that must not fail: a visitor who asks for a
+    // repository nobody has analyzed gets a 503 and no row, so the backlog it
+    // was protecting never shrinks and the site looks broken to exactly the
+    // people it was meant to protect. Depth is bounded by what enqueues —
+    // catalog backfill drips in batches of two, and a profile view offers
+    // `PROFILE_ANALYSIS_HEAD` + `PROFILE_ANALYSIS_TAIL` — not by refusal here.
+    // Drain rate is the real control, and it belongs to the worker pool.
     sqlx::query(
         "INSERT INTO repo_analysis_queue \
             (repo, status, phase, priority, requested_by_user_id, enqueued_at, updated_at) \
@@ -352,7 +327,6 @@ pub async fn enqueue_many(db: &Db, repos: &[String], max_new: usize) -> Result<u
                     break;
                 }
             }
-            EnqueueOutcome::AtCapacity => break,
             EnqueueOutcome::AlreadyActive | EnqueueOutcome::Fresh => {}
         }
     }
@@ -364,8 +338,9 @@ pub async fn enqueue_many(db: &Db, repos: &[String], max_new: usize) -> Result<u
 /// Three differences from [`enqueue_many`], all of them about work nobody is
 /// waiting on:
 ///   * **bounded**: at most `max_new` rows per pass, so a bootstrap cannot
-///     consume the global [`MAX_PENDING_ANALYSES`] ceiling and turn every
-///     visitor's enqueue into `AtCapacity`;
+///     bury visitor-priority work under the whole catalog at once. This is now
+///     the *only* bound on queue depth — there is no enqueue-time ceiling —
+///     which is why it stays even though nothing rejects a row any more;
 ///   * **never resurrects**: a repository that already has a queue row in any
 ///     state, including a parked one, is skipped. `enqueue_prioritized` clears
 ///     a `dead` row's attempts and error on purpose — that is the right
@@ -405,7 +380,6 @@ pub async fn enqueue_backfill(db: &Db, repos: &[String], max_new: usize) -> Resu
         // reserved workers and the concurrency cap are defined against.
         match enqueue_prioritized(db, &repo, 0, None).await? {
             EnqueueOutcome::Enqueued => enqueued += 1,
-            EnqueueOutcome::AtCapacity => break,
             EnqueueOutcome::AlreadyActive | EnqueueOutcome::Fresh => {}
         }
     }
@@ -607,8 +581,40 @@ pub async fn revive_retryable_on_startup(db: &Db) -> Result<u64> {
 /// [`general_analysis_workers`] per wave, not at this rate.
 const ANALYSIS_WORKERS: usize = 3;
 
+/// Upper bound on the configured pool. A clone plus a full-history walk is
+/// disk- and CPU-bound, so past roughly one worker per core the pool stops
+/// buying throughput and starts buying contention — with the co-tenant
+/// services on this host sharing the same spindle and the same 12 vCPU.
+const MAX_ANALYSIS_WORKERS: usize = 16;
+
+/// Size of the analysis pool, from `REPO_ANALYSIS_WORKERS` when it parses to a
+/// sane value and [`ANALYSIS_WORKERS`] otherwise.
+///
+/// This used to be the constant alone, which meant the operator's
+/// `REPO_ANALYSIS_WORKERS` was set in production and read nowhere: the pool
+/// stayed at three however the environment was tuned, and a deep backlog had
+/// no lever at all. Reading it here is what makes drain rate — the only real
+/// control on queue depth now that the enqueue ceiling is gone — adjustable
+/// without a rebuild.
 pub fn configured_analysis_workers() -> usize {
-    ANALYSIS_WORKERS
+    static WORKERS: std::sync::OnceLock<usize> = std::sync::OnceLock::new();
+    *WORKERS.get_or_init(|| {
+        let Ok(raw) = std::env::var("REPO_ANALYSIS_WORKERS") else {
+            return ANALYSIS_WORKERS;
+        };
+        match raw.trim().parse::<usize>() {
+            Ok(parsed) if (1..=MAX_ANALYSIS_WORKERS).contains(&parsed) => parsed,
+            _ => {
+                tracing::warn!(
+                    value = %raw,
+                    max = MAX_ANALYSIS_WORKERS,
+                    default = ANALYSIS_WORKERS,
+                    "REPO_ANALYSIS_WORKERS is not an integer in 1..=max; using the default"
+                );
+                ANALYSIS_WORKERS
+            }
+        }
+    })
 }
 
 /// Share of the pool held back for rows at or above

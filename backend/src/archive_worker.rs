@@ -419,8 +419,15 @@ struct QueryUnit {
 }
 
 /// Fetch a window without accepting the client's safety-cap truncation. A
-/// truncated batch is divided by repository first (avoids rescanning dates),
-/// then by date. One repo exceeding the cap in one day is a hard error.
+/// truncated batch is divided by date first, then — only for a single day that
+/// still overflows — by repository. One repo exceeding the cap in one day is a
+/// hard error.
+///
+/// The order used to be the other way around, to "avoid rescanning dates".
+/// That reasoning inverts what BigQuery charges for: dates are the partition
+/// key, so re-splitting them is the one axis that *does* prune, while the
+/// repository filter prunes nothing and makes each half re-read the whole
+/// corpus. See the split itself for the arithmetic.
 async fn fetch_complete(
     source: &dyn GhArchiveEventSource,
     items: &[Prepared],
@@ -458,19 +465,25 @@ async fn fetch_complete(
             events.extend(fetched);
             continue;
         }
-        if unit.items.len() > 1 {
-            let right = unit.items.len() / 2;
-            pending.push_front(QueryUnit {
-                items: unit.items[right..].to_vec(),
-                start: unit.start,
-                end: unit.end,
-            });
-            pending.push_front(QueryUnit {
-                items: unit.items[..right].to_vec(),
-                start: unit.start,
-                end: unit.end,
-            });
-        } else if unit.start < unit.end {
+        // A truncated result is discarded, so what this split chooses to halve
+        // decides what the whole retry costs — and the two dimensions are not
+        // interchangeable.
+        //
+        // `created_at` is the table's partition key. Halving the *window*
+        // halves the partitions each side reads, so the two halves together
+        // scan what the parent scanned: splitting on dates is free, and a
+        // window subdivided sixteen times still costs one corpus.
+        //
+        // The repository filter is a semi-join over a parameter array, which
+        // BigQuery cannot turn into partition or cluster elimination. Halving
+        // the *list* therefore changes nothing either side reads: both re-scan
+        // everything the parent did. That path costs 2^depth corpora, and at
+        // 39.9 GB and ~$0.24 a scan it is what turned one backfill into 518
+        // full-table scans and $126.
+        //
+        // So: divide the window while there is any window left to divide, and
+        // fall back to the list only for a single day that still overflows.
+        if unit.start < unit.end {
             let days = unit.end.signed_duration_since(unit.start).num_days();
             let left_end = unit
                 .start
@@ -486,6 +499,18 @@ async fn fetch_complete(
                 items: unit.items,
                 start: unit.start,
                 end: left_end,
+            });
+        } else if unit.items.len() > 1 {
+            let right = unit.items.len() / 2;
+            pending.push_front(QueryUnit {
+                items: unit.items[right..].to_vec(),
+                start: unit.start,
+                end: unit.end,
+            });
+            pending.push_front(QueryUnit {
+                items: unit.items[..right].to_vec(),
+                start: unit.start,
+                end: unit.end,
             });
         } else {
             anyhow::bail!(

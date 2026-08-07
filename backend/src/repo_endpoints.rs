@@ -777,9 +777,6 @@ async fn enqueue_analysis(
             (StatusCode::ACCEPTED, true, "already_active")
         }
         repo_analysis::EnqueueOutcome::Fresh => (StatusCode::OK, false, "fresh"),
-        repo_analysis::EnqueueOutcome::AtCapacity => {
-            (StatusCode::SERVICE_UNAVAILABLE, false, "queue_full")
-        }
     };
     Ok((
         status,

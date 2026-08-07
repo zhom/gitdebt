@@ -448,6 +448,24 @@ fn git() -> Command {
             "gc.auto=0",
             "-c",
             "maintenance.auto=false",
+            // Bound git's address space. Every default here is sized for a
+            // machine, not for a share of one: `core.packedGitLimit` defaults
+            // to 32 TiB on 64-bit and `core.packedGitWindowSize` to 1 GiB, and
+            // git maps pack windows rather than reading them. Mapped pages are
+            // charged to the cgroup, so a pool cloning several multi-gigabyte
+            // repositories at once reached the container limit on mappings
+            // alone and was OOM-killed mid-analysis — which orphaned the
+            // Postgres write it was in the middle of. These caps cost some
+            // remapping on the largest repositories and bound what the whole
+            // pool can charge to the cgroup.
+            "-c",
+            "core.packedGitWindowSize=64m",
+            "-c",
+            "core.packedGitLimit=512m",
+            "-c",
+            "pack.deltaCacheSize=64m",
+            "-c",
+            "pack.windowMemory=128m",
         ])
         .kill_on_drop(true);
     command

@@ -752,12 +752,53 @@ struct QueryParameter {
     parameter_value: Value,
 }
 
+/// Which of the three match branches the generated SQL should contain.
+///
+/// A branch whose parameter array would be empty is left out entirely: it
+/// could not match a row, but it would still be a scan on the bill.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+struct MatchBranches {
+    /// Repositories with a resolved GitHub id, matched on `github_repo_id`.
+    match_ids: bool,
+    /// Those same repositories' pre-id events, which carry a NULL id.
+    id_backed_names: bool,
+    /// Repositories that have no resolved id, matched on name alone.
+    name_only: bool,
+}
+
 fn build_query_request(
     config: &GhArchiveConfig,
     repositories: &[NormalizedRepository],
     start: NaiveDate,
     end: NaiveDate,
 ) -> QueryRequest {
+    // The branch decomposition exists to let BigQuery eliminate blocks by
+    // clustering, which only the configured source table has. The official
+    // `githubarchive.month.*` tables are neither partitioned nor clustered for
+    // us, so splitting them would buy nothing and only add scans — they keep
+    // the single `@repositories` semi-join.
+    let indexed_source = config.source_table.is_some();
+    // Split the request into the three disjoint ways a row can match, so each
+    // becomes a predicate directly against a clustering column. See
+    // `build_star_events_sql` for why a single EXISTS over the array could not
+    // be block-eliminated and read the whole corpus every time.
+    let mut match_ids: Vec<Value> = Vec::new();
+    let mut id_backed_names: Vec<Value> = Vec::new();
+    let mut name_only_names: Vec<Value> = Vec::new();
+    for repository in repositories {
+        match repository.github_id {
+            Some(id) => {
+                match_ids.push(json!({"value": id.to_string()}));
+                id_backed_names.push(json!({"value": repository.lower_name}));
+            }
+            None => name_only_names.push(json!({"value": repository.lower_name})),
+        }
+    }
+    let branches = MatchBranches {
+        match_ids: indexed_source && !match_ids.is_empty(),
+        id_backed_names: indexed_source && !id_backed_names.is_empty(),
+        name_only: indexed_source && !name_only_names.is_empty(),
+    };
     let repository_values = repositories
         .iter()
         .map(|repository| {
@@ -782,28 +823,52 @@ fn build_query_request(
         .to_string();
 
     QueryRequest {
-        query: build_star_events_sql(config.source_table.as_deref(), start, end),
+        query: build_star_events_sql(config.source_table.as_deref(), start, end, branches),
         use_legacy_sql: false,
         parameter_mode: "NAMED",
-        query_parameters: vec![
-            scalar_parameter("start_date", "DATE", start.to_string()),
-            scalar_parameter("end_date", "DATE", end.to_string()),
-            QueryParameter {
-                name: "repositories",
-                parameter_type: json!({
-                    "type": "ARRAY",
-                    "arrayType": {
-                        "type": "STRUCT",
-                        "structTypes": [
-                            {"name": "github_id", "type": {"type": "INT64"}},
-                            {"name": "lower_name", "type": {"type": "STRING"}}
-                        ]
-                    }
-                }),
-                parameter_value: json!({"arrayValues": repository_values}),
-            },
-            scalar_parameter("query_limit", "INT64", query_limit.to_string()),
-        ],
+        query_parameters: {
+            let mut parameters = vec![
+                scalar_parameter("start_date", "DATE", start.to_string()),
+                scalar_parameter("end_date", "DATE", end.to_string()),
+                scalar_parameter("query_limit", "INT64", query_limit.to_string()),
+            ];
+            // Only bind what the generated SQL references: BigQuery rejects a
+            // named parameter the query never uses.
+            if !indexed_source {
+                parameters.push(QueryParameter {
+                    name: "repositories",
+                    parameter_type: json!({
+                        "type": "ARRAY",
+                        "arrayType": {
+                            "type": "STRUCT",
+                            "structTypes": [
+                                {"name": "github_id", "type": {"type": "INT64"}},
+                                {"name": "lower_name", "type": {"type": "STRING"}}
+                            ]
+                        }
+                    }),
+                    parameter_value: json!({"arrayValues": repository_values}),
+                });
+            }
+            if branches.match_ids {
+                parameters.push(array_parameter("match_ids", "INT64", match_ids));
+            }
+            if branches.id_backed_names {
+                parameters.push(array_parameter(
+                    "id_backed_names",
+                    "STRING",
+                    id_backed_names,
+                ));
+            }
+            if branches.name_only {
+                parameters.push(array_parameter(
+                    "name_only_names",
+                    "STRING",
+                    name_only_names,
+                ));
+            }
+            parameters
+        },
         max_results: config.page_size.min(query_limit as u32),
         timeout_ms: query_timeout_ms,
         job_timeout_ms,
@@ -821,28 +886,80 @@ fn build_query_request(
 /// when any matched resource is a view. Month identifiers are derived only
 /// from validated `NaiveDate` values, so the dynamic table names cannot carry
 /// user input. The selected columns intentionally exclude actors and payloads.
-fn build_star_events_sql(source_table: Option<&str>, start: NaiveDate, end: NaiveDate) -> String {
+fn build_star_events_sql(
+    source_table: Option<&str>,
+    start: NaiveDate,
+    end: NaiveDate,
+    branches: MatchBranches,
+) -> String {
     if let Some(source_table) = source_table {
+        // One branch per way a row can match, UNION ALL'd, instead of one scan
+        // with a correlated EXISTS over the parameter array.
+        //
+        // The table is clustered on `(github_repo_id, lower_repository)`, and
+        // clustering only eliminates blocks when the predicate is a direct
+        // comparison against a clustering column. `EXISTS (SELECT 1 FROM
+        // UNNEST(@repositories) WHERE … OR …)` is a correlated semi-join whose
+        // result BigQuery cannot know per block, so it eliminated nothing and
+        // every query read the whole corpus. Measured on this table, full
+        // history for one repository: 40,907 MB billed as an EXISTS, 268 MB as
+        // `github_repo_id IN UNNEST(@match_ids)` — identical 823 rows, 153x
+        // less scanned.
+        //
+        // Each branch is disjoint by construction, so UNION ALL cannot
+        // duplicate a row: branch 1 requires a non-NULL id drawn from the
+        // resolved set, branch 2 requires a NULL id, and branch 3 covers only
+        // repositories that have no id at all and therefore appear in neither
+        // of the others.
+        //
+        // Empty branches are omitted rather than passed an empty array: a
+        // branch that can match nothing would still be a scan to bill.
+        let window = "created_at >= TIMESTAMP(@start_date) \
+                      AND created_at < TIMESTAMP(DATE_ADD(@end_date, INTERVAL 1 DAY))";
+        const COLUMNS: &str =
+            "github_repo_id, repository, lower_repository, source_event_id, created_at";
+        let mut selects: Vec<String> = Vec::new();
+        if branches.match_ids {
+            // Resolved repositories, matched on the leading clustering column.
+            selects.push(format!(
+                "SELECT {COLUMNS} FROM `{source_table}` \
+                 WHERE {window} AND github_repo_id IN UNNEST(@match_ids)"
+            ));
+        }
+        if branches.id_backed_names {
+            // GH Archive events predating repository ids carry a NULL id, so a
+            // resolved repository still needs its pre-id history matched by
+            // name. `github_repo_id IS NULL` is itself a clustering predicate.
+            selects.push(format!(
+                "SELECT {COLUMNS} FROM `{source_table}` \
+                 WHERE {window} AND github_repo_id IS NULL \
+                   AND lower_repository IN UNNEST(@id_backed_names)"
+            ));
+        }
+        if branches.name_only {
+            // Repositories GitHub metadata never resolved to an id: name is
+            // the only identity available, for every event.
+            selects.push(format!(
+                "SELECT {COLUMNS} FROM `{source_table}` \
+                 WHERE {window} AND lower_repository IN UNNEST(@name_only_names)"
+            ));
+        }
+        // No branch can match: return the shape without reading the table.
+        if selects.is_empty() {
+            selects.push(format!(
+                "SELECT {COLUMNS} FROM `{source_table}` WHERE FALSE"
+            ));
+        }
+        let unioned = selects.join("\n  UNION ALL\n  ");
         return format!(
             r#"SELECT
   github_repo_id,
   repository,
   source_event_id,
   FORMAT_TIMESTAMP('%Y-%m-%dT%H:%M:%E6SZ', created_at) AS created_at
-FROM `{source_table}`
-WHERE created_at >= TIMESTAMP(@start_date)
-  AND created_at < TIMESTAMP(DATE_ADD(@end_date, INTERVAL 1 DAY))
-  AND EXISTS (
-    SELECT 1
-    FROM UNNEST(@repositories) AS requested
-    WHERE
-      (requested.github_id > 0 AND github_repo_id = requested.github_id)
-      OR
-      (
-        lower_repository = requested.lower_name
-        AND (requested.github_id = 0 OR github_repo_id IS NULL)
-      )
-  )
+FROM (
+  {unioned}
+)
 ORDER BY created_at ASC, github_repo_id ASC, lower_repository ASC, source_event_id ASC
 LIMIT @query_limit"#
         );
@@ -900,6 +1017,18 @@ fn scalar_parameter(name: &'static str, kind: &'static str, value: String) -> Qu
         name,
         parameter_type: json!({"type": kind}),
         parameter_value: json!({"value": value}),
+    }
+}
+
+fn array_parameter(
+    name: &'static str,
+    element: &'static str,
+    values: Vec<Value>,
+) -> QueryParameter {
+    QueryParameter {
+        name,
+        parameter_type: json!({"type": "ARRAY", "arrayType": {"type": element}}),
+        parameter_value: json!({"arrayValues": values}),
     }
 }
 
@@ -1507,16 +1636,29 @@ mod tests {
         assert_eq!(value["maxResults"], 10);
         assert_eq!(value["jobTimeoutMs"], "45000");
         assert_eq!(value["timeoutMs"], 2500);
+        // By name, not by position: which parameters are bound now depends on
+        // whether an indexed source table is configured, so an index would
+        // assert on binding order rather than on the binding.
+        let parameter = |name: &str| {
+            value["queryParameters"]
+                .as_array()
+                .unwrap()
+                .iter()
+                .find(|candidate| candidate["name"] == name)
+                .unwrap_or_else(|| panic!("{name} is bound"))
+                .clone()
+        };
         assert_eq!(
-            value["queryParameters"][0]["parameterValue"]["value"],
+            parameter("start_date")["parameterValue"]["value"],
             "2026-01-02"
         );
         assert_eq!(
-            value["queryParameters"][1]["parameterValue"]["value"],
+            parameter("end_date")["parameterValue"]["value"],
             "2026-01-03"
         );
-        assert_eq!(value["queryParameters"][3]["parameterValue"]["value"], "26");
-        let repository_values = &value["queryParameters"][2]["parameterValue"]["arrayValues"];
+        assert_eq!(parameter("query_limit")["parameterValue"]["value"], "26");
+        let repositories_parameter = parameter("repositories");
+        let repository_values = &repositories_parameter["parameterValue"]["arrayValues"];
         assert!(
             repository_values[0]["structValues"]["github_id"]["value"].is_null(),
             "a missing stable ID must stay NULL so the name fallback is eligible"
@@ -1537,10 +1679,18 @@ mod tests {
 
     #[test]
     fn query_unions_only_exact_months_in_the_requested_range() {
+        // The public month path ignores the branch flags: it keeps the single
+        // `@repositories` semi-join, so every combination must produce the
+        // same month union.
         let sql = build_star_events_sql(
             None,
             NaiveDate::from_ymd_opt(2025, 12, 31).unwrap(),
             NaiveDate::from_ymd_opt(2026, 2, 1).unwrap(),
+            MatchBranches {
+                match_ids: true,
+                id_backed_names: true,
+                name_only: false,
+            },
         );
         assert!(sql.contains("`githubarchive.month.202512`"));
         assert!(sql.contains("`githubarchive.month.202601`"));

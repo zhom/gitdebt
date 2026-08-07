@@ -2,6 +2,12 @@
 import { Menu, X } from "lucide-react";
 import Brand from "@/components/Brand.astro";
 import { GitHubLoginButton } from "@/components/GitHubLoginButton";
+import { NavStarCount } from "@/components/NavStarCount";
+import {
+  GITDEBT_REPO,
+  GITDEBT_REPO_URL,
+  navStarSeed,
+} from "@/lib/nav-star-seed";
 import { staticApiBase } from "@/lib/static-api-base";
 
 const navLinks = [
@@ -9,6 +15,11 @@ const navLinks = [
   { label: "Compare", href: "/compare" },
   { label: "Leaderboard", href: "/leaderboard" },
 ];
+
+// gitdebt's own star count, seeded from gitdebt's own API at build time and
+// refreshed live on the client. See `navStarSeed` for why it is a seed rather
+// than the source of truth.
+const gitdebtStars = await navStarSeed();
 
 const apiBase = staticApiBase();
 const returnTo = `${Astro.url.pathname}${Astro.url.search}`;
@@ -55,6 +66,15 @@ function isCurrent(href: string): boolean {
     </nav>
 
     <div class="flex shrink-0 items-center gap-1 justify-self-end sm:gap-2">
+      <div class="hidden sm:block">
+        <NavStarCount
+          client:load
+          stars={gitdebtStars}
+          href={GITDEBT_REPO_URL}
+          apiBase={apiBase}
+          repo={GITDEBT_REPO}
+        />
+      </div>
       <div data-auth-slot>
         <div data-auth-control data-api-base={apiBase}>
           <GitHubLoginButton client:load href={loginHref} />

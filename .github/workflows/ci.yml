@@ -108,4 +108,12 @@ jobs:
 
       - run: npm --prefix extension ci
       - run: npm --prefix extension run package
-      - run: npm --prefix extension audit --audit-level=high
+      # Runtime dependencies only, matching `pnpm audit --prod` for the
+      # frontend. The extension ships no npm code at all: it is a zero-build
+      # MV3 bundle whose only dependency is `web-ext`, a devDependency used to
+      # lint and zip it. Auditing dev tooling gated releases on advisories in
+      # `web-ext`'s own transitive parsers (ajv/fast-uri, addons-linter/js-yaml,
+      # undici) that no user can reach, and the only "fix" on offer was forcing
+      # major bumps of those parsers underneath the linter — more likely to
+      # break packaging than to protect anyone.
+      - run: npm --prefix extension audit --omit=dev --audit-level=high

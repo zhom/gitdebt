@@ -935,7 +935,38 @@ async fn write_aggregates_in_tx(
 
     // Strongest file-coupling relationships: each count is the number of
     // bounded commits in which the two files changed together.
-    let coupling_rows: Vec<CouplingRow<'_>> = agg.couplings.iter().collect();
+    //
+    // Only `MAX_STORED_COUPLINGS` rows survive the trim below, and on the
+    // `replace` path this repository's rows were just deleted above — so the
+    // set inserted here IS the final set, and selecting the winners in memory
+    // is equivalent to inserting every tracked pair and deleting the rest.
+    // Doing it in the database instead meant writing up to
+    // `MAX_TRACKED_COUPLINGS` (250_000) rows to keep 2_000: a 125x write
+    // amplification that, repeated per repository per analysis, bloated the
+    // wide `(repo, path_a, path_b)` primary key far past the heap it indexes
+    // and left every later lookup walking dead index pages.
+    //
+    // The incremental path still trims in SQL: there the insert is a delta
+    // that accumulates onto existing counts, so the winners cannot be decided
+    // from this batch alone.
+    let mut coupling_rows: Vec<CouplingRow<'_>> = agg.couplings.iter().collect();
+    if replace {
+        let keep = usize::try_from(MAX_STORED_COUPLINGS).unwrap_or(usize::MAX);
+        if coupling_rows.len() > keep {
+            // Mirrors the SQL trim's ORDER BY. Ties beyond the cutoff may be
+            // broken differently from Postgres' text collation, which decides
+            // only *which* equally-ranked pairs are kept, never how many.
+            coupling_rows.sort_unstable_by(|(key_a, agg_a), (key_b, agg_b)| {
+                agg_b
+                    .cochanges
+                    .cmp(&agg_a.cochanges)
+                    .then_with(|| agg_b.fix_commits.cmp(&agg_a.fix_commits))
+                    .then_with(|| key_a.0.cmp(&key_b.0))
+                    .then_with(|| key_a.1.cmp(&key_b.1))
+            });
+            coupling_rows.truncate(keep);
+        }
+    }
     for chunk in coupling_rows.chunks(UPSERT_CHUNK) {
         let mut paths_a = Vec::with_capacity(chunk.len());
         let mut paths_b = Vec::with_capacity(chunk.len());
@@ -964,14 +995,27 @@ async fn write_aggregates_in_tx(
         .await
         .context("upsert file couplings")?;
     }
+    // Rank once, join once. The previous form —
+    //   WHERE (path_a, path_b) IN (SELECT ... ORDER BY ... OFFSET $2)
+    // — is a row-constructor semi-join whose subplan the planner may re-execute
+    // per candidate row instead of hashing. The rows being trimmed were just
+    // inserted by this same open transaction, so `pg_statistic` still describes
+    // the repository as empty; on a freshly added repo that rows=1 estimate
+    // picks the nested-loop shape and the statement goes quadratic. This form
+    // cannot: the window is evaluated exactly once whatever the estimate says.
     sqlx::query(
-        "DELETE FROM repo_file_couplings \
-         WHERE repo = $1 AND (path_a, path_b) IN ( \
-             SELECT path_a, path_b FROM repo_file_couplings \
-             WHERE repo = $1 \
-             ORDER BY cochanges DESC, fix_commits DESC, path_a, path_b \
-             OFFSET $2 \
-         )",
+        "DELETE FROM repo_file_couplings AS c \
+         USING ( \
+             SELECT path_a, path_b, \
+                    row_number() OVER ( \
+                        ORDER BY cochanges DESC, fix_commits DESC, path_a, path_b \
+                    ) AS rn \
+             FROM repo_file_couplings WHERE repo = $1 \
+         ) AS ranked \
+         WHERE c.repo = $1 \
+           AND c.path_a = ranked.path_a \
+           AND c.path_b = ranked.path_b \
+           AND ranked.rn > $2",
     )
     .bind(repo)
     .bind(MAX_STORED_COUPLINGS)

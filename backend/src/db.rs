@@ -2,7 +2,7 @@ use anyhow::{Context, Result};
 use sqlx::Connection;
 use sqlx::PgConnection;
 use sqlx::PgPool;
-use sqlx::postgres::PgPoolOptions;
+use sqlx::postgres::{PgConnectOptions, PgPoolOptions};
 
 /// Postgres connections a single gitdebt process may hold.
 ///
@@ -33,6 +33,53 @@ const POOL_MAX: u32 = 16;
 const POOL_ACQUIRE_TIMEOUT: std::time::Duration = std::time::Duration::from_secs(5);
 const POOL_IDLE_TIMEOUT: std::time::Duration = std::time::Duration::from_secs(5 * 60);
 const POOL_MAX_LIFETIME: std::time::Duration = std::time::Duration::from_secs(30 * 60);
+
+/// Server-side ceiling on any single statement issued through a pool.
+///
+/// This is the bound that actually ends a runaway query, and nothing else in
+/// the process can do it: dropping a sqlx future sends no `CancelRequest`, so
+/// an abandoned statement keeps its backend, its locks and its core until
+/// Postgres itself stops it. [`POOL_MAX_LIFETIME`] is not a substitute — sqlx
+/// evaluates it on the return-to-pool path, which a connection whose statement
+/// never finishes never reaches.
+///
+/// Ten minutes is above every legitimate statement here (the slowest measured
+/// analysis write is seconds; the widest profile aggregate is milliseconds)
+/// and far below the hours a wedged one will otherwise run.
+///
+/// Relying on a `postgresql.conf` GUC for this was what left production
+/// exposed: the server value is only armed at statement start, so a reload
+/// cannot bound statements already running, and a database rebuilt or restored
+/// without that line silently loses the protection. Setting it at connect time
+/// makes it a property of the application, not of one server's configuration.
+const STATEMENT_TIMEOUT: &str = "600s";
+
+/// Companion bound: a transaction that stops making progress while holding
+/// locks is as damaging as a slow statement, and `statement_timeout` alone
+/// does not cover the gaps between statements.
+const IDLE_IN_TRANSACTION_TIMEOUT: &str = "300s";
+
+/// Connection options carrying the statement bounds and an identity.
+///
+/// `application_name` is diagnostic, and it is load-bearing during an incident:
+/// without it, attributing a backend in `pg_stat_activity` to a binary — or to
+/// a *container generation* — means correlating `client_addr` against live
+/// container IPs, which stops working the moment those IPs are recycled.
+/// Stamping the process makes an orphan self-identifying, so reaping one is a
+/// targeted statement rather than archaeology.
+fn connect_options(database_url: &str, service: &str) -> Result<PgConnectOptions> {
+    Ok(database_url
+        .parse::<PgConnectOptions>()
+        .context("parse DATABASE_URL")?
+        .options([
+            ("statement_timeout", STATEMENT_TIMEOUT),
+            (
+                "idle_in_transaction_session_timeout",
+                IDLE_IN_TRANSACTION_TIMEOUT,
+            ),
+        ])
+        .application_name(&format!("gitdebt-{service}:{}", std::process::id())))
+}
 
 fn pool_options(max_connections: u32) -> PgPoolOptions {
     PgPoolOptions::new()
@@ -552,7 +599,12 @@ ALTER TABLE repo_commit_days ADD COLUMN IF NOT EXISTS lines_deleted BIGINT NOT N
 ALTER TABLE repo_commit_days ADD COLUMN IF NOT EXISTS files_changed BIGINT NOT NULL DEFAULT 0;
 ALTER TABLE repo_commit_days ADD COLUMN IF NOT EXISTS binary_files BIGINT NOT NULL DEFAULT 0;
 ALTER TABLE repo_commit_days ADD COLUMN IF NOT EXISTS large_changes BIGINT NOT NULL DEFAULT 0;
-CREATE INDEX IF NOT EXISTS idx_repo_commit_days_year ON repo_commit_days(repo, day);
+-- `idx_repo_commit_days_year` used to be created here as
+-- `ON repo_commit_days(repo, day)` — column-for-column the PRIMARY KEY above.
+-- The planner can never prefer a non-unique duplicate of the PK, so it served
+-- no read while being maintained on every row of every analysis pass, doubling
+-- this table's index write volume and its dead-entry production. It is dropped
+-- in `CONCURRENT_INDEX_DROPS` and replaced by the covering index below.
 
 -- TODO/FIXME deltas per day. Cumulative sum from first day → cur day
 -- gives the running count at any point in time.
@@ -891,6 +943,31 @@ const CONCURRENT_INDEXES: &[(&str, &str)] = &[
         "CREATE UNIQUE INDEX CONCURRENTLY IF NOT EXISTS idx_repo_star_arrivals_source_event \
          ON repo_star_arrivals(repo, source_event_id) WHERE source_event_id IS NOT NULL",
     ),
+    (
+        // The profile heatmap and trend read
+        // `WHERE repo = ANY($1) AND day BETWEEN $2 AND $3` and then SUM the
+        // `commits` column. `PRIMARY KEY (repo, day)` narrows the rows, but
+        // `commits` lives only in the heap, so every matching entry costs a
+        // heap fetch. INCLUDE carries the summed column in the leaf, making the
+        // aggregate an index-only scan wherever the visibility map is current.
+        "idx_repo_commit_days_covering",
+        "CREATE INDEX CONCURRENTLY IF NOT EXISTS idx_repo_commit_days_covering \
+         ON repo_commit_days(repo, day) INCLUDE (commits)",
+    ),
+];
+
+/// Indexes that must not exist any more.
+///
+/// Dropped concurrently, for the same reason the list above builds
+/// concurrently: a plain `DROP INDEX` takes an ACCESS EXCLUSIVE lock on the
+/// table and would block the analysis writers for its duration during startup.
+///
+/// A drop here is permanent. Removing a name from this list does not recreate
+/// the index — re-add it to [`CONCURRENT_INDEXES`] if it is ever wanted back.
+const CONCURRENT_INDEX_DROPS: &[&str] = &[
+    // Column-for-column identical to `repo_commit_days`'s PRIMARY KEY
+    // `(repo, day)`. Never chosen by the planner, maintained on every write.
+    "idx_repo_commit_days_year",
 ];
 
 /// The startup schema, exposed so tests in other modules can assert that the
@@ -933,7 +1010,7 @@ impl Db {
     /// only the first test applies the schema and the rest connect with this.
     pub async fn connect_pool_only(database_url: &str, max_connections: u32) -> Result<Self> {
         let pool = pool_options(max_connections)
-            .connect(database_url)
+            .connect_with(connect_options(database_url, "pool")?)
             .await
             .context("connect postgres")?;
         Ok(Self { pool })
@@ -942,7 +1019,7 @@ impl Db {
     /// `connect` with an explicit pool ceiling.
     pub async fn connect_with_pool_size(database_url: &str, max_connections: u32) -> Result<Self> {
         let pool = pool_options(max_connections)
-            .connect(database_url)
+            .connect_with(connect_options(database_url, "app")?)
             .await
             .context("connect postgres")?;
         let me = Self { pool };
@@ -1099,6 +1176,18 @@ impl Db {
     /// (`raw_sql`): `CREATE INDEX CONCURRENTLY` cannot run inside a
     /// transaction block or a multi-statement batch.
     async fn ensure_concurrent_indexes(&self, connection: &mut PgConnection) {
+        // Drops run first: a superseded index competes for buffer cache and is
+        // maintained on every write until it is gone, so there is nothing to
+        // gain by keeping it alive while its replacement builds.
+        for name in CONCURRENT_INDEX_DROPS {
+            let drop_stmt = format!("DROP INDEX CONCURRENTLY IF EXISTS {name}");
+            if let Err(e) = sqlx::raw_sql(sqlx::AssertSqlSafe(drop_stmt))
+                .execute(&mut *connection)
+                .await
+            {
+                tracing::warn!(index = %name, error = %e, "drop superseded index (non-fatal)");
+            }
+        }
         for (name, create_stmt) in CONCURRENT_INDEXES {
             tracing::info!(index = %name, "ensuring database index");
             // Drop a leftover invalid index so IF NOT EXISTS can rebuild it.
@@ -1129,7 +1218,8 @@ impl Db {
 #[cfg(test)]
 mod tests {
     use super::{
-        CONCURRENT_INDEXES, CURRENT_SCHEMA_VERSION, POOL_MAX, SCHEMA, SCHEMA_MIGRATION_LOCK_ID,
+        CONCURRENT_INDEX_DROPS, CONCURRENT_INDEXES, CURRENT_SCHEMA_VERSION, POOL_MAX, SCHEMA,
+        SCHEMA_MIGRATION_LOCK_ID,
     };
 
     /// Both binaries size their pool from the same constant, so the ceiling is
@@ -1419,6 +1509,58 @@ mod tests {
         assert!(SCHEMA.contains("CREATE TABLE IF NOT EXISTS leaderboard_snapshots"));
         assert!(SCHEMA.contains("UNIQUE (metric, window_days, rank)"));
         assert!(SCHEMA.contains("CREATE TABLE IF NOT EXISTS leaderboard_snapshot_state"));
+    }
+
+    /// `repo_commit_days` must carry exactly one `(repo, day)` btree.
+    ///
+    /// It used to carry two: `PRIMARY KEY (repo, day)` and a non-unique
+    /// `idx_repo_commit_days_year` on the identical columns. The planner can
+    /// never prefer the duplicate, so it served no read while being maintained
+    /// on every write of every analysis pass. This asserts the duplicate is
+    /// gone from the schema, that startup actively drops it rather than merely
+    /// stopping to create it, and that the covering replacement is built
+    /// concurrently — a plain build would lock out the analysis writers.
+    #[test]
+    fn repo_commit_days_has_one_key_index_and_a_covering_one() {
+        assert!(
+            SCHEMA.contains("PRIMARY KEY (repo, day)"),
+            "the key itself must stay"
+        );
+        assert!(
+            !SCHEMA.contains("CREATE INDEX IF NOT EXISTS idx_repo_commit_days_year"),
+            "the duplicate of the primary key must not be created"
+        );
+        assert!(
+            CONCURRENT_INDEX_DROPS.contains(&"idx_repo_commit_days_year"),
+            "an index already built on a live database is only removed by dropping it"
+        );
+        // Every drop is concurrent: a plain DROP INDEX takes ACCESS EXCLUSIVE
+        // on the table and would stall startup behind the analysis writers.
+        for name in CONCURRENT_INDEX_DROPS {
+            assert!(
+                !SCHEMA.contains(&format!("DROP INDEX IF EXISTS {name}")),
+                "{name} must be dropped concurrently, not inside the schema transaction"
+            );
+        }
+        // The replacement carries the summed column so the profile aggregate
+        // can be index-only instead of one heap fetch per matching day.
+        let covering = CONCURRENT_INDEXES
+            .iter()
+            .find(|(name, _)| *name == "idx_repo_commit_days_covering")
+            .map(|(_, sql)| *sql)
+            .expect("covering index is registered");
+        assert!(
+            covering.contains("ON repo_commit_days(repo, day) INCLUDE (commits)"),
+            "{covering}"
+        );
+        // A name cannot be in both lists: startup would drop and recreate it
+        // on every boot.
+        for name in CONCURRENT_INDEX_DROPS {
+            assert!(
+                !CONCURRENT_INDEXES.iter().any(|(built, _)| built == name),
+                "{name} is both created and dropped"
+            );
+        }
     }
 
     /// The `repo_stargazers` secondary indexes must NOT be created inline in

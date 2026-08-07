@@ -24,6 +24,15 @@ use gitdebt::{bootstrap, db::Db};
 /// with the analysis workers for exactly the connections and disk they needed.
 const STAR_WORKERS: usize = 4;
 
+/// How many frozen `github_api` histories one process start offers to GH
+/// Archive.
+///
+/// A migration is a full-history corpus scan, so this is a spend control, not a
+/// throughput one. The backlog is finite and shrinks by this much per start
+/// rather than arriving all at once; a redeploy loop therefore cannot turn a
+/// one-time migration into a repeated bill.
+const ARCHIVE_MIGRATIONS_PER_START: usize = 50;
+
 #[tokio::main]
 async fn main() -> Result<()> {
     bootstrap::init_process();
@@ -95,6 +104,28 @@ async fn main() -> Result<()> {
     let catalog_star_jobs = gitdebt::queue::enqueue_cold_or_stale_many(&db, &catalog, 0)
         .await
         .context("enqueue curated star histories")?;
+    // Repositories still carrying an exact GitHub-API snapshot cannot be
+    // refreshed by anything: the snapshot never ages out, the enqueue path
+    // refuses them, and the hourly follower only selects archive-backed rows.
+    // Offering them for an archive backfill is what migrates them onto the
+    // followed path — after which they stay current on their own. Gated on the
+    // archive client because with it absent this same queue is drained by the
+    // stargazer fallback, which would re-paginate an already-exact snapshot.
+    if archive_client.is_some() {
+        match gitdebt::queue::enqueue_archive_migrations(&db, ARCHIVE_MIGRATIONS_PER_START).await {
+            Ok(0) => {}
+            Ok(migrated) => tracing::info!(
+                migrated,
+                "github_api histories offered to GH Archive for migration"
+            ),
+            // Warm-up nobody is waiting on: a failure here must not stop a
+            // deployment that is otherwise healthy.
+            Err(error) => {
+                tracing::warn!(%error, "archive migration sweep failed");
+            }
+        }
+    }
+
     tracing::info!(
         catalog_size = catalog.len(),
         catalog_star_jobs,

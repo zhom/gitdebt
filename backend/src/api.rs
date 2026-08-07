@@ -3026,13 +3026,18 @@ async fn render_user_stat_svg(
             )
         }
         UserStatKind::CommitTrend => {
-            let days = load_user_commit_days(
-                pool,
-                &scope,
-                chrono::NaiveDate::from_ymd_opt(2005, 1, 1).expect("2005-01-01 is a valid date"),
-                Utc::now().date_naive(),
-            )
-            .await?;
+            // Bounded to the same window every other reader of this table
+            // uses. It was `2005-01-01 ..= today`, which is "all of git" — the
+            // range predicate stopped narrowing anything, so this variant read
+            // every stored day for all `PROFILE_MAX_REPOS` repos while the
+            // heatmap beside it read one year. It is reachable unauthenticated
+            // on an image route, which made the most expensive shape of this
+            // query the easiest one for a stranger to trigger.
+            //
+            // A monthly trend over 52 weeks is also what the chart actually
+            // renders; the extra decades were never plotted.
+            let (trend_start, trend_end) = profile_heatmap_window();
+            let days = load_user_commit_days(pool, &scope, trend_start, trend_end).await?;
             crate::repo_charts::render_commit_trend(&label, &days, theme)
         }
         UserStatKind::Languages => {

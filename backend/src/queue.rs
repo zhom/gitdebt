@@ -134,6 +134,57 @@ pub async fn enqueue_cold_or_stale_many(db: &Db, repos: &[String], priority: i64
     Ok(result.rows_affected())
 }
 
+/// Offer repositories still on the exact GitHub-API snapshot to GH Archive, so
+/// their star history can start moving again.
+///
+/// A repository whose history came from the stargazer API is frozen by design:
+/// [`crate::cache::RepoSummary::stargazers_fresh_within`] treats a complete
+/// `github_api` snapshot as permanently fresh (it is exact, so ageing it out
+/// would only re-fetch identical rows), [`enqueue`] refuses to queue one, and
+/// the hourly follower selects only `history_source = 'gh_archive'`. Those
+/// three rules are individually right and collectively fatal: a repository that
+/// landed on the API path before GH Archive was available can never be
+/// refreshed by anything, and its curve stops on the day it was first read.
+///
+/// Migration — not refresh — is the way out. One archive backfill rewrites the
+/// series from the corpus and flips `history_source` to `gh_archive`, after
+/// which the existing hourly follower keeps it current forever. This offers
+/// those repositories to the ordinary star-fetch queue; the archive coordinator
+/// claims them like any other job.
+///
+/// Only meaningful when GH Archive is configured. With it disabled the same
+/// queue is drained by the stargazer-list fallback, which would re-paginate an
+/// already-exact snapshot — precisely what the frozen-by-design rules exist to
+/// prevent — so callers must gate on the archive client being present.
+///
+/// `limit` bounds one pass: this is warm-up nobody is waiting on, and the cost
+/// is BigQuery scans rather than worker slots.
+pub async fn enqueue_archive_migrations(db: &Db, limit: usize) -> Result<u64> {
+    let limit = i64::try_from(limit.clamp(1, 5_000)).unwrap_or(5_000);
+    let result = sqlx::query(
+        "WITH eligible AS ( \
+             SELECT repo FROM repos \
+             WHERE history_source = 'github_api' \
+               AND history_complete = TRUE \
+               AND NOT missing \
+               AND NOT archive_complete \
+               AND github_id IS NOT NULL \
+               AND NOT EXISTS ( \
+                   SELECT 1 FROM star_fetch_queue q WHERE q.repo = repos.repo \
+               ) \
+             ORDER BY star_count DESC NULLS LAST, repo \
+             LIMIT $1 \
+         ) \
+         INSERT INTO star_fetch_queue (repo, status, priority, enqueued_at) \
+         SELECT repo, 'pending', 0, NOW() FROM eligible \
+         ON CONFLICT (repo) DO NOTHING",
+    )
+    .bind(limit)
+    .execute(&db.pool)
+    .await?;
+    Ok(result.rows_affected())
+}
+
 /// True iff the repo currently has a `pending` or `in_progress` row.
 /// Lets the analyze/ping paths report "already queued" without a second
 /// enqueue.

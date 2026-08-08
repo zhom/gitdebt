@@ -572,9 +572,103 @@ pub async fn user_access_token(
         return Ok(None);
     };
     if expires_at.is_some_and(|expiry| expiry <= Utc::now() + Duration::minutes(1)) {
-        return Ok(None);
+        // Expired, or about to be. GitHub App user-to-server tokens last eight
+        // hours, so without this branch every credential a background job holds
+        // is dead the same day its owner signed in — and returning `None` looks
+        // identical to "this user never connected", which is the wrong story to
+        // tell a reader and the wrong action to take on a grant.
+        return refresh_user_token(db, cfg, user_id).await;
     }
     Ok(Some(cfg.crypto.decrypt(&encrypted)?))
+}
+
+/// Redeem the stored refresh token for a new access token.
+///
+/// GitHub rotates BOTH tokens on redemption, so the response's refresh token
+/// replaces the stored one; keeping the old one would work exactly once. Both
+/// are re-encrypted and written in a single statement so a crash cannot leave
+/// an access token paired with a refresh token that no longer redeems it.
+///
+/// Returns `Ok(None)` — never an error — when there is nothing to redeem or
+/// GitHub declines. A refusal is a durable fact about the credential (the user
+/// revoked the app, or the refresh token itself expired), not a transient
+/// failure worth retrying, and callers must be able to treat it as "no
+/// credential" without unwinding whatever else they were doing.
+pub async fn refresh_user_token(
+    db: &Db,
+    cfg: &GithubAppConfig,
+    user_id: i64,
+) -> anyhow::Result<Option<String>> {
+    let row: Option<(Option<String>, Option<DateTime<Utc>>)> = sqlx::query_as(
+        "SELECT refresh_token, refresh_token_expires_at FROM app_users WHERE id = $1",
+    )
+    .bind(user_id)
+    .fetch_optional(&db.pool)
+    .await?;
+    let Some((Some(refresh_enc), refresh_expires_at)) = row else {
+        return Ok(None);
+    };
+    // A refresh token that has itself expired cannot be redeemed; spending a
+    // request to be told so only burns budget.
+    if refresh_expires_at.is_some_and(|expiry| expiry <= Utc::now()) {
+        return Ok(None);
+    }
+    let refresh_token = cfg.crypto.decrypt(&refresh_enc)?;
+
+    let http = reqwest::Client::new();
+    let response = http
+        .post(GITHUB_TOKEN_URL)
+        .header("Accept", "application/json")
+        .header("User-Agent", "gitdebt/0.1")
+        .form(&[
+            ("client_id", cfg.client_id.as_str()),
+            ("client_secret", cfg.client_secret.as_str()),
+            ("grant_type", "refresh_token"),
+            ("refresh_token", refresh_token.as_str()),
+        ])
+        .send()
+        .await;
+    // Network trouble is not evidence about the credential: leave the stored
+    // tokens alone so the next pass can try again.
+    let Ok(response) = response else {
+        return Ok(None);
+    };
+    let Ok(response) = response.error_for_status() else {
+        return Ok(None);
+    };
+    // GitHub answers a refused refresh with HTTP 200 and an `error` body, so a
+    // failed decode into the success shape is the ordinary refusal path.
+    let Ok(token) = response.json::<GithubTokenResponse>().await else {
+        return Ok(None);
+    };
+
+    let now = Utc::now();
+    let access_enc = cfg.crypto.encrypt(&token.access_token)?;
+    let refresh_enc = match token.refresh_token.as_deref() {
+        Some(rotated) => Some(cfg.crypto.encrypt(rotated)?),
+        // GitHub returned no replacement. Clearing the stored one is the honest
+        // record: keeping a token known not to have been rotated would make the
+        // next refresh look available when it is not.
+        None => None,
+    };
+    sqlx::query(
+        "UPDATE app_users SET access_token = $2, refresh_token = $3, \
+                token_expires_at = $4, refresh_token_expires_at = $5, updated_at = $6 \
+         WHERE id = $1",
+    )
+    .bind(user_id)
+    .bind(&access_enc)
+    .bind(&refresh_enc)
+    .bind(token.expires_in.map(|s| now + Duration::seconds(s)))
+    .bind(
+        token
+            .refresh_token_expires_in
+            .map(|s| now + Duration::seconds(s)),
+    )
+    .bind(now)
+    .execute(&db.pool)
+    .await?;
+    Ok(Some(token.access_token))
 }
 
 // Session cookie format:

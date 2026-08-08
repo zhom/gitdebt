@@ -19,7 +19,7 @@ use crate::db::Db;
 use crate::gh_archive::{
     GhArchiveError, GhArchiveEventSource, GhArchiveFetch, GhArchiveStarEvent, RepositorySpec,
 };
-use crate::github::GithubClient;
+use crate::github::{GithubClient, RepoVisibility};
 use crate::queue;
 
 const ARCHIVE_START: NaiveDate =
@@ -234,11 +234,19 @@ async fn prepare_job(
         // page.
         if needs_metadata(state.as_ref()) {
             let (owner, name) = split_slug(&repo)?;
-            match ctx.github.repo_metadata(owner, name).await? {
-                Some(metadata) => {
+            match ctx.github.repo_visibility(owner, name).await? {
+                RepoVisibility::Public(metadata) => {
                     ctx.cache.put_repo_metadata(&repo, &metadata).await?;
                 }
-                None => {
+                // Exists, but is not ours to publish. Parking it restricted
+                // rather than tombstoning it `missing` is the difference
+                // between "we will look again if this ever goes public" and a
+                // permanent not-found that never re-enqueues.
+                RepoVisibility::Private => {
+                    queue::mark_restricted(ctx.cache.db(), &repo, "repository is private").await?;
+                    return Ok(None);
+                }
+                RepoVisibility::Absent => {
                     ctx.cache.mark_repo_missing(&repo).await?;
                     queue::mark_dead(ctx.cache.db(), &repo, "repo not found").await?;
                     return Ok(None);

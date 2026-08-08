@@ -243,6 +243,12 @@ fn running_sections(view: &ReportView, running: &RunningReport) -> Vec<String> {
                 (true, _) => "backfilling in resumable chunks".to_string(),
                 (false, "ready") => "ready".to_string(),
                 (false, "retrying") => "retrying after a failed attempt".to_string(),
+                // Not "queued": nothing is queued and nothing will be. GitHub
+                // serves this repository's stargazers only to its own admins
+                // and collaborators, so the wait never ends on its own.
+                (false, "restricted") => {
+                    "not available — GitHub restricts this repository's stargazers".to_string()
+                }
                 (false, _) => "queued".to_string(),
             },
         ],

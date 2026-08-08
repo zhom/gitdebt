@@ -56,6 +56,17 @@ pub struct RepoQueueStatus {
     pub queued: i64,
     pub backfilling: bool,
     pub retrying: bool,
+    /// The row is parked because GitHub will not serve this repository's
+    /// stargazers to gitdebt, not because anything failed.
+    ///
+    /// Distinct from `retrying` and load-bearing for the caller: a restricted
+    /// park is terminal until something changes outside gitdebt, so a client
+    /// told "retrying" polls forever for a retry that is never scheduled.
+    /// Since GitHub limited the stargazers endpoint to a repository's own
+    /// admins and collaborators (July 2026), this is the ordinary state of
+    /// every repository the configured credential does not administer — not
+    /// an error worth reporting as one.
+    pub restricted: bool,
 }
 
 /// Enqueue a repo for a star-history fetch at the given priority.
@@ -211,9 +222,9 @@ pub async fn pending_count(db: &Db) -> Result<i64> {
     Ok(n)
 }
 
-pub async fn repo_status(db: &Db, repo: &str) -> Result<RepoQueueStatus> {
-    let row: (i64, bool, bool) = sqlx::query_as(
-        "SELECT \
+/// The one-round-trip projection behind [`RepoQueueStatus`], named so a test
+/// can assert which statuses each subquery reads.
+const REPO_STATUS_SQL: &str = "SELECT \
             (SELECT COUNT(*)::BIGINT FROM star_fetch_queue \
              WHERE status IN ('pending', 'in_progress')), \
             EXISTS(SELECT 1 FROM star_fetch_queue \
@@ -221,16 +232,24 @@ pub async fn repo_status(db: &Db, repo: &str) -> Result<RepoQueueStatus> {
                AND status IN ('pending', 'in_progress')), \
             EXISTS(SELECT 1 FROM star_fetch_queue \
              WHERE repo = $1 AND status IN ('pending', 'in_progress') \
-               AND (attempts > 0 OR last_error LIKE $2))",
-    )
-    .bind(repo)
-    .bind(format!("{PROVIDER_MARKER}%"))
-    .fetch_one(&db.pool)
-    .await?;
+               AND (attempts > 0 OR last_error LIKE $2)), \
+            EXISTS(SELECT 1 FROM star_fetch_queue \
+             WHERE repo = $1 AND status = 'dead' AND last_error LIKE $3)";
+
+pub async fn repo_status(db: &Db, repo: &str) -> Result<RepoQueueStatus> {
+    let row: (i64, bool, bool, bool) = sqlx::query_as(REPO_STATUS_SQL)
+        .bind(repo)
+        .bind(format!("{PROVIDER_MARKER}%"))
+        // The restricted park is `dead`, so it is deliberately NOT constrained to
+        // the pending/in_progress statuses the three counters above use.
+        .bind(format!("{RESTRICTED_MARKER}%"))
+        .fetch_one(&db.pool)
+        .await?;
     Ok(RepoQueueStatus {
         queued: row.0,
         backfilling: row.1,
         retrying: row.2,
+        restricted: row.3,
     })
 }
 
@@ -546,5 +565,36 @@ mod tests {
         // A generic failure is NOT classified restricted.
         assert!(!is_restricted_error("http error: connection reset"));
         assert!(!is_restricted_error("repo not found: o/r"));
+    }
+
+    /// The restricted probe must look at `dead` rows, and no other counter may.
+    ///
+    /// The three original counters in `repo_status` all constrain themselves to
+    /// `('pending', 'in_progress')`, because they describe work in flight. A
+    /// restricted park is the opposite: `mark_restricted` writes `dead`, so a
+    /// probe carrying the same status constraint would never see one and every
+    /// restricted repository would keep reporting "queued" forever.
+    #[test]
+    fn restricted_probe_reads_parked_rows_not_in_flight_ones() {
+        let sql = REPO_STATUS_SQL;
+        let restricted_clause = sql
+            .split("EXISTS(")
+            .nth(3)
+            .expect("repo_status has a fourth subquery for the restricted park");
+        assert!(
+            restricted_clause.contains("status = 'dead'"),
+            "the restricted probe must read parked rows: {restricted_clause}"
+        );
+        assert!(
+            !restricted_clause.contains("'in_progress'"),
+            "a restricted park is never in flight: {restricted_clause}"
+        );
+        // And the in-flight counters must not have drifted onto dead rows.
+        for (index, clause) in sql.split("EXISTS(").enumerate().skip(1).take(2) {
+            assert!(
+                clause.contains("'pending', 'in_progress'"),
+                "subquery {index} describes work in flight: {clause}"
+            );
+        }
     }
 }

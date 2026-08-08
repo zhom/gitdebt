@@ -323,17 +323,48 @@ impl GithubClient {
         owner: &str,
         repo: &str,
     ) -> Result<Option<RepoMetadata>, GithubError> {
+        Ok(match self.repo_visibility(owner, repo).await? {
+            RepoVisibility::Public(metadata) => Some(metadata),
+            RepoVisibility::Private | RepoVisibility::Absent => None,
+        })
+    }
+
+    /// Repository visibility as three distinct facts, because two of them stop
+    /// being interchangeable the moment a credential belongs to an owner.
+    ///
+    /// [`repo_metadata`] collapses "404" and "200 with `private: true`" into
+    /// `Ok(None)`, and its callers turn that into a `missing` tombstone. Under
+    /// the shared application token the two are genuinely indistinguishable —
+    /// a private repository 404s — so the collapse is harmless. Under an
+    /// owner's own credential it is not: their private repository answers 200,
+    /// and tombstoning it as `missing` records "this repository does not exist"
+    /// about one we positively know does. `missing` then drives a permanent
+    /// not-found short-circuit that never re-enqueues, so the repository stays
+    /// dead even after it is made public again.
+    ///
+    /// Callers that tombstone must therefore act on `Absent` alone, and treat
+    /// `Private` as a reason to hold off rather than to bury.
+    ///
+    /// [`repo_metadata`]: Self::repo_metadata
+    pub async fn repo_visibility(
+        &self,
+        owner: &str,
+        repo: &str,
+    ) -> Result<RepoVisibility, GithubError> {
         let url = format!("{API_BASE}/repos/{owner}/{repo}");
         let resp = self.send(&url, None).await?;
         match resp.status().as_u16() {
             200 => {
                 let metadata: RepoMetadata = resp.json().await?;
-                // A user OAuth token may be able to see a private repository,
-                // but gitdebt is a public-data product. Treat it exactly like
-                // an inaccessible repo and never enqueue or persist it.
-                Ok((!metadata.private).then_some(metadata))
+                // gitdebt is a public-data product: a private repository never
+                // becomes a public page, whatever credential could read it.
+                Ok(if metadata.private {
+                    RepoVisibility::Private
+                } else {
+                    RepoVisibility::Public(metadata)
+                })
             }
-            404 => Ok(None),
+            404 => Ok(RepoVisibility::Absent),
             403 | 429 => Err(GithubError::RateLimited(None)),
             s => Err(GithubError::Api {
                 status: s,
@@ -619,6 +650,24 @@ impl User {
 pub struct RepoList {
     pub items: Vec<RepoListItem>,
     pub truncated: bool,
+}
+
+/// What a repository lookup actually established.
+///
+/// Kept separate from `Option<RepoMetadata>` because "absent" and "private" are
+/// different facts with opposite consequences: one justifies a permanent
+/// tombstone, the other must never produce one. See
+/// [`GithubClient::repo_visibility`].
+#[derive(Debug, Clone)]
+pub enum RepoVisibility {
+    /// Exists and is public: the only case gitdebt may publish.
+    Public(RepoMetadata),
+    /// Exists, but is private. Readable only because the caller's credential
+    /// has access — never publishable, and never a tombstone.
+    Private,
+    /// GitHub reports nothing here for this caller. With an unprivileged token
+    /// that is the ordinary "deleted or never existed" answer.
+    Absent,
 }
 
 /// Slimmed public repository response. GitHub returns roughly one hundred

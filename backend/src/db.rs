@@ -450,6 +450,59 @@ CREATE TABLE IF NOT EXISTS installations (
 );
 CREATE INDEX IF NOT EXISTS idx_installations_account ON installations(account_login);
 
+-- Owner/collaborator credential grants for the exact stargazer refresh.
+--
+-- In July 2026 GitHub limited GET /repos/{owner}/{repo}/stargazers to a
+-- repository's own admins and collaborators. The shared application token can
+-- no longer read the stargazer list of a repository it does not administer, so
+-- an exact star series now exists only where somebody with access has connected
+-- the repository. A row here IS that connection.
+--
+-- Keyed on GitHub's numeric repository id, never the slug. A slug is mutable
+-- and re-creatable: once `me/foo` is transferred away, `me` may create a new
+-- `me/foo`, and a slug-keyed grant would silently bind one person's credential
+-- to somebody else's repository. `github_id` survives rename and transfer.
+--
+-- Stores no token. `user_id` points at the single encrypted copy in
+-- `app_users.access_token`, decrypted just-in-time by `auth::user_access_token`.
+-- The only identity here is the connecting collaborator's — the same class of
+-- datum as `repo_analysis_queue.requested_by_user_id`. No stargazer identity is
+-- recorded, so the product boundary ("star timestamps, not stargazers") holds.
+CREATE TABLE IF NOT EXISTS repo_star_grants (
+    github_id       BIGINT PRIMARY KEY NOT NULL,
+    -- Canonical lowercased slug as observed at connect time, denormalized so
+    -- the covering-grant lookup is one probe against the slug-keyed queue.
+    -- Reconciled on every refresh; a mismatch means the repo was renamed.
+    repo            TEXT NOT NULL,
+    -- Owner segment at connect time. A change means the repo was transferred,
+    -- which revokes the grant rather than silently following it.
+    owner_login     TEXT NOT NULL,
+    user_id         BIGINT NOT NULL REFERENCES app_users(id) ON DELETE CASCADE,
+    verified_at     TIMESTAMPTZ NOT NULL DEFAULT NOW(),
+    revoked_at      TIMESTAMPTZ,
+    -- A classified code, never raw GitHub text: this column is read by the
+    -- public API and must not become a leak channel for internal errors.
+    --   'stargazers_unavailable' | 'forbidden' | 'credential_expired'
+    --   'authorization_revoked'  | 'repo_private' | 'repo_missing'
+    --   'identity_changed'       | 'user_revoked'
+    revoked_reason  TEXT,
+    last_refresh_at TIMESTAMPTZ,
+    last_error_kind TEXT,
+    created_at      TIMESTAMPTZ NOT NULL DEFAULT NOW(),
+    updated_at      TIMESTAMPTZ NOT NULL DEFAULT NOW()
+);
+-- At most one LIVE grant per slug. Partial, so a revoked grant stays as history
+-- without blocking a later reconnection. The connect path must reconcile a
+-- colliding live row first, or a stale grant from a transferred repository
+-- permanently locks out the rightful owner of a recreated slug.
+CREATE UNIQUE INDEX IF NOT EXISTS idx_repo_star_grants_live_repo
+    ON repo_star_grants (repo) WHERE revoked_at IS NULL;
+CREATE INDEX IF NOT EXISTS idx_repo_star_grants_user
+    ON repo_star_grants (user_id) WHERE revoked_at IS NULL;
+-- Oldest-refreshed first, so the credentialed lane drains fairly.
+CREATE INDEX IF NOT EXISTS idx_repo_star_grants_refresh
+    ON repo_star_grants (last_refresh_at NULLS FIRST) WHERE revoked_at IS NULL;
+
 -- ===========================================================================
 -- Repo history analysis (gitoxide-based; commit-graph stats per repo).
 -- ===========================================================================
@@ -1509,6 +1562,76 @@ mod tests {
         assert!(SCHEMA.contains("CREATE TABLE IF NOT EXISTS leaderboard_snapshots"));
         assert!(SCHEMA.contains("UNIQUE (metric, window_days, rank)"));
         assert!(SCHEMA.contains("CREATE TABLE IF NOT EXISTS leaderboard_snapshot_state"));
+    }
+
+    /// A credential grant is keyed on the numeric repository id, never a slug.
+    ///
+    /// Slugs are mutable AND re-creatable. Once `me/foo` is transferred away,
+    /// `me` can create a fresh `me/foo`; a slug-keyed grant would then point one
+    /// person's credential at a different person's repository. `github_id`
+    /// survives both rename and transfer, so it is the only safe key.
+    ///
+    /// The slug column still exists for the covering-grant lookup, and is
+    /// therefore constrained to one LIVE row — partially, so a revoked grant
+    /// remains as history instead of blocking a later reconnection.
+    #[test]
+    fn star_grants_are_keyed_on_github_id_and_unique_per_live_slug() {
+        assert!(
+            SCHEMA.contains("CREATE TABLE IF NOT EXISTS repo_star_grants"),
+            "the grant table is part of the startup schema"
+        );
+        assert!(
+            SCHEMA.contains("github_id       BIGINT PRIMARY KEY NOT NULL"),
+            "the primary key must be the immutable numeric id, not the slug"
+        );
+        assert!(
+            SCHEMA.contains(
+                "CREATE UNIQUE INDEX IF NOT EXISTS idx_repo_star_grants_live_repo\n    \
+                 ON repo_star_grants (repo) WHERE revoked_at IS NULL"
+            ),
+            "one live grant per slug, and revoked rows must not block reconnection"
+        );
+        // The credential itself lives once, encrypted, in app_users. A grant
+        // that carried its own copy would be a second secret to rotate and
+        // revoke, and would outlive the session that created it.
+        let grants = SCHEMA
+            .split("CREATE TABLE IF NOT EXISTS repo_star_grants")
+            .nth(1)
+            .and_then(|rest| rest.split(");").next())
+            .expect("grant table body");
+        for forbidden in ["access_token", "refresh_token", "token"] {
+            assert!(
+                !grants.contains(forbidden),
+                "a grant references app_users.id; it never stores {forbidden}"
+            );
+        }
+        // ON DELETE CASCADE: a grant without a user has no credential behind
+        // it, so it must not survive the account.
+        assert!(
+            grants.contains("REFERENCES app_users(id) ON DELETE CASCADE"),
+            "a credential-less grant must not outlive its account"
+        );
+    }
+
+    /// The grant indexes are built inline, not concurrently.
+    ///
+    /// `CONCURRENT_INDEXES` exists for multi-million-row write-heavy tables
+    /// where a plain `CREATE INDEX` inside the schema transaction stalls startup
+    /// before `/health` binds. `repo_star_grants` holds one row per connected
+    /// repository — hundreds at most. Building inline costs microseconds and
+    /// keeps the indexes transactional with the table; the concurrent path runs
+    /// best-effort *outside* the transaction and can leave an INVALID index.
+    #[test]
+    fn grant_indexes_are_built_inline_not_concurrently() {
+        for (name, _) in CONCURRENT_INDEXES {
+            assert!(
+                !name.contains("repo_star_grants"),
+                "{name} belongs in SCHEMA, not in the concurrent set"
+            );
+        }
+        assert!(SCHEMA.contains("idx_repo_star_grants_live_repo"));
+        assert!(SCHEMA.contains("idx_repo_star_grants_user"));
+        assert!(SCHEMA.contains("idx_repo_star_grants_refresh"));
     }
 
     /// `repo_commit_days` must carry exactly one `(repo, day)` btree.

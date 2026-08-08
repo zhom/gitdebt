@@ -29,7 +29,7 @@ const collected = [
   },
   {
     term: "Optional GitHub sign-in",
-    desc: "If you choose to sign in, GitHub gives us your public profile identity and an OAuth token. We store the token encrypted at rest and use an HTTP-only signed session cookie to keep you signed in. Sign-in currently provides a one-click link to your profile-wide report; public repository reports do not require it. We do not request private-repository, write, or account-management access.",
+    desc: "If you choose to sign in, GitHub gives us your public profile identity and an OAuth token. We store the token encrypted at rest and use an HTTP-only signed session cookie to keep you signed in. Sign-in provides a one-click link to your profile-wide report; public repository reports do not require it. In July 2026 GitHub restricted the stargazer-list endpoint to a repository's own admins and collaborators, and the permission GitHub requires to read it is Contents (read and write). So if you connect a repository you administer, gitdebt requests that permission in order to read that repository's stargazer timestamps. We never write to your repositories, and we never request account-management access. You choose which repositories the app can see, and you can revoke it at any time from GitHub's settings.",
   },
   {
     term: "Operational logs",
@@ -44,7 +44,7 @@ const principles = [
   },
   {
     term: "Public data only",
-    desc: "Every repo signal we compute comes from publicly available GitHub data. We never request private-repo, write, or account-management permissions.",
+    desc: "Every repo signal we compute comes from publicly available GitHub data, and every chart we publish is derived from a public repository. Connecting a repository you administer grants the Contents (read and write) permission GitHub now requires to read a stargazer list — we use it only to read, never to write, and a private repository never becomes a public page. We never request account-management permissions.",
   },
   {
     term: "Minimal retention",

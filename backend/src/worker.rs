@@ -534,11 +534,20 @@ async fn process(ctx: &WorkerCtx, job: &queue::Job) -> Result<Outcome> {
         .repo_metadata_fresh_within(&job.repo, chrono::Duration::hours(1))
         .await?
     {
-        match ctx.github.repo_metadata(&owner, &repo).await? {
-            Some(metadata) => {
+        match ctx.github.repo_visibility(&owner, &repo).await? {
+            crate::github::RepoVisibility::Public(metadata) => {
                 ctx.cache.put_repo_metadata(&job.repo, &metadata).await?;
             }
-            None => return Err(GithubError::NotFound(job.repo.clone()).into()),
+            // Private is not missing. `NotFound` here tombstones the repository
+            // permanently, which is the right answer for something GitHub says
+            // does not exist and the wrong one for something we simply may not
+            // publish — it would survive the repository later going public.
+            crate::github::RepoVisibility::Private => {
+                return Err(GithubError::Forbidden(job.repo.clone()).into());
+            }
+            crate::github::RepoVisibility::Absent => {
+                return Err(GithubError::NotFound(job.repo.clone()).into());
+            }
         }
     }
     // An exact GitHub snapshot is immutable once complete. A legacy exact
@@ -1077,6 +1086,34 @@ mod tests {
         assert!(!is_not_found(&api));
         let generic = anyhow::anyhow!("some db error");
         assert!(!is_not_found(&generic));
+    }
+
+    /// A private repository must never be tombstoned as missing.
+    ///
+    /// `repo_metadata` used to collapse "404" and "200 with `private: true`"
+    /// into `Ok(None)`, and this worker turned that into `NotFound` — a
+    /// permanent `missing` tombstone driving a not-found short-circuit that
+    /// never re-enqueues. Under the shared token the two were genuinely
+    /// indistinguishable, so nothing broke. Under an owner's own credential
+    /// they diverge: their private repository answers 200, and burying it
+    /// records "does not exist" about one we know does, and keeps it buried
+    /// after it is later made public.
+    ///
+    /// `RepoVisibility::Private` therefore maps to `Forbidden`, which parks the
+    /// row `restricted` and leaves the repository recoverable.
+    #[test]
+    fn a_private_repository_is_restricted_never_tombstoned() {
+        let private: anyhow::Error = GithubError::Forbidden("o/r".into()).into();
+        assert!(is_forbidden(&private), "private parks restricted");
+        assert!(
+            !is_not_found(&private),
+            "a private repository is not a missing one"
+        );
+
+        // Only a genuine absence may tombstone.
+        let absent: anyhow::Error = GithubError::NotFound("o/r".into()).into();
+        assert!(is_not_found(&absent));
+        assert!(!is_forbidden(&absent));
     }
 
     #[test]

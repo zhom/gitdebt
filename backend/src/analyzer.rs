@@ -409,6 +409,14 @@ async fn analyze_repo_with_enqueue(
         backfilling: queue_status.backfilling,
         history_status: if history_complete {
             "ready"
+        } else if queue_status.restricted {
+            // Ahead of `retrying` on purpose. A restricted park is terminal
+            // until something changes outside gitdebt, so reporting it as a
+            // retry makes every client poll forever for a retry that is never
+            // scheduled. Since GitHub limited the stargazers endpoint to a
+            // repository's own admins and collaborators (July 2026) this is the
+            // ordinary state of most repositories, not a failure.
+            "restricted"
         } else if retrying {
             "retrying"
         } else {

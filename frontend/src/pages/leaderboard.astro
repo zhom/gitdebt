@@ -5,6 +5,7 @@ import BaseHead from "@/components/BaseHead.astro";
 import Seo from "@/components/Seo.astro";
 import SiteHeader from "@/components/SiteHeader.astro";
 import SiteFooter from "@/components/SiteFooter.astro";
+import { MomentumBoard } from "@/components/MomentumBoard";
 import {
   BODY,
   CAPTION,
@@ -17,7 +18,6 @@ import {
   TITLE,
 } from "@/components/style-tokens";
 import { CATEGORIES } from "@/data/categories";
-import { formatCompact } from "@/lib/star-insights";
 
 const apiBase = staticApiBase();
 const site = (Astro.site ?? new URL("https://gitdebt.com")).href.replace(/\/$/, "");
@@ -192,9 +192,6 @@ if (top && topStarred) {
   });
 }
 
-const thClass =
-  "py-3 pr-4 font-mono text-[10px] font-medium tracking-[0.14em] text-muted-foreground/70 uppercase whitespace-nowrap";
-const rowClass = "border-b border-border/40 last:border-0";
 const sectionLinks = [
   { href: "#trending-daily", label: "Daily" },
   { href: "#trending-weekly", label: "Weekly" },
@@ -220,7 +217,7 @@ const sectionLinks = [
     <div class="isolate flex min-h-dvh flex-col">
       <SiteHeader />
 
-      <main id="main-content" class="mx-auto w-full max-w-5xl flex-1 px-6 py-12">
+      <main id="main-content" class="mx-auto w-full max-w-[88rem] flex-1 px-6 py-12">
         <nav aria-label="Breadcrumb" class="font-mono text-[11px] text-muted-foreground">
           <a
             href="/"
@@ -289,93 +286,56 @@ const sectionLinks = [
           </section>
         )}
 
-        {momentumBoards.map((board) => board.repos.length > 0 && (
-          <section id={board.id} class="mt-16 scroll-mt-24 border-t border-border/60 pt-12">
-            <div class={SECTION_HEADER}>
-              <h2 class={HEADING}>{board.label} momentum</h2>
-              <p class={CAPTION}>stars gained in {board.days}d</p>
-            </div>
-            {board.days === 7 && vsPair && vsLabel && (
-              <p class:list={["mt-2", BODY]}>
-                Compare the top two directly:{" "}
-                <a
-                  href={`/vs/${vsPair[0]}/${vsPair[1]}`}
-                  class="rounded underline decoration-border underline-offset-4 outline-none transition-colors duration-150 hover:text-foreground hover:decoration-foreground/60 focus-visible:ring-2 focus-visible:ring-accent/30"
-                >
-                  {vsLabel} star history
-                </a>.
-              </p>
-            )}
-            <div class="-mx-6 mt-6 overflow-x-auto">
-              <div class="inline-block min-w-full px-6 py-2 align-middle">
-                <table class="w-full text-left text-base sm:text-sm">
-                  <thead>
-                    <tr class="border-b border-border">
-                      <th class={thClass}>#</th>
-                      <th class={thClass}>Repository</th>
-                      <th class={`${thClass} text-right`}>+{board.days}d</th>
-                      <th class={`${thClass} text-right`}>Total stars</th>
-                    </tr>
-                  </thead>
-                  <tbody class="tabular-nums">
-                    {board.repos.map((r) => (
-                      <tr class={rowClass}>
-                        <td class="py-3 pr-4 font-mono text-[11px] text-muted-foreground">{r.rank}</td>
-                        <td class="py-3 pr-4"><a href={`/${r.repo}`} class="rounded outline-none transition-colors duration-150 hover:text-foreground focus-visible:ring-2 focus-visible:ring-accent/30">{r.repo}</a></td>
-                        <td class="py-3 pr-4 text-right">+{r.velocity.toLocaleString()}</td>
-                        <td class="py-3 text-right text-muted-foreground">{formatCompact(r.stars)}</td>
-                      </tr>
-                    ))}
-                  </tbody>
-                </table>
-              </div>
-            </div>
-          </section>
-        ))}
+        {loaded && hasRows && (
+          <div class="mt-16 grid gap-10 border-t border-border/60 pt-12 lg:grid-cols-3 lg:gap-8">
+            {momentumBoards.map((board) => board.repos.length > 0 && (
+              <section id={board.id} class="scroll-mt-24">
+                <div class={SECTION_HEADER}>
+                  <h2 class={HEADING}>{board.label} momentum</h2>
+                  <p class={CAPTION}>stars gained in {board.days}d</p>
+                </div>
+                {board.days === 7 && vsPair && vsLabel && (
+                  <p class:list={["mt-2", BODY]}>
+                    Compare the top two:{" "}
+                    <a
+                      href={`/vs/${vsPair[0]}/${vsPair[1]}`}
+                      class="rounded underline decoration-border underline-offset-4 outline-none transition-colors duration-150 hover:text-foreground hover:decoration-foreground/60 focus-visible:ring-2 focus-visible:ring-accent/30"
+                    >
+                      {vsLabel}
+                    </a>.
+                  </p>
+                )}
+                <div class="mt-5">
+                  <MomentumBoard
+                    client:visible
+                    rows={board.repos.slice(0, 25)}
+                    windowDays={board.days}
+                    visibleRows={25}
+                  />
+                </div>
+              </section>
+            ))}
+          </div>
+        )}
 
         {mostStarred.length > 0 && (
-          <section id="most-starred" class="mt-16 scroll-mt-24 border-t border-border/60 pt-12">
+          <section id="most-starred" class="mt-20 scroll-mt-24 border-t border-border/60 pt-12">
             <div class={SECTION_HEADER}>
               <h2 class={HEADING}>Most-starred repos on gitdebt</h2>
-              <p class={CAPTION}>current totals</p>
+              <p class={CAPTION}>length is total stars · ripple is current growth</p>
             </div>
-            <div class="-mx-6 mt-6 overflow-x-auto">
-              <div class="inline-block min-w-full px-6 py-2 align-middle">
-                <table class="w-full text-left text-base sm:text-sm">
-                  <thead>
-                    <tr class="border-b border-border">
-                      <th class={thClass}>#</th>
-                      <th class={thClass}>Repository</th>
-                      <th class={`${thClass} text-right`}>Total stars</th>
-                      <th class={`${thClass} text-right`}>+{windowDays}d</th>
-                    </tr>
-                  </thead>
-                  <tbody class="tabular-nums">
-                    {mostStarred.map((r) => (
-                      <tr class={rowClass}>
-                        <td class="py-3 pr-4 font-mono text-[11px] text-muted-foreground">{r.rank}</td>
-                        <td class="py-3 pr-4">
-                          <a
-                            href={`/${r.repo}`}
-                            class="rounded outline-none transition-colors duration-150 hover:text-foreground focus-visible:ring-2 focus-visible:ring-accent/30"
-                          >
-                            {r.repo}
-                          </a>
-                        </td>
-                        <td class="py-3 pr-4 text-right">
-                          {r.stars.toLocaleString()}
-                        </td>
-                        <td class="py-3 text-right text-muted-foreground">
-                          +{r.velocity.toLocaleString()}
-                        </td>
-                      </tr>
-                    ))}
-                  </tbody>
-                </table>
-              </div>
+            <div class="mt-5">
+              <MomentumBoard
+                client:visible
+                rows={mostStarred.slice(0, 50)}
+                windowDays={windowDays}
+                visibleRows={50}
+                extentBy="stars"
+              />
             </div>
           </section>
         )}
+
 
         <section class="mt-16 scroll-mt-24 border-t border-border/60 pt-12">
           <div class={SECTION_HEADER}>

@@ -4,11 +4,11 @@ import { useEffect, useMemo, useRef } from "react";
 
 import {
   BAYER4,
-  BRAND,
   CELL,
   INK,
   OFF_TIER,
   RasterBuffer,
+  SWATCH,
   WAVE_AMPLITUDE,
   clamp01,
   makeWaves,
@@ -17,118 +17,107 @@ import {
   type RGB,
   type Wave,
 } from "@/lib/dither";
+import { rates, trendOf, type MomentumRow, type Trend } from "@/lib/momentum";
 
-export type MomentumRow = {
-  rank: number;
-  repo: string;
-  stars: number;
-  /** Stars gained across the board's window. The thing being ranked. */
-  velocity: number;
-};
+export type { MomentumRow, Trend };
 
 export type MomentumBoardProps = {
   rows: MomentumRow[];
-  /** Days the velocity covers, so the ripple can be normalised to a rate. */
-  windowDays: number;
-  /** Rows rendered before the list scrolls internally. */
-  visibleRows?: number;
-  /**
-   * Which quantity the band's horizontal extent measures.
-   *
-   * The ripple always encodes rate, because rate is what "momentum" means. The
-   * extent is whatever the list is ranked by — so a most-starred board shows
-   * size as length and growth as speed, and a large repo that has stopped
-   * moving is visibly still next to a smaller one that is climbing.
-   */
-  extentBy?: "velocity" | "stars";
 };
 
-/**
- * Rate at which the fastest repo's band ripples, in wave cycles per second.
- *
- * The whole page is about velocity, and velocity was previously a number in a
- * right-aligned column — the flattest possible way to show motion. Here the
- * band's ripple speed IS the repo's star rate, so the leader visibly churns
- * while a repo adding forty stars a week barely breathes. Removing the motion
- * removes a dimension of the data, which is the only justification for looping
- * animation on a page someone is trying to read.
- */
-const MAX_RIPPLE_RATE = 0.55;
-/** Slowest ripple a ranked repo gets, so "on the board" still reads as alive. */
-const MIN_RIPPLE_RATE = 0.04;
-
-/** Row height in CSS px. Generous on purpose: the list is the page. */
-const ROW_HEIGHT = 56;
+/** Cycles per second for the fastest repository's ripple. */
+const MAX_RIPPLE_RATE = 0.6;
+/** Slowest ripple a ranked repository gets, so "on the board" reads as alive. */
+const MIN_RIPPLE_RATE = 0.05;
 
 /**
- * Cell budget for one board's buffer.
+ * Row height in CSS px.
  *
- * `gridFor` caps at 600 rows, which is right for the interactive panels it was
- * written for and wrong here: a fifty-row list is 2,800 CSS px tall, so that cap
- * would stretch each cell to nearly 5px and this board's texture would stop
- * matching every other dithered surface on the site. `CELL` is documented as
- * "identical for every interactive component", so the grid is computed at true
- * cell density and bounded by area instead — a wide full-width board is about
- * 700x1400 cells, or 3.9 MB of RGBA, and only the boards actually on screen are
- * being painted.
+ * Deliberately tight. An earlier pass spent 56px per repository to carry four
+ * numbers — less information per screen than the plain table it replaced. A
+ * leaderboard's job is comparison, and comparison needs rows close enough to
+ * scan against one another.
  */
-const MAX_CELLS = 1_100_000;
+const ROW_HEIGHT = 30;
 
-/** Fill for the leader's band. Every other row is ink. */
-const LEADER_FILL: RGB = BRAND;
+/** Width of the momentum strip, in CSS px. Matches the `8.25rem` grid column. */
+const STRIP_WIDTH = 132;
+
+/** Area ceiling for one buffer, at true `CELL` density. */
+const MAX_CELLS = 900_000;
+
+const TREND_FILL: Record<Trend, RGB> = {
+  rising: SWATCH.green,
+  steady: INK,
+  fading: SWATCH.orange,
+  unknown: SWATCH.grey,
+};
+
+const TREND_LABEL: Record<Trend, string> = {
+  rising: "climbing, faster today than its monthly pace",
+  steady: "steady, today matches its monthly pace",
+  fading: "cooling, slower today than its monthly pace",
+  unknown: "ranked in only one window, so there is nothing to compare",
+};
+
+const TREND_MARK: Record<Trend, string> = {
+  rising: "▲",
+  steady: "–",
+  fading: "▼",
+  unknown: "·",
+};
 
 type Band = {
-  /** 0..1 share of the leader's rate — the horizontal extent of the band. */
+  /** 0..1 extent from the weekly rate — the dimension the board ranks by. */
   share: number;
-  /** Cycles per second for this row's ripple. */
+  /** 0..1 extent of today's rate, on the same per-day scale. */
+  today: number;
   rate: number;
+  fill: RGB;
   waves: Wave[];
 };
 
+const nf = new Intl.NumberFormat("en-US");
+const fmt = (value: number | null) => (value === null ? "—" : nf.format(value));
+
 /**
- * Ranked repositories as dithered momentum bands.
+ * The ranking as one dense list carrying every window at once.
  *
- * One canvas paints every row. Fifty canvases would be fifty compositor layers
- * and fifty rAF callbacks; `RasterBuffer` is built for exactly this instead —
- * one buffer, one `putImageData` per frame, whatever the row count.
+ * The page used to render three velocity boards and a stars board: the same
+ * repositories four times, one number each, and no way to answer what a
+ * trending board is for. Rates make the windows comparable, so a row now shows
+ * level (weekly), momentum (today), direction (today against the month) and
+ * size together, in less vertical space than any single old board occupied.
  *
- * The list itself is ordinary semantic markup sitting above the canvas, so the
- * ranking is complete and readable with the canvas absent, scripts disabled, or
- * motion reduced. The canvas only ever adds a reading of *rate* that the
- * numbers alone do not carry.
+ * One canvas paints every strip. Fifty canvases would be fifty compositor
+ * layers and fifty rAF callbacks; `RasterBuffer` exists so a single
+ * `putImageData` per frame serves any row count.
  */
-export function MomentumBoard({
-  rows,
-  windowDays,
-  visibleRows = 12,
-  extentBy = "velocity",
-}: MomentumBoardProps) {
+export function MomentumBoard({ rows }: MomentumBoardProps) {
   const canvasRef = useRef<HTMLCanvasElement>(null);
   const hostRef = useRef<HTMLDivElement>(null);
 
   const bands = useMemo<Band[]>(() => {
-    const days = Math.max(1, windowDays);
-    const rates = rows.map((row) => Math.max(0, row.velocity) / days);
-    const fastest = Math.max(1, ...rates);
-    const extents = rows.map((row, index) =>
-      extentBy === "stars" ? Math.max(0, row.stars) : rates[index],
-    );
-    const widest = Math.max(1, ...extents);
+    const all = rows.map(rates);
+    const fastestWeek = Math.max(1, ...all.map((r) => r.r7 ?? 0));
+    const fastestDay = Math.max(1, ...all.map((r) => r.r1 ?? 0));
     return rows.map((row, index) => {
-      // Square-root, not linear: both star counts and velocities are
-      // heavy-tailed, and a linear map leaves everything below the leader as an
-      // indistinguishable stub.
-      const share = clamp01(Math.sqrt(extents[index] / widest));
-      const rateShare = clamp01(Math.sqrt(rates[index] / fastest));
+      const { r1, r7 } = all[index];
+      // Square root: star rates are heavy-tailed, and a linear map leaves
+      // everything below the leader an indistinguishable stub.
+      const share = clamp01(Math.sqrt((r7 ?? 0) / fastestWeek));
+      const today = clamp01(Math.sqrt((r1 ?? 0) / fastestDay));
       return {
         share,
-        rate: MIN_RIPPLE_RATE + rateShare * (MAX_RIPPLE_RATE - MIN_RIPPLE_RATE),
-        // Seeded by slug, matching how the comparison chart gives each series a
-        // stable texture: the same repo ripples the same way on every render.
+        today,
+        rate: MIN_RIPPLE_RATE + today * (MAX_RIPPLE_RATE - MIN_RIPPLE_RATE),
+        fill: TREND_FILL[trendOf(row)],
+        // Seeded by slug, as the comparison chart seeds each series: the same
+        // repository keeps the same grain across renders.
         waves: makeWaves(row.repo),
       };
     });
-  }, [rows, windowDays, extentBy]);
+  }, [rows]);
 
   useEffect(() => {
     const canvas = canvasRef.current;
@@ -142,17 +131,16 @@ export function MomentumBoard({
     let raf = 0;
     let running = false;
     let onScreen = false;
-    // Accumulated animation seconds, not wall-clock since mount. A paused loop
-    // must resume where it stopped: timing from the first frame would jump the
-    // ripple forward by however long the tab was hidden, which reads as a
-    // glitch precisely when the reader looks back at it.
+    // Accumulated seconds, not wall-clock since mount: a paused loop resumes
+    // where it stopped instead of leaping forward by the hidden duration.
     let elapsed = 0;
     let last: number | undefined;
 
     const paint = (seconds: number) => {
-      const box = host.getBoundingClientRect();
+      const box = canvas.getBoundingClientRect();
       if (box.width < 4 || box.height < 4) return;
-      // True cell density, so the texture matches the rest of the system.
+      // True `CELL` density — documented as identical for every interactive
+      // component, so a stretched grid here would stop matching the site.
       let cols = Math.max(4, Math.round(box.width / CELL));
       let gridRows = Math.max(4, Math.round(box.height / CELL));
       if (cols * gridRows > MAX_CELLS) {
@@ -171,46 +159,44 @@ export function MomentumBoard({
       for (let y = 0; y < gridRows; y++) {
         const index = Math.min(bands.length - 1, Math.floor(y / cellsPerRow));
         const band = bands[index];
-        // Distance from the band's vertical centre, 0 at the middle and 1 at
-        // its edge: the ripple fades out rather than butting against its
-        // neighbour, so fifty bands read as fifty rows, not one field.
-        const withinBand = (y % cellsPerRow) / cellsPerRow;
-        const edge = 1 - Math.abs(withinBand - 0.5) * 2;
-        const falloff = clamp01(edge * 1.6);
+        // Fade toward each band's edge so rows read as rows, not one field.
+        const within = (y % cellsPerRow) / cellsPerRow;
+        const falloff = clamp01((1 - Math.abs(within - 0.5) * 2) * 2.2);
+        if (falloff <= 0) continue;
         const reach = band.share * cols;
-        const fill = index === 0 ? LEADER_FILL : INK;
+        const head = band.today * cols;
+        const span = Math.max(1, Math.max(reach, head));
 
         for (let x = 0; x < cols; x++) {
-          if (x > reach) break;
+          if (x > reach && x > head) break;
           const u = x / Math.max(1, cols);
-          // The wave set is the repo's own; `rate` scales time, so a faster
-          // repo advances further per second through the same waveform.
           const ripple = waveOffset(band.waves, u, seconds * band.rate);
-          // Density falls toward the band's leading edge so the bar reads as a
-          // measured extent, not a rectangle with texture on it.
-          const head = clamp01(1 - x / Math.max(1, reach));
-          const density = (0.24 + head * 0.52 + ripple / WAVE_AMPLITUDE * 0.09) * falloff;
+          // Two readings in one mark: the body is the weekly level, the
+          // brighter leading segment is today's rate on the same per-day
+          // scale. A spike therefore shows as a bright tip past a short body.
+          const base = x <= reach ? 0.3 + clamp01(1 - x / span) * 0.45 : 0;
+          const surge = x <= head ? 0.34 : 0;
+          const density =
+            (Math.max(base, surge) + (ripple / WAVE_AMPLITUDE) * 0.1) * falloff;
           if (density <= 0) continue;
           const lit = density > BAYER4[y & 3][x & 3];
-          const alpha = (0.26 + density * 0.62) * (lit ? 1 : OFF_TIER);
+          const alpha = (0.24 + density * 0.6) * (lit ? 1 : OFF_TIER);
           if (alpha <= 0.004) continue;
-          buffer.set(x, y, fill, alpha);
+          buffer.set(x, y, band.fill, alpha);
         }
       }
       ctx.putImageData(buffer.image, 0, 0);
     };
 
     const step = (now: number) => {
-      // Clamped so a long pause the observers did not catch still resumes
-      // smoothly instead of leaping.
       elapsed += Math.min(0.05, last === undefined ? 0 : (now - last) / 1000);
       last = now;
       paint(elapsed);
       if (running) raf = requestAnimationFrame(step);
     };
 
-    // Reduced motion gets the same information as a single still frame: the
-    // extents still encode rank and share, only the rate is dropped.
+    // Reduced motion keeps every reading: extents still encode level and
+    // today's rate, colour still encodes direction. Only speed is dropped.
     const reduced = prefersReducedMotion();
     const startLoop = () => {
       if (running || reduced) return;
@@ -221,14 +207,11 @@ export function MomentumBoard({
       running = false;
       if (raf) cancelAnimationFrame(raf);
       raf = 0;
-      // Dropping the timestamp is what makes the next frame a resume rather
-      // than a jump.
       last = undefined;
     };
 
     paint(0);
 
-    // A loop nobody can see is pure battery cost, and this one can be long.
     const observer = new IntersectionObserver(
       ([entry]) => {
         onScreen = entry?.isIntersecting ?? false;
@@ -238,15 +221,15 @@ export function MomentumBoard({
       { rootMargin: "128px" },
     );
     observer.observe(host);
-    // Both directions. Stopping on hide without restarting on show left the
-    // board frozen for the rest of the session after a single tab switch: the
-    // observer does not fire again, because the intersection never changed.
+    // Both directions: stopping on hide without restarting on show froze the
+    // board for the rest of the session, because the intersection never
+    // changed and so the observer never fired again.
     const onVisibility = () => {
       if (document.hidden) stopLoop();
       else if (onScreen) startLoop();
     };
     document.addEventListener("visibilitychange", onVisibility);
-    const resize = new ResizeObserver(() => paint(0));
+    const resize = new ResizeObserver(() => paint(elapsed));
     resize.observe(host);
 
     return () => {
@@ -257,52 +240,74 @@ export function MomentumBoard({
     };
   }, [bands]);
 
-  const maxHeight = visibleRows * ROW_HEIGHT;
+  // The strip sits immediately after the rank so its offset is a constant the
+  // canvas can be positioned against; a variable `1fr` column before it would
+  // put the painted band and its column in different places at every width.
+  const grid =
+    "grid grid-cols-[2.25rem_minmax(0,1fr)_3.25rem_3.25rem_3.25rem_3.75rem] sm:grid-cols-[2.75rem_8.25rem_minmax(0,1fr)_3.75rem_3.75rem_3.75rem_4.5rem]";
+  const head =
+    "px-2 py-1.5 text-right font-mono text-[10px] tracking-[0.12em] text-muted-foreground/70 uppercase";
   return (
-    <div
-      ref={hostRef}
-      className="dither-fallback relative isolate overflow-hidden rounded-lg border border-border/60"
-      style={{ maxHeight: rows.length > visibleRows ? `${maxHeight}px` : undefined }}
-    >
-      <canvas
-        ref={canvasRef}
-        aria-hidden="true"
-        className="pointer-events-none absolute inset-0 -z-10 h-full w-full [image-rendering:pixelated]"
-      />
-      <ol className="relative divide-y divide-border/30">
-        {rows.map((row, index) => (
-          <li key={row.repo}>
-            <a
-              href={`/${row.repo}`}
-              className="group grid grid-cols-[3.5rem_1fr_auto] items-center gap-4 px-4 outline-none transition-colors duration-150 hover:bg-card/40 focus-visible:ring-2 focus-visible:ring-accent/30 sm:grid-cols-[4.5rem_1fr_auto_auto] sm:gap-6 sm:px-6"
-              style={{ height: `${ROW_HEIGHT}px` }}
-            >
-              <span
-                className={`font-mono tabular-nums ${
-                  index === 0
-                    ? "text-[26px] leading-none text-foreground"
-                    : "text-[15px] leading-none text-muted-foreground"
-                }`}
-              >
-                {row.rank}
-              </span>
-              <span className="min-w-0 truncate text-[15px] text-foreground sm:text-[17px]">
-                {row.repo}
-              </span>
-              <span className="text-right font-mono text-[13px] tabular-nums text-foreground sm:text-[15px]">
-                {extentBy === "stars"
-                  ? row.stars.toLocaleString()
-                  : `+${row.velocity.toLocaleString()}`}
-              </span>
-              <span className="hidden text-right font-mono text-[12px] tabular-nums text-muted-foreground sm:block">
-                {extentBy === "stars"
-                  ? `+${row.velocity.toLocaleString()}`
-                  : row.stars.toLocaleString()}
-              </span>
-            </a>
-          </li>
-        ))}
-      </ol>
+    <div className="relative">
+      <div className={`${grid} items-center border-b border-border`}>
+        <span className={`${head} text-left`}>#</span>
+        <span className={`${head} hidden text-left sm:block`}>Momentum</span>
+        <span className={`${head} text-left`}>Repository</span>
+        <span className={head}>+1d</span>
+        <span className={head}>+7d</span>
+        <span className={head}>+30d</span>
+        <span className={head}>Stars</span>
+      </div>
+      <div ref={hostRef} className="dither-fallback relative isolate">
+        <canvas
+          ref={canvasRef}
+          aria-hidden="true"
+          className="pointer-events-none absolute top-0 bottom-0 -z-10 hidden [image-rendering:pixelated] sm:block"
+          style={{ left: "2.75rem", width: `${STRIP_WIDTH}px` }}
+        />
+        <ol className="relative">
+          {rows.map((row, index) => {
+            const trend = trendOf(row);
+            return (
+              <li key={row.repo}>
+                <a
+                  href={`/${row.repo}`}
+                  className={`${grid} items-center border-b border-border/25 outline-none transition-colors duration-150 hover:bg-card/50 focus-visible:ring-2 focus-visible:ring-accent/30 focus-visible:ring-inset`}
+                  style={{ height: `${ROW_HEIGHT}px` }}
+                >
+                  <span className="px-2 font-mono text-[11px] tabular-nums text-muted-foreground">
+                    {index + 1}
+                  </span>
+                  <span className="hidden sm:block" aria-hidden="true" />
+                  <span className="flex min-w-0 items-center gap-1.5 px-2">
+                    <span
+                      aria-hidden="true"
+                      className="font-mono text-[9px] leading-none"
+                      style={{ color: `rgb(${TREND_FILL[trend].join(" ")})` }}
+                    >
+                      {TREND_MARK[trend]}
+                    </span>
+                    <span className="truncate text-[13px] text-foreground">{row.repo}</span>
+                    <span className="sr-only">, {TREND_LABEL[trend]}</span>
+                  </span>
+                  <span className="px-2 text-right font-mono text-[11px] tabular-nums text-foreground">
+                    {fmt(row.d1)}
+                  </span>
+                  <span className="px-2 text-right font-mono text-[11px] tabular-nums text-foreground">
+                    {fmt(row.d7)}
+                  </span>
+                  <span className="px-2 text-right font-mono text-[11px] tabular-nums text-muted-foreground">
+                    {fmt(row.d30)}
+                  </span>
+                  <span className="px-2 text-right font-mono text-[11px] tabular-nums text-muted-foreground">
+                    {nf.format(row.stars)}
+                  </span>
+                </a>
+              </li>
+            );
+          })}
+        </ol>
+      </div>
     </div>
   );
 }

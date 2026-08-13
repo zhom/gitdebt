@@ -245,12 +245,10 @@ function Scorecard({ health }: { health: RepoHealth }) {
         </div>
       </div>
 
-      <p className={cn(CAPTION, "mt-1.5")}>
-        Stars measure attention. Everything below is read from the commit
-        history instead.
-      </p>
-
-      <div className="mt-4 grid gap-x-6 gap-y-6 sm:grid-cols-2">
+      {/* No caption here. The section that mounts this card already states
+          what these readings are, and a second sentence saying it again is the
+          duplication the density pass removes. */}
+      <div className="mt-6 grid gap-x-12 gap-y-8 sm:grid-cols-2">
         {readings.map((reading) => (
           <section key={reading.key} className={PANEL_PADDED}>
             <div className="flex items-baseline justify-between gap-3">

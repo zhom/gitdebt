@@ -4,211 +4,99 @@ export const prerender = true;
 import "@/styles/globals.css";
 import BaseHead from "@/components/BaseHead.astro";
 import { AgentReadmePrompt } from "@/components/AgentReadmePrompt";
-import { ButtonLink } from "@/components/ButtonLink";
 import Seo from "@/components/Seo.astro";
 import SiteHeader from "@/components/SiteHeader.astro";
 import SiteFooter from "@/components/SiteFooter.astro";
-import { BadgeStudio } from "@/components/BadgeStudio";
-import { CopyButton } from "@/components/CopyButton";
-import { TOKEN_CLASS, tokenize } from "@/components/CodeBlock";
+import { EmbedCatalog } from "@/components/BadgeStudio";
+import { ReportLayerGraphic } from "@/components/ReportLayerGraphic";
 import {
   BODY,
   CAPTION,
   EYEBROW,
   HEADING,
-  PANEL,
-  TILE_DESC,
-  TILE_TITLE,
+  LEAD,
+  MEASURE,
   SECTION_ACTION,
   SECTION_HEADER,
   TITLE,
 } from "@/components/style-tokens";
-import { MEDIA_RENDER_REVISION } from "@/lib/media";
+import {
+  loadBuildRepoSnapshot,
+  type BuildAnalyzeResponse,
+} from "@/lib/build-repo-snapshot";
+import { provenanceReadmeBlock } from "@/lib/provenance-embed";
+import {
+  assetUrl,
+  profileEmbedAssets,
+  repoEmbedAssets,
+  EMBED_RULES,
+  QUERY_REFERENCE,
+  type EmbedFormat,
+} from "@/lib/readme-embeds";
 import { staticApiBase } from "@/lib/static-api-base";
 
 const apiBase = staticApiBase();
 
 const site = (Astro.site ?? new URL("https://gitdebt.com")).href.replace(/\/$/, "");
 
-const exampleOwner = "facebook";
-const exampleRepo = "react";
-const exampleSlug = `${exampleOwner}/${exampleRepo}`;
-const exampleLogin = "facebook";
+/** The target every asset points at until a visitor types their own. */
+const exampleSlug = "facebook/react";
+const exampleLogin = exampleSlug.split("/")[0];
 
-const repoLink = `https://gitdebt.com/${exampleSlug}?ref=readme`;
-const profileLink = `https://gitdebt.com/${exampleLogin}?ref=readme`;
+// One catalog, shared with the agent prompt and the Rust renderer behind
+// `/api/md`. The page counts what it renders instead of asserting a number.
+const repoAssets = repoEmbedAssets(exampleSlug);
+const profileAssets = profileEmbedAssets(exampleLogin);
+const allAssets = [...repoAssets, ...profileAssets];
+const healthCount = repoAssets.filter((asset) => asset.group === "health").length;
+const formatCount = new Set(allAssets.flatMap((asset) => asset.formats)).size;
 
-type Embed = {
-  id: string;
-  name: string;
-  desc: string;
-  /** Asset path under the API origin, without a query string. */
-  path: string;
-  link: string;
-  alt: string;
-  /** Only SVG assets have a light/dark pair worth previewing. */
-  themed?: boolean;
-  wide?: boolean;
+// The provenance-stated README block is composed from a real analyze payload,
+// so it can only be built for the default target. A failed or cold snapshot
+// classifies as "source not established", which renders a disabled action —
+// never a wrong claim, and never a failed build.
+let exampleSnapshot: BuildAnalyzeResponse | null = null;
+try {
+  exampleSnapshot = (await loadBuildRepoSnapshot(exampleSlug)).data;
+} catch {
+  exampleSnapshot = null;
+}
+const provenance = provenanceReadmeBlock({
+  apiBase,
+  siteOrigin: site,
+  slug: exampleSlug,
+  snapshot: exampleSnapshot,
+});
+
+/** The two rules people get wrong, quoted from the shared list, not retyped. */
+const PUBLISHED_RULES = EMBED_RULES.filter((rule) =>
+  /^(?:Do not add cache-busting|Alt text is not optional)/.test(rule),
+);
+
+/**
+ * The shared copy is written for a page and for a Markdown file, so it carries
+ * backticks. Rendering them as `<code>` keeps one source of truth.
+ */
+function segments(text: string): { code: boolean; text: string }[] {
+  return text
+    .split(/(`[^`]+`)/g)
+    .filter((part) => part.length > 0)
+    .map((part) =>
+      part.startsWith("`") && part.endsWith("`") && part.length > 2
+        ? { code: true, text: part.slice(1, -1) }
+        : { code: false, text: part },
+    );
+}
+
+const MIME: Record<EmbedFormat, string> = {
+  svg: "image/svg+xml",
+  png: "image/png",
+  webp: "image/webp",
+  gif: "image/gif",
 };
 
-/** URL a README would carry: no cache-busting, no attribution parameters. */
-function embedUrl(path: string, theme?: "light" | "dark"): string {
-  if (!theme) return `${apiBase}${path}`;
-  const separator = path.includes("?") ? "&" : "?";
-  return `${apiBase}${path}${separator}theme=${theme}`;
-}
-
-/** Same asset, plus the revision the site uses to stay off stale edge objects. */
-function previewUrl(path: string, theme?: "light" | "dark"): string {
-  const [pathname, query = ""] = path.split("?", 2);
-  const params = new URLSearchParams(query);
-  if (theme) params.set("theme", theme);
-  params.set("render", MEDIA_RENDER_REVISION);
-  return `${apiBase}${pathname}?${params.toString()}`;
-}
-
-function markdown(embed: Embed): string {
-  const url = embedUrl(embed.path, embed.themed ? "dark" : undefined);
-  return `[![${embed.alt}](${url})](${embed.link})`;
-}
-
-const media: Embed[] = [
-  {
-    id: "contributor-ready",
-    name: "Contributor readiness",
-    desc: "A factual checklist badge for project guides, contribution policy, tests, CI, templates, and security documentation. It is a signal, not an achievement.",
-    path: `/api/repos/${exampleSlug}/badge.svg?signal=contributor-ready`,
-    link: repoLink,
-    alt: `${exampleSlug} contributor readiness`,
-    themed: true,
-  },
-  {
-    id: "chart",
-    name: "Star history",
-    desc: "The full star curve, served from Postgres. Add from/to for a window or rebase=1 to start every series at zero.",
-    path: `/api/repos/${exampleSlug}/chart.svg`,
-    link: repoLink,
-    alt: `${exampleSlug} star history`,
-    themed: true,
-    wide: true,
-  },
-  {
-    id: "gif",
-    name: "Looping GIF",
-    desc: "The same curve as an animated GIF, for READMEs and sites that strip SVG motion.",
-    path: `/api/repos/${exampleSlug}/chart.gif`,
-    link: repoLink,
-    alt: `${exampleSlug} star history animation`,
-    wide: true,
-  },
-  {
-    id: "repo-card",
-    name: "Repository card",
-    desc: "Stars, forks, contributors, languages, and a 90-day sparkline in one compact panel.",
-    path: `/api/repos/${exampleSlug}/card.svg`,
-    link: repoLink,
-    alt: `${exampleSlug} repository statistics`,
-    themed: true,
-  },
-  {
-    id: "profile-card",
-    name: "Maintainer profile card",
-    desc: "Aggregate public-repository totals for an account, for a profile README.",
-    path: `/api/users/${exampleLogin}/card.svg`,
-    link: profileLink,
-    alt: `${exampleLogin} maintainer statistics`,
-    themed: true,
-  },
-  {
-    id: "og",
-    name: "Social preview",
-    desc: "A 1200x630 PNG for link unfurls on social platforms and chat apps.",
-    path: `/api/repos/${exampleSlug}/og.png`,
-    link: repoLink,
-    alt: `${exampleSlug} on gitdebt`,
-    wide: true,
-  },
-];
-
-const health: Embed[] = [
-  {
-    id: "heatmap",
-    name: "Commit calendar",
-    desc: "Daily commit density across the last year.",
-    path: `/api/repos/${exampleSlug}/stats/heatmap.svg`,
-    link: repoLink,
-    alt: `${exampleSlug} commit calendar`,
-    themed: true,
-    wide: true,
-  },
-  {
-    id: "contributors",
-    name: "Contributors",
-    desc: "Who is actually landing commits, ranked.",
-    path: `/api/repos/${exampleSlug}/stats/contributors.svg`,
-    link: repoLink,
-    alt: `${exampleSlug} contributors`,
-    themed: true,
-  },
-  {
-    id: "bus-factor",
-    name: "Bus factor",
-    desc: "How concentrated the commit history is in a few hands.",
-    path: `/api/repos/${exampleSlug}/stats/bus-factor.svg`,
-    link: repoLink,
-    alt: `${exampleSlug} bus factor`,
-    themed: true,
-  },
-  {
-    id: "commit-trend",
-    name: "Commit trend",
-    desc: "Commit volume over time, so a slowdown is visible.",
-    path: `/api/repos/${exampleSlug}/stats/commit-trend.svg`,
-    link: repoLink,
-    alt: `${exampleSlug} commit trend`,
-    themed: true,
-  },
-  {
-    id: "lines",
-    name: "Language activity",
-    desc: "Lines added and removed per language.",
-    path: `/api/repos/${exampleSlug}/stats/lines.svg`,
-    link: repoLink,
-    alt: `${exampleSlug} language activity`,
-    themed: true,
-  },
-  {
-    id: "top-files",
-    name: "File change frequency",
-    desc: "Files touched by the most analyzed commits.",
-    path: `/api/repos/${exampleSlug}/stats/top-files.svg`,
-    link: repoLink,
-    alt: `${exampleSlug} file change frequency`,
-    themed: true,
-  },
-  {
-    id: "bug-magnets",
-    name: "Fix-labelled changes",
-    desc: "Files most often touched by commits whose message matches the fix heuristic.",
-    path: `/api/repos/${exampleSlug}/stats/bug-magnets.svg`,
-    link: repoLink,
-    alt: `${exampleSlug} fix-labelled changes`,
-    themed: true,
-  },
-  {
-    id: "todo-trend",
-    name: "Recent TODO/FIXME movement",
-    desc: "Recent marker movement inside the analyzed commit window.",
-    path: `/api/repos/${exampleSlug}/stats/todo-trend.svg`,
-    link: repoLink,
-    alt: `${exampleSlug} recent TODO/FIXME movement`,
-    themed: true,
-  },
-];
-
 const title = "GitHub README badges and embeds · gitdebt";
-const description =
-  "Embed live GitHub data in a README: a stars, forks, and downloads badge, the star-history chart and GIF, repository and profile cards, a social preview, and eight repository-health charts.";
+const description = `Point ${allAssets.length} README embeds at your repository: metrics and signal badges, the star-history chart, repository and maintainer cards, and ${healthCount} health charts.`;
 const ogImage = `${apiBase}/api/og.png`;
 
 const jsonLd = [
@@ -225,18 +113,40 @@ const jsonLd = [
       name: "gitdebt",
       url: site,
     },
+    // Generated from the same arrays that render the grids, so the markup
+    // cannot describe an asset the page does not show.
     mainEntity: {
-      "@type": "WebApplication",
-      name: "gitdebt README badge builder",
-      applicationCategory: "DeveloperApplication",
-      operatingSystem: "Web",
-      url: `${site}/badges`,
-      isAccessibleForFree: true,
-      offers: {
-        "@type": "Offer",
-        price: 0,
-        priceCurrency: "USD",
-      },
+      "@type": "ItemList",
+      "@id": `${site}/badges#embeds`,
+      name: "gitdebt README embeds",
+      numberOfItems: allAssets.length,
+      itemListElement: allAssets.map((asset, index) => ({
+        "@type": "ListItem",
+        position: index + 1,
+        item: {
+          "@type": "ImageObject",
+          name: asset.name,
+          description: asset.purpose,
+          contentUrl: assetUrl(apiBase, asset),
+          encodingFormat: MIME[asset.formats[0]],
+          isAccessibleForFree: true,
+        },
+      })),
+    },
+  },
+  {
+    "@context": "https://schema.org",
+    "@type": "WebApplication",
+    "@id": `${site}/badges#builder`,
+    name: "gitdebt README badge builder",
+    applicationCategory: "DeveloperApplication",
+    operatingSystem: "Web",
+    url: `${site}/badges`,
+    isAccessibleForFree: true,
+    offers: {
+      "@type": "Offer",
+      price: 0,
+      priceCurrency: "USD",
     },
   },
   {
@@ -280,7 +190,7 @@ const jsonLd = [
     <div class="isolate flex min-h-dvh flex-col">
       <SiteHeader />
 
-      <main id="main-content" class="mx-auto w-full max-w-5xl flex-1 px-6 py-12">
+      <main id="main-content" class="mx-auto w-full max-w-6xl flex-1 px-6 py-12">
         <nav aria-label="Breadcrumb" class="font-mono text-[11px] text-muted-foreground">
           <a
             href="/"
@@ -291,220 +201,119 @@ const jsonLd = [
           <span class="text-foreground">badges</span>
         </nav>
 
-        <header class="mt-8 max-w-3xl">
+        <header class="mt-8">
           <h1 class={TITLE}>Everything you can embed in a README</h1>
-          <p class:list={["mt-3 max-w-[62ch] text-[15px]", BODY]}>
-            One metrics badge, the star-history chart as SVG or GIF, repository
-            and maintainer cards, a social preview, and eight
-            repository-health charts. Every asset is a plain image URL served
-            from gitdebt's own database.
+          <p class:list={["mt-3", LEAD, BODY]}>
+            Badges, the star-history chart, repository and maintainer cards, a
+            social preview, and {healthCount} repository-health charts. Every asset
+            is a plain image URL served from gitdebt's own database. Point them
+            at your repository below and copy what you need.
           </p>
           <p class:list={["mt-3 font-mono", CAPTION]}>
-            Free · open source · no account required · static README output
+            {allAssets.length} assets · {formatCount} formats · light and dark · no
+            account or token
           </p>
         </header>
 
-        <section aria-labelledby="studio-title" class="mt-12">
-          <div class={SECTION_HEADER}>
-            <h2 id="studio-title" class={HEADING}>Metrics badge</h2>
-            <p class={CAPTION}>interactive</p>
-          </div>
-          <p class:list={["mt-2 max-w-[68ch]", BODY]}>
-            Stars, forks, and package downloads in one compact chip. Pick the
-            metrics and the theme, then copy Markdown or theme-aware HTML.
-            The example below is ready immediately; a repository report opens
-            the same controls with its own owner and name.
-          </p>
+        <EmbedCatalog
+          client:load
+          apiBase={apiBase}
+          siteOrigin={site}
+          defaultSlug={exampleSlug}
+          defaultProvenance={provenance?.snippet ?? null}
+        />
 
-          <div class="mt-6">
-            <BadgeStudio
-              client:load
-              owner={exampleOwner}
-              repo={exampleRepo}
-              apiBase={apiBase}
-            />
-          </div>
-          <noscript>
-            <p class:list={["mt-4", BODY]}>
-              Enable JavaScript to configure and copy a badge. Published
-              badges remain static assets and do not require JavaScript.
-            </p>
-          </noscript>
-        </section>
+        <noscript>
+          <p class:list={["mt-6", BODY, MEASURE]}>
+            Without JavaScript the catalog stays pointed at {exampleSlug} and the
+            copy buttons are inert. Every snippet is still printed in full, and a
+            published embed never needs JavaScript.
+          </p>
+        </noscript>
 
         <section
-          aria-labelledby="media-title"
+          id="reference"
+          aria-labelledby="reference-title"
           class="mt-16 scroll-mt-24 border-t border-border/60 pt-12"
         >
-          <div class={SECTION_HEADER}>
-            <h2 id="media-title" class={HEADING}>Charts, cards, and previews</h2>
-            <p class={CAPTION}>{exampleSlug}</p>
+          <div class="flex items-end justify-between gap-6">
+            <div class="min-w-0">
+              <h2 id="reference-title" class={HEADING}>URL reference</h2>
+              <p class:list={[CAPTION, "mt-1"]}>
+                {QUERY_REFERENCE.length} parameters
+              </p>
+            </div>
+            <figure aria-hidden="true" class="hidden shrink-0 sm:block">
+              <div class="flex h-24 items-center overflow-hidden opacity-80">
+                <ReportLayerGraphic client:visible kind="readme" />
+              </div>
+              <figcaption class:list={[CAPTION, "mt-1 text-right"]}>
+                Illustrative — no repository values
+              </figcaption>
+            </figure>
           </div>
-          <p class:list={["mt-2 max-w-[68ch]", BODY]}>
-            Live assets for {exampleSlug}. Each snippet is Markdown for the
-            dark asset; swap <code class="font-mono text-foreground"
-              >theme=light</code
-            > for the light one, or use the HTML <code
-              class="font-mono text-foreground">&lt;picture&gt;</code
-            > form to publish both.
+
+          <p class:list={["mt-6", BODY, MEASURE]}>
+            Swap the owner and name in any URL; nothing else changes.
           </p>
 
-          <div class="mt-8 grid gap-6 sm:grid-cols-2">
-            {
-              media.map((embed) => (
-                <figure
-                  class:list={[
-                    PANEL,
-                    "flex flex-col overflow-hidden",
-                    embed.wide && "sm:col-span-2",
-                  ]}
-                >
-                  <figcaption class="border-b border-border/40 px-4 py-3">
-                    <p class="text-[13px] text-foreground">{embed.name}</p>
-                    <p class:list={[CAPTION, "mt-1 max-w-[62ch]"]}>
-                      {embed.desc}
-                    </p>
-                  </figcaption>
+          <div class="mt-6 overflow-x-auto">
+            <table class="w-full min-w-[42rem] border-collapse text-left">
+              <caption class="sr-only">
+                Query parameters that change what an asset renders
+              </caption>
+              <thead>
+                <tr class="border-b border-border/60">
+                  <th scope="col" class:list={[EYEBROW, "py-2 pr-6"]}>
+                    Parameter
+                  </th>
+                  <th scope="col" class:list={[EYEBROW, "py-2 pr-6"]}>
+                    Applies to
+                  </th>
+                  <th scope="col" class:list={[EYEBROW, "py-2"]}>Effect</th>
+                </tr>
+              </thead>
+              <tbody>
+                {
+                  QUERY_REFERENCE.map((row) => (
+                    <tr class="border-b border-border/40">
+                      <td class="py-3 pr-6 align-top font-mono text-[12px] text-foreground">
+                        {row.param}
+                      </td>
+                      <td class:list={[CAPTION, "py-3 pr-6 align-top"]}>
+                        {row.applies}
+                      </td>
+                      <td class:list={[BODY, "py-3 align-top"]}>
+                        {segments(row.effect).map((part) =>
+                          part.code ? (
+                            <code class="font-mono text-foreground">{part.text}</code>
+                          ) : (
+                            part.text
+                          ),
+                        )}
+                      </td>
+                    </tr>
+                  ))
+                }
+              </tbody>
+            </table>
+          </div>
 
-                  <div class="flex flex-1 items-center justify-center bg-card/40 px-4 py-6">
-                    {embed.themed ? (
-                      <picture>
-                        <source
-                          media="(prefers-color-scheme: dark)"
-                          srcset={previewUrl(embed.path, "dark")}
-                        />
-                        <img
-                          src={previewUrl(embed.path, "light")}
-                          alt={embed.alt}
-                          loading="lazy"
-                          decoding="async"
-                          class="block h-auto max-w-full"
-                        />
-                      </picture>
+          <ul role="list" class="mt-8 grid gap-x-12 gap-y-8 sm:grid-cols-2">
+            {
+              PUBLISHED_RULES.map((rule) => (
+                <li class:list={[BODY, MEASURE]}>
+                  {segments(rule).map((part) =>
+                    part.code ? (
+                      <code class="font-mono text-foreground">{part.text}</code>
                     ) : (
-                      <img
-                        src={previewUrl(embed.path)}
-                        alt={embed.alt}
-                        loading="lazy"
-                        decoding="async"
-                        class="block h-auto max-w-full"
-                      />
-                    )}
-                  </div>
-
-                  <div class="relative border-t border-border/40">
-                    <pre class="overflow-x-auto px-4 py-4 pr-24 font-mono text-[12px] leading-relaxed"><code>{tokenize(markdown(embed), "markdown").map((token) => (<span class={TOKEN_CLASS[token.kind]}>{token.text}</span>))}</code></pre>
-                    <CopyButton
-                      client:visible
-                      value={markdown(embed)}
-                      ariaLabel={`Copy the ${embed.name} embed snippet`}
-                      className="absolute top-3 right-3 backdrop-blur"
-                    />
-                  </div>
-                </figure>
+                      part.text
+                    ),
+                  )}
+                </li>
               ))
             }
-          </div>
-        </section>
-
-        <section
-          aria-labelledby="health-title"
-          class="mt-16 scroll-mt-24 border-t border-border/60 pt-12"
-        >
-          <div class={SECTION_HEADER}>
-            <h2 id="health-title" class={HEADING}>Repository-health charts</h2>
-            <p class={CAPTION}>eight assets</p>
-          </div>
-          <p class:list={["mt-2 max-w-[68ch]", BODY]}>
-            Calculated from the public Git history, cached, and served as
-            images. A repository that has never been analyzed renders a
-            placeholder and queues the work instead of blocking the request.
-          </p>
-
-          <div class="mt-8 grid gap-6 sm:grid-cols-2">
-            {
-              health.map((embed) => (
-                <figure
-                  class:list={[
-                    PANEL,
-                    "flex flex-col overflow-hidden",
-                    embed.wide && "sm:col-span-2",
-                  ]}
-                >
-                  <figcaption class="border-b border-border/40 px-4 py-3">
-                    <p class="text-[13px] text-foreground">{embed.name}</p>
-                    <p class:list={[CAPTION, "mt-1 max-w-[62ch]"]}>
-                      {embed.desc}
-                    </p>
-                  </figcaption>
-
-                  <div class="flex flex-1 items-center justify-center bg-card/40 px-4 py-6">
-                    <picture>
-                      <source
-                        media="(prefers-color-scheme: dark)"
-                        srcset={previewUrl(embed.path, "dark")}
-                      />
-                      <img
-                        src={previewUrl(embed.path, "light")}
-                        alt={embed.alt}
-                        loading="lazy"
-                        decoding="async"
-                        class="block h-auto max-w-full"
-                      />
-                    </picture>
-                  </div>
-
-                  <div class="relative border-t border-border/40">
-                    <pre class="overflow-x-auto px-4 py-4 pr-24 font-mono text-[12px] leading-relaxed"><code>{tokenize(markdown(embed), "markdown").map((token) => (<span class={TOKEN_CLASS[token.kind]}>{token.text}</span>))}</code></pre>
-                    <CopyButton
-                      client:visible
-                      value={markdown(embed)}
-                      ariaLabel={`Copy the ${embed.name} embed snippet`}
-                      className="absolute top-3 right-3 backdrop-blur"
-                    />
-                  </div>
-                </figure>
-              ))
-            }
-          </div>
-        </section>
-
-        <section
-          aria-labelledby="badge-workflow-title"
-          class="mt-16 scroll-mt-24 border-t border-border/60 pt-12"
-        >
-          <div class={SECTION_HEADER}>
-            <h2 id="badge-workflow-title" class={HEADING}>
-              How the embeds work
-            </h2>
-          </div>
-          <div class="mt-8 grid gap-x-12 gap-y-10 sm:grid-cols-3">
-            {
-              [
-                {
-                  step: "01",
-                  title: "Point at a repository",
-                  body: "Swap the owner and name in any URL above. Nothing else needs to change, and no account or token is involved.",
-                },
-                {
-                  step: "02",
-                  title: "Pick a theme",
-                  body: "Colors are baked per asset because GitHub renders README images against your OS preference, not the page. Publish both with a picture element.",
-                },
-                {
-                  step: "03",
-                  title: "Paste the snippet",
-                  body: "The image URL stays plain and cacheable; only the surrounding link carries README attribution.",
-                },
-              ].map(({ step, title, body }) => (
-                <article>
-                  <p class={EYEBROW}>{step}</p>
-                  <h3 class={TILE_TITLE}>{title}</h3>
-                  <p class={TILE_DESC}>{body}</p>
-                </article>
-              ))
-            }
-          </div>
+          </ul>
         </section>
 
         <section
@@ -523,7 +332,7 @@ const jsonLd = [
               >
             </a>
           </div>
-          <p class:list={["mt-2 max-w-[68ch]", BODY]}>
+          <p class:list={["mt-6", BODY, MEASURE]}>
             This prompt resolves your repository from its git remote, then adds
             the badge, the star-history chart, and the health charts that fit —
             replacing an existing star-history widget in place rather than
@@ -536,28 +345,6 @@ const jsonLd = [
               siteOrigin={site}
               target={{ kind: "generic" }}
             />
-          </div>
-        </section>
-
-        <section class="mt-16 scroll-mt-24 border-t border-border/60 pt-12">
-          <div class={SECTION_HEADER}>
-            <h2 class={HEADING}>Build these for your repository</h2>
-          </div>
-          <p class:list={["mt-2 max-w-[64ch]", BODY]}>
-            Open a repository report to get every asset above wired to that
-            project, with the badge studio and embed menus already pointed at
-            it, plus a prompt carrying that project's measured numbers.
-          </p>
-          <div class="mt-6">
-            <ButtonLink
-              client:visible
-              href={`/${exampleSlug}`}
-              variant="outline"
-              size="lg"
-              pulse
-            >
-              View {exampleSlug}
-            </ButtonLink>
           </div>
         </section>
       </main>

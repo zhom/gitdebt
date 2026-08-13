@@ -6,59 +6,191 @@ import BaseHead from "@/components/BaseHead.astro";
 import Seo from "@/components/Seo.astro";
 import SiteHeader from "@/components/SiteHeader.astro";
 import SiteFooter from "@/components/SiteFooter.astro";
+import { DitherField } from "@/components/DitherField";
+import { ReportLayerGraphic } from "@/components/ReportLayerGraphic";
+import { SeriesProvenance } from "@/components/SeriesProvenance";
 import {
   BODY,
+  CAPTION,
+  EYEBROW,
   HEADING,
+  LEAD,
+  MEASURE,
   SECTION_HEADER,
   TITLE,
 } from "@/components/style-tokens";
+import { CATEGORIES } from "@/data/categories";
 import { staticApiBase } from "@/lib/static-api-base";
 
 const apiBase = staticApiBase();
+const site = (Astro.site ?? new URL("https://gitdebt.com")).href.replace(
+  /\/$/,
+  "",
+);
 
 const title = "About & methodology · gitdebt";
 const description =
-  "How gitdebt builds GitHub star-history charts and computes change frequency, fix-labelled changes, contributors, and recent TODO/FIXME movement.";
+  "How gitdebt builds GitHub star-history charts, which of the two sources produced a given series, and what its git-history health signals do and do not claim.";
 const ogImage = `${apiBase}/api/og.png`;
 
-const stats = [
+/**
+ * Every term links to the report section that demonstrates it. The slugs are
+ * the first member of each curated category, which `build-catalog` always
+ * seeds into the published catalog, so none of these links can point at a
+ * page the build did not emit.
+ */
+const demoSlugs = CATEGORIES.map((category) => category.repos[0]).filter(
+  (slug): slug is string => typeof slug === "string" && slug.length > 0,
+);
+
+type Signal = {
+  term: string;
+  desc: string;
+  /** Section of a repository report that renders this signal. */
+  anchor: "" | "#stats" | "#readme";
+};
+
+type SignalGroup = {
+  label: string;
+  graphic: "stars" | "health" | "readme";
+  signals: Signal[];
+};
+
+const groups: SignalGroup[] = [
   {
-    term: "Star history",
-    desc: "We keep only the timestamp of each public star and plot the cumulative count over time. You can view it against calendar dates or aligned to days-since-first-star to compare growth shapes. Several repos can be overlaid on shared axes, and the chart embeds in a README.",
+    label: "Star history",
+    graphic: "stars",
+    signals: [
+      {
+        term: "Star history",
+        desc: "One point per star, plotted as a cumulative count over time. Read it against calendar dates or aligned to days-since-first-star to compare growth shapes, overlay several repositories on shared axes, and embed the result in a README.",
+        anchor: "",
+      },
+    ],
   },
   {
-    term: "Fix-labelled changes",
-    desc: "We count how often each file appears in commits whose message matches a fix heuristic. This describes fix-labelled history; it does not prove a bug or measure code quality.",
+    label: "Read from the git history",
+    graphic: "health",
+    signals: [
+      {
+        term: "Commit trend",
+        desc: "Monthly commit volume across the analyzed history, so a slowdown shows up as a shape rather than an impression.",
+        anchor: "#stats",
+      },
+      {
+        term: "Commit heatmap",
+        desc: "The last 52 weeks of commit activity, bucketed by day, to show how steadily — or sporadically — the project moves.",
+        anchor: "#stats",
+      },
+      {
+        term: "File change frequency",
+        desc: "A straight count of how many analyzed commits touched each file. It identifies frequently revisited files without claiming those changes were unstable or defective.",
+        anchor: "#stats",
+      },
+      {
+        term: "Fix-labelled changes",
+        desc: "How often each file appears in commits whose message matches a fix heuristic. This describes fix-labelled history; it does not prove a bug or measure code quality.",
+        anchor: "#stats",
+      },
+      {
+        term: "Contributors",
+        desc: "Everyone who has authored commits, aggregated from the git log so it reflects actual shipped code rather than profile metadata.",
+        anchor: "#stats",
+      },
+      {
+        term: "Ownership concentration",
+        desc: "How few contributors it takes to write half the commits. It shows where knowledge has pooled in a codebase; it is not a judgement about any person.",
+        anchor: "#stats",
+      },
+      {
+        term: "Language lines",
+        desc: "A per-language lines-of-code breakdown of the current HEAD, measured with tokei over a materialized checkout — so you can see where the codebase's mass sits.",
+        anchor: "#stats",
+      },
+      {
+        term: "Recent TODO / FIXME movement",
+        desc: "The recent running movement of TODO, FIXME, and similar source markers inside the analyzed commit window. It is a directional maintenance signal, not a complete backlog.",
+        anchor: "#stats",
+      },
+    ],
   },
   {
-    term: "File change frequency",
-    desc: "A straight count of how many analyzed commits touched each file. It identifies frequently revisited files without claiming those changes were unstable or defective.",
-  },
-  {
-    term: "Contributors",
-    desc: "Everyone who has authored commits, aggregated from the git log so it reflects actual shipped code rather than profile metadata.",
-  },
-  {
-    term: "Language lines",
-    desc: "A per-language lines-of-code breakdown of the current HEAD, measured with tokei over a materialized checkout — so you can see where the codebase's mass sits.",
-  },
-  {
-    term: "Commit heatmap",
-    desc: "The last 52 weeks of commit activity, bucketed by day, to show how steadily (or sporadically) the project moves.",
-  },
-  {
-    term: "Recent TODO / FIXME movement",
-    desc: "The recent running movement of TODO, FIXME, and similar source markers inside the analyzed commit window. It is a directional maintenance signal, not a complete backlog.",
+    label: "Published as an embed",
+    graphic: "readme",
+    signals: [
+      {
+        term: "README embeds",
+        desc: "Every chart above also renders as a static image for a README — SVG, PNG and WebP, with light and dark variants where the theme matters. The URL takes the repository slug and nothing else.",
+        anchor: "#readme",
+      },
+    ],
   },
 ];
 
-const jsonLd = {
-  "@context": "https://schema.org",
-  "@type": "AboutPage",
-  name: "About gitdebt",
-  url: `${(Astro.site ?? new URL("https://gitdebt.com")).href.replace(/\/$/, "")}/about`,
-  description,
-};
+let cursor = 0;
+const signalGroups = groups.map((group) => ({
+  ...group,
+  signals: group.signals.map((signal) => {
+    const slug = demoSlugs[cursor++ % demoSlugs.length];
+    return { ...signal, slug, href: `/${slug}${signal.anchor}` };
+  }),
+}));
+const allSignals = signalGroups.flatMap((group) => group.signals);
+
+const canonical = `${site}/about`;
+const termSetId = `${canonical}#signals`;
+
+const jsonLd: Record<string, unknown>[] = [
+  {
+    "@context": "https://schema.org",
+    "@type": "AboutPage",
+    "@id": `${canonical}#page`,
+    name: "About gitdebt",
+    url: canonical,
+    description,
+    mainEntity: { "@id": termSetId },
+  },
+  {
+    "@context": "https://schema.org",
+    "@type": "BreadcrumbList",
+    itemListElement: [
+      { "@type": "ListItem", position: 1, name: "gitdebt", item: `${site}/` },
+      { "@type": "ListItem", position: 2, name: "About", item: canonical },
+    ],
+  },
+  {
+    "@context": "https://schema.org",
+    "@type": "DefinedTermSet",
+    "@id": termSetId,
+    name: "What gitdebt computes",
+    url: canonical,
+    hasDefinedTerm: allSignals.map((signal) => ({
+      "@type": "DefinedTerm",
+      name: signal.term,
+      description: signal.desc,
+      inDefinedTermSet: { "@id": termSetId },
+      url: `${site}${signal.href}`,
+    })),
+  },
+];
+
+const linkClass =
+  "rounded font-mono text-[11px] text-muted-foreground underline decoration-border underline-offset-4 outline-none transition-colors duration-150 hover:text-foreground hover:decoration-foreground/60 focus-visible:ring-2 focus-visible:ring-accent/30";
+
+const access = [
+  {
+    term: "Cold vs cached",
+    desc: "The first request for a repository is cold: star history starts in the background while a shallow clone is analyzed for the health charts. The report shows a measured live ETA, then fills each finished section on its own — no reload needed. After that, results are cached and served from the edge, so repeat views are near-instant. Popular repos refresh more often, and our browser extension reports the repos people are actively viewing so their data stays current. Very large histories build in durable windows and appear only after the complete snapshot is stored.",
+  },
+  {
+    term: "What gitdebt does not do",
+    desc: "gitdebt does not flag stars as fake, real, or suspicious, and it doesn't score individual accounts. That can't be done correctly without privileged access to GitHub's full dataset, so we don't pretend to. A star series stores the timestamp of each star plus the opaque event id needed to avoid counting one twice — never an actor, a stargazer profile, or an event payload.",
+  },
+  {
+    term: "Sign-in is optional",
+    desc: "Every public repository report works without an account. GitHub sign-in adds a one-click shortcut to your profile-wide aggregate report and queues your own public repositories for analysis; it does not unlock private repository analysis or request write access.",
+  },
+];
 ---
 
 <!doctype html>
@@ -88,13 +220,20 @@ const jsonLd = {
           <span class="text-foreground">about</span>
         </nav>
 
-        <header class="mt-8">
+        <header class="relative isolate -mx-6 mt-6 overflow-hidden px-6 py-6">
+          <DitherField
+            client:idle
+            render="static"
+            opacity={0.14}
+            vignette={0.7}
+            colors={["#12161f", "#1d2b45"]}
+          />
           <h1 class={TITLE}>How gitdebt works</h1>
-          <p class:list={["mt-3 max-w-[62ch] text-[15px]", BODY]}>
-            gitdebt charts the star history of any public GitHub repository
-            and pairs it with health signals read from the git history itself:
-            change frequency, fix-labelled changes, contributors, and recent
-            TODO/FIXME movement.
+          <p class:list={["mt-3", LEAD, BODY]}>
+            gitdebt charts the star history of any public GitHub repository and
+            pairs it with health signals read from the git history itself:
+            commit cadence, change frequency, ownership concentration, and
+            recent TODO/FIXME movement.
           </p>
         </header>
 
@@ -102,64 +241,62 @@ const jsonLd = {
           <div class={SECTION_HEADER}>
             <h2 class={HEADING}>What we compute</h2>
           </div>
-          <p class:list={["mt-2 max-w-[68ch]", BODY]}>
-            Star history comes from GitHub's API; the repo-debt stats come from
-            a shallow git clone analyzed on our side. Each signal is a pure,
-            unit-tested function over that data.
+          <p class:list={["mt-6", MEASURE, BODY]}>
+            The health signals come from a shallow git clone analyzed on our
+            side, and each one is a pure, unit-tested function over that data.
+            Star history is different: it is read either from GitHub's
+            stargazer list or rebuilt from public GH Archive star events, and
+            every report names the source that produced its chart.
           </p>
+
+          {
+            signalGroups.map((group, index) => (
+              <div
+                class:list={[
+                  "mt-8",
+                  index > 0 && "border-t border-border/40 pt-8",
+                ]}
+              >
+                <h3 class={EYEBROW}>{group.label}</h3>
+                <div class="mt-6 flex h-24 items-center overflow-hidden opacity-80">
+                  <ReportLayerGraphic client:visible kind={group.graphic} />
+                </div>
+                <p class={CAPTION}>Illustrative — no repository values</p>
+                <dl class="mt-8 grid gap-x-12 gap-y-8 sm:grid-cols-2">
+                  {group.signals.map((signal) => (
+                    <div>
+                      <dt class="text-[13px] text-foreground/90">
+                        {signal.term}
+                      </dt>
+                      <dd class:list={["mt-1.5", MEASURE, BODY]}>
+                        {signal.desc}{" "}
+                        <a href={signal.href} class={linkClass}>
+                          See it on {signal.slug}
+                        </a>
+                      </dd>
+                    </div>
+                  ))}
+                </dl>
+              </div>
+            ))
+          }
+        </section>
+
+        <section class="mt-16 scroll-mt-24 border-t border-border/60 pt-12">
+          <div class={SECTION_HEADER}>
+            <h2 class={HEADING}>Freshness, limits, and access</h2>
+          </div>
           <dl class="mt-8 grid gap-x-12 gap-y-8 sm:grid-cols-2">
             {
-              stats.map((item) => (
+              access.map((item) => (
                 <div>
                   <dt class="text-[13px] text-foreground/90">{item.term}</dt>
-                  <dd class:list={["mt-1.5 max-w-[52ch]", BODY]}>{item.desc}</dd>
+                  <dd class:list={["mt-1.5", MEASURE, BODY]}>{item.desc}</dd>
                 </div>
               ))
             }
           </dl>
-        </section>
-
-        <section class="mt-16 scroll-mt-24 border-t border-border/60 pt-12">
-          <div class={SECTION_HEADER}>
-            <h2 class={HEADING}>Freshness &amp; caching</h2>
-          </div>
-          <p class:list={["mt-2 max-w-[68ch]", BODY]}>
-            The first time a repo is requested it's cold: star history starts
-            in the background while the git clone is analyzed for repo-health
-            charts. The report shows a measured live ETA, then fills each
-            finished section on its own—no reload needed.
-          </p>
-          <p class:list={["mt-3 max-w-[68ch]", BODY]}>
-            Once analyzed, results are cached and served from the edge, so
-            repeat views are near-instant. Popular repos refresh more often;
-            our browser extension reports the repos people are actively viewing
-            so their data stays current. Very large histories build in durable
-            windows and appear only after the complete snapshot is stored.
-          </p>
-        </section>
-
-        <section class="mt-16 scroll-mt-24 border-t border-border/60 pt-12">
-          <div class={SECTION_HEADER}>
-            <h2 class={HEADING}>What gitdebt does not do</h2>
-          </div>
-          <p class:list={["mt-2 max-w-[68ch]", BODY]}>
-            gitdebt does not flag stars as fake, real, or suspicious, and it
-            doesn't score individual accounts. That can't be done correctly
-            without privileged access to GitHub's full dataset, so we don't
-            pretend to. For star history we only ever use stargazer timestamps.
-          </p>
-        </section>
-
-        <section class="mt-16 scroll-mt-24 border-t border-border/60 pt-12">
-          <div class={SECTION_HEADER}>
-            <h2 class={HEADING}>Sign-in is optional</h2>
-          </div>
-          <p class:list={["mt-2 max-w-[68ch]", BODY]}>
-            Every public repository report works without an account. GitHub
-            sign-in currently adds a one-click shortcut to your profile-wide
-            aggregate report; it does not unlock private repository analysis or
-            request write access.
-          </p>
+          <SeriesProvenance client:visible variant="explainer" className="mt-8" />
         </section>
       </main>
 

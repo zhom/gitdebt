@@ -1,4 +1,4 @@
-import { useEffect, useRef, useState } from "react";
+import { useEffect, useMemo, useRef, useState } from "react";
 import {
   animate,
   motion,
@@ -11,9 +11,11 @@ import { ExternalLink, Loader2 } from "lucide-react";
 import { BalancedText } from "@/components/BalancedText";
 import { ButtonLink } from "@/components/ButtonLink";
 import { DitherMeter } from "@/components/DitherMeter";
+import { SeriesProvenance } from "@/components/SeriesProvenance";
 import { StatStrip } from "@/components/StatStrip";
-import { BODY, CAPTION, EYEBROW, HEADING, PANEL, TITLE } from "@/components/style-tokens";
+import { BODY, CAPTION, PANEL, TITLE } from "@/components/style-tokens";
 import { BRAND } from "@/lib/dither";
+import { historyFreshness, noticeText } from "@/lib/history-freshness";
 import { DURATION, EASE_OUT } from "@/lib/motion";
 import { formatCountdown, useLiveCountdown } from "@/lib/live-eta";
 import { cn } from "@/lib/utils";
@@ -21,7 +23,22 @@ import { cn } from "@/lib/utils";
 export type StarPoint = { date: string; stars: number };
 export type HistoryKind =
   "current_stargazers" | "public_star_actions" | "unavailable";
-export type HistoryStatus = "ready" | "queued" | "retrying" | "not_public";
+/**
+ * `restricted` is a real terminal value the analyzer emits: GitHub serves the
+ * repository's stargazer list only to its own admins and collaborators, so
+ * there is nothing left to attempt. It was missing from this union, which is
+ * why the report used to poll a no-store endpoint forever and offer a retry
+ * that was never scheduled.
+ */
+const HISTORY_STATUSES = [
+  "ready",
+  "queued",
+  "retrying",
+  "restricted",
+  "not_public",
+] as const;
+
+export type HistoryStatus = (typeof HISTORY_STATUSES)[number];
 
 export type AnalyzeResponse = {
   repo: string;
@@ -41,6 +58,28 @@ export type AnalyzeResponse = {
   not_found?: boolean;
   history: StarPoint[];
 };
+
+/**
+ * The payload as it actually arrives — from `fetch` at runtime or from a
+ * build-time snapshot. `history_status` is whatever string the backend sent,
+ * including a value this build has never heard of, so it is narrowed at the
+ * boundary rather than asserted. An unrecognised status classifies as absent,
+ * which is the same non-committal reading `historyFreshness()` gives it.
+ */
+export type AnalyzePayload = Omit<AnalyzeResponse, "history_status"> & {
+  history_status?: string;
+};
+
+function asHistoryStatus(value: string | undefined): HistoryStatus | undefined {
+  return HISTORY_STATUSES.find((status) => status === value);
+}
+
+function normalizeAnalyze(payload: AnalyzePayload): AnalyzeResponse;
+function normalizeAnalyze(payload: AnalyzePayload | null): AnalyzeResponse | null;
+function normalizeAnalyze(payload: AnalyzePayload | null): AnalyzeResponse | null {
+  if (!payload) return null;
+  return { ...payload, history_status: asHistoryStatus(payload.history_status) };
+}
 
 type ProgressPhase =
   | "idle"
@@ -82,7 +121,7 @@ type Props = {
   owner: string;
   repo: string;
   apiBase: string;
-  initialData: AnalyzeResponse | null;
+  initialData: AnalyzePayload | null;
 };
 
 const POLL_MS = 20_000;
@@ -93,7 +132,15 @@ const HERO_BLURB =
   "Star momentum, maintenance concentration, contributor health, and codebase change — one report built from public repository data.";
 
 function needsPolling(data: AnalyzeResponse): boolean {
-  if (data.not_found || data.history_status === "not_public") return false;
+  // Terminal states. Polling them is a request stream that can never change
+  // its own answer.
+  if (
+    data.not_found ||
+    data.history_status === "not_public" ||
+    data.history_status === "restricted"
+  ) {
+    return false;
+  }
   return (
     data.pending === true ||
     data.backfilling === true ||
@@ -131,8 +178,9 @@ function isArchiveHistory(data: AnalyzeResponse | null): boolean {
 }
 
 export function RepoHero({ owner, repo, apiBase, initialData }: Props) {
-  const [data, setData] = useState<AnalyzeResponse | null>(initialData);
-  const [loading, setLoading] = useState(!initialData);
+  const seed = useMemo(() => normalizeAnalyze(initialData), [initialData]);
+  const [data, setData] = useState<AnalyzeResponse | null>(seed);
+  const [loading, setLoading] = useState(!seed);
   const [progress, setProgress] = useState<RepoProgress | null>(null);
   const [liveProgress, setLiveProgress] = useState(false);
 
@@ -156,7 +204,7 @@ export function RepoHero({ owner, repo, apiBase, initialData }: Props) {
           },
         );
         if (!res.ok) throw new Error(`API ${res.status}`);
-        const next = (await res.json()) as AnalyzeResponse;
+        const next = normalizeAnalyze((await res.json()) as AnalyzePayload);
         if (!cancelled) {
           setData(next);
           window.dispatchEvent(
@@ -291,7 +339,7 @@ export function RepoHero({ owner, repo, apiBase, initialData }: Props) {
       });
     }
 
-    if (!initialData || needsPolling(initialData)) {
+    if (!seed || needsPolling(seed)) {
       // Both analyzer reads are enqueue triggers. Wait for them before opening
       // the read-only stream so a cold repo cannot report idle and close before
       // its durable work rows exist.
@@ -312,7 +360,7 @@ export function RepoHero({ owner, repo, apiBase, initialData }: Props) {
       if (progressTimer) clearTimeout(progressTimer);
       events?.close();
     };
-  }, [owner, repo, apiBase, initialData]);
+  }, [owner, repo, apiBase, seed]);
 
   const slug = data?.repo ?? `${owner}/${repo}`;
   const latest = data?.history[data.history.length - 1]?.date ?? null;
@@ -424,7 +472,17 @@ export function RepoHero({ owner, repo, apiBase, initialData }: Props) {
         }))}
       />
 
-      {data && archiveHistory && <HistoryProvenance data={data} slug={slug} />}
+      {/* All five states, not just the archive one. An owner arriving at their
+          own frozen repository previously saw nothing at all here. */}
+      {data && (
+        <SeriesProvenance
+          snapshot={data}
+          slug={slug}
+          variant="panel"
+          headingId="star-history-provenance"
+          signInHref={`${apiBase}/auth/github/start?return_to=${encodeURIComponent(`/${slug}`)}`}
+        />
+      )}
 
       {showProgress && (
         <ReportProgress
@@ -451,59 +509,10 @@ export function RepoHero({ owner, repo, apiBase, initialData }: Props) {
   );
 }
 
-function HistoryProvenance({
-  data,
-  slug,
-}: {
-  data: AnalyzeResponse;
-  slug: string;
-}) {
-  const coverageStart =
-    data.history_coverage_start ?? data.history[0]?.date ?? null;
-  const coverageEnd =
-    data.history_coverage_end ??
-    data.history[data.history.length - 1]?.date ??
-    null;
-
-  return (
-    <aside
-      className={cn(
-        PANEL,
-        "grid gap-4 p-3.5 lg:grid-cols-[minmax(0,1fr)_auto] lg:items-start",
-      )}
-      aria-labelledby="star-history-provenance"
-    >
-      <div className="max-w-[68ch] space-y-1.5">
-        <h2 id="star-history-provenance" className={HEADING}>
-          Approximate public star activity
-        </h2>
-        <p className={BODY}>
-          This curve uses public GitHub WatchEvents, which record star actions
-          but not unstars. The current GitHub star total for {slug} remains the
-          headline figure above.
-        </p>
-      </div>
-      <dl className="grid grid-cols-2 gap-x-6 gap-y-3">
-        <div className="space-y-1">
-          <dt className={EYEBROW}>Observed actions</dt>
-          <dd className="text-[13px] tabular-nums">
-            {data.history_event_count.toLocaleString()}
-          </dd>
-        </div>
-        <div className="space-y-1">
-          <dt className={EYEBROW}>Coverage</dt>
-          <dd className="text-[13px]">
-            {formatDate(coverageStart)} {"–"} {formatDate(coverageEnd)}
-          </dd>
-        </div>
-      </dl>
-    </aside>
-  );
-}
-
 function starPhaseFromAnalyze(data: AnalyzeResponse | null): ProgressPhase {
   if (!data) return "pending";
   if (data.not_found) return "not_found";
+  if (data.history_status === "restricted") return "restricted";
   if (data.history_status === "retrying" || data.history_unavailable)
     return "retrying";
   if (data.backfilling) return "backfilling";
@@ -528,9 +537,14 @@ function ReportProgress({
   live: boolean;
 }) {
   const active = isActive(stars) ? stars : analysis;
-  const label = isActive(stars)
-    ? "Collecting star history"
-    : "Reading repository history";
+  // "Collecting" is a claim about work in flight. A restricted read is over,
+  // so the heading has to stop saying it is happening.
+  const label =
+    active.phase === "restricted"
+      ? "Star history stopped"
+      : isActive(stars)
+        ? "Collecting star history"
+        : "Reading repository history";
   const remaining = useLiveCountdown(
     active.eta_seconds,
     `${active.phase}:${active.processed_units ?? ""}:${active.queue_position ?? ""}`,
@@ -628,11 +642,15 @@ function progressDetail(
     return `Saving repository signals${eta}`;
   if (work.detail === "finishing")
     return `Counting languages and resolving top contributors${eta}`;
-  if (
-    work.phase === "retrying" ||
-    work.phase === "failed" ||
-    work.phase === "restricted"
-  ) {
+  if (work.phase === "restricted") {
+    // Nothing is scheduled and nothing will be. Say what actually happened,
+    // in the one place that sentence is written.
+    return (
+      noticeText(historyFreshness({ history_status: "restricted" })) ??
+      "GitHub does not serve this repository's stargazer list to gitdebt."
+    );
+  }
+  if (work.phase === "retrying" || work.phase === "failed") {
     return `Retry scheduled${eta}`;
   }
   if (work.queue_position) {

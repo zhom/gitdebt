@@ -6,8 +6,23 @@ import BaseHead from "@/components/BaseHead.astro";
 import Seo from "@/components/Seo.astro";
 import SiteHeader from "@/components/SiteHeader.astro";
 import SiteFooter from "@/components/SiteFooter.astro";
-import { BODY, CAPTION, HEADING, TITLE } from "@/components/style-tokens";
+import {
+  BODY,
+  CAPTION,
+  HEADING,
+  MEASURE,
+  TITLE,
+} from "@/components/style-tokens";
 import { staticApiBase } from "@/lib/static-api-base";
+
+/**
+ * Page-body motion here is deliberately absent, not missing.
+ *
+ * Two sections and no number, series, or state to encode — a generative field
+ * would be wallpaper on a legal document, and `PageInsightSection` already
+ * puts one mosaic `PageSignalCanvas` on this same scroll via the footer.
+ * This is the shortest page in the product and it should stay that way.
+ */
 
 const apiBase = staticApiBase();
 
@@ -89,7 +104,7 @@ const jsonLd = {
         </header>
 
         <section class="mt-12">
-          <p class:list={["max-w-[68ch]", BODY]}>
+          <p class:list={[MEASURE, BODY]}>
             By using gitdebt you agree to these terms. If you don't agree,
             please don't use the service.
           </p>
@@ -98,7 +113,7 @@ const jsonLd = {
               terms.map((item) => (
                 <div>
                   <dt class="text-[13px] text-foreground/90">{item.term}</dt>
-                  <dd class:list={["mt-1.5 max-w-[52ch]", BODY]}>{item.desc}</dd>
+                  <dd class:list={["mt-1.5", MEASURE, BODY]}>{item.desc}</dd>
                 </div>
               ))
             }
@@ -107,7 +122,7 @@ const jsonLd = {
 
         <section class="mt-16 scroll-mt-24 border-t border-border/60 pt-12">
           <h2 class={HEADING}>Contact</h2>
-          <p class:list={["mt-2 max-w-[68ch]", BODY]}>
+          <p class:list={["mt-6", MEASURE, BODY]}>
             Questions about these terms? Open a
             <a
               href="https://github.com/zhom/gitdebt/issues"

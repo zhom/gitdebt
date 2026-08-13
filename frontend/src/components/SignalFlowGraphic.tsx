@@ -11,6 +11,7 @@ import { DitherAreaChart } from "@/components/DitherAreaChart";
 import { DitherMeter } from "@/components/DitherMeter";
 import { StatStrip } from "@/components/StatStrip";
 import { CAPTION, EYEBROW, PANEL } from "@/components/style-tokens";
+import { useInView } from "@/components/ui/use-in-view";
 import {
   healthReadings,
   type HealthReading,
@@ -278,27 +279,7 @@ export function SignalFlowGraphic({ apiBase }: { apiBase: string }) {
                     seed={selected.repo}
                   />
                 ) : (
-                  <div className="flex min-h-44 flex-col justify-center px-6">
-                    <p className="inline-flex items-center gap-2 text-[13px]">
-                      <Activity className="size-4" aria-hidden="true" />
-                      Building star history
-                    </p>
-                    <div className="mt-4 h-1.5 overflow-hidden rounded-[2px]">
-                      <motion.span
-                        initial={{ x: "-65%" }}
-                        animate={{ x: "260%" }}
-                        transition={
-                          reduceMotion
-                            ? { duration: 0 }
-                            : { duration: 1.4, repeat: Infinity, ease: EASE_OUT }
-                        }
-                        className="block h-full w-1/3"
-                      >
-                        <DitherMeter ratio={1} className="h-full" />
-                      </motion.span>
-                    </div>
-                    <p className={cn(CAPTION, "mt-3")}>A measured ETA replaces this as soon as work starts.</p>
-                  </div>
+                  <BuildingHistory />
                 )}
               </div>
 
@@ -324,5 +305,47 @@ export function SignalFlowGraphic({ apiBase }: { apiBase: string }) {
       </div>
     </figure>
     </a>
+  );
+}
+
+/**
+ * The indeterminate bar shown while a repository's star history is still being
+ * built.
+ *
+ * It is its own component for one reason: it renders conditionally, and a hook
+ * on the parent would attach its IntersectionObserver on the parent's mount,
+ * long before this element exists. Mounting the block is what must start the
+ * observer, so the observer lives with the block.
+ *
+ * Off-screen, in a hidden tab, or under reduced motion the sweep parks at its
+ * start — one deterministic frame, no scheduled work.
+ */
+function BuildingHistory() {
+  const reduceMotion = useReducedMotion();
+  const [ref, inView] = useInView<HTMLDivElement>();
+  const active = !reduceMotion && inView;
+
+  return (
+    <div className="flex min-h-44 flex-col justify-center px-6">
+      <p className="inline-flex items-center gap-2 text-[13px]">
+        <Activity className="size-4" aria-hidden="true" />
+        Building star history
+      </p>
+      <div ref={ref} className="mt-4 h-1.5 overflow-hidden rounded-[2px]">
+        <motion.span
+          initial={{ x: "-65%" }}
+          animate={active ? { x: "260%" } : { x: "-65%" }}
+          transition={
+            active
+              ? { duration: 1.4, repeat: Infinity, ease: EASE_OUT }
+              : { duration: 0 }
+          }
+          className="block h-full w-1/3"
+        >
+          <DitherMeter ratio={1} className="h-full" />
+        </motion.span>
+      </div>
+      <p className={cn(CAPTION, "mt-3")}>A measured ETA replaces this as soon as work starts.</p>
+    </div>
   );
 }

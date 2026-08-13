@@ -98,17 +98,123 @@ export function formatThrough(through: Date | null): string | null {
  * wrong on exactly the repositories where it is most eye-catching.
  *
  * Tone rule: this describes gitdebt's read access, never the owner's conduct.
+ *
+ * It also describes only what the product does TODAY. There is no repository
+ * connection flow — no endpoint, no install link, no grant field in the analyze
+ * payload — so no sentence here may offer connecting a repository as a
+ * remedy the reader can take. It would be an invented capability, and it would
+ * contradict both the privacy policy and the sign-in caption these sentences
+ * are rendered beside. State the restriction; do not promise a way around it.
  */
 export function noticeText(freshness: HistoryFreshness): string | null {
   const through = formatThrough(freshness.through);
+  const restriction =
+    "In July 2026 GitHub limited stargazer lists to a repository's own admins and collaborators";
   switch (freshness.state) {
     case "exact_frozen":
       return through
-        ? `Star history is complete through ${through}. In July 2026 GitHub limited stargazer lists to a repository's own admins and collaborators, so this chart no longer updates unless the repository is connected to gitdebt.`
-        : `In July 2026 GitHub limited stargazer lists to a repository's own admins and collaborators, so this chart no longer updates unless the repository is connected to gitdebt.`;
+        ? `Star history is complete through ${through}. ${restriction}, so gitdebt can no longer read new stars from that list and this chart stops there.`
+        : `${restriction}, so gitdebt can no longer read new stars from that list and this chart stops where it does.`;
     case "restricted":
-      return `GitHub serves this repository's stargazer list only to its own admins and collaborators, so gitdebt cannot read it. Connecting the repository restores the chart.`;
+      return `GitHub serves this repository's stargazer list only to its own admins and collaborators, so gitdebt cannot read it.`;
     default:
       return null;
   }
+}
+
+/* ------------------------------------------------------------------------- *
+ * Provenance vocabulary.
+ *
+ * Three facts, and only three: which SOURCE produced the series, the DATE its
+ * coverage runs to, and the STATE of that read. Never a count, never a share,
+ * never a score, and never a sentence whose subject is the repository owner —
+ * every one of these describes gitdebt's read access.
+ *
+ * They live here rather than in the component so the wording exists once and
+ * is unit-testable without a DOM, and so `sourceDetail` can delegate the two
+ * July-2026 sentences straight to `noticeText`.
+ * ------------------------------------------------------------------------- */
+
+/** What produced the points. Not a judgement, a method. */
+export function sourceLabel(freshness: HistoryFreshness): string {
+  switch (freshness.state) {
+    case "exact_current":
+    case "exact_frozen":
+      return "GitHub stargazer list";
+    case "archive":
+      return "Public GH Archive star events";
+    case "restricted":
+      return "No readable source";
+    case "unknown":
+      return "Source not established";
+  }
+}
+
+/** Whether the series still receives points, said in words. */
+export function stateLabel(freshness: HistoryFreshness): string {
+  switch (freshness.state) {
+    case "exact_current":
+    case "archive":
+      return "Still updating";
+    case "exact_frozen":
+      return "No longer updating";
+    case "restricted":
+      return "Cannot be read";
+    case "unknown":
+      return "Being read";
+  }
+}
+
+/** How far the series runs. A date, never a proportion of anything. */
+export function coverageLabel(freshness: HistoryFreshness): string {
+  const through = formatThrough(freshness.through);
+  return through ? `Covers through ${through}` : "Coverage window not established";
+}
+
+/** The paragraph under the mark. Two states delegate, so they are never retyped. */
+export function sourceDetail(freshness: HistoryFreshness): string {
+  switch (freshness.state) {
+    case "exact_current":
+      return "Every point is one star with its own timestamp, read from GitHub's stargazer list.";
+    case "archive":
+      return "Rebuilt from public GH Archive star events. Star actions are recorded and unstars are not, so this is an attention signal rather than a net star count.";
+    case "exact_frozen":
+    case "restricted":
+      // `noticeText` is total for these two states; the fallback exists only so
+      // the return type stays a plain string, and it asserts nothing.
+      return noticeText(freshness) ?? UNESTABLISHED;
+    case "unknown":
+      return UNESTABLISHED;
+  }
+}
+
+const UNESTABLISHED =
+  "gitdebt has not established a source for this series yet. The chart appears once one is.";
+
+/**
+ * Dither coverage for the provenance mark, 0..1.
+ *
+ * A fixed constant per state, and deliberately not a function of anything the
+ * series measures. A density derived from coverage would be a completeness
+ * score wearing a texture, and the counts rule forbids publishing one: an
+ * archive series counts re-stars and can exceed the repository's own star
+ * total, so any "how much of it do we have" figure is wrong exactly where it
+ * looks most precise. Density here says *which source*, nothing more.
+ */
+export function sourceDensity(freshness: HistoryFreshness): number {
+  switch (freshness.state) {
+    case "exact_current":
+    case "exact_frozen":
+      return 0.85;
+    case "archive":
+      return 0.45;
+    case "restricted":
+    case "unknown":
+      return 0.12;
+  }
+}
+
+/** True iff the series still receives points. Drives the mark's aperture. */
+export function seriesOpen(freshness: HistoryFreshness): boolean {
+  return freshness.state === "exact_current" || freshness.state === "archive";
 }

@@ -7,10 +7,12 @@ import SiteHeader from "@/components/SiteHeader.astro";
 import SiteFooter from "@/components/SiteFooter.astro";
 import { MomentumBoard } from "@/components/MomentumBoard";
 import { weeklyPace } from "@/lib/momentum";
+import { formatCompact } from "@/lib/star-insights";
 import {
   BODY,
   CAPTION,
   HEADING,
+  LEAD,
   PANEL_PADDED,
   ROW,
   ROW_BADGE,
@@ -83,7 +85,6 @@ const [dailyBoard, weeklyBoard, monthlyBoard, starsBoard, totalAnalyzed] = await
   })(),
 ]);
 
-const trending = weeklyBoard?.repos ?? [];
 const mostStarred = starsBoard?.repos ?? [];
 
 // One row per repository, carrying every window at once.
@@ -140,15 +141,39 @@ const loaded = dailyBoard !== null || weeklyBoard !== null || monthlyBoard !== n
 const hasRows = rankedRows.length > 0;
 const windowDays = weeklyBoard?.window_days ?? 7;
 
-const top = trending[0] ?? null;
-const topStarred = mostStarred[0] ?? null;
-const runnerUp = trending[1] ?? null;
+// The page's lede, its description and its first FAQ answer all describe the
+// board the reader actually sees, so they are read off `rankedRows` — the array
+// `MomentumBoard` renders — rather than off one window's own ordinal.
+const lead = rankedRows[0] ?? null;
+const runnerUp = rankedRows[1] ?? null;
+
+// The tightest window the leading row is genuinely ranked in. A window it is
+// absent from is "not ranked here", not zero, so it is never quoted.
+// `window` is the phrase, not the number: `windowDays` is whatever the API
+// reports and the daily fallback is literally 1, so a bare "in {n} days" prints
+// "in 1 days" on any build where the leading row is ranked daily but not
+// weekly. The lede, the meta description and the FAQ answer all read this.
+const paceWindow = (days: number) => (days === 1 ? "1 day" : `${days} days`);
+const leadPace =
+  !lead
+    ? null
+    : lead.d7 !== null
+      ? { count: lead.d7, window: paceWindow(windowDays) }
+      : lead.d1 !== null
+        ? { count: lead.d1, window: paceWindow(1) }
+        : lead.d30 !== null
+          ? { count: lead.d30, window: paceWindow(30) }
+          : null;
 
 const vsPair =
-  top && runnerUp
-    ? [top.repo, runnerUp.repo].sort((a, b) => (a < b ? -1 : 1))
+  lead && runnerUp
+    ? [lead.repo, runnerUp.repo].sort((a, b) => (a < b ? -1 : 1))
     : null;
-const vsLabel = top && runnerUp ? `${top.repo} vs ${runnerUp.repo}` : null;
+const vsLabel = lead && runnerUp ? `${lead.repo} vs ${runnerUp.repo}` : null;
+
+// 100 most-starred rows are already fetched for the merge; 24 of them are worth
+// rendering, and the section restores the `#most-starred` anchor.
+const mostStarredShown = mostStarred.slice(0, 24);
 
 const updatedDate = new Date().toLocaleDateString("en-US", {
   month: "long",
@@ -159,9 +184,19 @@ const updatedDate = new Date().toLocaleDateString("en-US", {
 const year = new Date().getUTCFullYear();
 
 const title = `Fastest-growing GitHub repos (${year}) · gitdebt`;
-const description = top
-  ? `${top.repo} leads the gitdebt leaderboard with ${top.velocity.toLocaleString()} stars gained in ${windowDays} days. See the fastest-growing and most-starred repos, from public star timestamps.`
-  : `Fastest-growing and most-starred GitHub repos, ranked from public star timestamps across every repo gitdebt has analyzed. Updated daily.`;
+// `Seo` truncates at 160, and a long slug is what pushes the specific variant
+// over: the generic sentence is the guaranteed-whole fallback rather than a
+// description ending in an ellipsis.
+const genericDescription =
+  "Fastest-growing and most-starred GitHub repos, ranked from public star timestamps across every repo gitdebt has analyzed. Updated daily.";
+const leadDescription =
+  lead && leadPace
+    ? `${lead.repo} leads: ${leadPace.count.toLocaleString()} stars in ${leadPace.window}. Fastest-growing and most-starred GitHub repos, ranked from public star timestamps.`
+    : null;
+const description =
+  leadDescription && leadDescription.length <= 160
+    ? leadDescription
+    : genericDescription;
 
 const canonicalPath = "/leaderboard";
 const ogImage = `${apiBase}/api/og.png`;
@@ -188,37 +223,41 @@ const jsonLd: Record<string, unknown>[] = [
     ],
   },
 ];
-if (trending.length > 0) {
+// One list, over the array the board renders, positioned by rendered order. The
+// per-window ordinal the API returns describes a different ordering than the
+// merged board, so quoting it put positions on rows that do not hold them.
+const rankedItems = rankedRows.slice(0, 25);
+if (rankedItems.length > 0) {
   jsonLd.push({
     "@context": "https://schema.org",
     "@type": "ItemList",
-    name: `Fastest-growing GitHub repos (trailing ${windowDays} days)`,
+    name: "Every tracked repo, ranked by weekly pace",
     itemListOrder: "https://schema.org/ItemListOrderDescending",
-    numberOfItems: trending.length,
-    itemListElement: trending.slice(0, 25).map((r) => ({
+    numberOfItems: rankedItems.length,
+    itemListElement: rankedItems.map((row, index) => ({
       "@type": "ListItem",
-      position: r.rank,
-      name: r.repo,
-      url: `${site}/${r.repo}`,
+      position: index + 1,
+      name: row.repo,
+      url: `${site}/${row.repo}`,
     })),
   });
 }
-if (mostStarred.length > 0) {
+if (mostStarredShown.length > 0) {
   jsonLd.push({
     "@context": "https://schema.org",
     "@type": "ItemList",
     name: "Most-starred repos on gitdebt",
     itemListOrder: "https://schema.org/ItemListOrderDescending",
-    numberOfItems: mostStarred.length,
-    itemListElement: mostStarred.slice(0, 25).map((r) => ({
+    numberOfItems: mostStarredShown.length,
+    itemListElement: mostStarredShown.map((row, index) => ({
       "@type": "ListItem",
-      position: r.rank,
-      name: r.repo,
-      url: `${site}/${r.repo}`,
+      position: index + 1,
+      name: row.repo,
+      url: `${site}/${row.repo}`,
     })),
   });
 }
-if (top && topStarred) {
+if (lead && leadPace && mostStarredShown.length > 0) {
   jsonLd.push({
     "@context": "https://schema.org",
     "@type": "FAQPage",
@@ -228,7 +267,7 @@ if (top && topStarred) {
         name: "What is the fastest-growing repo on gitdebt right now?",
         acceptedAnswer: {
           "@type": "Answer",
-          text: `${top.repo} is the fastest-growing repo gitdebt tracks, gaining ${top.velocity.toLocaleString()} GitHub stars in the last ${windowDays} days (as of ${updatedDate}). The full ranking is computed from public stargazer timestamps.`,
+          text: `${lead.repo} sets the fastest weekly pace gitdebt tracks, gaining ${leadPace.count.toLocaleString()} GitHub stars in the last ${leadPace.window} (as of ${updatedDate}). The full ranking is computed from public star timestamps.`,
         },
       },
       {
@@ -236,19 +275,12 @@ if (top && topStarred) {
         name: "How is the gitdebt leaderboard computed?",
         acceptedAnswer: {
           "@type": "Answer",
-          text: `Rankings come from public GitHub star timestamps cached by gitdebt${totalAnalyzed ? ` across the ${totalAnalyzed.toLocaleString()} repos it has analyzed` : ""}. "Fastest-growing" counts stars added in the trailing ${windowDays} days; "most-starred" ranks by current total stars. No repo is ranked until its full star history has been fetched.`,
+          text: `Rankings come from public GitHub star timestamps cached by gitdebt${totalAnalyzed ? ` across the ${totalAnalyzed.toLocaleString()} repos it has analyzed` : ""}. "Fastest-growing" ranks by stars added in the trailing ${windowDays} days; "most-starred" ranks by current total stars. No repo is ranked until its star history is cached.`,
         },
       },
     ],
   });
 }
-
-const sectionLinks = [
-  { href: "#trending-daily", label: "Daily" },
-  { href: "#trending-weekly", label: "Weekly" },
-  { href: "#trending-monthly", label: "Monthly" },
-  { href: "#most-starred", label: "Most starred" },
-];
 ---
 
 <!doctype html>
@@ -281,23 +313,23 @@ const sectionLinks = [
 
         <header class="mt-8">
           <h1 class={TITLE}>Fastest-growing & most-starred repos</h1>
-          {top ? (
-            <p class:list={["mt-3 max-w-[68ch] text-[15px]", BODY]}>
+          {lead && leadPace ? (
+            <p class:list={["mt-3", LEAD, BODY]}>
               <a
-                href={`/${top.repo}`}
+                href={`/${lead.repo}`}
                 class="rounded text-foreground underline decoration-border underline-offset-4 outline-none transition-colors duration-150 hover:decoration-foreground/60 focus-visible:ring-2 focus-visible:ring-accent/30"
-                >{top.repo}</a
+                >{lead.repo}</a
               >
-              {" "}is the fastest-growing repo gitdebt tracks right now, gaining{" "}
-              <span class="text-foreground tabular-nums">{top.velocity.toLocaleString()}</span> stars in the
-              last {windowDays} days. Rankings are computed from public star timestamps
+              {" "}sets the fastest weekly pace on the board, gaining{" "}
+              <span class="text-foreground tabular-nums">{leadPace.count.toLocaleString()}</span> stars in
+              {" "}{leadPace.window}. Rankings come from public star timestamps
               {totalAnalyzed
                 ? ` across the ${totalAnalyzed.toLocaleString()} repos gitdebt has analyzed`
-                : " across every repo gitdebt has analyzed"} — repos join the board once
-              their full star history is cached.
+                : " across every repo gitdebt has analyzed"} — a repo joins once its
+              star history is cached.
             </p>
           ) : (
-            <p class:list={["mt-3 max-w-[68ch] text-[15px]", BODY]}>
+            <p class:list={["mt-3", LEAD, BODY]}>
               Repos ranked by star growth and total stars, computed from public star
               timestamps across every repo gitdebt has analyzed.
             </p>
@@ -305,16 +337,6 @@ const sectionLinks = [
           <p class:list={["mt-3 font-mono", CAPTION]}>
             Data updated {updatedDate} · rankings refreshed daily from cached public history
           </p>
-          <nav class="mt-4 flex flex-wrap gap-2" aria-label="Leaderboard sections">
-            {sectionLinks.map((link) => (
-              <a
-                href={link.href}
-                class="dither-chip rounded-md outline-none focus-visible:ring-2 focus-visible:ring-accent/30"
-              >
-                {link.label}
-              </a>
-            ))}
-          </nav>
         </header>
 
         {!loaded && (
@@ -331,44 +353,79 @@ const sectionLinks = [
         {loaded && !hasRows && (
           <section class:list={["mt-12", PANEL_PADDED]}>
             <p class={BODY}>
-              No repos have a complete star history yet. Look up any repo to start
-              tracking it — it joins the leaderboard as soon as its history is cached.
+              {mostStarredShown.length > 0
+                ? "Growth rankings are unavailable right now. The most-starred board below is current."
+                : "No repos have a complete star history yet. Look up any repo to start tracking it — it joins the leaderboard as soon as its history is cached."}
             </p>
           </section>
         )}
 
-        {loaded && hasRows && (
+        {loaded && hasRows && lead && (
           <section id="ranking" class="mt-10 scroll-mt-24">
             <div class={SECTION_HEADER}>
               <h2 class={HEADING}>Every tracked repo, ranked by weekly pace</h2>
               <p class={CAPTION}>
                 <span style="color: rgb(40 210 110)">▲</span> climbing ·
-                <span style="color: rgb(255 150 50)">▼</span> cooling · today vs its 30-day pace
+                <span style="color: rgb(255 150 50)">▼</span> cooling
               </p>
             </div>
-            {vsPair && vsLabel && (
-              <p class:list={["mt-2", BODY]}>
-                Compare the top two directly:{" "}
-                <a
-                  href={`/vs/${vsPair[0]}/${vsPair[1]}`}
-                  class="rounded underline decoration-border underline-offset-4 outline-none transition-colors duration-150 hover:text-foreground hover:decoration-foreground/60 focus-visible:ring-2 focus-visible:ring-accent/30"
-                >
-                  {vsLabel}
-                </a>.
-              </p>
-            )}
-            <div class="mt-4">
+            <div class="mt-8">
               <MomentumBoard client:visible rows={rankedRows} />
             </div>
             <p class:list={["mt-3", CAPTION]}>
               Bar length is the weekly pace; the brighter tip is today's, on the same
               per-day scale — a short bar with a bright tip is a repo spiking right now.
-              A dash means the repo is outside that window's top ranks, not that it
-              gained nothing.
+              The arrow compares today against the same repo's 30-day pace. A dash means
+              the repo is outside that window's top ranks, not that it gained nothing.
+            </p>
+            <p class:list={["mt-2", CAPTION]}>
+              Rankings are computed from star timestamps whose source differs per
+              repository; each report names its own — see{" "}
+              <a
+                href={`/${lead.repo}`}
+                class="rounded underline decoration-border underline-offset-4 outline-none transition-colors duration-150 hover:text-foreground hover:decoration-foreground/60 focus-visible:ring-2 focus-visible:ring-accent/30"
+                >{lead.repo}</a
+              >.
+              {vsPair && vsLabel && (
+                <Fragment>
+                  {" "}Or compare the top two directly:{" "}
+                  <a
+                    href={`/vs/${vsPair[0]}/${vsPair[1]}`}
+                    class="rounded underline decoration-border underline-offset-4 outline-none transition-colors duration-150 hover:text-foreground hover:decoration-foreground/60 focus-visible:ring-2 focus-visible:ring-accent/30"
+                    >{vsLabel}</a
+                  >.
+                </Fragment>
+              )}
             </p>
           </section>
         )}
 
+        {mostStarredShown.length > 0 && (
+          <section
+            id="most-starred"
+            class="mt-16 scroll-mt-24 border-t border-border/60 pt-12"
+          >
+            <div class={SECTION_HEADER}>
+              <h2 class={HEADING}>Most-starred repos</h2>
+              <p class={CAPTION}>top {mostStarredShown.length} by current total stars</p>
+            </div>
+            <ul role="list" class="mt-8 grid gap-x-10 sm:grid-cols-2">
+              {mostStarredShown.map((row, index) => (
+                <li>
+                  <a href={`/${row.repo}`} class={ROW}>
+                    <span class="w-6 shrink-0 text-right text-muted-foreground/60 tabular-nums">
+                      {index + 1}
+                    </span>
+                    <span class="min-w-0 flex-1 truncate">{row.repo}</span>
+                    <span class={ROW_BADGE}>
+                      <span class="sr-only">stars: </span>{formatCompact(row.stars)}
+                    </span>
+                  </a>
+                </li>
+              ))}
+            </ul>
+          </section>
+        )}
 
         <section class="mt-16 scroll-mt-24 border-t border-border/60 pt-12">
           <div class={SECTION_HEADER}>
@@ -382,7 +439,7 @@ const sectionLinks = [
               >
             </a>
           </div>
-          <ul role="list" class="mt-6 grid gap-x-10 sm:grid-cols-2">
+          <ul role="list" class="mt-8 grid gap-x-10 sm:grid-cols-2">
             {featuredCategories.map((c) => (
               <li>
                 <a href={`/compare/${c.slug}`} class={ROW}>
@@ -407,24 +464,6 @@ const sectionLinks = [
             </a>.
           </p>
         </section>
-
-        {hasRows && (
-          <section class="mt-16 scroll-mt-24 border-t border-border/60 pt-12">
-            <div class={SECTION_HEADER}>
-              <h2 class={HEADING}>How this leaderboard works</h2>
-            </div>
-            <p class:list={["mt-2 max-w-[70ch]", BODY]}>
-              gitdebt caches the public timestamp of every star on the repos it analyzes.
-              "Trending" counts stars added in the trailing {windowDays} days; "most
-              starred" ranks by current totals. A repo appears once its complete star
-              history is cached, so the board covers
-              {totalAnalyzed
-                ? ` the ${totalAnalyzed.toLocaleString()} repos analyzed so far`
-                : " the repos analyzed so far"} rather than all of GitHub — look up any
-              repo to add it.
-            </p>
-          </section>
-        )}
       </main>
 
       <SiteFooter />

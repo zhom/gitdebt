@@ -14,6 +14,14 @@ export type BuildAnalyzeResponse = {
   history_coverage_start: string | null;
   history_coverage_end: string | null;
   history_approximate: boolean;
+  /**
+   * Optional and additive: nothing that already reads this type breaks, and it
+   * is what lets a prerendered page classify `restricted` and `exact_frozen`
+   * through `historyFreshness()` instead of falling to "unknown" on every
+   * build-time surface. Widened to `string` deliberately — the build has no
+   * business rejecting a status value the backend adds later.
+   */
+  history_status?: string;
   pending?: boolean;
   backfilling?: boolean;
   not_found?: boolean;

@@ -9,7 +9,22 @@ import BaseHead from "@/components/BaseHead.astro";
 import Seo from "@/components/Seo.astro";
 import SiteHeader from "@/components/SiteHeader.astro";
 import SiteFooter from "@/components/SiteFooter.astro";
+import { comparisonColors } from "@/components/DitherComparisonChart";
 import { LiveVsComparison } from "@/components/LiveVsComparison";
+import { SeriesProvenance } from "@/components/SeriesProvenance";
+import {
+  BODY,
+  HEADING,
+  MEASURE,
+  SECTION_HEADER,
+} from "@/components/style-tokens";
+import {
+  coverageLabel,
+  historyFreshness,
+  sourceLabel,
+  stateLabel,
+  type HistorySnapshot,
+} from "@/lib/history-freshness";
 
 export function getStaticPaths() {
   return staticComparisonPaths();
@@ -76,7 +91,26 @@ const reposParam = encodeURIComponent(`${slug1},${slug2}`);
 const overlayPath = `/api/chart.svg?repos=${reposParam}`;
 
 const title = `${repo1} vs ${repo2}: stars, code, and maintenance · gitdebt`;
-const description = `Compare ${slug1} and ${slug2} by GitHub star growth, forks, dominant language, codebase size, commit cadence, bus factor, contributor concentration, and change pressure.`;
+
+/**
+ * Two unbounded slugs eat most of the 160-character budget before a single
+ * descriptive word is written, so the enumeration is the part that gives way.
+ * All 278 of these pages used to truncate mid-clause.
+ */
+function fitDescription(head: string, tails: string[], limit = 160): string {
+  for (const tail of tails) {
+    const composed = `${head} ${tail}`;
+    if (composed.length <= limit) return composed;
+  }
+  return head;
+}
+
+const description = fitDescription(`${slug1} vs ${slug2}.`, [
+  "Star growth, forks, dominant language, codebase size, commit cadence, bus factor, and change pressure compared.",
+  "Star growth, language, codebase size, commit cadence, and bus factor compared.",
+  "Star growth, commit cadence, and contributor concentration compared.",
+  "Star growth and repository health compared.",
+]);
 const site = (Astro.site ?? new URL("https://gitdebt.com")).href.replace(/\/$/, "");
 const canonicalPath = `/vs/${slug1}/${slug2}`;
 const canonical = `${site}${canonicalPath}`;
@@ -85,7 +119,45 @@ const ogImage = `${apiBase}/api/og.png?repos=${reposParam}`;
 
 const noindex = !ready || fetchError !== null;
 
-const jsonLd = [
+// A head-to-head is exactly where two series with different sources and
+// different coverage ends get read as directly comparable. Hue is series
+// identity — the same map the overlay chart builds — and the mark's density
+// carries the source.
+const vsColors = comparisonColors([slug1, slug2]);
+const seriesRows = [
+  { slug: slug1, snapshot: left.data, fill: vsColors.get(slug1) },
+  { slug: slug2, snapshot: right.data, fill: vsColors.get(slug2) },
+];
+
+const faqs: { q: string; a: string }[] = [];
+if (left.data && right.data) {
+  const ranked = [
+    { slug: slug1, stars: left.data.total_stars },
+    { slug: slug2, stars: right.data.total_stars },
+  ].sort((a, b) => b.stars - a.stars);
+  faqs.push({
+    q: `Which has more GitHub stars, ${slug1} or ${slug2}?`,
+    a: `GitHub reports ${ranked[0].stars.toLocaleString()} stars for ${ranked[0].slug} and ${ranked[1].stars.toLocaleString()} for ${ranked[1].slug}.`,
+  });
+
+  // Source, date, state — per repository, and never a gap, a share or a score.
+  // An archive series counts re-stars and can exceed a repository's own total,
+  // so "how much is missing" is wrong exactly where it looks precise.
+  const readAs = (slug: string, snapshot: HistorySnapshot) => {
+    const freshness = historyFreshness(snapshot);
+    return `${slug} — ${sourceLabel(freshness)} · ${coverageLabel(freshness)} · ${stateLabel(freshness)}`;
+  };
+  faqs.push({
+    q: "Do both star histories cover the same period?",
+    a: `Not necessarily, and each chart names its own. ${readAs(slug1, left.data)}. ${readAs(slug2, right.data)}. Since July 2026 GitHub serves a repository's stargazer list only to its own admins and collaborators, so one series can stop on a fixed date while the other keeps flowing from public archive events.`,
+  });
+  faqs.push({
+    q: "How is this comparison computed?",
+    a: "Star totals come from public repository metadata. The two curves are each repository's stored star series drawn on shared axes, from whichever source is named above. Repository-health figures are computed independently from each project's commit history.",
+  });
+}
+
+const jsonLd: Record<string, unknown>[] = [
   {
     "@context": "https://schema.org",
     "@type": "WebPage",
@@ -103,7 +175,39 @@ const jsonLd = [
     ],
   },
 ];
-
+// The star total is GitHub's own figure and the hero prints it; asserting it
+// says nothing about how the series behind the chart was read.
+if (left.data && right.data) {
+  for (const entry of [
+    { slug: slug1, stars: left.data.total_stars },
+    { slug: slug2, stars: right.data.total_stars },
+  ]) {
+    jsonLd.push({
+      "@context": "https://schema.org",
+      "@type": "SoftwareSourceCode",
+      name: entry.slug,
+      codeRepository: `https://github.com/${entry.slug}`,
+      url: `${site}/${entry.slug}`,
+      interactionStatistic: {
+        "@type": "InteractionCounter",
+        interactionType: { "@type": "LikeAction" },
+        userInteractionCount: entry.stars,
+      },
+    });
+  }
+}
+// Mirrors the visible block below, and is never emitted without it.
+if (faqs.length > 0) {
+  jsonLd.push({
+    "@context": "https://schema.org",
+    "@type": "FAQPage",
+    mainEntity: faqs.map((f) => ({
+      "@type": "Question",
+      name: f.q,
+      acceptedAnswer: { "@type": "Answer", text: f.a },
+    })),
+  });
+}
 ---
 
 <!doctype html>
@@ -151,6 +255,53 @@ const jsonLd = [
           slug1={slug1}
           slug2={slug2}
         />
+
+        {bothLoaded && (
+          <section class="mt-16 scroll-mt-24 border-t border-border/60 pt-12">
+            <div class={SECTION_HEADER}>
+              <h2 class={HEADING}>How each series was read</h2>
+            </div>
+            <p class:list={["mt-2", BODY, MEASURE]}>
+              The overlay puts both repositories on one axis. It does not put
+              them on one source: since July 2026 a stargazer-list series stops
+              on a fixed date, while a series rebuilt from public archive events
+              keeps receiving points. Each mark below shows its own source,
+              coverage date, and state.
+            </p>
+            <ul role="list" class="mt-6 grid gap-x-12 gap-y-4 sm:grid-cols-2">
+              {seriesRows.map((row) => (
+                <li class="min-w-0">
+                  <p class="truncate font-mono text-[12px]">{row.slug}</p>
+                  <SeriesProvenance
+                    client:visible
+                    variant="inline"
+                    className="mt-1.5"
+                    fill={row.fill}
+                    snapshot={row.snapshot}
+                  />
+                </li>
+              ))}
+            </ul>
+          </section>
+        )}
+
+        {faqs.length > 0 && (
+          <section class="mt-16 scroll-mt-24 border-t border-border/60 pt-12">
+            <div class={SECTION_HEADER}>
+              <h2 class={HEADING}>Frequently asked</h2>
+            </div>
+            <div class="mt-6">
+              {faqs.map((f) => (
+                <details class="group border-b border-border/40 py-4 last:border-0">
+                  <summary class="cursor-pointer list-none rounded-md py-1 text-[13px] outline-none transition-colors duration-150 hover:text-foreground focus-visible:ring-2 focus-visible:ring-accent/30 [&::-webkit-details-marker]:hidden">
+                    {f.q}
+                  </summary>
+                  <p class:list={["mt-2", BODY, MEASURE]}>{f.a}</p>
+                </details>
+              ))}
+            </div>
+          </section>
+        )}
       </main>
 
       <SiteFooter

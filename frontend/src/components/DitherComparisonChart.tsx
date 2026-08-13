@@ -58,6 +58,15 @@ type ParsedSeries = {
   phaseY: number;
   points: ParsedPoint[];
 };
+/**
+ * `approximate` here means ONE thing: the reading was interpolated between two
+ * samples rather than landing on one. It is a geometry fact about the hover
+ * position and it is NOT source provenance — it says nothing about whether the
+ * series came from GitHub's stargazer list or from public GH Archive star
+ * events. That distinction belongs to `SeriesProvenance`, which reads
+ * `history_kind` / `history_status` off the analyze payload. Do not wire this
+ * flag to a provenance marker; the two words collide and mean different things.
+ */
 type Sample = { at: number; value: number; approximate: boolean };
 type Hover = {
   fraction: number;

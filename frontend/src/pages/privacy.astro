@@ -6,8 +6,23 @@ import BaseHead from "@/components/BaseHead.astro";
 import Seo from "@/components/Seo.astro";
 import SiteHeader from "@/components/SiteHeader.astro";
 import SiteFooter from "@/components/SiteFooter.astro";
-import { BODY, CAPTION, HEADING, TITLE } from "@/components/style-tokens";
+import {
+  BODY,
+  CAPTION,
+  HEADING,
+  MEASURE,
+  TITLE,
+} from "@/components/style-tokens";
 import { staticApiBase } from "@/lib/static-api-base";
+
+/**
+ * Page-body motion here is deliberately absent, not missing.
+ *
+ * Nothing on this page is a series, a magnitude, or a state, so a generative
+ * field would be wallpaper on a legal document — and `PageInsightSection`
+ * already puts one mosaic `PageSignalCanvas` on this same scroll via the
+ * footer. Adding a second canvas would duplicate it without adding meaning.
+ */
 
 const apiBase = staticApiBase();
 
@@ -16,7 +31,7 @@ const description =
   "How gitdebt handles optional GitHub sign-in, anonymous extension activity, public repository data, and operational logs.";
 const ogImage = `${apiBase}/api/og.png`;
 
-const updated = "2026-07-19";
+const updated = "2026-08-11";
 
 const collected = [
   {
@@ -29,7 +44,7 @@ const collected = [
   },
   {
     term: "Optional GitHub sign-in",
-    desc: "If you choose to sign in, GitHub gives us your public profile identity and an OAuth token. We store the token encrypted at rest and use an HTTP-only signed session cookie to keep you signed in. Sign-in provides a one-click link to your profile-wide report; public repository reports do not require it. In July 2026 GitHub restricted the stargazer-list endpoint to a repository's own admins and collaborators, and the permission GitHub requires to read it is Contents (read and write). So if you connect a repository you administer, gitdebt requests that permission in order to read that repository's stargazer timestamps. We never write to your repositories, and we never request account-management access. You choose which repositories the app can see, and you can revoke it at any time from GitHub's settings.",
+    desc: "If you choose to sign in, GitHub gives us your public profile identity and an OAuth token. We store the token encrypted at rest and use an HTTP-only signed session cookie to keep you signed in. Sign-in provides a one-click link to your profile-wide report and queues your own public repositories for analysis; public repository reports do not require it. gitdebt has no repository connection flow today. In July 2026 GitHub restricted the stargazer-list endpoint to a repository's own admins and collaborators, and the permission GitHub requires to read it is Contents (read and write). If gitdebt adds repository connection, it will request that permission solely to read that repository's stargazer timestamps. You would choose which repositories the app can see, and you could revoke it at any time from GitHub's settings. We never write to your repositories, and we never request account-management access.",
   },
   {
     term: "Operational logs",
@@ -44,7 +59,7 @@ const principles = [
   },
   {
     term: "Public data only",
-    desc: "Every repo signal we compute comes from publicly available GitHub data, and every chart we publish is derived from a public repository. Connecting a repository you administer grants the Contents (read and write) permission GitHub now requires to read a stargazer list — we use it only to read, never to write, and a private repository never becomes a public page. We never request account-management permissions.",
+    desc: "Every repo signal we compute comes from publicly available GitHub data, and every chart we publish is derived from a public repository. gitdebt has no repository connection flow today; if one is added, connecting a repository you administer would grant the Contents (read and write) permission GitHub now requires to read a stargazer list — we would use it only to read, never to write, and a private repository would never become a public page. We never request account-management permissions.",
   },
   {
     term: "Minimal retention",
@@ -102,7 +117,7 @@ const jsonLd = {
               collected.map((item) => (
                 <div>
                   <dt class="text-[13px] text-foreground/90">{item.term}</dt>
-                  <dd class:list={["mt-1.5 max-w-[52ch]", BODY]}>{item.desc}</dd>
+                  <dd class:list={["mt-1.5", MEASURE, BODY]}>{item.desc}</dd>
                 </div>
               ))
             }
@@ -116,7 +131,7 @@ const jsonLd = {
               principles.map((item) => (
                 <div>
                   <dt class="text-[13px] text-foreground/90">{item.term}</dt>
-                  <dd class:list={["mt-1.5 max-w-[52ch]", BODY]}>{item.desc}</dd>
+                  <dd class:list={["mt-1.5", MEASURE, BODY]}>{item.desc}</dd>
                 </div>
               ))
             }
@@ -125,7 +140,7 @@ const jsonLd = {
 
         <section class="mt-16 scroll-mt-24 border-t border-border/60 pt-12">
           <h2 class={HEADING}>Your choices</h2>
-          <p class:list={["mt-2 max-w-[68ch]", BODY]}>
+          <p class:list={["mt-6", MEASURE, BODY]}>
             gitdebt does not require an account. You can sign out at any time
             from the header menu. To stop the browser extension from sending
             repository views, turn off its automatic panel or uninstall the
@@ -135,7 +150,7 @@ const jsonLd = {
 
         <section class="mt-16 scroll-mt-24 border-t border-border/60 pt-12">
           <h2 class={HEADING}>Contact</h2>
-          <p class:list={["mt-2 max-w-[68ch]", BODY]}>
+          <p class:list={["mt-6", MEASURE, BODY]}>
             Questions about this policy? Open a
             <a
               href="https://github.com/zhom/gitdebt/issues"

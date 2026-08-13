@@ -12,6 +12,7 @@ import {
 import BaseHead from "@/components/BaseHead.astro";
 import { AgentReadmePrompt } from "@/components/AgentReadmePrompt";
 import { ButtonLink } from "@/components/ButtonLink";
+import { CodeBlock } from "@/components/CodeBlock";
 import Seo from "@/components/Seo.astro";
 import SiteHeader from "@/components/SiteHeader.astro";
 import SiteFooter from "@/components/SiteFooter.astro";
@@ -20,17 +21,24 @@ import { RepoHero } from "@/components/RepoHero";
 import { ChartViewer } from "@/components/ChartViewer";
 import { EarnedBadges } from "@/components/EarnedBadges";
 import { InteractiveRepoSignals } from "@/components/InteractiveRepoSignals";
+import { SeriesProvenance } from "@/components/SeriesProvenance";
 import { UsageSection, type UsageResponse } from "@/components/UsageSection";
 import { WarmRepos } from "@/components/WarmRepos";
 import {
   BODY,
   CAPTION,
+  EYEBROW,
   HEADING,
+  MEASURE,
+  PANEL_PADDED,
   SECTION_ACTION,
   SECTION_HEADER,
 } from "@/components/style-tokens";
 import { categoriesForRepo, relatedRepos } from "@/data/categories";
 import { starFacts } from "@/lib/agent-prompt";
+import { historyFreshness, sourceLabel } from "@/lib/history-freshness";
+import { provenanceReadmeBlock } from "@/lib/provenance-embed";
+import { profileLogin } from "@/lib/static-routing.mjs";
 import {
   firstStarYear as historyFirstYear,
   formatFullDate,
@@ -142,24 +150,36 @@ const gained90 = hasHistory ? gainedInTrailingDays(history, 90) : null;
 const gained30 = hasHistory ? gainedInTrailingDays(history, 30) : null;
 const trend = hasHistory ? growthTrend(history) : null;
 const milestones = hasHistory ? starMilestones(history) : [];
-const lastDataDate = hasHistory ? history[history.length - 1].date : null;
-const updatedLabel = formatMonthYear(
-  data?.history_coverage_end ?? lastDataDate,
-);
 const createdFull = formatFullDate(data?.created_at ?? null);
 const firstStarMonth = hasHistory ? formatMonthYear(history[0].date) : null;
 
+// Source, coverage date, state — the only three things gitdebt can observe
+// about how this series was read. Never a count and never a share.
+const freshness = historyFreshness(data);
+
 const title = `${repoSlug} — star history & stats · gitdebt`;
+
+/**
+ * The composed description has to land under Seo's 160-character truncation,
+ * and the slug is unbounded, so the distinguishing clause goes first and the
+ * enumeration is the part that gives way. 112 of 118 repo pages used to cut
+ * mid-word here.
+ */
+function fitDescription(head: string, tails: string[], limit = 160): string {
+  for (const tail of tails) {
+    const composed = `${head} ${tail}`;
+    if (composed.length <= limit) return composed;
+  }
+  return head;
+}
+
+const sourceWord = archiveHistory ? "Public star-activity" : "Star-history";
 const description = data
-  ? `${repoSlug} has ${data.total_stars.toLocaleString()} GitHub stars${
-      archiveHistory && gained90 !== null && gained90 > 0
-        ? `, with about ${gained90.toLocaleString()} public star actions observed in the latest 90 days of archive coverage`
-        : gained90 !== null && gained90 > 0
-          ? `, up about ${gained90.toLocaleString()} in 90 days`
-          : firstStarYear
-            ? ` since ${firstStarYear}`
-            : ""
-    }. ${archiveHistory ? "Approximate public star-activity chart" : "Full star-history chart"} plus repo health: fix-labelled changes, file change frequency, contributors, commit activity, and recent TODO/FIXME movement.`
+  ? fitDescription(`${repoSlug}: ${data.total_stars.toLocaleString()} GitHub stars.`, [
+      `${sourceWord} chart plus repo health — fix-labelled changes, file churn, contributor concentration, and commit cadence.`,
+      `${sourceWord} chart plus repo health: fix-labelled changes, file churn, and contributors.`,
+      `${sourceWord} chart plus repo-health charts.`,
+    ])
   : `Star history and repo-debt insights for ${repoSlug}.`;
 
 const ogImage = `${apiBase}/api/repos/${owner}/${repo}/og.png`;
@@ -171,11 +191,14 @@ const faqs: { q: string; a: string }[] = [];
 if (data && hasHistory) {
   faqs.push({
     q: `How many stars does ${repoSlug} have?`,
+    // No event count beside the star total: an archive series records star
+    // actions and not unstars, so it can exceed the repository's own total and
+    // the subtraction a reader would make is not a real figure.
     a: `GitHub currently reports ${data.total_stars.toLocaleString()} stars for ${repoSlug}${
       !archiveHistory && gained90 !== null && gained90 > 0
         ? `, with about ${gained90.toLocaleString()} of them added in the last 90 days`
         : ""
-    }.${archiveHistory ? ` The chart separately represents ${data.history_event_count.toLocaleString()} public star actions and can differ because public WatchEvents do not include unstars.` : ""}`,
+    }.${archiveHistory ? ` The chart itself is rebuilt from public GH Archive star events, which record star actions and not unstars, so it reads as an attention signal rather than a net star count.` : ""}`,
   });
   if (gained90 !== null) {
     const pace =
@@ -225,6 +248,47 @@ if (data && hasHistory) {
   }
 }
 
+// Owner segments accept dots and any length; the profile route does not. A
+// catalog entry with a dotted owner would otherwise link a 404 breadcrumb and
+// assert a structured-data URL for a page that is never emitted.
+const ownerProfile = profileLogin(owner);
+
+// Coverage is asserted in markup only where the page actually shows it. The
+// node carries a source, a window and a download — never a count, a share, or
+// a completeness score.
+const temporalCoverage =
+  hasHistory && data?.history_coverage_end
+    ? `${history[0].date.slice(0, 10)}/${data.history_coverage_end.slice(0, 10)}`
+    : null;
+// `hasHistory` is part of the gate, not decoration. A `restricted` repository
+// classifies out of "unknown" but has no series at all — the backend only
+// reports that status while `history_complete` is false — so without this the
+// page would publish a Dataset node whose `DataDownload` points at a
+// `stars.json` that has nothing to serve, and credit it to "No readable
+// source". Assert a dataset only where a dataset exists.
+const showProvenanceDataset =
+  Boolean(data) && hasHistory && freshness.state !== "unknown";
+
+const breadcrumbItems: Record<string, unknown>[] = [
+  { "@type": "ListItem", position: 1, name: "gitdebt", item: `${site}/` },
+  ...(ownerProfile
+    ? [
+        {
+          "@type": "ListItem",
+          position: 2,
+          name: ownerProfile,
+          item: `${site}/${ownerProfile}`,
+        },
+      ]
+    : []),
+];
+breadcrumbItems.push({
+  "@type": "ListItem",
+  position: breadcrumbItems.length + 1,
+  name: repoSlug,
+  item: canonical,
+});
+
 const jsonLd: Record<string, unknown>[] = [
   {
     "@context": "https://schema.org",
@@ -245,28 +309,26 @@ const jsonLd: Record<string, unknown>[] = [
   {
     "@context": "https://schema.org",
     "@type": "BreadcrumbList",
-    itemListElement: [
-      {
-        "@type": "ListItem",
-        position: 1,
-        name: "gitdebt",
-        item: `${site}/`,
-      },
-      {
-        "@type": "ListItem",
-        position: 2,
-        name: owner,
-        item: `${site}/${owner}`,
-      },
-      {
-        "@type": "ListItem",
-        position: 3,
-        name: repoSlug,
-        item: canonical,
-      },
-    ],
+    itemListElement: breadcrumbItems,
   },
 ];
+if (showProvenanceDataset) {
+  jsonLd.push({
+    "@context": "https://schema.org",
+    "@type": "Dataset",
+    name: `${repoSlug} star history`,
+    description: `Dated star series for ${repoSlug}, as read by gitdebt.`,
+    url: canonical,
+    isAccessibleForFree: true,
+    creditText: sourceLabel(freshness),
+    ...(temporalCoverage && { temporalCoverage }),
+    distribution: {
+      "@type": "DataDownload",
+      contentUrl: `${apiBase}/api/repos/${owner}/${repo}/stars.json`,
+      encodingFormat: "application/json",
+    },
+  });
+}
 if (faqs.length > 0) {
   jsonLd.push({
     "@context": "https://schema.org",
@@ -294,6 +356,17 @@ const vsLinks = (categoryRelated.length > 0 ? categoryRelated : FALLBACK_SUGGEST
 // Prerendered seed for the agent prompt. The island refreshes it from the
 // report's own live broadcast, so the copied brief never issues a request.
 const promptStars = data ? starFacts(history, data.total_stars, archiveHistory) : null;
+
+// The owner's one move from "my chart is frozen" to "my README says why": the
+// unmodified chart embed plus one line of provenance text. Null while the
+// source is unestablished, because publishing an unestablished claim into a
+// permanent place is worse than publishing nothing.
+const readmeBlock = provenanceReadmeBlock({
+  apiBase,
+  siteOrigin: site,
+  slug: repoSlug,
+  snapshot: data,
+});
 ---
 
 <!doctype html>
@@ -332,11 +405,15 @@ const promptStars = data ? starFacts(history, data.total_stars, archiveHistory) 
             >gitdebt</a
           >
           <span class="px-1.5 text-border" aria-hidden="true">/</span>
-          <a
-            href={`/${owner}`}
-            class="rounded outline-none transition-colors duration-150 hover:text-foreground focus-visible:ring-2 focus-visible:ring-accent/30"
-            >{owner}</a
-          >
+          {ownerProfile ? (
+            <a
+              href={`/${ownerProfile}`}
+              class="rounded outline-none transition-colors duration-150 hover:text-foreground focus-visible:ring-2 focus-visible:ring-accent/30"
+              >{owner}</a
+            >
+          ) : (
+            <span>{owner}</span>
+          )}
           <span class="px-1.5 text-border" aria-hidden="true">/</span>
           <span class="text-foreground">{repo}</span>
         </nav>
@@ -356,12 +433,6 @@ const promptStars = data ? starFacts(history, data.total_stars, archiveHistory) 
             <h2 class={HEADING}>
               {archiveHistory ? "Public star activity" : "Star history"}
             </h2>
-            {updatedLabel && (
-              <p class={CAPTION}>
-                {archiveHistory ? "coverage through" : "latest star"}{" "}
-                {updatedLabel}
-              </p>
-            )}
           </div>
           <div class="mt-6">
             <ChartViewer
@@ -377,19 +448,31 @@ const promptStars = data ? starFacts(history, data.total_stars, archiveHistory) 
               points={history}
             />
           </div>
-          {milestones.length > 0 && (
-            <p class:list={["mt-4", CAPTION]}>
-              {archiveHistory ? "Observed activity milestones" : "Star milestones"}:{" "}
-              {milestones.map((m, i) => (
-                <>
-                  {i > 0 && <span aria-hidden="true"> · </span>}
-                  <span class="whitespace-nowrap tabular-nums">
-                    {formatCompact(m.threshold)} around {formatMonthYear(m.date)}
-                  </span>
-                </>
-              ))}
-            </p>
-          )}
+          {/* The header used to caption this date "latest star", which reads as
+              a repository that stopped gaining stars rather than a coverage
+              window that closed. Source, date and state now sit on the chart
+              itself, said once and in the vocabulary that can be defended. */}
+          <div class="mt-4 flex flex-wrap items-center justify-between gap-x-8 gap-y-2">
+            <SeriesProvenance
+              client:visible
+              variant="inline"
+              snapshot={data}
+              slug={repoSlug}
+            />
+            {milestones.length > 0 && (
+              <p class={CAPTION}>
+                {archiveHistory ? "Observed activity milestones" : "Star milestones"}:{" "}
+                {milestones.map((m, i) => (
+                  <>
+                    {i > 0 && <span aria-hidden="true"> · </span>}
+                    <span class="whitespace-nowrap tabular-nums">
+                      {formatCompact(m.threshold)} around {formatMonthYear(m.date)}
+                    </span>
+                  </>
+                ))}
+              </p>
+            )}
+          </div>
         </section>
 
         <section id="readme" class="mt-16 scroll-mt-24 border-t border-border/60 pt-12">
@@ -404,13 +487,37 @@ const promptStars = data ? starFacts(history, data.total_stars, archiveHistory) 
               >
             </a>
           </div>
-          <p class:list={["mt-2 max-w-[68ch]", BODY]}>
-            Hand a coding agent one prompt and it adds the star-history chart, a
-            stars-and-forks badge, and whichever repo-health charts fit to
-            {repoSlug}'s README — light and dark variants, alt text, and the
-            measured numbers already filled in.
+          <p class:list={["mt-2", BODY, MEASURE]}>
+            Copy the block below to publish the chart with its source and
+            coverage date stated beside it — the same three facts this page
+            shows, as text a reader can check. Or hand the prompt underneath to
+            a coding agent and it adds the badges and repo-health charts too.
           </p>
-          <div class="mt-6">
+          {readmeBlock ? (
+            <div class="mt-6">
+              <CodeBlock
+                client:visible
+                code={readmeBlock.snippet}
+                language={readmeBlock.language}
+                label={`README.md · ${repoSlug} star history`}
+                copyLabel="Copy block"
+                copyAriaLabel={`Copy the README block for ${repoSlug}`}
+              />
+              <p class:list={["mt-2", CAPTION, MEASURE]}>
+                Light and dark variants, alt text, and one provenance line.
+                Provenance is text in your README, never baked into the image
+                URL, so the chart stays cacheable.
+              </p>
+            </div>
+          ) : (
+            <div class:list={["mt-6", PANEL_PADDED]}>
+              <p class={EYEBROW}>Star-history block</p>
+              <p class:list={["mt-2", CAPTION, MEASURE]}>
+                Available once gitdebt has read this repository.
+              </p>
+            </div>
+          )}
+          <div class="mt-8">
             <AgentReadmePrompt
               client:visible
               apiBase={apiBase}
@@ -432,7 +539,7 @@ const promptStars = data ? starFacts(history, data.total_stars, archiveHistory) 
               >
             </a>
           </div>
-          <p class:list={["mt-2 max-w-[64ch]", BODY]}>
+          <p class:list={["mt-2", BODY, MEASURE]}>
             Embeddable maintenance, ownership, and star-momentum signals,
             computed from commit and star history.
           </p>
@@ -453,7 +560,7 @@ const promptStars = data ? starFacts(history, data.total_stars, archiveHistory) 
               >
             </a>
           </div>
-          <p class:list={["mt-2 max-w-[68ch]", BODY]}>
+          <p class:list={["mt-2", BODY, MEASURE]}>
             Fix-labelled changes, file change frequency, ownership risk, and
             maintenance cadence for {repoSlug}, each computed from its analyzed
             commit window.
@@ -489,7 +596,7 @@ const promptStars = data ? starFacts(history, data.total_stars, archiveHistory) 
             <div class={SECTION_HEADER}>
               <h2 class={HEADING}>{repoSlug} at a glance</h2>
             </div>
-            <div class="mt-6 grid gap-x-12 gap-y-8 sm:grid-cols-2">
+            <div class="mt-8 grid gap-x-12 gap-y-8 sm:grid-cols-2">
               {faqs.map((f) => (
                 <article>
                   <h3 class="text-[13px] text-foreground/90">{f.q}</h3>
@@ -515,7 +622,7 @@ const promptStars = data ? starFacts(history, data.total_stars, archiveHistory) 
               >
             </a>
           </div>
-          <div class="mt-5 flex flex-wrap items-center gap-2">
+          <div class="mt-6 flex flex-wrap items-center gap-2">
             {vsLinks.map((other) => (
               <a
                 href={`/vs/${repoSlug}/${other}`}
@@ -536,7 +643,7 @@ const promptStars = data ? starFacts(history, data.total_stars, archiveHistory) 
             </ButtonLink>
           </div>
           {repoCategories.length > 0 && (
-            <p class:list={["mt-5", BODY]}>
+            <p class:list={["mt-6", BODY, MEASURE]}>
               {repoSlug} is featured in{" "}
               {repoCategories.map((c, i) => (
                 <>

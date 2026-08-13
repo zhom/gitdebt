@@ -464,30 +464,6 @@ label.dither-chip:hover {
   background-image: none;
 }
 
-@keyframes growth-ticker-scroll {
-  to {
-    transform: translateX(-50%);
-  }
-}
-
-.growth-ticker-track {
-  animation: growth-ticker-scroll 48s linear infinite;
-  will-change: transform;
-}
-
-.group:hover > .growth-ticker-track,
-.group:focus-within > .growth-ticker-track {
-  animation-play-state: paused;
-}
-
-@media (prefers-reduced-motion: reduce) {
-  .growth-ticker-track {
-    animation: none;
-    transform: none;
-    will-change: auto;
-  }
-}
-
 @media (max-width: 39.999rem) {
   .site-header [data-auth-slot] details > div {
     position: fixed;

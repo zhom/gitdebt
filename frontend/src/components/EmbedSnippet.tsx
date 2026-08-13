@@ -20,7 +20,6 @@ import {
   EASE_OUT,
   REDUCED_MOTION_DURATION,
 } from "@/lib/motion";
-import { MEDIA_RENDER_REVISION } from "@/lib/media";
 import { cn } from "@/lib/utils";
 
 /** Native select plus the chevron every select in the product carries. */
@@ -195,9 +194,15 @@ export function EmbedSnippet({
 
   const formatParams =
     selectedFormat === "svg" && animate ? ["animate=1"] : [];
+  // No `render=` here. Every URL this component builds is published into
+  // somebody's README and nowhere else — there is no on-page preview to bust a
+  // cache for — so a revision parameter would pin a permanent README to one
+  // renderer revision, split the CDN cache key, and contradict both the
+  // `no cache-busting parameters` rule /badges states and the plain URLs the
+  // golden `readme-embeds` library and `/api/md` emit for the same assets.
   const base = appendParams(
     `${apiBase}${withFormat(chartPath, selectedFormat)}`,
-    [...stateParams(state), ...formatParams, `render=${MEDIA_RENDER_REVISION}`],
+    [...stateParams(state), ...formatParams],
   );
   const lightUrl = appendParams(base, ["theme=light"]);
   const darkUrl = appendParams(base, ["theme=dark"]);

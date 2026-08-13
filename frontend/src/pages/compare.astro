@@ -6,11 +6,19 @@ import Seo from "@/components/Seo.astro";
 import SiteHeader from "@/components/SiteHeader.astro";
 import SiteFooter from "@/components/SiteFooter.astro";
 import { CompareBuilder } from "@/components/CompareBuilder";
+import {
+  DitherComparisonChart,
+  comparisonColors,
+} from "@/components/DitherComparisonChart";
+import { SeriesProvenance } from "@/components/SeriesProvenance";
 import { WarmRepos } from "@/components/WarmRepos";
 import {
   BODY,
+  CAPTION,
   EYEBROW,
   HEADING,
+  LEAD,
+  MEASURE,
   ROW,
   ROW_BADGE,
   SECTION_ACTION,
@@ -18,9 +26,14 @@ import {
   TITLE,
 } from "@/components/style-tokens";
 import { CATEGORIES, CATEGORY_GROUPS } from "@/data/categories";
+import {
+  loadBuildRepoSnapshot,
+  type BuildAnalyzeResponse,
+} from "@/lib/build-repo-snapshot";
+import { formatCompact } from "@/lib/star-insights";
 import { staticApiBase } from "@/lib/static-api-base";
 
-const POPULAR_PAIRS = [
+const POPULAR_PAIRS: [string, string][] = [
   ["facebook/react", "vuejs/vue"],
   ["denoland/deno", "oven-sh/bun"],
   ["tailwindlabs/tailwindcss", "twbs/bootstrap"],
@@ -29,59 +42,128 @@ const POPULAR_PAIRS = [
   ["actix/actix-web", "tokio-rs/axum"],
   ["ollama/ollama", "vllm-project/vllm"],
   ["microsoft/vscode", "neovim/neovim"],
-].map((repos) => ({
-  repos: [...repos].sort(),
-  label: repos.map((repo) => repo.split("/")[1]).join(" vs "),
-}));
+].map((pair) => [...pair].sort() as [string, string]);
 
 const apiBase = staticApiBase();
 const site = (Astro.site ?? new URL("https://gitdebt.com")).href.replace(/\/$/, "");
 
-const SLUG_RE = /^[a-z0-9._-]+\/[a-z0-9._-]+$/;
-const rawRepos = Astro.url.searchParams.get("repos");
-let repos: string[] = [];
-if (rawRepos) {
-  const parts = rawRepos
-    .split(",")
-    .map((slug) => slug.trim().toLowerCase())
-    .filter(Boolean);
-  if (parts.every((slug) => SLUG_RE.test(slug))) {
-    repos = Array.from(new Set(parts)).sort().slice(0, 8);
-  }
-}
-const hasSelection = repos.length >= 2;
-const reposParam = repos.join(",");
+// `Astro.url.searchParams` is always empty during prerender, so the old
+// selection branch could never run: it only ever produced a canonical carrying
+// a query. `CompareBuilder` reads `window.location.search` itself, which is the
+// working client-side contract, so the page ships exactly one honest canonical.
+const canonicalPath = "/compare";
+const title = "Compare GitHub star history · gitdebt";
+const description =
+  "Compare up to eight GitHub repositories by star history, codebase scale, maintenance cadence, ownership concentration, and change pressure.";
+const ogImage = `${apiBase}/api/og.png`;
 
-const title = hasSelection
-  ? `${repos.join(" vs ")} — star history · gitdebt`
-  : "Compare GitHub star history · gitdebt";
-const description = hasSelection
-  ? `Compare ${repos.join(", ")} by animated star history, languages, codebase size, maintenance cadence, ownership concentration, and change pressure.`
-  : "Compare up to eight GitHub repositories by animated star history, codebase scale, maintenance cadence, ownership concentration, and change pressure.";
-
-const ogImage = hasSelection
-  ? `${apiBase}/api/og.png?repos=${encodeURIComponent(reposParam)}`
-  : `${apiBase}/api/og.png`;
-const canonicalPath = !hasSelection
-  ? "/compare"
-  : repos.length === 2
-    ? `/vs/${repos[0]}/${repos[1]}`
-    : `/compare?repos=${encodeURIComponent(reposParam)}`;
-
-const jsonLd = {
-  "@context": "https://schema.org",
-  "@type": "CollectionPage",
-  name: hasSelection
-    ? `Compare star history: ${repos.join(" vs ")}`
-    : "Compare GitHub star history",
-  url: `${site}${canonicalPath}`,
-  description,
+type LeaderboardResponse = {
+  repos: { repo: string; stars: number }[];
 };
+
+async function fetchJson<T>(url: string): Promise<T | null> {
+  for (let attempt = 0; attempt < 3; attempt += 1) {
+    try {
+      const res = await fetch(url, {
+        headers: { accept: "application/json" },
+        signal: AbortSignal.timeout(20_000),
+      });
+      if (res.ok) return (await res.json()) as T;
+      if (res.status < 500 && res.status !== 429) return null;
+    } catch {}
+
+    if (attempt < 2) {
+      await new Promise((resolve) => setTimeout(resolve, 500 * 2 ** attempt));
+    }
+  }
+  return null;
+}
+
+// One Postgres-backed board read. A pair whose sides are not both on it renders
+// no badge at all: grey and absent mean "no data", and a build must never fail
+// because a decorative figure was unavailable.
+const starsBoard = await fetchJson<LeaderboardResponse>(
+  `${apiBase}/api/leaderboard.json?metric=stars&per=100&page=0`,
+);
+const starsBySlug = new Map<string, number>(
+  (starsBoard?.repos ?? []).map((row) => [row.repo.toLowerCase(), row.stars]),
+);
+
+const popularPairs = POPULAR_PAIRS.map(([first, second]) => {
+  const starsFirst = starsBySlug.get(first) ?? null;
+  const starsSecond = starsBySlug.get(second) ?? null;
+  return {
+    repos: [first, second] as [string, string],
+    label: `${first.split("/")[1]} vs ${second.split("/")[1]}`,
+    detail: `${first} · ${second}`,
+    badge:
+      starsFirst !== null && starsSecond !== null
+        ? `${formatCompact(starsFirst)} · ${formatCompact(starsSecond)}`
+        : null,
+    combined: (starsFirst ?? 0) + (starsSecond ?? 0),
+  };
+}).sort(
+  (a, b) => b.combined - a.combined || (a.label < b.label ? -1 : 1),
+);
+
+// The demo is pinned to the first declared pair rather than the sorted one, so
+// the same two series are baked on every build regardless of what the board
+// returned. Both slugs are already curated members, so this shares the snapshot
+// promise `compare/[category]` opens and costs no extra request.
+const demoSlugs = POPULAR_PAIRS[0];
+const demoSnapshots = await Promise.all(
+  demoSlugs.map((slug) => loadBuildRepoSnapshot(slug)),
+);
+const demoEntries = demoSlugs
+  .map((slug, index) => ({ slug, data: demoSnapshots[index].data }))
+  .filter(
+    (entry): entry is { slug: string; data: BuildAnalyzeResponse } =>
+      entry.data !== null && entry.data.history.length >= 2,
+  );
+// Never chart from partial data: one usable series is not a comparison.
+const showDemo = demoEntries.length === demoSlugs.length;
+const demoColors = comparisonColors(demoSlugs);
+const demoParam = demoSlugs.join(",");
+const demoPath = `/api/chart.svg?repos=${encodeURIComponent(demoParam)}`;
+const demoLink = `${site}/compare?repos=${encodeURIComponent(demoParam)}`;
+const demoLabel = demoSlugs.map((slug) => slug.split("/")[1]).join(" vs ");
+
+// The exact array the category columns render, so the markup cannot describe a
+// list the page does not show.
+const renderedCategories = CATEGORY_GROUPS.flatMap((group) => group.categories);
+
+const jsonLd: Record<string, unknown>[] = [
+  {
+    "@context": "https://schema.org",
+    "@type": "CollectionPage",
+    name: "Compare GitHub star history",
+    url: `${site}${canonicalPath}`,
+    description,
+    mainEntity: {
+      "@type": "ItemList",
+      name: "Curated categories of comparable repositories",
+      numberOfItems: renderedCategories.length,
+      itemListElement: renderedCategories.map((category, index) => ({
+        "@type": "ListItem",
+        position: index + 1,
+        name: category.name,
+        url: `${site}/compare/${category.slug}`,
+      })),
+    },
+  },
+  {
+    "@context": "https://schema.org",
+    "@type": "BreadcrumbList",
+    itemListElement: [
+      { "@type": "ListItem", position: 1, name: "gitdebt", item: `${site}/` },
+      { "@type": "ListItem", position: 2, name: "Compare", item: `${site}/compare` },
+    ],
+  },
+];
 
 const suggestionRepos = Array.from(
   new Set([
-    ...repos,
-    ...POPULAR_PAIRS.flatMap((pair) => pair.repos),
+    ...POPULAR_PAIRS.flat(),
     ...CATEGORIES.flatMap((category) => category.repos),
   ]),
 );
@@ -96,9 +178,6 @@ const suggestionRepos = Array.from(
       description={description}
       canonicalPath={canonicalPath}
       ogImage={ogImage}
-      imageAlt={hasSelection
-        ? `Star history comparison card for ${repos.join(" versus ")}`
-        : undefined}
       jsonLd={jsonLd}
     />
   </head>
@@ -119,16 +198,63 @@ const suggestionRepos = Array.from(
 
         <header class="mt-8">
           <h1 class={TITLE}>Compare star history across repositories</h1>
-          <p class:list={["mt-3 max-w-[68ch] text-[15px]", BODY]}>
-            Compare up to eight repos by calendar date or days since their
-            first star, then inspect languages, codebase scale, maintenance
-            cadence, ownership resilience, and debt signals. Use the builder
-            for any combination, or open a curated field.
+          <p class:list={["mt-3", LEAD, BODY]}>
+            Plot up to eight repos by calendar date or days since their first
+            star, then read languages, codebase scale, maintenance cadence,
+            ownership resilience and debt signals. Build any combination, or
+            open a curated field.
           </p>
         </header>
 
-        <div class="mt-12">
-          <CompareBuilder client:load apiBase={apiBase} initialRepos={repos} />
+        {showDemo && (
+          <div id="compare-demo" class="mt-6">
+            <DitherComparisonChart
+              client:load
+              apiBase={apiBase}
+              path={demoPath}
+              caption={`Example — ${demoLabel} star history`}
+              embedLink={demoLink}
+              label={demoLabel}
+              series={demoEntries.map((entry) => ({
+                slug: entry.slug,
+                points: entry.data.history,
+              }))}
+            />
+            <ul role="list" class="mt-3 grid gap-x-12 gap-y-2 sm:grid-cols-2">
+              {demoEntries.map((entry) => (
+                <li>
+                  <SeriesProvenance
+                    client:visible
+                    variant="inline"
+                    slug={entry.slug}
+                    snapshot={entry.data}
+                    fill={demoColors.get(entry.slug)}
+                  />
+                </li>
+              ))}
+            </ul>
+            <p class:list={["mt-2", CAPTION, MEASURE]}>
+              A worked example from cached star history — the two series can come
+              from different sources, which is why each carries its own mark.
+              Enter repositories below to replace it.
+            </p>
+          </div>
+        )}
+        {/* Deliberately NOT `is:inline`: Astro's CSP hashes the scripts it
+            processes, and an `is:inline` script is left untouched and therefore
+            has no hash, so `script-src` blocks it at runtime. Bundled is the
+            only form that actually executes here. */}
+        <script>
+          // The demo is the empty state of the builder. Once the visitor has a
+          // selection of their own, the builder charts it and a second, unrelated
+          // chart above it is noise.
+          if (new URLSearchParams(window.location.search).get("repos")) {
+            document.getElementById("compare-demo")?.remove();
+          }
+        </script>
+
+        <div class:list={[showDemo ? "mt-8" : "mt-6"]}>
+          <CompareBuilder client:load apiBase={apiBase} />
         </div>
 
         <section class="mt-16 scroll-mt-24 border-t border-border/60 pt-12">
@@ -143,15 +269,25 @@ const suggestionRepos = Array.from(
               >
             </a>
           </div>
-          <ul role="list" class="mt-6 grid gap-x-10 sm:grid-cols-2">
-            {POPULAR_PAIRS.map((pair) => (
+          <ul role="list" class="mt-8 grid gap-x-10 sm:grid-cols-2">
+            {popularPairs.map((pair) => (
               <li>
                 <a
                   href={`/vs/${pair.repos[0]}/${pair.repos[1]}`}
                   data-warm-repos={pair.repos.join(",")}
                   class={ROW}
                 >
-                  <span class="min-w-0 flex-1 truncate">{pair.label}</span>
+                  <span class="min-w-0 flex-1 py-2">
+                    <span class="block truncate">{pair.label}</span>
+                    <span class="mt-0.5 block truncate text-[11px] text-muted-foreground/80 group-hover:text-muted-foreground">
+                      {pair.detail}
+                    </span>
+                  </span>
+                  {pair.badge && (
+                    <span class={ROW_BADGE}>
+                      <span class="sr-only">stars: </span>{pair.badge}
+                    </span>
+                  )}
                 </a>
               </li>
             ))}
@@ -164,26 +300,19 @@ const suggestionRepos = Array.from(
         >
           <div class={SECTION_HEADER}>
             <h2 class={HEADING}>Curated categories of comparable tools</h2>
-            <a href="/leaderboard" class={SECTION_ACTION}>
-              fastest growing
-              <span
-                aria-hidden="true"
-                class="transition-transform duration-150 group-hover:translate-x-0.5 motion-reduce:transition-none"
-                >→</span
-              >
-            </a>
+            <p class={CAPTION}>{renderedCategories.length} categories</p>
           </div>
-          <p class:list={["mt-2 max-w-[68ch]", BODY]}>
-            Each page has an editorial introduction, a shared star-history
-            chart, recent growth, current ranking, and direct access to the
+          <p class:list={["mt-6", MEASURE, BODY]}>
+            Each page carries an editorial introduction, a shared star-history
+            chart, recent growth, the current ranking, and direct access to the
             maintenance signals behind every repository.
           </p>
 
-          <div class="mt-10 grid gap-x-12 gap-y-12 lg:grid-cols-3">
+          <div class="mt-8 grid gap-x-12 gap-y-8 lg:grid-cols-3">
             {CATEGORY_GROUPS.map((group) => (
               <section>
                 <h3 class={EYEBROW}>{group.name}</h3>
-                <p class:list={["mt-2 max-w-[42ch]", BODY]}>
+                <p class:list={["mt-2", MEASURE, BODY]}>
                   {group.description}
                 </p>
                 <ul role="list" class="mt-4">

@@ -16,6 +16,18 @@ dark is the default theme for the site and for server-rendered assets.
   idempotency. Do not collect actors, stargazer profiles, or event payloads.
 - Do not add another code path that paginates GitHub's stargazers endpoint.
   Star-series read surfaces must use Postgres.
+- Provenance copy states SOURCE, COVERAGE DATE, and STATE — never a count,
+  percentage, completeness score, or any figure implying how many stars are
+  missing. An archive series counts re-stars and can exceed the repository's own
+  star total, so a gap number is confidently wrong exactly where it is most
+  eye-catching. `history-freshness.ts` owns every one of these strings;
+  `SeriesProvenance.tsx` and `provenance-embed.ts` render them and add none of
+  their own. Enforced by `history-freshness.test.mjs` and
+  `provenance-embed.test.mjs`.
+- There is no repository connection flow. `repo_star_grants` exists in `db.rs`
+  with no reader, no writer, and no route, and its schema comment reads as
+  though the feature shipped. Until it does, no copy may offer connecting a
+  repository as a remedy for the July 2026 stargazer restriction.
 
 ## Repository map
 
@@ -53,8 +65,9 @@ cargo fmt --all -- --check
 
 # Frontend
 pnpm install --frozen-lockfile
-pnpm --filter gitdebt-frontend test:seo
-pnpm --filter gitdebt-frontend build
+pnpm --filter gitdebt-frontend test          # every scripts/*.test.mjs
+PUBLIC_API_BASE=https://api.gitdebt.com \
+  pnpm --filter gitdebt-frontend build       # check + build + 3 audit scripts
 
 # Extension
 npm --prefix extension ci
@@ -109,6 +122,13 @@ frontend grid.
 - Production catalog failures must fail the build instead of publishing an
   accidentally empty catalog.
 - Sitemap URLs must exactly match emitted, indexable pages.
+- Never run two frontend builds against one `dist`. `astro build` empties
+  `outDir` at startup only, so an overlapping build keeps writing pages from its
+  own older catalog window into the same tree. The survivors are pages the
+  second build's window no longer contains, and `audit-seo` then fails with
+  `Indexable pages outside the sitemap` naming repositories that look like a
+  sitemap bug and are not. Confirm no build is running, and check the reported
+  page count against the HTML file count before believing such a failure.
 - `/report` remains the live client-side discovery route.
 
 ## Finish checklist

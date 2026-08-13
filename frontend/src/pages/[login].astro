@@ -13,8 +13,9 @@ import {
   type UserAnalyze,
   type UserStats,
 } from "@/components/LiveUserProfile";
+import { CAPTION, MEASURE } from "@/components/style-tokens";
 import { profileLogin } from "@/lib/static-routing.mjs";
-import { firstStarYear, gainedInTrailingDays } from "@/lib/star-insights";
+import { firstStarYear } from "@/lib/star-insights";
 
 export async function getStaticPaths() {
   return staticLoginPaths();
@@ -46,16 +47,33 @@ const ownedRepos = data ? await catalogReposFor(login) : [];
 
 const hasData = data !== null && data.repos_included > 0 && data.history.length > 0;
 const firstYear = stats?.since_year ?? (data ? firstStarYear(data.history) : null);
-const gained90 = data ? gainedInTrailingDays(data.history, 90) : null;
 
 const title = `${login} — GitHub star history and repo health · gitdebt`;
+
+/**
+ * A login can be 39 characters, so the enumeration is the part that gives way
+ * rather than Seo's truncation cutting the tail mid-clause.
+ */
+function fitDescription(head: string, tails: string[], limit = 160): string {
+  for (const tail of tails) {
+    const composed = `${head} ${tail}`;
+    if (composed.length <= limit) return composed;
+  }
+  return head;
+}
+
 const description = hasData
-  ? `${login}'s public repos have earned ${data!.total_stars.toLocaleString()} GitHub stars${
-      firstYear ? ` since ${firstYear}` : ""
-    }${
-      gained90 !== null && gained90 > 0 ? `, ${gained90.toLocaleString()} in the last 90 days` : ""
-    }. Aggregate star history across ${data!.repos_included} repos, plus commit activity, language footprint and embeddable README assets.`
-  : `Aggregate GitHub star history for ${login}'s public repos, with commit activity, language footprint and embeddable README assets.`;
+  ? fitDescription(
+      `${login}: ${data!.total_stars.toLocaleString()} GitHub stars across ${data!.repos_included} public repos${
+        firstYear ? ` since ${firstYear}` : ""
+      }.`,
+      [
+        "Aggregate star history, commit activity, language footprint, and embeddable README assets.",
+        "Aggregate star history, commit activity, and embeddable README assets.",
+        "Aggregate star history and commit activity.",
+      ],
+    )
+  : `Aggregate GitHub star history for ${login}'s public repos, with commit activity and embeddable README assets.`;
 
 const ogImage = `${apiBase}/api/users/${login}/og.png`;
 
@@ -76,8 +94,12 @@ const jsonLd: Record<string, unknown>[] = [
     ...(hasData && {
       mainEntity: {
         "@type": "ItemList",
+        // `numberOfItems` is the size of the list this page actually provides.
+        // `repos_included` is how many repositories the aggregate covered, and
+        // the elements are hard-capped at 24, so asserting it here claimed a
+        // list the markup does not carry for any maintainer above the cap.
         name: `${login}'s tracked GitHub repositories`,
-        numberOfItems: data!.repos_included,
+        numberOfItems: ownedRepos.length,
         itemListElement: ownedRepos.map((slug, index) => ({
           "@type": "ListItem",
           position: index + 1,
@@ -148,6 +170,17 @@ const jsonLd: Record<string, unknown>[] = [
             repos={ownedRepos}
           />
         </div>
+
+        {/* No source marker here, deliberately. This curve sums many
+            repositories whose series were read differently, and the aggregate
+            payload carries no per-repository source, so a single mark over it
+            would be a claim gitdebt cannot make. */}
+        {hasData && (
+          <p class:list={["mt-6", CAPTION, MEASURE]}>
+            This aggregate sums star series whose source differs per repository.
+            Each repository report names its own source and coverage date.
+          </p>
+        )}
       </main>
 
       <SiteFooter

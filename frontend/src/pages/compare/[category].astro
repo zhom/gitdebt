@@ -2,19 +2,28 @@
 import "@/styles/globals.css";
 import { staticCategoryPaths } from "@/lib/build-catalog";
 import { staticApiBase } from "@/lib/static-api-base";
-import { loadBuildRepoSnapshot } from "@/lib/build-repo-snapshot";
+import {
+  loadBuildRepoSnapshot,
+  type BuildAnalyzeResponse,
+} from "@/lib/build-repo-snapshot";
 import BaseHead from "@/components/BaseHead.astro";
 import Seo from "@/components/Seo.astro";
 import SiteHeader from "@/components/SiteHeader.astro";
 import SiteFooter from "@/components/SiteFooter.astro";
-import { DitherComparisonChart } from "@/components/DitherComparisonChart";
+import {
+  DitherComparisonChart,
+  comparisonColors,
+} from "@/components/DitherComparisonChart";
 import { RepoComparisonMatrix } from "@/components/RepoComparisonMatrix";
+import { SeriesProvenance } from "@/components/SeriesProvenance";
 import { WarmRepos } from "@/components/WarmRepos";
 import {
   BODY,
   CAPTION,
   EYEBROW,
   HEADING,
+  LEAD,
+  MEASURE,
   PANEL_PADDED,
   ROW,
   ROW_BADGE,
@@ -63,6 +72,8 @@ type MemberRow = {
   firstYear: number | null;
   hasHistory: boolean;
   lastDate: string | null;
+  /** Kept whole so the series legend can classify source, coverage and state. */
+  snapshot: BuildAnalyzeResponse;
 };
 
 const members: MemberRow[] = [];
@@ -80,6 +91,7 @@ for (let i = 0; i < category.repos.length; i++) {
     firstYear: firstStarYear(d.history),
     hasHistory: d.history.length > 0,
     lastDate: d.history.length > 0 ? d.history[d.history.length - 1].date : null,
+    snapshot: d,
   });
 }
 members.sort((a, b) => b.stars - a.stars || (a.slug < b.slug ? -1 : 1));
@@ -111,9 +123,15 @@ const description = leader
 
 const reposParam = category.repos.join(",");
 const overlayPath = `/api/chart.svg?repos=${encodeURIComponent(reposParam)}`;
-const chartSeries = members
-  .filter((member) => member.history.length >= 2)
-  .map((member) => ({ slug: member.slug, points: member.history }));
+const chartMembers = members.filter((member) => member.history.length >= 2);
+const chartSeries = chartMembers.map((member) => ({
+  slug: member.slug,
+  points: member.history,
+}));
+// Same call the chart makes internally, so a legend row's hue is the hue of
+// the curve it labels. Hue is series identity; the mark's density carries the
+// source, which is what differs across members on these shared axes.
+const seriesColors = comparisonColors(chartSeries.map((series) => series.slug));
 const comparisonInitial = members.map((member) => ({
   slug: member.slug,
   total_stars: member.stars,
@@ -125,17 +143,34 @@ const ogImage = `${apiBase}/api/og.png?repos=${encodeURIComponent(
   category.repos.slice(0, 4).join(","),
 )}`;
 
-const topSlugs = members.slice(0, 3).map((m) => m.slug);
+// Every /vs page this category emits, not just the top three. `getStaticPaths`
+// builds one page per within-category pair, and 89 of the 278 had no inbound
+// link from anywhere on the site; the pair list here is generated the same way
+// so a chip can never point at a page that was never built.
+const pairKeys = new Set<string>();
 const pairs: [string, string][] = [];
-for (let i = 0; i < topSlugs.length; i++) {
-  for (let j = i + 1; j < topSlugs.length; j++) {
-    const pair = [topSlugs[i], topSlugs[j]].sort((a, b) => (a < b ? -1 : 1)) as [
+for (let i = 0; i < category.repos.length; i++) {
+  for (let j = i + 1; j < category.repos.length; j++) {
+    const [a, b] = [category.repos[i], category.repos[j]].sort() as [
       string,
       string,
     ];
-    pairs.push(pair);
+    const key = `${a}/${b}`;
+    if (pairKeys.has(key)) continue;
+    pairKeys.add(key);
+    pairs.push([a, b]);
   }
 }
+// Ordered by the ranking the page already renders, so the most-starred
+// head-to-heads lead. Unranked members sort last rather than being dropped.
+const memberRank = new Map(members.map((m, i) => [m.slug, i]));
+const rankOf = (slug: string) => memberRank.get(slug) ?? Number.MAX_SAFE_INTEGER;
+pairs.sort(
+  (x, y) =>
+    rankOf(x[0]) + rankOf(x[1]) - (rankOf(y[0]) + rankOf(y[1])) ||
+    (x[0] < y[0] ? -1 : 1),
+);
+const showPairs = members.length > 0 && pairs.length > 0;
 
 const related = relatedCategories(category, 4);
 const warmTargets = Array.from(
@@ -168,9 +203,12 @@ if (fastest && fastest.gained90 !== null) {
 }
 faqs.push({
   q: "How is this comparison computed?",
+  // "Stargazer timestamps" stopped being the whole answer in July 2026: an
+  // unconnected repository's series is rebuilt from public archive events, so
+  // naming one source for every curve on this axis would be wrong.
   a: loadedEnough
-    ? `The table ranks public repository metadata by current total stars. When historical stargazer timestamps are available, gitdebt plots their cumulative series on shared axes and estimates trailing 90-day growth. Repo-health charts come independently from each repository's commit history.`
-    : `The table ranks public repository metadata by current total stars. Historical growth columns and the shared timeline appear only when stargazer timestamps are available; repo-health charts come independently from each repository's commit history.`,
+    ? `The table ranks public repository metadata by current total stars. Each curve is that repository's stored star series — read either from GitHub's stargazer list or rebuilt from public GH Archive star events — drawn on shared axes, with trailing 90-day growth estimated from it. The legend under the chart names each series' own source and coverage date. Repo-health charts come independently from each repository's commit history.`
+    : `The table ranks public repository metadata by current total stars. The shared timeline and 90-day growth appear only for repositories whose star series gitdebt has read; repo-health charts come independently from each repository's commit history.`,
 });
 
 const jsonLd: Record<string, unknown>[] = [
@@ -203,6 +241,22 @@ const jsonLd: Record<string, unknown>[] = [
     ],
   },
 ];
+if (showPairs) {
+  // Generated from the same array the chips render, so the markup and the
+  // visible list cannot drift apart.
+  jsonLd.push({
+    "@context": "https://schema.org",
+    "@type": "ItemList",
+    name: `${category.name} head-to-head comparisons`,
+    numberOfItems: pairs.length,
+    itemListElement: pairs.map(([a, b], index) => ({
+      "@type": "ListItem",
+      position: index + 1,
+      name: `${a} vs ${b}`,
+      url: `${site}/vs/${a}/${b}`,
+    })),
+  });
+}
 if (faqs.length > 0 && hasCurrentRanking) {
   jsonLd.push({
     "@context": "https://schema.org",
@@ -257,7 +311,7 @@ const rowClass = "border-b border-border/40 last:border-0";
 
         <header class="mt-8">
           <h1 class={TITLE}>{category.name}: star history compared</h1>
-          <p class:list={["mt-3 max-w-[70ch] text-[15px]", BODY]}>
+          <p class:list={["mt-3", BODY, LEAD]}>
             {category.intro}
           </p>
           <p class:list={["mt-3 font-mono", CAPTION]}>
@@ -277,6 +331,25 @@ const rowClass = "border-b border-border/40 last:border-0";
               label={category.name}
               series={chartSeries}
             />
+            {/* These curves share one axis but not one source: an exact series
+                stops on a fixed date, an archive series keeps flowing. The
+                legend says which is which per repository, in source, date and
+                state — never a gap and never a share. */}
+            <p class:list={["mt-6", EYEBROW]}>How each series was read</p>
+            <ul role="list" class="mt-3 grid gap-x-12 gap-y-4 sm:grid-cols-2">
+              {chartMembers.map((m) => (
+                <li class="min-w-0">
+                  <p class="truncate font-mono text-[12px]">{m.slug}</p>
+                  <SeriesProvenance
+                    client:visible
+                    variant="inline"
+                    className="mt-1.5"
+                    fill={seriesColors.get(m.slug)}
+                    snapshot={m.snapshot}
+                  />
+                </li>
+              ))}
+            </ul>
           </div>
         )}
 
@@ -285,11 +358,10 @@ const rowClass = "border-b border-border/40 last:border-0";
             {!loadedEnough && (
               <section class:list={["mt-12", PANEL_PADDED]}>
                 <p class={EYEBROW}>Current ranking ready</p>
-                <p class:list={["mt-2 max-w-[72ch]", BODY]}>
+                <p class:list={["mt-2", BODY, MEASURE]}>
                   Current GitHub star totals and repository-health links are
-                  usable now. Historical curves and 90-day growth will appear
-                  only for repositories whose stargazer timestamps are
-                  available.
+                  usable now. Historical curves and 90-day growth appear only
+                  for repositories whose star series gitdebt has read.
                 </p>
               </section>
             )}
@@ -299,7 +371,7 @@ const rowClass = "border-b border-border/40 last:border-0";
                 <h2 class={HEADING}>Ranking</h2>
                 <p class={CAPTION}>{members.length} repositories</p>
               </div>
-              <div class="-mx-6 mt-6 overflow-x-auto">
+              <div class="-mx-6 mt-8 overflow-x-auto">
                 <div class="inline-block min-w-full px-6 py-2 align-middle">
                   <table class="w-full text-left text-base sm:text-sm">
                     <thead>
@@ -356,7 +428,7 @@ const rowClass = "border-b border-border/40 last:border-0";
               initial={comparisonInitial}
             />
 
-            {pairs.length > 0 && (
+            {showPairs && (
               <section class="mt-16 scroll-mt-24 border-t border-border/60 pt-12">
                 <div class={SECTION_HEADER}>
                   <h2 class={HEADING}>Head to head</h2>
@@ -372,14 +444,14 @@ const rowClass = "border-b border-border/40 last:border-0";
                     >
                   </a>
                 </div>
-                <div class="mt-5 flex flex-wrap items-center gap-2">
+                <div class="mt-6 flex flex-wrap items-center gap-2">
                   {pairs.map(([a, b]) => (
                     <a
                       href={`/vs/${a}/${b}`}
                       data-warm-repos={`${a},${b}`}
                       class="dither-chip rounded-md outline-none focus-visible:ring-2 focus-visible:ring-accent/30"
                     >
-                      {a.split("/")[1]} vs {b.split("/")[1]}
+                      {a} vs {b}
                     </a>
                   ))}
                 </div>
@@ -391,13 +463,13 @@ const rowClass = "border-b border-border/40 last:border-0";
                 <div class={SECTION_HEADER}>
                   <h2 class={HEADING}>Frequently asked</h2>
                 </div>
-                <div class="mt-4">
+                <div class="mt-6">
                   {faqs.map((f) => (
                     <details class="group border-b border-border/40 py-4 last:border-0">
                       <summary class="cursor-pointer list-none rounded-md py-1 text-[13px] outline-none transition-colors duration-150 hover:text-foreground focus-visible:ring-2 focus-visible:ring-accent/30 [&::-webkit-details-marker]:hidden">
                         {f.q}
                       </summary>
-                      <p class:list={["mt-2 max-w-[72ch]", BODY]}>{f.a}</p>
+                      <p class:list={["mt-2", BODY, MEASURE]}>{f.a}</p>
                     </details>
                   ))}
                 </div>
@@ -407,7 +479,7 @@ const rowClass = "border-b border-border/40 last:border-0";
         ) : (
           <section class:list={["mt-12", PANEL_PADDED]}>
             <p class={EYEBROW}>Warming up</p>
-            <p class:list={["mt-2 max-w-[70ch]", BODY]}>
+            <p class:list={["mt-2", BODY, MEASURE]}>
               Repository metadata has not loaded for this field yet. The repos
               below are being initialized automatically; open any one to watch
               its analysis progress:
@@ -439,7 +511,7 @@ const rowClass = "border-b border-border/40 last:border-0";
                 >
               </a>
             </div>
-            <ul role="list" class="mt-6 grid gap-x-10 sm:grid-cols-2">
+            <ul role="list" class="mt-8 grid gap-x-10 sm:grid-cols-2">
               {related.map((relatedCategory) => (
                 <li>
                   <a

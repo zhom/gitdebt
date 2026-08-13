@@ -9,12 +9,16 @@ import { pageInsightForPath } from "@/lib/signal-art";
 interface Props {
   /** Optional page data makes the route-specific signal field quantitative. */
   signalValues?: number[];
-  /** Landing pages may hide products that are not ready to publish. */
+  /**
+   * Reserved. Kept in the type so existing callers keep type-checking; the
+   * extension entry it used to gate has been removed because it pointed at
+   * `/#extension`, an id that exists on no page.
+   */
   showExtensionLink?: boolean;
 }
 
 const year = new Date().getFullYear();
-const { signalValues, showExtensionLink = true } = Astro.props;
+const { signalValues } = Astro.props;
 const routeInsight = pageInsightForPath(Astro.url.pathname);
 const pageInsight = signalValues?.some(Number.isFinite)
   ? { ...routeInsight, values: signalValues }
@@ -32,9 +36,6 @@ const footerLinks = [
   { label: "Compare repos", href: "/compare" },
   { label: "Repo leaderboard", href: "/leaderboard" },
   { label: "README badges", href: "/badges" },
-  ...(showExtensionLink
-    ? [{ label: "Browser extension", href: "/#extension" }]
-    : []),
 ];
 
 const categoryLinks = [

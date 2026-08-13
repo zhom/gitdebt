@@ -21,6 +21,12 @@ export const EYEBROW =
 export const BODY =
   "text-[13px] leading-relaxed text-muted-foreground [text-wrap:pretty]";
 
+/** Page-header prose: the one paragraph directly under a page `h1`. */
+export const LEAD = "max-w-[62ch] text-[15px]";
+
+/** Section prose: every other block of running text. There is no third measure. */
+export const MEASURE = "max-w-[68ch]";
+
 /** Caption, footnote, and inline status text. */
 export const CAPTION = "text-[11px] leading-relaxed text-muted-foreground";
 

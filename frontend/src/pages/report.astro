@@ -4,10 +4,18 @@ import BaseHead from "@/components/BaseHead.astro";
 import Seo from "@/components/Seo.astro";
 import SiteFooter from "@/components/SiteFooter.astro";
 import SiteHeader from "@/components/SiteHeader.astro";
+import { DitherField } from "@/components/DitherField";
 import { LiveRepoReport } from "@/components/LiveRepoReport";
+import { SeriesProvenance } from "@/components/SeriesProvenance";
+import { BODY, MEASURE, PANEL_PADDED } from "@/components/style-tokens";
 import { staticApiBase } from "@/lib/static-api-base";
 
 const apiBase = staticApiBase();
+
+// The Markdown representation a reader without JavaScript can always reach.
+// `{owner}/{repo}` is a placeholder to substitute: the site prerenders none of
+// these, so the API answers for any public repository.
+const agentMarkdown = `${apiBase}/api/md/{owner}/{repo}`;
 ---
 
 <!doctype html>
@@ -25,8 +33,45 @@ const apiBase = staticApiBase();
   <body>
     <div class="isolate flex min-h-dvh flex-col">
       <SiteHeader />
-      <main id="main-content" class="mx-auto w-full max-w-6xl flex-1 px-6 py-12">
-        <LiveRepoReport client:only="react" apiBase={apiBase} />
+      {
+        /*
+         * `main` keeps real layout height and owns the field's box: `DitherField`
+         * measures its own canvas, which is stretched to `inset-0` here. The
+         * field is depth only — once a repository resolves, the island's own
+         * data-bound motion is what carries meaning on this page.
+         */
+      }
+      <main id="main-content" class="relative isolate flex-1 overflow-hidden">
+        <DitherField
+          client:idle
+          opacity={0.12}
+          vignette={0.7}
+          colors={["#12161f", "#1d2b45"]}
+        />
+        <div class="mx-auto w-full max-w-6xl px-6 py-12">
+          <LiveRepoReport client:only="react" apiBase={apiBase} />
+          <noscript>
+            <div class:list={[PANEL_PADDED, BODY, MEASURE]}>
+              JavaScript is required to look up a repository that has no static
+              page yet. Without it, {agentMarkdown} returns the same report as Markdown
+              for any public repository, and queues the analysis when there is none
+              yet.
+            </div>
+          </noscript>
+          {
+            /*
+             * /report is the live discovery route, so the reader arriving here
+             * has not named a repository yet. What they need before they do is
+             * which of the two sources their chart will come from — stated with
+             * no claim about any repository, which is what the explainer is.
+             */
+          }
+          <SeriesProvenance
+            client:visible
+            variant="explainer"
+            className="mt-16 scroll-mt-24 border-t border-border/60 pt-12"
+          />
+        </div>
       </main>
       <SiteFooter />
     </div>

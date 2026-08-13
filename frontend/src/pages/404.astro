@@ -6,7 +6,10 @@ import BaseHead from "@/components/BaseHead.astro";
 import Seo from "@/components/Seo.astro";
 import SiteHeader from "@/components/SiteHeader.astro";
 import SiteFooter from "@/components/SiteFooter.astro";
+import { DitherField } from "@/components/DitherField";
 import { LiveRepoReport } from "@/components/LiveRepoReport";
+import { SeriesProvenance } from "@/components/SeriesProvenance";
+import { BODY, MEASURE, PANEL_PADDED } from "@/components/style-tokens";
 import { staticApiBase } from "@/lib/static-api-base";
 
 const apiBase = staticApiBase();
@@ -40,14 +43,46 @@ const ogImage = `${apiBase}/api/og.png`;
     <div class="isolate flex min-h-dvh flex-col">
       <SiteHeader />
 
-      <main id="main-content" class="mx-auto w-full max-w-6xl flex-1 px-6 py-12">
-        <LiveRepoReport client:only="react" apiBase={apiBase} />
-        <noscript>
-          <div class="rounded-lg border border-border/60 bg-background/40 p-3.5 text-[13px] leading-relaxed text-muted-foreground">
-            JavaScript is required to open a repository that has not been included in the static catalog yet.
-            Without it, {agentMarkdown} returns the report as Markdown for any public repository, and queues the analysis when there is none yet.
-          </div>
-        </noscript>
+      {
+        /*
+         * The same host treatment as /report, deliberately: both routes mount
+         * the same island and must not drift. `main` keeps real layout height
+         * and owns the field's box — `DitherField` measures its own canvas,
+         * which is stretched to `inset-0` here.
+         */
+      }
+      <main id="main-content" class="relative isolate flex-1 overflow-hidden">
+        <DitherField
+          client:idle
+          opacity={0.12}
+          vignette={0.7}
+          colors={["#12161f", "#1d2b45"]}
+        />
+        <div class="mx-auto w-full max-w-6xl px-6 py-12">
+          <LiveRepoReport client:only="react" apiBase={apiBase} />
+          <noscript>
+            <div class:list={[PANEL_PADDED, BODY, MEASURE]}>
+              JavaScript is required to open a repository that has not been
+              included in the static catalog yet. Without it, {agentMarkdown} returns
+              the report as Markdown for any public repository, and queues the analysis
+              when there is none yet.
+            </div>
+          </noscript>
+          {
+            /*
+             * This route's most common real state is not "page missing" but "a
+             * public repository that is not in the static catalog", where the
+             * island renders the full report. The explainer covers the state
+             * that is genuinely empty, and says what gitdebt reads without
+             * claiming anything about a repository it has not read.
+             */
+          }
+          <SeriesProvenance
+            client:visible
+            variant="explainer"
+            className="mt-16 scroll-mt-24 border-t border-border/60 pt-12"
+          />
+        </div>
       </main>
 
       <SiteFooter />

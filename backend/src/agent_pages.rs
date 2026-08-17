@@ -589,7 +589,7 @@ Goes in a personal site's `og:image` meta tag.
 
 - No account, token, or API key is involved. Every URL is a plain public image.
 - Themes are baked into each asset because GitHub renders README images against the reader's OS preference, not the page. Publish both variants with an HTML `<picture>` element, or pick one explicitly with `theme=light` / `theme=dark`. There is no `theme=auto`.
-- Published snippets are static. Motion is opt-in: add `animate=1` to an SVG URL, or use the `.gif` variant where one exists, because GitHub strips SVG animation from README images in several contexts.
+- Published snippets are static: motion nobody asked for is bad manners in somebody else's README, and it keeps the SVG and raster forms of an asset identical. Motion is an explicit opt-in — add `animate=1` to an SVG URL and it plays in a GitHub README. The `.gif` variant is for the surfaces that take raster alone: rasterizers, CSS `background-image`, and README renderers outside GitHub such as npm, PyPI, and Docker Hub, which show an SVG as a single static frame.
 - Keep the surrounding link and its `?ref=readme` parameter. Attribution lives on the link; the image URL stays plain so CDNs can cache it.
 - Do not add cache-busting query parameters. Media is edge-cached for a few hours by design and refreshes on its own.
 - Alt text is not optional. Say what the image shows, not "chart".
@@ -758,7 +758,7 @@ One chart, both series. Append `&rebase=1` to start each series at zero when the
 
 - No account, token, or API key is involved. Every URL is a plain public image.
 - Themes are baked into each asset because GitHub renders README images against the reader's OS preference, not the page. Publish both variants with an HTML `<picture>` element, or pick one explicitly with `theme=light` / `theme=dark`. There is no `theme=auto`.
-- Published snippets are static. Motion is opt-in: add `animate=1` to an SVG URL, or use the `.gif` variant where one exists, because GitHub strips SVG animation from README images in several contexts.
+- Published snippets are static: motion nobody asked for is bad manners in somebody else's README, and it keeps the SVG and raster forms of an asset identical. Motion is an explicit opt-in — add `animate=1` to an SVG URL and it plays in a GitHub README. The `.gif` variant is for the surfaces that take raster alone: rasterizers, CSS `background-image`, and README renderers outside GitHub such as npm, PyPI, and Docker Hub, which show an SVG as a single static frame.
 - Keep the surrounding link and its `?ref=readme` parameter. Attribution lives on the link; the image URL stays plain so CDNs can cache it.
 - Do not add cache-busting query parameters. Media is edge-cached for a few hours by design and refreshes on its own.
 - Alt text is not optional. Say what the image shows, not "chart".
@@ -857,7 +857,7 @@ One chart, 2 series, rebased so projects of different ages start together.
 
 - No account, token, or API key is involved. Every URL is a plain public image.
 - Themes are baked into each asset because GitHub renders README images against the reader's OS preference, not the page. Publish both variants with an HTML `<picture>` element, or pick one explicitly with `theme=light` / `theme=dark`. There is no `theme=auto`.
-- Published snippets are static. Motion is opt-in: add `animate=1` to an SVG URL, or use the `.gif` variant where one exists, because GitHub strips SVG animation from README images in several contexts.
+- Published snippets are static: motion nobody asked for is bad manners in somebody else's README, and it keeps the SVG and raster forms of an asset identical. Motion is an explicit opt-in — add `animate=1` to an SVG URL and it plays in a GitHub README. The `.gif` variant is for the surfaces that take raster alone: rasterizers, CSS `background-image`, and README renderers outside GitHub such as npm, PyPI, and Docker Hub, which show an SVG as a single static frame.
 - Keep the surrounding link and its `?ref=readme` parameter. Attribution lives on the link; the image URL stays plain so CDNs can cache it.
 - Do not add cache-busting query parameters. Media is edge-cached for a few hours by design and refreshes on its own.
 - Alt text is not optional. Say what the image shows, not "chart".

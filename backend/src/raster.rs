@@ -512,6 +512,29 @@ mod tests {
         );
     }
 
+    /// Shareable SVGs paint no canvas, so both raster encoders have to carry
+    /// the alpha through instead of flattening onto an implicit white.
+    #[test]
+    fn transparent_surfaces_keep_their_alpha_in_png_and_webp() {
+        let svg = r##"<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 20 20"><rect x="8" y="8" width="4" height="4" fill="#358ff3" /></svg>"##;
+
+        let png = rasterize(svg, RasterFormat::Png, 1.0).expect("png");
+        let pixmap = tiny_skia::Pixmap::decode_png(&png).expect("decode png");
+        let png_at = |x: u32, y: u32| pixmap.pixels()[(y * pixmap.width() + x) as usize].alpha();
+        assert_eq!(png_at(0, 0), 0, "png corner must be fully transparent");
+        assert!(png_at(10, 10) > 0, "png ink must be opaque");
+
+        let webp = rasterize(svg, RasterFormat::Webp, 1.0).expect("webp");
+        let decoded = image::load_from_memory_with_format(&webp, image::ImageFormat::WebP)
+            .expect("decode webp")
+            .to_rgba8();
+        assert_eq!(decoded.get_pixel(0, 0).0[3], 0, "webp corner keeps alpha 0");
+        assert!(
+            decoded.get_pixel(10, 10).0[3] > 0,
+            "webp ink must be opaque"
+        );
+    }
+
     #[test]
     fn rasterize_emits_webp_bytes() {
         let svg = r##"<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 100 50"><rect width="100" height="50" fill="#3b82f6" /></svg>"##;

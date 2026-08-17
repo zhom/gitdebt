@@ -30,6 +30,14 @@ pub fn wave_ink(theme: &Theme) -> &'static str {
 /// SVG definitions for a compact ordered-dot field and a denser signal
 /// fill, sized so the wave gradient spans the actual surface. A 268px badge
 /// and a 1200px chart both sample the full violet→blue→magenta ramp.
+///
+/// `gd-pixel-fade` is a symmetric plateau rather than the bottom-weighted
+/// ramp it once was: with no canvas underneath, a downward gradient reads as
+/// an unexplained smudge instead of a vignette, while a hard grain edge would
+/// draw a visible line where the asset begins. Mean mask alpha is unchanged
+/// (0.36 × 0.92 ≈ 0.33), so only the distribution moves. The exact zero at
+/// offset 0 is load-bearing — it keeps the top row grain-free, which is what
+/// makes flattened GIF corner pixels land on the theme tone exactly.
 pub fn defs_sized(theme: &Theme, width: f32, height: f32) -> String {
     let sparse = pattern_cells(theme.fg, 4);
     let dense = pattern_cells("url(#gd-dither-wave)", 13);
@@ -51,8 +59,9 @@ pub fn defs_sized(theme: &Theme, width: f32, height: f32) -> String {
   </pattern>
   <linearGradient id="gd-pixel-fade" x1="0" y1="0" x2="0" y2="1">
     <stop offset="0" stop-color="white" stop-opacity="0" />
-    <stop offset="0.3" stop-color="white" stop-opacity="0.18" />
-    <stop offset="1" stop-color="white" stop-opacity="0.68" />
+    <stop offset="0.08" stop-color="white" stop-opacity="0.36" />
+    <stop offset="0.92" stop-color="white" stop-opacity="0.36" />
+    <stop offset="1" stop-color="white" stop-opacity="0" />
   </linearGradient>
   <mask id="gd-pixel-field-mask">
     <rect width="100%" height="100%" fill="url(#gd-pixel-fade)" />
@@ -117,21 +126,28 @@ pub fn tier_fill_ns(ns: &str, tier: usize) -> String {
     format!("url(#{ns}-t{})", tier.min(TIER_COUNT - 1))
 }
 
-/// A subtle background field makes every rendered chart share the same pixel
-/// grain. It is inserted immediately after the root element so every label,
+/// A subtle grain field makes every rendered chart share the same pixel
+/// texture. It is inserted immediately after the root element so every label,
 /// link, line, and avatar remains above it. The texture defs are sized from
 /// the document's `viewBox` so the wave gradient spans the real surface.
+///
+/// No canvas rect is painted. Shareable assets are deliberately transparent
+/// so a README composites them onto its own background instead of showing a
+/// near-black or white slab floating inside the page; the `<picture>` +
+/// `prefers-color-scheme` embed contract already guarantees the reader's
+/// backdrop matches the theme whose ink is baked in.
 pub fn decorate(mut svg: String, theme: &Theme) -> String {
     if svg.contains("data-gitdebt-texture=\"true\"") {
         return svg;
     }
     let (width, height) = surface_size(&svg);
-    let field = format!(
-        "\n  <rect data-gitdebt-canvas=\"true\" width=\"100%\" height=\"100%\" fill=\"{}\" pointer-events=\"none\" />\n  <rect data-gitdebt-texture=\"true\" width=\"100%\" height=\"100%\" fill=\"url(#gd-pixel-field)\" mask=\"url(#gd-pixel-field-mask)\" opacity=\"0.28\" pointer-events=\"none\" />\n",
-        theme.bg,
+    let field = concat!(
+        "\n  <rect data-gitdebt-texture=\"true\" width=\"100%\" height=\"100%\" ",
+        "fill=\"url(#gd-pixel-field)\" mask=\"url(#gd-pixel-field-mask)\" ",
+        "opacity=\"0.28\" pointer-events=\"none\" />\n"
     );
     if let Some(index) = svg.find('>') {
-        svg.insert_str(index + 1, &field);
+        svg.insert_str(index + 1, field);
     }
     if let Some(index) = svg.rfind("</svg>") {
         svg.insert_str(index, &format!("\n{}\n", defs_sized(theme, width, height)));
@@ -226,8 +242,8 @@ mod tests {
         let second = decorate(first.clone(), &theme::LIGHT);
         assert_eq!(first, second);
         assert!(first.contains("data-gitdebt-texture=\"true\""));
-        assert!(first.contains("data-gitdebt-canvas=\"true\""));
-        assert!(first.contains(crate::theme::LIGHT.bg));
+        assert!(!first.contains("data-gitdebt-canvas"));
+        assert!(!first.contains(&format!("fill=\"{}\"", crate::theme::LIGHT.bg)));
         assert!(first.contains("shape-rendering=\"crispEdges\""));
         assert!(first.contains("id=\"gd-dither-wave\""));
         assert!(!first.contains("<animate"));
@@ -240,6 +256,26 @@ mod tests {
             first.find("data-gitdebt-texture").expect("texture field")
                 < first.find("<text>").expect("chart content")
         );
+    }
+
+    /// The default for every shareable surface: grain, no slab. A canvas
+    /// rect would defeat the whole point — the asset has to composite onto
+    /// whatever README background the reader is looking at.
+    #[test]
+    fn decorated_surfaces_paint_no_canvas() {
+        for theme in [&theme::LIGHT, &theme::DARK] {
+            let svg = decorate("<svg><text>chart</text></svg>".to_string(), theme);
+            assert!(!svg.contains("data-gitdebt-canvas"));
+            assert!(!svg.contains(&format!("fill=\"{}\"", theme.bg)));
+            assert!(svg.contains("data-gitdebt-texture=\"true\""));
+            assert!(svg.contains("mask=\"url(#gd-pixel-field-mask)\""));
+            assert!(svg.contains("id=\"gd-pixel-fade\""));
+            // The GIF corner assertions depend on the top row staying
+            // grain-free, which is exactly this first stop.
+            assert!(svg.contains("<stop offset=\"0\" stop-color=\"white\" stop-opacity=\"0\" />"));
+            // A second pass cannot reintroduce a canvas under other params.
+            assert_eq!(decorate(svg.clone(), &theme::DARK), svg);
+        }
     }
 
     #[test]

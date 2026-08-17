@@ -332,7 +332,7 @@ fn star_sections(stars: &ReportStars) -> Vec<String> {
         vec![
             "Series".to_string(),
             if stars.approximate {
-                "public star actions (GH Archive)".to_string()
+                "public star actions (historical data)".to_string()
             } else {
                 "current stargazers (exact snapshot)".to_string()
             },
@@ -620,10 +620,12 @@ fn readme_sections(view: &ReportView, pending: bool) -> Vec<String> {
     }
 
     sections.push(
-        "Snippets are static by design: add `animate=1` to an SVG URL, or use \
-         the `.gif` variant, when motion is wanted. Keep the surrounding link \
-         and its `?ref=readme` — attribution lives on the link, never in an \
-         image URL — and do not add cache-busting parameters."
+        "Snippets are static by design, because motion in somebody else's \
+         README should be their decision: add `animate=1` to an SVG URL when it \
+         is wanted and it plays in a GitHub README, or use the `.gif` variant \
+         for a surface that takes raster alone. Keep the surrounding link and \
+         its `?ref=readme` — attribution lives on the link, never in an image \
+         URL — and do not add cache-busting parameters."
             .to_string(),
     );
     sections.push(format!(
@@ -776,7 +778,7 @@ Stars, forks, contributors, languages, and a 90-day sparkline in one panel. Goes
 
 These URLs are already correct. Until the analysis lands they render a placeholder frame and queue the work rather than failing, and the real asset replaces it at the same URL.
 
-Snippets are static by design: add `animate=1` to an SVG URL, or use the `.gif` variant, when motion is wanted. Keep the surrounding link and its `?ref=readme` — attribution lives on the link, never in an image URL — and do not add cache-busting parameters.
+Snippets are static by design, because motion in somebody else's README should be their decision: add `animate=1` to an SVG URL when it is wanted and it plays in a GitHub README, or use the `.gif` variant for a surface that takes raster alone. Keep the surrounding link and its `?ref=readme` — attribution lives on the link, never in an image URL — and do not add cache-busting parameters.
 
 The complete asset catalog, with every snippet, is at https://gitdebt.com/badges.md.
 
@@ -958,7 +960,7 @@ Stars, forks, contributors, languages, and a 90-day sparkline in one panel. Goes
 </a>
 ```
 
-Snippets are static by design: add `animate=1` to an SVG URL, or use the `.gif` variant, when motion is wanted. Keep the surrounding link and its `?ref=readme` — attribution lives on the link, never in an image URL — and do not add cache-busting parameters.
+Snippets are static by design, because motion in somebody else's README should be their decision: add `animate=1` to an SVG URL when it is wanted and it plays in a GitHub README, or use the `.gif` variant for a surface that takes raster alone. Keep the surrounding link and its `?ref=readme` — attribution lives on the link, never in an image URL — and do not add cache-busting parameters.
 
 The complete asset catalog, with every snippet, is at https://gitdebt.com/badges.md.
 

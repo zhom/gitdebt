@@ -20,12 +20,13 @@
 //! recomputed from the final text widths, so content can never underlap
 //! the trailing brand mark.
 //!
-//! ## Animation + GitHub's SMIL sanitizer
+//! ## Animation + the static-frame guarantee
 //!
 //! `animate=1` adds tasteful SMIL animation using `<animate …
-//! fill="freeze">`. GitHub strips `<animate>` from README `<img>` SVGs, so
-//! on GitHub the viewer sees the **frozen final frame**. We guarantee that
-//! frame is correct by authoring every animated attribute's static value
+//! fill="freeze">`. Anything that renders the SVG as a still — every
+//! rasterizer, and README renderers outside GitHub — never runs the
+//! `<animate>`, so the viewer sees the **frozen final frame**. We guarantee
+//! that frame is correct by authoring every animated attribute's static value
 //! to already equal the animation's end state; `<animateTransform>` always
 //! carries `additive="sum"` so the element's static transform survives
 //! (SMIL's default replace semantics would discard it). `animate=0`
@@ -303,12 +304,6 @@ fn star_points(cx: f32, cy: f32, outer: f32, inner: f32) -> String {
 
 // Shared chrome
 
-/// Panel tone per theme — a quiet dark-first surface one step off the
-/// canvas, with a hairline border.
-fn panel_tone(theme: &Theme) -> &'static str {
-    if theme.dark { "#141414" } else { "#f5f5f5" }
-}
-
 /// The Bayer wash defs a badge needs: the used density tier in the theme's
 /// fg ink (alpha carried by the consuming rect, one ink only).
 fn wash_defs(theme: &Theme, tier: usize) -> String {
@@ -425,12 +420,12 @@ fn render_dither(placed: &[Placed], width: f32, theme: &Theme, animate: bool) ->
     let label = aria_label(placed);
     let total = width + BRAND_W;
     let mut body = String::new();
-    // Bordered chip + Bayer wash.
+    // Bordered chip + Bayer wash. The panel is unpainted so the badge sits
+    // directly on the README; the border is what keeps it reading as a chip.
     body.push_str(&format!(
-        "  <rect x=\"0.5\" y=\"0.5\" width=\"{w:.1}\" height=\"{h:.1}\" rx=\"6\" fill=\"{bg}\" stroke=\"{border}\" stroke-width=\"1\" />\n",
+        "  <rect x=\"0.5\" y=\"0.5\" width=\"{w:.1}\" height=\"{h:.1}\" rx=\"6\" fill=\"none\" stroke=\"{border}\" stroke-width=\"1\" />\n",
         w = total - 1.0,
         h = HEIGHT - 1.0,
-        bg = panel_tone(theme),
         border = theme.border,
     ));
     body.push_str(&wash_rect(
@@ -467,7 +462,7 @@ fn render_dither(placed: &[Placed], width: f32, theme: &Theme, animate: bool) ->
 }
 
 fn empty_badge(theme: &Theme) -> String {
-    let (bg, fg, mark_ink) = (panel_tone(theme), theme.muted, theme.fg);
+    let (fg, mark_ink) = (theme.muted, theme.fg);
     let text = "no metrics";
     let advance = text.chars().count() as f32 * SIGNAL_CHAR_W;
     let content_w = SEG_PAD_X + advance + SEG_PAD_X;
@@ -475,7 +470,7 @@ fn empty_badge(theme: &Theme) -> String {
     format!(
         r##"<svg xmlns="http://www.w3.org/2000/svg" width="{total:.0}" height="{h:.0}" viewBox="0 0 {total:.0} {h:.0}" role="img" aria-label="no metrics">
   <style><![CDATA[ text {{ font: 600 11px {FONT_MONO}; }} ]]></style>
-  <rect x="0.5" y="0.5" width="{rw:.1}" height="{rh:.1}" rx="6" fill="{bg}" stroke="{border}" stroke-width="1" />
+  <rect x="0.5" y="0.5" width="{rw:.1}" height="{rh:.1}" rx="6" fill="none" stroke="{border}" stroke-width="1" />
   {text_el}
 {mark}</svg>"##,
         h = HEIGHT,
@@ -584,7 +579,6 @@ pub fn render_signal_badge(
     let status = if earned { "earned" } else { "not earned" };
     let wave = texture::wave_ink(theme);
     let signal = if earned { wave } else { theme.muted };
-    let panel = panel_tone(theme);
     let text_y = HEIGHT / 2.0 + 4.0;
     // `additive="sum"` keeps the static translate; the check scales in
     // around the group's local origin and rests at the authored position.
@@ -616,7 +610,7 @@ pub fn render_signal_badge(
     .detail {{ font-weight: 500; }}
     {MOTION_CSS}
   ]]></style>
-  <rect x="0.5" y="0.5" width="{panel_w:.1}" height="{panel_h:.1}" rx="7" fill="{panel}" stroke="{border}" />
+  <rect x="0.5" y="0.5" width="{panel_w:.1}" height="{panel_h:.1}" rx="7" fill="none" stroke="{border}" />
 {wash}  <rect x="0" y="5" width="3" height="{strip_h:.1}" rx="1.5" fill="{signal}" />
 {check}  {label_text}
   <circle cx="{sep_x:.1}" cy="{sep_y:.1}" r="1.3" fill="{muted}" opacity="0.7" />
@@ -858,7 +852,9 @@ mod tests {
                         width: MARK_W,
                         scale,
                         ink: theme.fg,
-                        canvas: panel_tone(theme),
+                        // The chip paints no panel now, so the tone the mark
+                        // is designed against is the theme canvas itself.
+                        canvas: theme.bg,
                     },
                 );
                 assert!(
@@ -1073,8 +1069,9 @@ mod tests {
 
     #[test]
     fn frozen_frame_shows_final_value() {
-        // The static text content must already be the final value, so the
-        // GitHub-sanitized (no-SMIL) render shows correct numbers.
+        // The static text content must already be the final value, so a
+        // still-frame render (rasterizers, non-GitHub READMEs) shows correct
+        // numbers.
         let svg = render_badge(&full_input(true), &LIGHT);
         assert!(svg.contains("12.3k")); // stars
         assert!(svg.contains("1.2k")); // forks

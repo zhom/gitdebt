@@ -18,11 +18,20 @@ import {
   type Wave,
 } from "@/lib/dither";
 import { rates, trendOf, type MomentumRow, type Trend } from "@/lib/momentum";
+import { formatCompact } from "@/lib/star-insights";
 
 export type { MomentumRow, Trend };
 
+/**
+ * `full` is the leaderboard's own board: every window in its own column.
+ * `compact` is the landing hero's, where the board shares a viewport with the
+ * headline and the lookup, so it prints the ranked window and size only.
+ */
+export type MomentumVariant = "full" | "compact";
+
 export type MomentumBoardProps = {
   rows: MomentumRow[];
+  variant?: MomentumVariant;
 };
 
 /** Cycles per second for the fastest repository's ripple. */
@@ -40,8 +49,29 @@ const MIN_RIPPLE_RATE = 0.05;
  */
 const ROW_HEIGHT = 30;
 
-/** Width of the momentum strip, in CSS px. Matches the `8.25rem` grid column. */
-const STRIP_WIDTH = 132;
+/**
+ * Grid track list and the strip's geometry, per variant.
+ *
+ * The strip is absolutely positioned, so its `left`/`width` and the grid column
+ * it sits over have to be stated together or they drift apart. Both class
+ * strings are literals rather than composed at runtime, because Tailwind's
+ * scanner reads source text.
+ */
+const LAYOUT: Record<
+  MomentumVariant,
+  { grid: string; stripLeft: string; stripWidth: number }
+> = {
+  full: {
+    grid: "grid grid-cols-[2.25rem_minmax(0,1fr)_3.25rem_3.25rem_3.25rem_3.75rem] sm:grid-cols-[2.75rem_8.25rem_minmax(0,1fr)_3.75rem_3.75rem_3.75rem_4.5rem]",
+    stripLeft: "2.75rem",
+    stripWidth: 132,
+  },
+  compact: {
+    grid: "grid grid-cols-[2.25rem_minmax(0,1fr)_3.5rem_3.75rem] sm:grid-cols-[2.75rem_5rem_minmax(0,1fr)_4rem_4.25rem]",
+    stripLeft: "2.75rem",
+    stripWidth: 80,
+  },
+};
 
 /** Area ceiling for one buffer, at true `CELL` density. */
 const MAX_CELLS = 900_000;
@@ -60,6 +90,19 @@ const TREND_LABEL: Record<Trend, string> = {
   unknown: "ranked in only one window, so there is nothing to compare",
 };
 
+/**
+ * Every compact row is ranked monthly, so `trendOf`'s long side is always the
+ * month there while its short side is whichever tighter window ranked the repo.
+ * The copy names the month and leaves the short side unquoted rather than
+ * claiming a day the row may not have.
+ */
+const TREND_LABEL_COMPACT: Record<Trend, string> = {
+  rising: "climbing, its recent pace beats its monthly pace",
+  steady: "steady, its recent pace matches its monthly pace",
+  fading: "cooling, its recent pace trails its monthly pace",
+  unknown: "ranked in only one window, so there is nothing to compare",
+};
+
 const TREND_MARK: Record<Trend, string> = {
   rising: "▲",
   steady: "–",
@@ -68,9 +111,9 @@ const TREND_MARK: Record<Trend, string> = {
 };
 
 type Band = {
-  /** 0..1 extent from the weekly rate — the dimension the board ranks by. */
+  /** 0..1 extent from the rate of the window this board ranks by. */
   share: number;
-  /** 0..1 extent of today's rate, on the same per-day scale. */
+  /** 0..1 extent of the next window in, on the same per-day scale. */
   today: number;
   rate: number;
   fill: RGB;
@@ -93,20 +136,27 @@ const fmt = (value: number | null) => (value === null ? "—" : nf.format(value)
  * layers and fifty rAF callbacks; `RasterBuffer` exists so a single
  * `putImageData` per frame serves any row count.
  */
-export function MomentumBoard({ rows }: MomentumBoardProps) {
+export function MomentumBoard({ rows, variant = "full" }: MomentumBoardProps) {
   const canvasRef = useRef<HTMLCanvasElement>(null);
   const hostRef = useRef<HTMLDivElement>(null);
 
   const bands = useMemo<Band[]>(() => {
     const all = rows.map(rates);
-    const fastestWeek = Math.max(1, ...all.map((r) => r.r7 ?? 0));
-    const fastestDay = Math.max(1, ...all.map((r) => r.r1 ?? 0));
+    // One rule, read off whichever window the board ranks by: the bar's body is
+    // that window's rate, and the brighter tip is the next window in. The full
+    // board ranks weekly, so week over day; the compact board ranks monthly, so
+    // month over week. Pairing month with day instead would leave most compact
+    // rows tipless — the daily board ranks an order of magnitude fewer repos.
+    const compact = variant === "compact";
+    const body = all.map((r) => (compact ? r.r30 : r.r7));
+    const tip = all.map((r) => (compact ? r.r7 : r.r1));
+    const fastestBody = Math.max(1, ...body.map((r) => r ?? 0));
+    const fastestTip = Math.max(1, ...tip.map((r) => r ?? 0));
     return rows.map((row, index) => {
-      const { r1, r7 } = all[index];
       // Square root: star rates are heavy-tailed, and a linear map leaves
       // everything below the leader an indistinguishable stub.
-      const share = clamp01(Math.sqrt((r7 ?? 0) / fastestWeek));
-      const today = clamp01(Math.sqrt((r1 ?? 0) / fastestDay));
+      const share = clamp01(Math.sqrt((body[index] ?? 0) / fastestBody));
+      const today = clamp01(Math.sqrt((tip[index] ?? 0) / fastestTip));
       return {
         share,
         today,
@@ -117,7 +167,7 @@ export function MomentumBoard({ rows }: MomentumBoardProps) {
         waves: makeWaves(row.repo),
       };
     });
-  }, [rows]);
+  }, [rows, variant]);
 
   useEffect(() => {
     const canvas = canvasRef.current;
@@ -171,9 +221,9 @@ export function MomentumBoard({ rows }: MomentumBoardProps) {
           if (x > reach && x > head) break;
           const u = x / Math.max(1, cols);
           const ripple = waveOffset(band.waves, u, seconds * band.rate);
-          // Two readings in one mark: the body is the weekly level, the
-          // brighter leading segment is today's rate on the same per-day
-          // scale. A spike therefore shows as a bright tip past a short body.
+          // Two readings in one mark: the body is the ranked window's level,
+          // the brighter leading segment is the next window in on the same
+          // per-day scale. A spike shows as a bright tip past a short body.
           const base = x <= reach ? 0.3 + clamp01(1 - x / span) * 0.45 : 0;
           const surge = x <= head ? 0.34 : 0;
           const density =
@@ -243,18 +293,20 @@ export function MomentumBoard({ rows }: MomentumBoardProps) {
   // The strip sits immediately after the rank so its offset is a constant the
   // canvas can be positioned against; a variable `1fr` column before it would
   // put the painted band and its column in different places at every width.
-  const grid =
-    "grid grid-cols-[2.25rem_minmax(0,1fr)_3.25rem_3.25rem_3.25rem_3.75rem] sm:grid-cols-[2.75rem_8.25rem_minmax(0,1fr)_3.75rem_3.75rem_3.75rem_4.5rem]";
+  const compact = variant === "compact";
+  const { grid, stripLeft, stripWidth } = LAYOUT[variant];
   const head =
     "px-2 py-1.5 text-right font-mono text-[10px] tracking-[0.12em] text-muted-foreground/70 uppercase";
   return (
     <div className="relative">
       <div className={`${grid} items-center border-b border-border`}>
         <span className={`${head} text-left`}>#</span>
-        <span className={`${head} hidden text-left sm:block`}>Momentum</span>
+        <span className={`${head} hidden text-left sm:block`}>
+          {compact ? "Pace" : "Momentum"}
+        </span>
         <span className={`${head} text-left`}>Repository</span>
-        <span className={head}>+1d</span>
-        <span className={head}>+7d</span>
+        {!compact && <span className={head}>+1d</span>}
+        {!compact && <span className={head}>+7d</span>}
         <span className={head}>+30d</span>
         <span className={head}>Stars</span>
       </div>
@@ -263,7 +315,7 @@ export function MomentumBoard({ rows }: MomentumBoardProps) {
           ref={canvasRef}
           aria-hidden="true"
           className="pointer-events-none absolute top-0 bottom-0 -z-10 hidden [image-rendering:pixelated] sm:block"
-          style={{ left: "2.75rem", width: `${STRIP_WIDTH}px` }}
+          style={{ left: stripLeft, width: `${stripWidth}px` }}
         />
         <ol className="relative">
           {rows.map((row, index) => {
@@ -288,19 +340,34 @@ export function MomentumBoard({ rows }: MomentumBoardProps) {
                       {TREND_MARK[trend]}
                     </span>
                     <span className="truncate text-[13px] text-foreground">{row.repo}</span>
-                    <span className="sr-only">, {TREND_LABEL[trend]}</span>
+                    <span className="sr-only">
+                      , {compact ? TREND_LABEL_COMPACT[trend] : TREND_LABEL[trend]}
+                    </span>
                   </span>
-                  <span className="px-2 text-right font-mono text-[11px] tabular-nums text-foreground">
-                    {fmt(row.d1)}
-                  </span>
-                  <span className="px-2 text-right font-mono text-[11px] tabular-nums text-foreground">
-                    {fmt(row.d7)}
+                  {!compact && (
+                    <span className="px-2 text-right font-mono text-[11px] tabular-nums text-foreground">
+                      {fmt(row.d1)}
+                    </span>
+                  )}
+                  {!compact && (
+                    <span className="px-2 text-right font-mono text-[11px] tabular-nums text-foreground">
+                      {fmt(row.d7)}
+                    </span>
+                  )}
+                  {/* Compact leads with the window it ranks by, so that column
+                      carries the emphasis the full board gives its tighter
+                      windows. Compact numerals are what fit a 4rem column. */}
+                  <span
+                    className={`px-2 text-right font-mono text-[11px] tabular-nums ${compact ? "text-foreground" : "text-muted-foreground"}`}
+                  >
+                    {compact
+                      ? row.d30 === null
+                        ? "—"
+                        : `+${formatCompact(row.d30)}`
+                      : fmt(row.d30)}
                   </span>
                   <span className="px-2 text-right font-mono text-[11px] tabular-nums text-muted-foreground">
-                    {fmt(row.d30)}
-                  </span>
-                  <span className="px-2 text-right font-mono text-[11px] tabular-nums text-muted-foreground">
-                    {nf.format(row.stars)}
+                    {compact ? formatCompact(row.stars) : nf.format(row.stars)}
                   </span>
                 </a>
               </li>

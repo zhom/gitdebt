@@ -1237,8 +1237,10 @@ export function LiveUserProfile({
             </p>
           </div>
           <p className={cn(BODY, "mt-2 max-w-[70ch]")}>
-            Every profile asset defaults to animated SVG, with GitHub-safe GIF
-            and static PNG/WebP variants available behind a{" "}
+            Every profile asset defaults to a static SVG frame — motion is
+            yours to turn on, and it plays in a GitHub README. GIF is for the
+            surfaces that show an SVG as a single frame, and PNG/WebP are
+            static raster. Each snippet ships light and dark behind a{" "}
             <code className="font-mono text-[12px] text-foreground">&lt;picture&gt;</code>{" "}
             element, so they follow the reader's GitHub theme. Copy a snippet and
             paste it into your profile README.

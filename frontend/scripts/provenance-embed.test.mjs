@@ -100,7 +100,7 @@ test("the provenance line states source, date and state — and never a count", 
   const VERDICT = /\b(verified|unverified|suspicious|fake|score)\b/i;
   for (const [snapshot, expected] of [
     [frozen, "GitHub stargazer list · Covers through July 20, 2026 · No longer updating"],
-    [archive, "Public GH Archive star events · Covers through August 8, 2026 · Still updating"],
+    [archive, "Historical star data · Covers through August 8, 2026 · Still updating"],
   ]) {
     const line = block(snapshot).snippet.split("\n\n")[1];
     assert.ok(line.includes(expected), line);

@@ -70,7 +70,11 @@ type Mode = "markdown" | "html";
 type Format = "svg" | "gif" | "png" | "webp";
 type ThemeChoice = "auto" | "light" | "dark";
 
-/** Surfaces with real raster motion that survives GitHub's SVG sanitizer. */
+/**
+ * Asset routes wired through the animated-GIF rasterizer. GIF is the only
+ * motion a surface that renders an SVG as a single static frame can carry — a
+ * GitHub README is not one of those, so it is a fallback, not the default.
+ */
 const GIF_ASSET_RE =
   /^\/api\/(?:(?:repos\/[^/]+\/[^/]+|users\/[^/]+)\/chart|chart|(?:repos\/[^/]+\/[^/]+|users\/[^/]+)\/(?:card|stats\/[^/?]+))\.svg(?:\?|$)/;
 const THEMES: { id: ThemeChoice; label: string }[] = [
@@ -192,6 +196,9 @@ export function EmbedSnippet({
     if (selectedFormat === "gif" && !supportsGif) setSelectedFormat("svg");
   }, [selectedFormat, supportsGif]);
 
+  // `animate=1` rides only an explicitly requested SVG. The published catalog
+  // stays static by default, so this parameter exists here and nowhere else:
+  // it is a choice this visitor made, in this builder, for their own README.
   const formatParams =
     selectedFormat === "svg" && animate ? ["animate=1"] : [];
   // No `render=` here. Every URL this component builds is published into
@@ -277,7 +284,7 @@ export function EmbedSnippet({
             id={`${controlId}-motion`}
             checked={animate}
             onCheckedChange={setAnimate}
-            aria-label="Animate SVG where the viewer supports it"
+            aria-label="Animate the SVG, which plays in a GitHub README"
           />
         </div>
       )}
@@ -287,10 +294,10 @@ export function EmbedSnippet({
       >
         {selectedFormat === "svg"
           ? animate
-            ? "SVG · animated where supported"
+            ? "SVG · animated · plays in a GitHub README"
             : "SVG · default · static README frame"
           : selectedFormat === "gif"
-            ? "Animated GIF · GitHub-safe motion"
+            ? "Animated GIF · motion for raster-only surfaces"
             : `${selectedFormat.toUpperCase()} · static raster`}
       </span>
     </div>
@@ -310,8 +317,10 @@ export function EmbedSnippet({
       </div>
       {selectedFormat === "gif" && (
         <p className={cn(CAPTION, "border-t border-border/40 px-4 py-3")}>
-          GIF carries real dither motion through GitHub's image proxy and uses
-          more bandwidth than SVG. Auto emits separate light and dark assets.
+          GIF is for surfaces that show an SVG as a single static frame — npm,
+          PyPI, Docker Hub, a CSS background. A GitHub README animates the SVG
+          itself, for a fraction of the bytes. Auto emits separate light and
+          dark assets.
         </p>
       )}
     </>

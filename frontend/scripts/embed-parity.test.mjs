@@ -94,7 +94,7 @@ prompt-parity.md — the cross-language golden for the "Ask an agent" prompt.
 
 What this is: the complete prompt gitdebt hands a coding agent, rendered in
 every state that changes it — a repository with nothing measured, one with a
-complete star history, one whose curve is GH Archive star activity (with and
+complete star history, one whose curve is historical star activity (with and
 without a resolved total), and a profile with and without measured totals.
 
 Two implementations render it: backend/src/agent_prompt.rs, asserted by

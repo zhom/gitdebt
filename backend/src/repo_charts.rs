@@ -9,9 +9,9 @@
 //! `?theme=light` + `?theme=dark` pair via `<picture>` for theme-aware
 //! README rendering.
 //!
-//! Static attributes always contain the finished chart because README
-//! sanitizers may remove SMIL. Animation only enhances renderers that
-//! retain it.
+//! Static attributes always contain the finished chart because many
+//! consumers render an SVG as a single frame — every rasterizer, and README
+//! renderers outside GitHub. Animation only enhances the ones that play it.
 
 use chrono::{Datelike, NaiveDate};
 use serde::Serialize;
@@ -62,6 +62,17 @@ pub struct ContributionProfile {
     pub external_commits: i64,
     pub visionary_count: i64,
 }
+
+/// Rendered diameter of a contributor's photo, and the dither ring's reach
+/// past it on every side. Shared by the grid and the single-avatar asset so a
+/// README that lays the standalone tiles out itself lands on the same geometry
+/// the chart draws.
+pub const AVATAR_SIZE: u32 = 62;
+pub const AVATAR_RING_OVERHANG: u32 = 5;
+
+/// Edge of the square one standalone avatar occupies: the photo plus the ring
+/// overhang on both sides.
+pub const AVATAR_TILE: u32 = AVATAR_SIZE + AVATAR_RING_OVERHANG * 2;
 
 fn reveal_begin(index: usize) -> f32 {
     (index as f32 * 0.018).min(0.09)
@@ -519,8 +530,8 @@ fn render_contributors_inner(repo: &str, contributors: &[ContributorRow], theme:
     let width = 1100u32;
     let pad = 44u32;
     let avatar_y = 86u32;
-    let avatar_size = 62u32;
-    let avatar_ring_overhang = 5u32;
+    let avatar_size = AVATAR_SIZE;
+    let avatar_ring_overhang = AVATAR_RING_OVERHANG;
     let min_column_step = 76u32;
     let row_step = 82u32;
     let content_width = width - pad * 2;
@@ -589,7 +600,7 @@ fn render_contributors_inner(repo: &str, contributors: &[ContributorRow], theme:
       </g>"##,
             label = escape_xml(&label),
             r = avatar_size / 2,
-            ring_r = avatar_size / 2 + 5,
+            ring_r = avatar_size / 2 + avatar_ring_overhang,
         );
         let linked = profile.map_or(content.clone(), |href| {
             format!(
@@ -611,12 +622,17 @@ fn render_contributors_inner(repo: &str, contributors: &[ContributorRow], theme:
     }
 
     let footer_y = (height - 12) as f32;
+    // `.avatar-pixels` carries no stroke: it used to be inked with the canvas
+    // colour to knock a gap between the dither ring and the photo, which on a
+    // surface that paints no canvas is just an opaque halo. Without it the
+    // disc sits at exactly the 5px `avatar_ring_overhang` the layout above
+    // already reserves, and the ring's outer edge is dither, not paint.
     format!(
         r##"<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 {width} {height}" role="img" aria-label="Contributors of {repo}">
   <style><![CDATA[
     .title {{ fill: {fg}; font: 600 18px ui-sans-serif, system-ui, sans-serif; }}
     .subtitle {{ fill: {muted}; font: 13px ui-sans-serif, system-ui, sans-serif; }}
-    .avatar-pixels {{ fill: url(#gd-pixel-fill); stroke: {bg}; stroke-width: 3; shape-rendering: crispEdges; }}
+    .avatar-pixels {{ fill: url(#gd-pixel-fill); stroke: none; shape-rendering: crispEdges; }}
     .avatar-outline {{ fill: none; stroke: {border}; stroke-width: 1.5; }}
     .avatar-fallback-bg {{ fill: {track}; }}
     .avatar-fallback {{ fill: {fg}; font: 700 22px ui-monospace, SFMono-Regular, monospace; }}
@@ -634,7 +650,7 @@ fn render_contributors_inner(repo: &str, contributors: &[ContributorRow], theme:
     }}
   ]]></style>
   <text class="title" x="{pad}" y="36">Contributors</text>
-  <text class="subtitle" x="{pad}" y="58">{shown_count} public commit authors · analyzed commit window · {repo}</text>
+  <text class="subtitle" x="{pad}" y="58">{shown_count} public commit author{plural} · {repo}</text>
 {rows}
 {footer}
 </svg>"##,
@@ -642,15 +658,113 @@ fn render_contributors_inner(repo: &str, contributors: &[ContributorRow], theme:
         height = height,
         repo = escape_xml(repo),
         fg = theme.fg,
-        bg = theme.bg,
         muted = theme.muted,
         border = theme.border,
         track = theme.track,
         pad = pad,
         shown_count = shown.len(),
+        plural = if shown.len() == 1 { "" } else { "s" },
         rows = rows,
         footer = brand::footer_lockup((width as f32) - pad as f32, footer_y, theme,),
     )
+}
+
+/// One contributor's avatar as a standalone asset: dither ring, clipped photo
+/// (or an initial when there is none), outline. No title, no subtitle, no
+/// footer, no canvas.
+///
+/// The grid's own `<a>` wrappers can never fire in a README. An SVG loaded
+/// through an HTML `<img>` renders in SVG2 secure animated mode, where
+/// declarative animation still plays but script, external references and every
+/// form of interactivity are switched off. A linked contributor grid therefore
+/// has to be one `<a>` per tile in the README's *own* markup, which needs one
+/// image per tile — this one.
+///
+/// `rank` only shifts the reveal delay, reusing the grid's stagger so a README
+/// laid out from these tiles fades in exactly like the single-image chart.
+pub fn render_contributor_avatar(
+    contributor: &ContributorRow,
+    rank: usize,
+    theme: &Theme,
+) -> String {
+    crate::texture::decorate(
+        render_contributor_avatar_inner(contributor, rank, theme),
+        theme,
+    )
+}
+
+fn render_contributor_avatar_inner(
+    contributor: &ContributorRow,
+    rank: usize,
+    theme: &Theme,
+) -> String {
+    let label = contributor
+        .login
+        .clone()
+        .unwrap_or_else(|| contributor.name.clone());
+    let r = AVATAR_SIZE / 2;
+    let avatar = contributor.avatar_url.as_ref().map_or_else(
+        || {
+            let initial = label
+                .chars()
+                .next()
+                .unwrap_or('?')
+                .to_uppercase()
+                .to_string();
+            format!(
+                r#"<circle class="avatar-fallback-bg" cx="{r}" cy="{r}" r="{r}" /><text class="avatar-fallback" x="{r}" y="{y}" text-anchor="middle">{initial}</text>"#,
+                y = r + 8,
+                initial = escape_xml(&initial),
+            )
+        },
+        |url| {
+            format!(
+                r#"<image href="{url}" x="0" y="0" width="{AVATAR_SIZE}" height="{AVATAR_SIZE}" clip-path="url(#gd-avatar-clip)" preserveAspectRatio="xMidYMid slice" />"#,
+                url = escape_xml(url),
+            )
+        },
+    );
+    // Intrinsic width/height as well as the viewBox: a README lays these out
+    // as bare `<img>` tiles, and a sizeless SVG would be stretched to the
+    // viewer's default replaced-element box instead of staying a 72px avatar.
+    format!(
+        r##"<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 {AVATAR_TILE} {AVATAR_TILE}" width="{AVATAR_TILE}" height="{AVATAR_TILE}" role="img" aria-label="{label}">
+  <style><![CDATA[
+    .avatar-pixels {{ fill: url(#gd-pixel-fill); stroke: none; shape-rendering: crispEdges; }}
+    .avatar-outline {{ fill: none; stroke: {border}; stroke-width: 1.5; }}
+    .avatar-fallback-bg {{ fill: {track}; }}
+    .avatar-fallback {{ fill: {fg}; font: 700 22px ui-monospace, SFMono-Regular, monospace; }}
+    @media (prefers-reduced-motion: reduce) {{
+      .motion {{ display: none; }}
+    }}
+  ]]></style>
+  <g transform="translate({AVATAR_RING_OVERHANG}, {AVATAR_RING_OVERHANG})" opacity="1">
+    <animate class="motion" attributeName="opacity" from="0" to="1" dur="0.2s" begin="{begin:.2}s" fill="freeze" />
+    <circle class="avatar-pixels" cx="{r}" cy="{r}" r="{ring_r}" />
+    <clipPath id="gd-avatar-clip"><circle cx="{r}" cy="{r}" r="{r}" /></clipPath>
+    {avatar}
+    <circle class="avatar-outline" cx="{r}" cy="{r}" r="{r}" />
+  </g>
+</svg>"##,
+        label = escape_xml(&label),
+        ring_r = r + AVATAR_RING_OVERHANG,
+        begin = reveal_begin(rank),
+        fg = theme.fg,
+        border = theme.border,
+        track = theme.track,
+    )
+}
+
+/// The answer for a contributor slot nobody occupies.
+///
+/// A README grid is pasted with a fixed number of slots and the author set
+/// underneath it shrinks and grows, so the tail slots have to disappear rather
+/// than break: a 404 draws the broken-image glyph, and any visible placeholder
+/// would assert a contributor who does not exist. Deliberately undecorated —
+/// even the shared grain would be a visible square.
+pub fn render_blank_avatar() -> String {
+    r#"<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 1 1" width="1" height="1" role="presentation"></svg>"#
+        .to_string()
 }
 
 // Lines of code by language
@@ -2093,11 +2207,14 @@ mod tests {
     fn empty_charts_keep_the_shared_texture_field() {
         // The empty state used to paint an opaque background rect on top of
         // the texture field, so "no data" looked like a different product.
+        // No chart paints a canvas at all now, so the absence is structural
+        // rather than a property of this one state.
         let svg = render_commit_trend("o/r", &[], &theme::DARK);
         assert!(svg.contains("no commit data yet"));
         assert!(svg.contains("data-gitdebt-texture=\"true\""));
         let texture = svg.find("data-gitdebt-texture").expect("texture");
         assert!(texture < svg.find("<text x=\"50%\"").expect("message"));
+        assert!(!svg.contains("data-gitdebt-canvas"));
         assert!(!svg.contains(&format!(
             "<rect width=\"1200\" height=\"360\" fill=\"{}\" />",
             theme::DARK.bg
@@ -2137,7 +2254,8 @@ mod tests {
         assert!(svg.contains("href=\"https://github.com/zhom"));
         assert!(svg.contains("<image"));
         assert!(svg.contains("avatar-pixels"));
-        assert!(svg.contains("1 public commit authors · analyzed commit window"));
+        assert!(svg.contains("1 public commit author · "));
+        assert!(!svg.contains("analyzed commit window"));
         assert!(!svg.contains("100 commits"));
         assert!(!svg.contains("class=\"commits\""));
         assert!(!svg.contains("class=\"share\""));
@@ -2145,6 +2263,10 @@ mod tests {
         assert!(svg.contains("translateY(-10px) scale(1.08)"));
         assert!(svg.contains("(hover: hover) and (pointer: fine)"));
         assert!(!svg.contains("drop-shadow"));
+        // The dither ring must never be knocked out with a canvas-coloured
+        // stroke: with no canvas behind it that is an opaque halo.
+        assert!(svg.contains(".avatar-pixels { fill: url(#gd-pixel-fill); stroke: none;"));
+        assert!(!svg.contains(&format!("stroke: {}", theme::LIGHT.bg)));
     }
 
     #[test]
@@ -2161,7 +2283,8 @@ mod tests {
         assert_eq!(svg.matches("class=\"contributor-node\"").count(), 29);
         assert!(svg.contains("href=\"https://github.com/author-28\""));
         assert!(svg.contains("id=\"contributor-clip-28\""));
-        assert!(svg.contains("29 public commit authors · analyzed commit window"));
+        assert!(svg.contains("29 public commit authors · "));
+        assert!(!svg.contains("analyzed commit window"));
         assert!(
             svg.contains("transform=\"translate(49, 86)\""),
             "the first dither ring should begin at the 44px content gutter"
@@ -2174,6 +2297,120 @@ mod tests {
             !svg.contains("viewBox=\"0 0 1100 208\""),
             "a multi-row set must grow the deterministic canvas"
         );
+    }
+
+    /// The standalone tile is the grid's avatar and nothing else: no chart
+    /// title, no subtitle, no footer lockup, no canvas. Its geometry has to
+    /// match the grid's cell exactly, or a README grid built from these tiles
+    /// would not line up with the chart it came from.
+    #[test]
+    fn contributor_avatar_is_one_avatar_on_a_transparent_tile() {
+        let row = ContributorRow {
+            login: Some("zhom".into()),
+            name: "zhom".into(),
+            avatar_url: Some("data:image/png;base64,AAAA".into()),
+            commits: 100,
+        };
+        let svg = render_contributor_avatar(&row, 0, &theme::DARK);
+
+        assert!(svg.contains("viewBox=\"0 0 72 72\""));
+        assert!(svg.contains("width=\"72\" height=\"72\""));
+        assert!(svg.contains("class=\"avatar-pixels\" cx=\"31\" cy=\"31\" r=\"36\""));
+        assert!(svg.contains("class=\"avatar-outline\" cx=\"31\" cy=\"31\" r=\"31\""));
+        assert!(svg.contains("<image href=\"data:image/png;base64,AAAA\""));
+        assert!(svg.contains("aria-label=\"zhom\""));
+
+        assert!(!svg.contains("<title>"));
+        assert!(!svg.contains("class=\"title\""));
+        assert!(!svg.contains("class=\"subtitle\""));
+        assert!(!svg.contains("data-gitdebt-logo"));
+        assert!(!svg.contains("footer-link"));
+        // Transparent like every other shareable surface: no canvas rect, and
+        // the ring's outer edge is dither rather than paint.
+        assert!(!svg.contains(&format!("fill=\"{}\"", theme::DARK.bg)));
+        assert!(svg.contains(".avatar-pixels { fill: url(#gd-pixel-fill); stroke: none;"));
+        // Baked ink only.
+        assert!(!svg.contains("var(--"));
+        assert!(!svg.contains("prefers-color-scheme"));
+        assert!(svg.contains(theme::DARK.border));
+
+        assert_eq!(svg, render_contributor_avatar(&row, 0, &theme::DARK));
+        assert_ne!(svg, render_contributor_avatar(&row, 0, &theme::LIGHT));
+    }
+
+    /// The tile carries the grid's own stagger so a README laid out from them
+    /// reveals like the single-image chart, and freezes to a finished frame
+    /// when motion is off.
+    #[test]
+    fn contributor_avatar_reveal_is_staggered_by_rank_and_freezes_static() {
+        let row = ContributorRow {
+            login: None,
+            name: "Ada Lovelace".into(),
+            avatar_url: None,
+            commits: 3,
+        };
+        let first = render_contributor_avatar(&row, 0, &theme::LIGHT);
+        let third = render_contributor_avatar(&row, 3, &theme::LIGHT);
+        assert!(first.contains("begin=\"0.00s\""));
+        assert!(third.contains(&format!("begin=\"{:.2}s\"", reveal_begin(3))));
+        assert_ne!(first, third);
+
+        // No avatar URL → the initial, never a broken <image>.
+        assert!(first.contains(">A</text>"));
+        assert!(!first.contains("<image"));
+
+        // Static is the default output, and it is complete: the reveal's
+        // finished opacity is already on the element.
+        let frozen = crate::raster::freeze_svg_animations(&first);
+        assert!(!frozen.contains("<animate"));
+        assert!(frozen.contains("opacity=\"1\""));
+    }
+
+    /// A README grid is pasted with a fixed slot count and the author list
+    /// underneath it moves, so the tail slots have to vanish rather than draw
+    /// anything at all.
+    #[test]
+    fn blank_avatar_is_an_empty_one_pixel_tile() {
+        let svg = render_blank_avatar();
+        assert!(svg.contains("viewBox=\"0 0 1 1\""));
+        assert!(svg.contains("width=\"1\" height=\"1\""));
+        assert!(!svg.contains("fill="));
+        assert!(!svg.contains("<rect"));
+        assert!(!svg.contains("<circle"));
+        assert!(!svg.contains("<text"));
+        // Undecorated on purpose: the shared grain would be a visible square.
+        assert!(!svg.contains("data-gitdebt-texture"));
+        assert_eq!(svg, render_blank_avatar());
+    }
+
+    /// Both tiles have to survive the raster dispatcher in every encoding the
+    /// route answers — an empty slot that 500s is the broken-image icon the
+    /// transparent tile exists to avoid, and the 1x1 blank is the smallest
+    /// surface either encoder will ever be handed.
+    #[test]
+    fn avatar_tiles_rasterize() {
+        let row = ContributorRow {
+            login: Some("zhom".into()),
+            name: "zhom".into(),
+            avatar_url: None,
+            commits: 1,
+        };
+        for format in [
+            crate::raster::RasterFormat::Png,
+            crate::raster::RasterFormat::Webp,
+        ] {
+            let blank = crate::raster::rasterize(&render_blank_avatar(), format, 2.0)
+                .expect("blank tile rasterizes");
+            assert!(!blank.is_empty());
+
+            let tile = crate::raster::rasterize(
+                &render_contributor_avatar(&row, 0, &theme::DARK),
+                format,
+                2.0,
+            )
+            .expect("avatar tile rasterizes");
+            assert!(!tile.is_empty());
+        }
     }
 
     #[test]

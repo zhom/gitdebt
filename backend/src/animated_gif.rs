@@ -1,8 +1,11 @@
 //! Size-bounded animated star-history GIFs for README embeds.
 //!
-//! GitHub strips SMIL from SVG images, so actual README motion is an
-//! explicit raster alternative. Frames are rendered from `chart.rs`'s pure
-//! geometry and the Postgres-derived series supplied by the API layer.
+//! GIF is the motion format for surfaces that render an SVG as a single
+//! frame — rasterizers, and README renderers outside GitHub such as npm,
+//! PyPI and Docker Hub. GitHub itself plays SMIL and CSS animation in an
+//! `<img>`-embedded SVG, so `animate=1` is the lighter option there.
+//! Frames are rendered from `chart.rs`'s pure geometry and the
+//! Postgres-derived series supplied by the API layer.
 //!
 //! Two presets:
 //!   * `wave` (default) — a continuous loop: the dithered underfill
@@ -116,7 +119,11 @@ pub fn encode_wave(
 /// labels, completed bars), then only the decorative pattern phase changes.
 /// Every frame therefore remains fully readable and a README consumer never
 /// sees partial data masquerading as animation.
-pub fn encode_dither_loop(svg: &str) -> Result<EncodedGif> {
+///
+/// `backdrop` is the theme canvas the source SVG's ink was designed against
+/// (`theme.bg`); frames are flattened onto it before encoding. `&str` rather
+/// than `&Theme` because every call site captures it in a `'static` closure.
+pub fn encode_dither_loop(svg: &str, backdrop: &str) -> Result<EncodedGif> {
     let frozen = crate::raster::freeze_svg_animations(svg);
     let delays = [DITHER_FRAME_DELAY_MS; DITHER_FRAME_COUNT];
     let svgs = (0..DITHER_FRAME_COUNT)
@@ -125,7 +132,7 @@ pub fn encode_dither_loop(svg: &str) -> Result<EncodedGif> {
 
     let mut last = None;
     for scale in [1.0_f32, 0.75, 0.5] {
-        let encoded = encode_frames(&svgs, &delays, scale, Some(Repeat::Infinite))?;
+        let encoded = encode_frames(&svgs, &delays, scale, Some(Repeat::Infinite), backdrop)?;
         if encoded.bytes.len() <= DITHER_TARGET_BYTES {
             return Ok(encoded);
         }
@@ -210,7 +217,7 @@ fn encode_at_scale(
         .into_iter()
         .map(|sample| render_svg_frame(series, cfg, theme, &static_opts, spline_progress(sample)))
         .collect::<Vec<_>>();
-    encode_frames(&svgs, &DELAYS_MS, scale, None)
+    encode_frames(&svgs, &DELAYS_MS, scale, None, theme.bg)
 }
 
 fn encode_wave_at_scale(
@@ -241,21 +248,65 @@ fn encode_wave_at_scale(
             )
         })
         .collect::<Vec<_>>();
-    encode_frames(&svgs, &delays, scale, Some(Repeat::Infinite))
+    encode_frames(&svgs, &delays, scale, Some(Repeat::Infinite), theme.bg)
+}
+
+/// GIF carries one bit of alpha and `Frame::from_parts` uses the default
+/// disposal, so a transparent frame would harden every antialiased edge and
+/// ghost the previous frame through it. The SVG surfaces are transparent by
+/// design, so flatten each rasterized frame onto the tone its ink was drawn
+/// against before the encoder ever sees it. Integer round-half-up math keeps
+/// the result byte-deterministic.
+fn flatten_onto(rgba: &mut [u8], backdrop: [u8; 3]) {
+    for px in rgba.chunks_exact_mut(4) {
+        let a = px[3] as u32;
+        if a == 255 {
+            continue;
+        }
+        for (channel, bg) in px[..3].iter_mut().zip(backdrop) {
+            *channel = ((*channel as u32 * a + bg as u32 * (255 - a) + 127) / 255) as u8;
+        }
+        px[3] = 255;
+    }
+}
+
+/// `#rrggbb` → channels. Theme canvases are always well-formed; an
+/// unparseable value falls back to black rather than panicking on a
+/// request path.
+fn backdrop_rgb(hex: &str) -> [u8; 3] {
+    let digits = hex.strip_prefix('#').unwrap_or(hex);
+    if digits.len() != 6 {
+        return [0, 0, 0];
+    }
+    let mut out = [0u8; 3];
+    for (channel, pair) in out.iter_mut().zip(digits.as_bytes().chunks_exact(2)) {
+        let Ok(text) = std::str::from_utf8(pair) else {
+            return [0, 0, 0];
+        };
+        let Ok(value) = u8::from_str_radix(text, 16) else {
+            return [0, 0, 0];
+        };
+        *channel = value;
+    }
+    out
 }
 
 /// Rasterize each frame SVG at `scale` and encode the GIF. `repeat`
 /// writes the NETSCAPE2.0 loop extension (wave); `None` plays once (draw).
+/// Frames are flattened onto `backdrop` first — see [`flatten_onto`].
 fn encode_frames(
     svgs: &[String],
     delays_ms: &[u32],
     scale: f32,
     repeat: Option<Repeat>,
+    backdrop: &str,
 ) -> Result<EncodedGif> {
     let mut frames = Vec::with_capacity(svgs.len());
     let mut dimensions = None;
+    let backdrop = backdrop_rgb(backdrop);
     for (svg, delay) in svgs.iter().zip(delays_ms) {
-        let (rgba, width, height) = rasterize_rgba(svg, scale)?;
+        let (mut rgba, width, height) = rasterize_rgba(svg, scale)?;
+        flatten_onto(&mut rgba, backdrop);
         match dimensions {
             Some((w, h)) if (w, h) != (width, height) => {
                 bail!("GIF frames have inconsistent dimensions")
@@ -408,6 +459,10 @@ mod tests {
         let dark_px = decode(&dark.bytes)[0].buffer().get_pixel(0, 0).0;
         assert_eq!(&light_px[..3], &[0xff, 0xff, 0xff]);
         assert_eq!(&dark_px[..3], &[0x0a, 0x0a, 0x0a]);
+        // The chart SVG is transparent; the encoder must have flattened it.
+        // Leaked alpha would harden edges and ghost across frames.
+        assert_eq!(light_px[3], 0xff);
+        assert_eq!(dark_px[3], 0xff);
     }
 
     fn has_netscape_loop(bytes: &[u8]) -> bool {
@@ -472,7 +527,7 @@ mod tests {
   <rect width="80" height="40" fill="url(#p)" />
   <text x="8" y="24" fill="#fafafa">ready</text>
 </svg>"##;
-        let gif = encode_dither_loop(svg).unwrap();
+        let gif = encode_dither_loop(svg, DARK.bg).unwrap();
         assert_eq!(gif.frame_count, DITHER_FRAME_COUNT);
         assert!(has_netscape_loop(&gif.bytes));
         assert!(gif.bytes.len() <= DITHER_TARGET_BYTES);
@@ -483,6 +538,25 @@ mod tests {
             frames[1].buffer().as_raw(),
             "Bayer phase must visibly advance"
         );
+    }
+
+    /// The generic media path takes an already-transparent SVG, so the
+    /// flatten has to happen inside the encoder rather than in the renderers
+    /// that feed it.
+    #[test]
+    fn gif_frames_are_flattened_onto_the_theme_canvas() {
+        let svg = r##"<svg xmlns="http://www.w3.org/2000/svg" width="40" height="20" viewBox="0 0 40 20">
+  <defs><pattern id="p" width="8" height="8" patternUnits="userSpaceOnUse" patternTransform="translate(.5 .5)"><rect width="4" height="4" fill="#9b7bff" /></pattern></defs>
+  <rect x="8" y="4" width="24" height="12" fill="url(#p)" />
+</svg>"##;
+        let gif = encode_dither_loop(svg, DARK.bg).unwrap();
+        let frames = decode(&gif.bytes);
+        let first = frames[0].buffer();
+        assert!(
+            first.pixels().all(|px| px.0[3] == 0xff),
+            "GIF's single alpha bit must never be spent on the canvas"
+        );
+        assert_eq!(&first.get_pixel(0, 0).0[..3], &[0x0a, 0x0a, 0x0a]);
     }
 
     #[test]

@@ -236,6 +236,16 @@ pub fn public_router() -> Router<ApiState> {
             "/api/repos/{owner}/{repo}/health.json",
             get(repo_health_json),
         )
+        // One contributor per request, addressed by rank. See
+        // `contributor_avatar` for why a linked grid cannot be one image.
+        .route(
+            "/api/repos/{owner}/{repo}/contributors/{rank}/{filename}",
+            get(contributor_avatar),
+        )
+        .route(
+            "/api/repos/{owner}/{repo}/contributors/{rank}",
+            get(contributor_profile_redirect),
+        )
 }
 
 /// Postgres-only data contract for the interactive in-app charts. Embedded
@@ -953,7 +963,7 @@ async fn stat_dispatcher(
         }
         if format == OutputFormat::Gif {
             let encoded = crate::api::with_raster_permit(move || {
-                crate::animated_gif::encode_dither_loop(&svg)
+                crate::animated_gif::encode_dither_loop(&svg, theme.bg)
             })
             .await?
             .map_err(ApiError::from)?;
@@ -993,7 +1003,9 @@ async fn stat_dispatcher(
             ensure_top_files_svg(&state, &full, theme, &theme_key, q.since.as_deref()).await?
         }
         StatKind::Heatmap => ensure_heatmap_svg(&state, &full, theme, &theme_key, q.year).await?,
-        StatKind::Contributors => ensure_contributors_svg(&state, &full, theme, &theme_key).await?,
+        StatKind::Contributors => {
+            ensure_contributors_svg(&state, &full, theme, &theme_key, &revision).await?
+        }
         StatKind::TodoTrend => ensure_todo_trend_svg(&state, &full, theme, &theme_key).await?,
         StatKind::Lines => ensure_lines_svg(&state, &full, theme, &theme_key).await?,
         StatKind::BusFactor => ensure_bus_factor_svg(&state, &full, theme, &theme_key).await?,
@@ -1009,10 +1021,11 @@ async fn stat_dispatcher(
         if let Some(cached) = state.raster_cache.get(&gif_key).await {
             return Ok(gif_response_with_policy(&request_headers, cached, false));
         }
-        let encoded =
-            crate::api::with_raster_permit(move || crate::animated_gif::encode_dither_loop(&svg))
-                .await?
-                .map_err(ApiError::from)?;
+        let encoded = crate::api::with_raster_permit(move || {
+            crate::animated_gif::encode_dither_loop(&svg, theme.bg)
+        })
+        .await?
+        .map_err(ApiError::from)?;
         let arc = Arc::new(encoded.bytes);
         state.raster_cache.insert(gif_key, arc.clone()).await;
         return Ok(gif_response_with_policy(&request_headers, arc, false));
@@ -1054,6 +1067,256 @@ fn stat_svg_motion(svg: String, animate: bool) -> String {
         // Removing SMIL is therefore a complete, deterministic README frame.
         crate::raster::freeze_svg_animations(&svg)
     }
+}
+
+// One contributor per request, addressed by rank
+//
+// The contributors chart already draws an `<a>` around every avatar, and in a
+// README none of them can ever fire: an SVG behind an HTML `<img>` renders in
+// SVG2 secure animated mode, where declarative animation still plays but
+// script, external references and every form of interactivity are disabled.
+// Linking the avatars therefore means one `<a>` per avatar in the README's own
+// markup, and that needs one image per avatar — these routes.
+//
+// The addressing unit is a rank, not a login, because pasted markup has to
+// keep working: gitdebt resolves rank → current contributor on every request,
+// so a grid re-ranks itself as the repository's history moves and nobody has
+// to regenerate the snippet.
+
+/// Only `avatar.{svg,png,webp}` — the same filename-plus-format dispatch idiom
+/// as [`parse_filename`]. GIF is deliberately absent: the animated encoder
+/// flattens onto a theme background, which is the one thing a README tile must
+/// not have.
+fn parse_avatar_filename(s: &str) -> Option<OutputFormat> {
+    let (name, ext) = s.rsplit_once('.')?;
+    if name != "avatar" {
+        return None;
+    }
+    match ext {
+        "svg" => Some(OutputFormat::Svg),
+        "png" => Some(OutputFormat::Png),
+        "webp" => Some(OutputFormat::Webp),
+        _ => None,
+    }
+}
+
+/// A rank is a plain 0-based index. Rejecting `+1`, `01`, whitespace and signs
+/// keeps one contributor addressable by exactly one URL, so an edge cache
+/// cannot hold the same avatar under a dozen spellings.
+fn parse_rank(s: &str) -> Option<usize> {
+    if s.is_empty() || (s.len() > 1 && s.starts_with('0')) {
+        return None;
+    }
+    if !s.bytes().all(|b| b.is_ascii_digit()) {
+        return None;
+    }
+    s.parse().ok()
+}
+
+/// GitHub's own login grammar: ASCII alphanumeric with single internal
+/// hyphens, 1–39 characters.
+///
+/// Stricter than [`crate::cards::is_valid_login`], which permits `a--b`,
+/// because this value is about to be written into a `Location` header. The
+/// login comes out of `repo_author_stats`, where it was written by the author
+/// enrichment pass from a GitHub API response — a value gitdebt did not author
+/// and must not forward on trust.
+fn is_github_login(s: &str) -> bool {
+    !s.is_empty()
+        && s.len() <= 39
+        && s.bytes().all(|b| b.is_ascii_alphanumeric() || b == b'-')
+        && !s.starts_with('-')
+        && !s.ends_with('-')
+        && !s.contains("--")
+}
+
+/// Where a contributor rank sends a reader.
+///
+/// Anything that is not recognizably a login — an unenriched author, a rank
+/// past the roster, a stored value that does not match GitHub's grammar —
+/// falls back to the repository's own contributor graph. A slot that cannot be
+/// resolved must still land somewhere true; it must never land on whatever the
+/// stored string happened to say.
+fn contributor_destination(owner: &str, repo: &str, login: Option<&str>) -> String {
+    match login.filter(|login| is_github_login(login)) {
+        Some(login) => format!("https://github.com/{login}"),
+        None => format!("https://github.com/{owner}/{repo}/graphs/contributors"),
+    }
+}
+
+/// About an hour. This redirect *is* the auto-update mechanism — it is what
+/// lets pasted markup keep pointing at whoever holds the rank today — so it
+/// cannot be cached on the four-hour asset policy.
+const CONTRIBUTOR_REDIRECT_CACHE: &str = "public, max-age=3600, s-maxage=3600";
+
+/// `GET /api/repos/{owner}/{repo}/contributors/{rank}` → the profile of
+/// whoever holds that rank right now.
+async fn contributor_profile_redirect(
+    State(state): State<ApiState>,
+    Path((owner, repo, rank)): Path<(String, String, String)>,
+) -> Result<Response, ApiError> {
+    if !is_valid_slug(&owner) || !is_valid_slug(&repo) {
+        return Err(ApiError::bad_request("invalid owner/repo"));
+    }
+    let full = crate::analyzer::repo_key(&owner, &repo);
+    let login = match parse_rank(&rank) {
+        Some(rank) if rank < CONTRIBUTOR_RANK_LIMIT => {
+            match stat_revision(&state, &full, StatKind::Contributors).await? {
+                Some(revision) => contributor_roster(&state, &full, &revision)
+                    .await?
+                    .get(rank)
+                    .and_then(|contributor| contributor.login.clone()),
+                // Nothing analyzed yet: the graph is the honest answer, and a
+                // one-hour TTL re-asks once the analysis lands.
+                None => None,
+            }
+        }
+        _ => None,
+    };
+    let destination = contributor_destination(&owner, &repo, login.as_deref());
+    let Ok(location) = HeaderValue::from_str(&destination) else {
+        // Unreachable: every byte came through `is_valid_slug` or
+        // `is_github_login`, both of which are visible-ASCII-only.
+        return Err(ApiError::bad_request("invalid contributor destination"));
+    };
+    Ok((
+        StatusCode::FOUND,
+        [
+            (header::LOCATION, location),
+            (
+                header::CACHE_CONTROL,
+                HeaderValue::from_static(CONTRIBUTOR_REDIRECT_CACHE),
+            ),
+        ],
+    )
+        .into_response())
+}
+
+/// `GET /api/repos/{owner}/{repo}/contributors/{rank}/avatar.{svg,png,webp}` →
+/// one avatar, nothing else.
+async fn contributor_avatar(
+    State(state): State<ApiState>,
+    Path((owner, repo, rank, filename)): Path<(String, String, String, String)>,
+    Query(q): Query<StatQuery>,
+    request_headers: HeaderMap,
+) -> Result<Response, ApiError> {
+    if !is_valid_slug(&owner) || !is_valid_slug(&repo) {
+        return Err(ApiError::bad_request("invalid owner/repo"));
+    }
+    let Some(format) = parse_avatar_filename(&filename) else {
+        return Err(ApiError::bad_request("unknown avatar format"));
+    };
+    let Some(rank) = parse_rank(&rank) else {
+        return Err(ApiError::bad_request("invalid contributor rank"));
+    };
+    let theme = theme_for(q.theme.as_deref());
+    // Past the roster's own LIMIT the answer is fixed for good, so it costs no
+    // query and rides the full asset TTL.
+    if rank >= CONTRIBUTOR_RANK_LIMIT {
+        return blank_avatar_response(&state, &request_headers, format, false).await;
+    }
+    let full = crate::analyzer::repo_key(&owner, &repo);
+    let Some(revision) = stat_revision(&state, &full, StatKind::Contributors).await? else {
+        // Same organic-demand argument as the stat dispatcher: an impression
+        // in a README is the only thing that will ever ask for this
+        // repository's analysis. Only rank 0 enqueues, so a twelve-slot grid
+        // offers the job once per page view instead of twelve times.
+        if rank == 0
+            && let Err(error) = repo_analysis::enqueue_prioritized(
+                state.analyzer.cache.db(),
+                &full,
+                repo_analysis::VISITOR_PRIORITY_FLOOR,
+                None,
+            )
+            .await
+        {
+            tracing::warn!(repo = %full, %error, "contributor avatar analysis enqueue failed");
+        }
+        return blank_avatar_response(&state, &request_headers, format, true).await;
+    };
+    let roster = contributor_roster(&state, &full, &revision).await?;
+    let Some(contributor) = roster.get(rank) else {
+        return blank_avatar_response(&state, &request_headers, format, false).await;
+    };
+
+    let theme_key = format!(
+        "{}|rev:{revision}|{}",
+        if theme.dark { "dark" } else { "light" },
+        crate::api::RENDER_REVISION,
+    );
+    let cache_key = format!("contributor-avatar:{full}|{theme_key}|{rank}");
+    let animated_svg = crate::api::single_flight(&state.stat_svg_cache, cache_key.clone(), async {
+        let mut row = contributor.clone();
+        row.avatar_url = match row.avatar_url {
+            // A remote `href` renders as a blank hole behind GitHub's camo
+            // proxy, whose CSP is `default-src 'none'; img-src data:`.
+            Some(raw) => self_contained_avatar(&state, raw).await,
+            None => None,
+        };
+        Ok(repo_charts::render_contributor_avatar(&row, rank, theme))
+    })
+    .await?;
+    let svg = stat_svg_motion(animated_svg, q.animate());
+
+    let Some(raster_format) = format.raster() else {
+        // No site-link overlay: the README's own `<a>` owns this tile, and a
+        // second full-surface link inside it would fight for the same pixels.
+        return Ok(svg_response_with_policy(
+            &request_headers,
+            svg,
+            false,
+            false,
+        ));
+    };
+    let raster_key = format!("{cache_key}|{}", format.cache_suffix());
+    if let Some(cached) = state.raster_cache.get(&raster_key).await {
+        return Ok(raster_response(&request_headers, raster_format, cached));
+    }
+    let bytes = crate::api::rasterize_limited(svg, raster_format, RASTER_SCALE).await?;
+    let arc = Arc::new(bytes);
+    state.raster_cache.insert(raster_key, arc.clone()).await;
+    Ok(raster_response(&request_headers, raster_format, arc))
+}
+
+/// The empty slot, in whichever format was asked for. Themeless and
+/// data-free, so every repository and theme shares one cached raster.
+async fn blank_avatar_response(
+    state: &ApiState,
+    request_headers: &HeaderMap,
+    format: OutputFormat,
+    pending: bool,
+) -> Result<Response, ApiError> {
+    let svg = repo_charts::render_blank_avatar();
+    let Some(raster_format) = format.raster() else {
+        return Ok(svg_response_with_policy(
+            request_headers,
+            svg,
+            pending,
+            false,
+        ));
+    };
+    let raster_key = format!(
+        "contributor-avatar:blank|{}|{}",
+        format.cache_suffix(),
+        crate::api::RENDER_REVISION,
+    );
+    if let Some(cached) = state.raster_cache.get(&raster_key).await {
+        return Ok(raster_response_with_policy(
+            request_headers,
+            raster_format,
+            cached,
+            pending,
+        ));
+    }
+    let bytes = crate::api::rasterize_limited(svg, raster_format, RASTER_SCALE).await?;
+    let arc = Arc::new(bytes);
+    state.raster_cache.insert(raster_key, arc.clone()).await;
+    Ok(raster_response_with_policy(
+        request_headers,
+        raster_format,
+        arc,
+        pending,
+    ))
 }
 
 async fn stat_revision(
@@ -1112,6 +1375,9 @@ async fn stat_revision_in(
     Ok(Some(revision))
 }
 
+/// This frame is returned before the decorated path, so it never reaches
+/// `texture::decorate` and has to state its own transparency: a half-pixel
+/// inset outlined frame, the same idiom as `cards::chrome`.
 fn render_analysis_pending(repo: &str, theme: &crate::theme::Theme) -> String {
     let repo = repo
         .replace('&', "&amp;")
@@ -1123,13 +1389,13 @@ fn render_analysis_pending(repo: &str, theme: &crate::theme::Theme) -> String {
   <style><![CDATA[
     .footer-link {{ fill: {muted}; font: 600 11px ui-sans-serif, system-ui, sans-serif; text-decoration: none; letter-spacing: 0.02em; }}
   ]]></style>
-  <rect width="760" height="180" rx="12" fill="{bg}"/>
+  <rect x="0.5" y="0.5" width="759" height="179" rx="12" fill="none" stroke="{border}" stroke-width="1"/>
   <text x="28" y="62" fill="{fg}" font-family="ui-sans-serif,system-ui,sans-serif" font-size="19" font-weight="600">{repo}</text>
   <text x="28" y="105" fill="{muted}" font-family="ui-sans-serif,system-ui,sans-serif" font-size="14">Repository analysis is still running</text>
   <text x="28" y="132" fill="{muted}" font-family="ui-sans-serif,system-ui,sans-serif" font-size="12">Refresh shortly for code-health data.</text>
 {footer}
 </svg>"#,
-        bg = theme.track,
+        border = theme.border,
         fg = theme.fg,
         muted = theme.muted,
         footer = brand::footer_lockup(732.0, 164.0, theme),
@@ -1285,35 +1551,71 @@ async fn ensure_heatmap_svg(
     Ok((cache_key, svg))
 }
 
+/// Deepest contributor rank gitdebt resolves, and the `LIMIT` on the roster
+/// the grid renders. A rank at or past it is out of range by definition, so
+/// it is answered without touching Postgres.
+const CONTRIBUTOR_RANK_LIMIT: usize = 200;
+
+/// The ordered non-bot author set behind the contributors grid: rank `n` in a
+/// README embed is index `n` here.
+///
+/// Every contributor surface reads this one roster, so the grid, the per-rank
+/// avatar and the per-rank profile redirect cannot disagree about who rank `n`
+/// is. `author_email` breaks commit ties — without it Postgres may return tied
+/// authors in any order, and rank → person is exactly what a pasted README
+/// link is addressed by, so an unstable order would silently repoint somebody
+/// else's markup.
+///
+/// Rows keep the remote avatar URL. Only the single rank a request renders is
+/// fetched and inlined, so serving a twelve-slot grid never pulls 200 images.
+async fn contributor_roster(
+    state: &ApiState,
+    full: &str,
+    revision: &str,
+) -> Result<Arc<Vec<ContributorRow>>, ApiError> {
+    let key = format!("contributor-roster:{full}|rev:{revision}");
+    state
+        .contributor_roster_cache
+        .try_get_with(key, async {
+            let sql = format!(
+                "SELECT github_login, author_name, avatar_url, commits FROM repo_author_stats \
+                 WHERE repo = $1 AND {NON_BOT_AUTHOR_FILTER} \
+                 ORDER BY commits DESC, author_email ASC LIMIT {CONTRIBUTOR_RANK_LIMIT}"
+            );
+            let rows = sqlx::query(sqlx::AssertSqlSafe(sql))
+                .bind(full)
+                .bind(BOT_LOGINS)
+                .fetch_all(&state.analyzer.cache.db().pool)
+                .await?;
+            Ok::<_, ApiError>(Arc::new(
+                rows.into_iter()
+                    .map(|r| ContributorRow {
+                        login: r
+                            .try_get::<Option<String>, _>("github_login")
+                            .unwrap_or(None),
+                        name: r.try_get("author_name").unwrap_or_default(),
+                        avatar_url: r.try_get::<Option<String>, _>("avatar_url").unwrap_or(None),
+                        commits: r.try_get("commits").unwrap_or(0),
+                    })
+                    .collect(),
+            ))
+        })
+        .await
+        .map_err(|error| error.clone_shared())
+}
+
 async fn ensure_contributors_svg(
     state: &ApiState,
     full: &str,
     theme: &crate::theme::Theme,
     theme_key: &str,
+    revision: &str,
 ) -> Result<(String, String), ApiError> {
     let cache_key = format!("contributors:{full}|{theme_key}");
     let svg = crate::api::single_flight(&state.stat_svg_cache, cache_key.clone(), async {
-        let sql = format!(
-            "SELECT github_login, author_name, avatar_url, commits FROM repo_author_stats \
-             WHERE repo = $1 AND {NON_BOT_AUTHOR_FILTER} \
-             ORDER BY commits DESC LIMIT 200"
-        );
-        let rows = sqlx::query(sqlx::AssertSqlSafe(sql))
-            .bind(full)
-            .bind(BOT_LOGINS)
-            .fetch_all(&state.analyzer.cache.db().pool)
-            .await?;
-        let mut rows: Vec<ContributorRow> = rows
-            .into_iter()
-            .map(|r| ContributorRow {
-                login: r
-                    .try_get::<Option<String>, _>("github_login")
-                    .unwrap_or(None),
-                name: r.try_get("author_name").unwrap_or_default(),
-                avatar_url: r.try_get::<Option<String>, _>("avatar_url").unwrap_or(None),
-                commits: r.try_get("commits").unwrap_or(0),
-            })
-            .collect();
+        let mut rows: Vec<ContributorRow> = (*contributor_roster(state, full, revision).await?)
+            .as_slice()
+            .to_vec();
         let avatar_urls: Vec<Option<String>> =
             rows.iter().map(|row| row.avatar_url.clone()).collect();
         let avatars = self_contained_avatars(state, avatar_urls).await;
@@ -1874,6 +2176,277 @@ mod tests {
     fn parse_filename_rejects_unknown_names_and_formats() {
         assert!(parse_filename("bus-factor").is_none());
         assert!(parse_filename("unknown.svg").is_none());
+    }
+
+    #[test]
+    fn avatar_filenames_dispatch_three_still_formats() {
+        assert!(matches!(
+            parse_avatar_filename("avatar.svg"),
+            Some(OutputFormat::Svg)
+        ));
+        assert!(matches!(
+            parse_avatar_filename("avatar.png"),
+            Some(OutputFormat::Png)
+        ));
+        assert!(matches!(
+            parse_avatar_filename("avatar.webp"),
+            Some(OutputFormat::Webp)
+        ));
+        // A GIF frame is flattened onto a theme background, which is the one
+        // thing a README tile must not carry.
+        assert!(parse_avatar_filename("avatar.gif").is_none());
+        assert!(parse_avatar_filename("contributors.svg").is_none());
+        assert!(parse_avatar_filename("avatar").is_none());
+    }
+
+    /// One contributor, one URL: an edge cache must not end up holding the
+    /// same avatar under `0`, `00`, `+0` and ` 0`.
+    #[test]
+    fn ranks_are_plain_zero_based_indices() {
+        assert_eq!(parse_rank("0"), Some(0));
+        assert_eq!(parse_rank("11"), Some(11));
+        assert_eq!(parse_rank("199"), Some(199));
+        assert!(parse_rank("00").is_none());
+        assert!(parse_rank("01").is_none());
+        assert!(parse_rank("+1").is_none());
+        assert!(parse_rank("-1").is_none());
+        assert!(parse_rank(" 1").is_none());
+        assert!(parse_rank("1.0").is_none());
+        assert!(parse_rank("").is_none());
+        assert!(parse_rank("one").is_none());
+        // Past the roster's LIMIT the handler answers blank without a query;
+        // it still has to parse, or it would 400 instead.
+        assert_eq!(parse_rank("200"), Some(200));
+    }
+
+    /// This value is written into a `Location` header. It comes from
+    /// `repo_author_stats`, where the enrichment pass copied it out of a
+    /// GitHub API response — a string gitdebt did not author. Anything that is
+    /// not recognizably a login lands on the repository's contributor graph.
+    #[test]
+    fn only_a_real_login_reaches_the_location_header() {
+        assert!(is_github_login("zhom"));
+        assert!(is_github_login("rust-lang"));
+        assert!(is_github_login("a"));
+        assert!(is_github_login(&"a".repeat(39)));
+
+        assert!(!is_github_login(""));
+        assert!(!is_github_login(&"a".repeat(40)));
+        assert!(!is_github_login("-lead"));
+        assert!(!is_github_login("trail-"));
+        // GitHub's grammar allows single hyphens only.
+        assert!(!is_github_login("double--hyphen"));
+        assert!(!is_github_login("under_score"));
+        assert!(!is_github_login("dot.ted"));
+        assert!(!is_github_login("héllo"));
+
+        let graph = "https://github.com/owner/repo/graphs/contributors";
+        assert_eq!(
+            contributor_destination("owner", "repo", Some("zhom")),
+            "https://github.com/zhom"
+        );
+        // A rank nobody holds, and an author the enrichment pass never named.
+        assert_eq!(contributor_destination("owner", "repo", None), graph);
+        // Hostile stored values must reach the fallback, never the header.
+        for hostile in [
+            "evil.com",
+            "//evil.com",
+            "..",
+            "../../evil",
+            "a/../../evil",
+            "zhom@evil.com",
+            "zhom?next=https://evil.com",
+            "zhom#@evil.com",
+            "zhom\r\nLocation: https://evil.com",
+            "zhom\nSet-Cookie: session=1",
+            " zhom",
+            "javascript:alert(1)",
+        ] {
+            assert_eq!(
+                contributor_destination("owner", "repo", Some(hostile)),
+                graph,
+                "{hostile} must not reach the Location header"
+            );
+        }
+    }
+
+    /// A slot past the end of the roster answers 200 with an empty tile.
+    /// A 404 would draw the broken-image glyph in the README, and a visible
+    /// placeholder would assert a contributor who does not exist.
+    #[test]
+    fn an_empty_slot_is_a_transparent_two_hundred() {
+        let response = svg_response_with_policy(
+            &HeaderMap::new(),
+            repo_charts::render_blank_avatar(),
+            false,
+            false,
+        );
+        assert_eq!(response.status(), StatusCode::OK);
+        assert_eq!(
+            response.headers().get(header::CONTENT_TYPE).unwrap(),
+            "image/svg+xml; charset=utf-8"
+        );
+        assert_eq!(
+            response.headers().get(header::CACHE_CONTROL).unwrap(),
+            &stat_cache_control(false)
+        );
+        // Unbranded: the README's own <a> owns the tile, so no full-surface
+        // gitdebt link is layered under it.
+        let svg = repo_charts::render_blank_avatar();
+        assert!(!svg.contains("data-gitdebt-surface-link"));
+
+        // An unanalyzed repository answers the same tile on the short policy
+        // so the grid fills in within one analysis cycle.
+        let pending = svg_response_with_policy(&HeaderMap::new(), svg, true, false);
+        assert_eq!(pending.status(), StatusCode::OK);
+        assert_eq!(
+            pending.headers().get(header::CACHE_CONTROL).unwrap(),
+            &stat_cache_control(true)
+        );
+    }
+
+    /// The redirect is the auto-update mechanism: pasted markup addresses a
+    /// rank, and the rank has to be re-resolved on a human timescale rather
+    /// than pinned for the four hours an image rides.
+    #[test]
+    fn the_rank_redirect_expires_in_about_an_hour() {
+        assert_eq!(
+            CONTRIBUTOR_REDIRECT_CACHE,
+            "public, max-age=3600, s-maxage=3600"
+        );
+        assert_ne!(
+            CONTRIBUTOR_REDIRECT_CACHE,
+            stat_cache_control(false).to_str().unwrap()
+        );
+    }
+
+    /// Path conflicts are a construction-time panic in axum, and the rank
+    /// routes sit one literal segment away from `stats/{filename}` — the
+    /// pattern most likely to collide with them.
+    #[test]
+    fn the_public_router_builds_with_the_rank_routes() {
+        let _router: Router<ApiState> = public_router();
+    }
+
+    /// `ApiState` over the test database, or `None` (test no-ops) when
+    /// `GITDEBT_TEST_DATABASE_URL` is unset.
+    #[cfg(test)]
+    async fn test_db_state() -> Option<ApiState> {
+        let db = crate::test_db::shared().await?;
+        let rate = std::sync::Arc::new(
+            crate::rate_limit::RateLimitTracker::load(db.clone())
+                .await
+                .expect("load rate tracker"),
+        );
+        let github = std::sync::Arc::new(
+            crate::github::GithubClient::new(None, rate).expect("github client"),
+        );
+        let analyzer = crate::analyzer::AnalyzerCtx {
+            github,
+            cache: crate::cache::Cache::new(db),
+        };
+        Some(
+            crate::api::ApiState::with_settings(
+                analyzer,
+                None,
+                std::sync::Arc::new(crate::repo_history::RepoStorage::from_env()),
+                None,
+                "http://localhost:14321".to_string(),
+                Some("http://localhost:8787".to_string()),
+                None,
+            )
+            .expect("api state"),
+        )
+    }
+
+    /// Rank → author is the whole contract: pasted markup names a rank, and
+    /// gitdebt has to resolve it to the same person the contributors grid
+    /// draws in that position. Bots are excluded from both, the roster stops
+    /// at [`CONTRIBUTOR_RANK_LIMIT`], and tied commit counts order by
+    /// `author_email` so the mapping cannot drift between two requests.
+    #[tokio::test]
+    async fn contributor_ranks_resolve_to_the_grid_order() {
+        let Some(state) = test_db_state().await else {
+            eprintln!("skipping: set GITDEBT_TEST_DATABASE_URL to run");
+            return;
+        };
+        let pool = state.analyzer.cache.db().pool.clone();
+        let repo = format!("gitdebt-test-rank/{}", std::process::id());
+        cleanup_health_rows(&pool, &repo).await;
+
+        sqlx::query(
+            "INSERT INTO repos (repo, missing, metadata_fetched_at) VALUES ($1, FALSE, NOW())",
+        )
+        .bind(&repo)
+        .execute(&pool)
+        .await
+        .expect("seed repo");
+        sqlx::query(
+            "INSERT INTO repo_history \
+                (repo, total_commits, last_analyzed_sha, last_analyzed_at, analysis_revision) \
+             VALUES ($1, 30, 'abc', NOW(), 1)",
+        )
+        .bind(&repo)
+        .execute(&pool)
+        .await
+        .expect("seed history");
+        for (email, name, login, commits) in [
+            ("top@example.com", "Top", Some("top-author"), 30i64),
+            // Tied on commits: `author_email` decides, so `b@` is rank 1 and
+            // `c@` is rank 2 on every request.
+            ("b@example.com", "B", Some("bee"), 10),
+            ("c@example.com", "C", None, 10),
+            ("bot@example.com", "renovate[bot]", Some("renovate"), 900),
+        ] {
+            sqlx::query(
+                "INSERT INTO repo_author_stats \
+                    (repo, author_email, author_name, github_login, commits) \
+                 VALUES ($1, $2, $3, $4, $5)",
+            )
+            .bind(&repo)
+            .bind(email)
+            .bind(name)
+            .bind(login)
+            .bind(commits)
+            .execute(&pool)
+            .await
+            .expect("seed author");
+        }
+
+        let revision = stat_revision(&state, &repo, StatKind::Contributors)
+            .await
+            .expect("revision query")
+            .expect("an analyzed repository has a revision");
+        let roster = contributor_roster(&state, &repo, &revision)
+            .await
+            .expect("roster query");
+
+        assert_eq!(roster.len(), 3, "the bot must not occupy a rank");
+        assert_eq!(roster[0].login.as_deref(), Some("top-author"));
+        assert_eq!(roster[1].login.as_deref(), Some("bee"));
+        assert_eq!(roster[2].login, None);
+        assert_eq!(
+            contributor_destination("owner", "repo", roster[0].login.as_deref()),
+            "https://github.com/top-author"
+        );
+        // Rank 2 exists but nobody enriched it, so it falls back rather than
+        // redirecting to a non-login.
+        assert_eq!(
+            contributor_destination("owner", "repo", roster[2].login.as_deref()),
+            "https://github.com/owner/repo/graphs/contributors"
+        );
+        // Past the end of the roster there is no author to resolve.
+        assert!(roster.get(3).is_none());
+        assert!(roster.get(CONTRIBUTOR_RANK_LIMIT).is_none());
+
+        // A second call is served from the shared roster cache: a twelve-slot
+        // grid must not become twelve identical ranked queries.
+        let again = contributor_roster(&state, &repo, &revision)
+            .await
+            .expect("roster query");
+        assert!(Arc::ptr_eq(&roster, &again));
+
+        cleanup_health_rows(&pool, &repo).await;
     }
 
     #[test]

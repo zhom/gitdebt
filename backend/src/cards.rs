@@ -135,12 +135,6 @@ fn display_title(custom: Option<&str>, default: &str) -> String {
     }
 }
 
-/// Card background per theme — concrete hex, matching the GitHub-native
-/// look (`#0a0a0a` is the product's dark canvas).
-fn card_bg(theme: &Theme) -> &'static str {
-    if theme.dark { "#0a0a0a" } else { "#ffffff" }
-}
-
 /// The single chromatic accent (the wave trio's leading stop), used
 /// sparingly: eyebrow, glyph ink, sparkline.
 fn accent_ink(theme: &Theme) -> &'static str {
@@ -204,12 +198,15 @@ fn svg_open(w: f32, h: f32, label: &str) -> String {
 
 /// Card chrome: rounded rect, 1px border (opacity 0 when hidden — the
 /// geometry stays identical so `hide_border` never reflows anything).
+///
+/// The interior is unpainted so the card composites onto the README it is
+/// embedded in; the border, the Bayer wash, and the accent strip are what
+/// make it read as a card.
 fn chrome(w: f32, h: f32, theme: &Theme, hide_border: bool) -> String {
     format!(
-        "  <rect x=\"0.5\" y=\"0.5\" width=\"{:.1}\" height=\"{:.1}\" rx=\"4.5\" fill=\"{}\" stroke=\"{}\" stroke-width=\"1\" stroke-opacity=\"{}\" />\n",
+        "  <rect x=\"0.5\" y=\"0.5\" width=\"{:.1}\" height=\"{:.1}\" rx=\"4.5\" fill=\"none\" stroke=\"{}\" stroke-width=\"1\" stroke-opacity=\"{}\" />\n",
         w - 1.0,
         h - 1.0,
-        card_bg(theme),
         theme.border,
         if hide_border { "0" } else { "1" },
     )
@@ -597,10 +594,9 @@ pub fn render_user_card(
 
     let mut body = String::new();
     body.push_str(&format!(
-        "  <rect x=\"0.5\" y=\"0.5\" width=\"{rw:.1}\" height=\"{rh:.1}\" rx=\"12\" fill=\"{bg}\" stroke=\"{border}\" stroke-width=\"1\" stroke-opacity=\"{stroke_opacity}\" />\n",
+        "  <rect x=\"0.5\" y=\"0.5\" width=\"{rw:.1}\" height=\"{rh:.1}\" rx=\"12\" fill=\"none\" stroke=\"{border}\" stroke-width=\"1\" stroke-opacity=\"{stroke_opacity}\" />\n",
         rw = w - 1.0,
         rh = h - 1.0,
-        bg = card_bg(theme),
         border = theme.border,
         stroke_opacity = if opts.hide_border { "0" } else { "1" },
     ));
@@ -1724,9 +1720,16 @@ mod tests {
         // text lights a few percent, runaway glyphs light most of it.
         let svg = render_user_card(&sample_user(), &UserCardOptions::default(), &DARK).unwrap();
         let (rgba, w, h) = crate::raster::rasterize_rgba(&svg, 1.0).expect("raster");
+        // The card paints no canvas, so the grain wash demultiplies to
+        // straight #fafafa at single-digit alpha. Composite onto the tone the
+        // card is designed against first, or a barely-there dot counts as
+        // brightly as a glyph and the measurement stops meaning anything.
         let lit = rgba
             .chunks_exact(4)
-            .filter(|px| px[0] > 160 && px[3] > 0)
+            .filter(|px| {
+                let a = px[3] as u32;
+                (px[0] as u32 * a + 0x0a * (255 - a)) / 255 > 160
+            })
             .count();
         let share = lit as f64 / (w * h) as f64;
         assert!(

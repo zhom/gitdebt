@@ -20,7 +20,9 @@ dark is the default theme for the site and for server-rendered assets.
   percentage, completeness score, or any figure implying how many stars are
   missing. An archive series counts re-stars and can exceed the repository's own
   star total, so a gap number is confidently wrong exactly where it is most
-  eye-catching. `history-freshness.ts` owns every one of these strings;
+  eye-catching. User-visible copy names the source as "historical data" and
+  never names GH Archive; the module and env-var names below still do, and that
+  asymmetry is deliberate. `history-freshness.ts` owns every one of these strings;
   `SeriesProvenance.tsx` and `provenance-embed.ts` render them and add none of
   their own. Enforced by `history-freshness.test.mjs` and
   `provenance-embed.test.mjs`.

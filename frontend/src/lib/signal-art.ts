@@ -301,7 +301,7 @@ export function pageInsightForPath(pathname: string): PageInsight {
     eyebrow: "gitdebt signal // live mosaic",
     question: "What can gitdebt tell you about a GitHub repository?",
     answer:
-      "gitdebt charts star history and pairs it with repository-health evidence: maintenance cadence, file change frequency, contributor concentration, and fix-labelled changes. Reports are designed for investigation first and README embedding second.",
+      "gitdebt charts star history and pairs it with repository-health evidence: maintenance cadence, file change frequency, change hotspots, and fix-labelled changes. Reports are designed for investigation first and README embedding second.",
     labels: ["star history", "repository health"],
     values: segmentValues(segments.length > 0 ? segments : ["gitdebt"], seed),
   };

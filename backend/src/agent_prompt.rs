@@ -193,7 +193,7 @@ fn repo_evidence(stars: Option<&StarSummary>) -> Vec<String> {
     // calls an activity curve "net stars" publishes a wrong claim either way.
     if stars.approximate {
         facts.push(
-            "The star curve is public GH Archive star activity, not a net-star \
+            "The star curve is historical star activity, not a net-star \
              series: it records star actions and cannot see unstars. Describe it \
              as star activity, never as net stars."
                 .to_string(),

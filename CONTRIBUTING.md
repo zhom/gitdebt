@@ -97,7 +97,7 @@ This runs:
   `*_complete` flag atomically; readers never see partial data. Changes to
   `backend/src/db.rs` or `backend/src/cache.rs` require an invariant test
 - **Deterministic renderers**: identical inputs must produce identical SVG and
-  raster bytes, and SVGs must stay correct when GitHub strips SMIL
+  raster bytes, and SVGs must stay correct when rendered as a single frame
 - **Warning-free builds**: compiler, Clippy, Astro, and lint warnings fail CI
 - **No lock file changes**: don't update `Cargo.lock`, `pnpm-lock.yaml`, or
   `extension/package-lock.json` unless updating dependencies is the purpose of

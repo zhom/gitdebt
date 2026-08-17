@@ -142,7 +142,7 @@ export function sourceLabel(freshness: HistoryFreshness): string {
     case "exact_frozen":
       return "GitHub stargazer list";
     case "archive":
-      return "Public GH Archive star events";
+      return "Historical star data";
     case "restricted":
       return "No readable source";
     case "unknown":
@@ -177,7 +177,7 @@ export function sourceDetail(freshness: HistoryFreshness): string {
     case "exact_current":
       return "Every point is one star with its own timestamp, read from GitHub's stargazer list.";
     case "archive":
-      return "Rebuilt from public GH Archive star events. Star actions are recorded and unstars are not, so this is an attention signal rather than a net star count.";
+      return "Rebuilt from historical star data. Star actions are recorded and unstars are not, so this is an attention signal rather than a net star count.";
     case "exact_frozen":
     case "restricted":
       // `noticeText` is total for these two states; the fallback exists only so

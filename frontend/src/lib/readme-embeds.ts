@@ -24,6 +24,29 @@ export type EmbedFormat = "svg" | "png" | "webp" | "gif";
 /** The surface an asset describes, which decides how it is grouped. */
 export type EmbedGroup = "headline" | "health" | "social";
 
+/**
+ * A grid of rank-addressed images, each in its own link.
+ *
+ * One `<a><img></a>` per slot rather than one linked image: an SVG embedded
+ * through `<img>` renders as an image and not as a document, so an `<a>` drawn
+ * inside it is inert. The only way to give twelve faces twelve destinations is
+ * twelve elements.
+ */
+export type EmbedGrid = {
+  /**
+   * The rank-addressed route. `{route}/{rank}` redirects to whoever holds that
+   * rank right now, and `{route}/{rank}/avatar.svg` renders them.
+   */
+  route: string;
+  /**
+   * How many slots the pasted markup carries. Ranks past the end of the list
+   * render an empty image, so this is a ceiling and never a claim.
+   */
+  slots: number;
+  /** Per-slot alt text, suffixed with the slot's 1-based rank. */
+  alt: string;
+};
+
 export type EmbedAsset = {
   id: string;
   /** Display name, also the Markdown heading the snippet sits under. */
@@ -36,24 +59,48 @@ export type EmbedAsset = {
   alt: string;
   /**
    * Whether light and dark variants are both worth publishing. False for
-   * assets that ship one baked appearance (GIF-only motion, social PNGs).
+   * assets that ship one baked appearance (GIF-only motion, social PNGs, the
+   * contributor grid).
    */
   themed: boolean;
   formats: EmbedFormat[];
   group: EmbedGroup;
   /** Where the asset earns its place, in the words an agent can act on. */
   placement: string;
+  /**
+   * Set when the asset publishes a grid of rank-addressed images rather than
+   * the single image `path` names. `path` is still the first slot, so previews
+   * and format swaps keep working.
+   */
+  grid?: EmbedGrid;
 };
 
 /**
+ * Slots the published contributor grid carries. The URLs address ranks and
+ * never go stale, but the *number* of them is whatever the pasted markup says,
+ * so a round dozen: two full rows at most README widths, and short enough that
+ * a maintainer reads the block rather than scrolling past it.
+ */
+const CONTRIBUTOR_GRID_SLOTS = 12;
+/** Rendered size of one avatar slot, in CSS pixels. */
+const AVATAR_SLOT_PX = 64;
+
+/**
  * README assets are static by default and animation is opt-in, so no builder
- * here ever emits `animate=1`. GitHub sanitizes SMIL out of SVG in many
- * contexts anyway; `.gif` is the honest way to ship motion.
+ * here ever emits `animate=1`. Not because GitHub removes it — camo passes an
+ * SVG through byte for byte, and an `<img>`-embedded SVG runs in secure
+ * animated mode, where SMIL and CSS animation both play — but because motion in
+ * somebody else's README should be their decision, and because a static default
+ * keeps the SVG and the raster forms of an asset showing the same frame.
  */
 export const STATIC_BY_DEFAULT =
-  "Published snippets are static. Motion is opt-in: add `animate=1` to an SVG " +
-  "URL, or use the `.gif` variant where one exists, because GitHub strips SVG " +
-  "animation from README images in several contexts.";
+  "Published snippets are static: motion nobody asked for is bad manners in " +
+  "somebody else's README, and it keeps the SVG and raster forms of an asset " +
+  "identical. Motion is an explicit opt-in — add `animate=1` to an SVG URL " +
+  "and it plays in a GitHub README. The `.gif` variant is for the surfaces " +
+  "that take raster alone: rasterizers, CSS `background-image`, and README " +
+  "renderers outside GitHub such as npm, PyPI, and Docker Hub, which show an " +
+  "SVG as a single static frame.";
 
 /** Repository-health charts share a route shape, a caveat, and a placement. */
 const HEALTH_CHARTS: {
@@ -180,6 +227,30 @@ export function repoEmbedAssets(slug: string): EmbedAsset[] {
       formats: ["svg", "png", "webp"],
       group: "headline",
       placement: "next to the star-history chart, when the project ships a package",
+    },
+    {
+      id: "contributor-grid",
+      name: "Linked contributor grid",
+      purpose:
+        "The top twelve contributors as individually linked avatars. Each slot is its own " +
+        "`<a><img>` because an SVG embedded through `<img>` cannot carry a working link " +
+        "inside it, and each URL addresses a rank rather than a person, so the markup never " +
+        "needs regenerating: ranks past the end of the list render nothing, and a repository " +
+        "that grows past twelve keeps showing its top twelve until someone pastes more lines.",
+      // Rank zero: the asset's own path is the first slot, so a preview or a
+      // format swap resolves to a real image rather than a template.
+      path: `${base}/contributors/0/avatar.svg`,
+      alt: `${slug} contributor 1`,
+      themed: false,
+      formats: ["svg", "png", "webp"],
+      group: "headline",
+      placement:
+        "a Contributors or Thanks section, where a reader is looking for the people rather than the numbers",
+      grid: {
+        route: `${base}/contributors`,
+        slots: CONTRIBUTOR_GRID_SLOTS,
+        alt: `${slug} contributor`,
+      },
     },
     ...HEALTH_CHARTS.map((chart): EmbedAsset => ({
       id: chart.id,
@@ -347,12 +418,41 @@ export function pictureEmbed(
   ].join("\n");
 }
 
-/** The snippet to publish: theme-aware where that is meaningful, Markdown otherwise. */
+/**
+ * One `<a><img></a>` per rank, then the attributed link.
+ *
+ * Every anchor above belongs to a contributor, so this is the one published
+ * snippet with no single wrapper to hang `?ref=readme` on; it goes on a line of
+ * its own underneath instead. The image URLs stay plain.
+ *
+ * The slots carry no `theme`: an avatar is a photograph inside a ring, the ring
+ * is the only themed ink on it, and a `<picture>` per slot would triple a block
+ * somebody else has to read in their own README.
+ */
+export function linkedGridEmbed(
+  apiBase: string,
+  grid: EmbedGrid,
+  link: string,
+): string {
+  const lines = Array.from(
+    { length: grid.slots },
+    (_unused, rank) =>
+      `<a href="${apiBase}${grid.route}/${rank}"><img src="${apiBase}${grid.route}/${rank}/avatar.svg" width="${AVATAR_SLOT_PX}" height="${AVATAR_SLOT_PX}" alt="${grid.alt} ${rank + 1}" /></a>`,
+  );
+  lines.push(`<a href="${link}">Contributor ranking on gitdebt</a>`);
+  return lines.join("\n");
+}
+
+/**
+ * The snippet to publish: a grid where the asset is one, theme-aware where that
+ * is meaningful, Markdown otherwise.
+ */
 export function bestEmbed(
   apiBase: string,
   asset: EmbedAsset,
   link: string,
 ): string {
+  if (asset.grid) return linkedGridEmbed(apiBase, asset.grid, link);
   return asset.themed
     ? pictureEmbed(apiBase, asset, link)
     : markdownEmbed(apiBase, asset, link);
@@ -360,7 +460,7 @@ export function bestEmbed(
 
 /** The dialect `bestEmbed` returned, for fencing it in a code block. */
 export function bestEmbedLanguage(asset: EmbedAsset): "html" | "markdown" {
-  return asset.themed ? "html" : "markdown";
+  return asset.themed || asset.grid ? "html" : "markdown";
 }
 
 /** The rules that make a published embed correct rather than merely present. */
@@ -395,7 +495,8 @@ export const QUERY_REFERENCE: {
   {
     param: "animate=1",
     applies: "SVG charts, cards, and badges",
-    effect: "Opts into motion. Off by default; use the `.gif` variant where GitHub strips SVG animation.",
+    effect:
+      "Opts into motion, which plays in a GitHub README. Off by default; use the `.gif` variant for surfaces that show an SVG as a static frame.",
   },
   {
     param: "from=YYYY-MM-DD&to=YYYY-MM-DD",

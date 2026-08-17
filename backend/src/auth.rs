@@ -160,6 +160,7 @@ pub fn router() -> Router<ApiState> {
         .route("/auth/github/callback", get(login_callback))
         .route("/auth/logout", post(logout))
         .route("/api/me", get(me))
+        .route("/api/me/repos", get(my_live_repos))
 }
 
 #[derive(Debug, Error)]
@@ -511,6 +512,60 @@ struct MeResponse {
     name: Option<String>,
     avatar_url: Option<String>,
     email: Option<String>,
+}
+
+/// One repository the signed-in user has connected: a `repo_star_grants` row
+/// that exists and has not been revoked.
+#[derive(Serialize)]
+struct LiveRepo {
+    repo: String,
+    owner_login: String,
+}
+
+#[derive(Serialize)]
+struct LiveReposResponse {
+    repos: Vec<LiveRepo>,
+}
+
+/// The signed-in user's live repositories.
+///
+/// Read-only, and deliberately the *only* thing in this binary that touches
+/// `repo_star_grants`: nothing writes that table yet, so this endpoint
+/// answers `{"repos": []}` for every account until a connect flow lands. That
+/// is the honest answer rather than a placeholder — the landing page renders
+/// exactly what this returns, so an empty grant table is an empty list and
+/// never a fabricated one.
+///
+/// `revoked_reason` is never serialized. Live rows have none by definition,
+/// and the column is a classified code whose only reader must stay one that
+/// cannot leak it.
+async fn my_live_repos(
+    State(state): State<ApiState>,
+    jar: CookieJar,
+) -> Result<Response, AuthError> {
+    let Some(cfg) = state.gh_app.as_ref() else {
+        return Ok(no_store((StatusCode::UNAUTHORIZED).into_response()));
+    };
+    let Some(user_id) = current_user_id(cfg, &jar) else {
+        return Ok(no_store((StatusCode::UNAUTHORIZED).into_response()));
+    };
+    // Matches `idx_repo_star_grants_user`, the partial index on
+    // (user_id) WHERE revoked_at IS NULL.
+    let rows = sqlx::query(
+        "SELECT repo, owner_login FROM repo_star_grants \
+         WHERE user_id = $1 AND revoked_at IS NULL ORDER BY repo",
+    )
+    .bind(user_id)
+    .fetch_all(&state.analyzer.cache.db().pool)
+    .await?;
+    let mut repos = Vec::with_capacity(rows.len());
+    for row in rows {
+        repos.push(LiveRepo {
+            repo: row.try_get("repo").map_err(AuthError::Sqlx)?,
+            owner_login: row.try_get("owner_login").map_err(AuthError::Sqlx)?,
+        });
+    }
+    Ok(no_store(Json(LiveReposResponse { repos }).into_response()))
 }
 
 async fn me(State(state): State<ApiState>, jar: CookieJar) -> Result<Response, AuthError> {

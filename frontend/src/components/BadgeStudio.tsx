@@ -355,9 +355,11 @@ export function BadgeStudio({
           </div>
 
           <p className={cn(BODY, "border-t border-border/40 px-4 py-3")}>
-            SVG previews can animate here. Copied README SVGs are always
-            static because GitHub strips SVG motion; Auto emits separate light
-            and dark assets.
+            SVG previews can animate here. Copied README SVGs stay static, so
+            nobody's README moves without being asked; add{" "}
+            <code className="font-mono text-foreground">animate=1</code> to the
+            URL when you want the motion. Auto emits separate light and dark
+            assets.
           </p>
         </div>
       </div>
@@ -757,8 +759,9 @@ export function EmbedCatalog({
           Each asset lists the encodings its path answers: swap{" "}
           <code className="font-mono text-foreground">chart.svg</code> for{" "}
           <code className="font-mono text-foreground">chart.gif</code> and
-          nothing else changes. GIF is the honest way to publish motion, because
-          GitHub strips SVG animation from README images in several contexts.
+          nothing else changes. An animated SVG plays in a GitHub README, so GIF
+          is for the surfaces that show one as a single static frame — npm,
+          PyPI, Docker Hub, a CSS background.
         </p>
         <div className="mt-8 grid gap-x-12 gap-y-10 sm:grid-cols-2">
           {headline.flatMap((asset) => {

@@ -9,8 +9,8 @@
 //!   * [`render_svg`] — single repo, ONE total-stars line. Animates the
 //!     draw-in only when [`ChartOpts::animate`] is explicitly enabled.
 //!   * [`render_multi_svg`] — N repos overlaid with a legend. ALWAYS
-//!     static — no `<animate>` — because GitHub's camo proxy sanitizes
-//!     SMIL and an animated embed would render blank.
+//!     static — no `<animate>` — because a comparison is read, not
+//!     watched, and motion would fight the legend for attention.
 //!
 //! Theme colors are baked as concrete hex (no CSS vars) so the SVG renders
 //! correctly when embedded as an `<img>` regardless of OS / page theme.
@@ -71,8 +71,8 @@ pub struct ChartOpts {
     /// True → log-scaled y-axis. Useful when overlaying repos that span
     /// several orders of magnitude in star count.
     pub log_y: bool,
-    /// Emit the brief, on-site-only line reveal. Public/embed URLs are
-    /// static by default because GitHub strips SVG animation.
+    /// Emit the brief line reveal. Embed URLs are static by default because
+    /// motion in someone else's README is their call, not ours.
     pub animate: bool,
 }
 
@@ -345,8 +345,9 @@ fn render_single_svg(
     //
     // CRITICAL (static-embed invariant): the STATIC attributes must encode
     // the *end* state (fully-drawn line, `stroke-dashoffset="0"`), not the
-    // start of the draw-in. Consumers that strip SMIL (GitHub's camo proxy,
-    // any static rasterizer) never run the `<animate>`, so if the static
+    // start of the draw-in. Consumers that render the SVG as a still (every
+    // rasterizer, npm/PyPI/Docker Hub READMEs, CSS `background-image`, and
+    // our own PNG/WebP path) never run the `<animate>`, so if the static
     // offset were `{dash}` the whole line would be dashed out of view and
     // the chart would render blank. The `<animate>` still starts the on-site
     // draw-in from `{dash}` → `0` and freezes at the end; on a static render
@@ -412,7 +413,7 @@ fn render_single_svg(
 ///
 /// The semantic final frame is always baked into the paths. `animate=1` adds
 /// a brief line reveal plus a looping ordered-dither phase; consumers that
-/// sanitize SMIL still receive the complete chart. Determinism holds: same
+/// render a still frame still receive the complete chart. Determinism holds: same
 /// input → same bytes.
 pub fn render_multi_svg(
     series_per_repo: &[(String, Vec<Point>)],
@@ -589,7 +590,8 @@ pub struct OverlayConfig {
 /// series color so the reader knows which line maps to which scale.
 ///
 /// Static by design (no `<animate>`) — this backs an embeddable README
-/// surface, and GitHub strips SMIL. Deterministic: same input → same bytes.
+/// surface, where motion is the reader's call. Deterministic: same input →
+/// same bytes.
 ///
 /// When `downloads` is empty (or `cfg.downloads_label` is `None`), renders a
 /// stars-only chart plus a small "no package downloads found" note, so the
@@ -1382,7 +1384,7 @@ mod tests {
     }
 
     #[test]
-    fn render_svg_is_static_by_default_and_bakes_theme_canvas() {
+    fn render_svg_is_static_by_default_and_leaves_the_canvas_transparent() {
         let series = cumulative_series(&[at(1), at(2)]);
         let light = render_svg(
             &series,
@@ -1398,10 +1400,38 @@ mod tests {
         );
         assert!(!light.contains("<animate"));
         assert!(!dark.contains("<animate"));
-        assert!(light.contains(r##"fill="#ffffff""##));
-        assert!(dark.contains(r##"fill="#0a0a0a""##));
+        // Neither theme paints its canvas: the chart has to sit on whatever
+        // README background the reader has, which the baked-per-theme
+        // `<picture>` embed already guarantees is the matching one.
+        assert!(!light.contains(r##"fill="#ffffff""##));
+        assert!(!dark.contains(r##"fill="#0a0a0a""##));
+        assert!(!light.contains("data-gitdebt-canvas"));
+        assert!(light.contains("data-gitdebt-texture=\"true\""));
+        assert!(dark.contains("data-gitdebt-texture=\"true\""));
         assert!(light.contains(r#"stroke-dashoffset="0""#));
         assert!(dark.contains(r#"stroke-dashoffset="0""#));
+    }
+
+    /// The product-level proof: transparency survives all the way to the
+    /// bytes a README actually loads, not just to the SVG markup.
+    #[test]
+    fn chart_rasterizes_onto_a_transparent_canvas() {
+        let series = cumulative_series(&[at(1), at(2), at(3)]);
+        let svg = render_svg(
+            &series,
+            &ChartConfig::default(),
+            &DARK,
+            &ChartOpts::default(),
+        );
+        let png = crate::raster::rasterize(&svg, crate::raster::RasterFormat::Png, 1.0)
+            .expect("chart png");
+        let pixmap = resvg::tiny_skia::Pixmap::decode_png(&png).expect("decode png");
+        let at_px = |x: u32, y: u32| pixmap.pixels()[(y * pixmap.width() + x) as usize].alpha();
+        assert_eq!(at_px(0, 0), 0, "the corner must stay fully transparent");
+        assert!(
+            pixmap.pixels().iter().any(|px| px.alpha() > 0),
+            "a transparent canvas must not mean an empty chart"
+        );
     }
 
     #[test]
@@ -1446,7 +1476,7 @@ mod tests {
             &crate::theme::LIGHT,
             &ChartOpts::default(),
         );
-        // Embeds MUST be static — GitHub strips SMIL.
+        // Embeds MUST be static — motion is opt-in, never a default.
         assert!(!svg1.contains("<animate"));
         // Same input → same bytes.
         assert_eq!(svg1, svg2);

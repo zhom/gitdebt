@@ -11,11 +11,10 @@ import SiteFooter from "@/components/SiteFooter.astro";
 import { ComparisonModeGraphic } from "@/components/ComparisonModeGraphic";
 import { DitherField } from "@/components/DitherField";
 import { LandingRepoLookup } from "@/components/LandingRepoLookup";
-import { RepoHealthScorecard } from "@/components/RepoHealthScorecard";
+import { LiveRepos } from "@/components/LiveRepos";
+import { MomentumBoard } from "@/components/MomentumBoard";
 import { ReportLayerGraphic } from "@/components/ReportLayerGraphic";
 import { SeriesProvenance } from "@/components/SeriesProvenance";
-import { SignalFlowGraphic } from "@/components/SignalFlowGraphic";
-import { StatStrip } from "@/components/StatStrip";
 import { ThemeEmbedPreview } from "@/components/ThemeEmbedPreview";
 import { WarmRepos } from "@/components/WarmRepos";
 import {
@@ -34,6 +33,7 @@ import {
   TILE_TITLE,
 } from "@/components/style-tokens";
 import { CATEGORIES } from "@/data/categories";
+import { heroMomentumRows, type LeaderboardResponse } from "@/lib/hero-momentum";
 import { repoEmbedAssets } from "@/lib/readme-embeds";
 import { staticApiBase } from "@/lib/static-api-base";
 
@@ -107,12 +107,46 @@ async function fetchJson<T>(url: string): Promise<T | null> {
   return null;
 }
 
-const analyzedRepos = await (async () => {
-  const result = await fetchJson<{ total?: number }>(
-    `${apiBase}/api/sitemap/repos?page=0&per=1`,
+/**
+ * One velocity board per window, at the deepest page the API allows. Depth is
+ * what gives the merge overlap: a repository has to be ranked in more than one
+ * window before its windows can be compared, which is what the trend arrow and
+ * the bar's leading tip are read from.
+ */
+const fetchBoard = (days: 1 | 7 | 30) =>
+  fetchJson<LeaderboardResponse>(
+    `${apiBase}/api/leaderboard.json?metric=velocity&window=${days}&per=100&page=0`,
   );
-  return typeof result?.total === "number" ? result.total : null;
-})();
+
+const [analyzedRepos, monthBoard, weekBoard, dayBoard] = await Promise.all([
+  (async () => {
+    const result = await fetchJson<{ total?: number }>(
+      `${apiBase}/api/sitemap/repos?page=0&per=1`,
+    );
+    return typeof result?.total === "number" ? result.total : null;
+  })(),
+  fetchBoard(30),
+  fetchBoard(7),
+  fetchBoard(1),
+]);
+
+/**
+ * The hero's board, baked here rather than fetched after mount.
+ *
+ * What stood here before was a client-only panel that opened as a 432px
+ * "Connecting to live repository activity…" placeholder — the largest element
+ * above the fold said nothing until JavaScript had run and a request had
+ * returned. Eight rows is what balances the headline column beside it.
+ */
+const HERO_BOARD_ROWS = 8;
+const heroRows = heroMomentumRows(
+  {
+    d30: monthBoard?.repos ?? null,
+    d7: weekBoard?.repos ?? null,
+    d1: dayBoard?.repos ?? null,
+  },
+  HERO_BOARD_ROWS,
+);
 
 // Both counts are derived from the embed library that renders /badges and is
 // byte-parity-locked to the Rust renderers, so neither can drift from what the
@@ -125,30 +159,28 @@ const embedAssetCount = embedAssets.length;
 
 const nf = new Intl.NumberFormat("en-US");
 
-const heroStats = [
-  ...(analyzedRepos !== null
-    ? [
-        {
-          key: "repos",
-          label: "Repos analyzed",
-          value: nf.format(analyzedRepos),
-        },
-      ]
-    : []),
-  { key: "health", label: "Health charts", value: String(healthChartCount) },
-  {
-    key: "embeds",
-    label: "Embeddable assets",
-    value: String(embedAssetCount),
-  },
-];
-
 const countsLine = [
   ...(analyzedRepos !== null
     ? [`${nf.format(analyzedRepos)} repositories analyzed`]
     : []),
   `${healthChartCount} health charts`,
   `${embedAssetCount} embeddable assets`,
+].join(" · ");
+
+// The board is baked at build time, so the honest freshness claim is the build
+// date — the same claim `/leaderboard` makes about the same daily snapshot.
+const boardUpdated = new Date().toLocaleDateString("en-US", {
+  month: "short",
+  day: "numeric",
+  year: "numeric",
+  timeZone: "UTC",
+});
+const boardCaption = [
+  "Ranked by stars gained in the last 30 days",
+  ...(analyzedRepos !== null
+    ? [`across ${nf.format(analyzedRepos)} analyzed repos`]
+    : []),
+  `updated ${boardUpdated}`,
 ].join(" · ");
 
 const reportLayers = [
@@ -161,7 +193,7 @@ const reportLayers = [
   {
     graphic: "health" as const,
     title: "Repository health",
-    desc: "Find file change frequency, fix-labelled changes, bus factor, contributor concentration, and recent TODO/FIXME movement.",
+    desc: "Find maintenance cadence, file change frequency, fix-labelled changes, and recent TODO/FIXME movement.",
     link: "/facebook/react",
   },
   {
@@ -171,27 +203,6 @@ const reportLayers = [
     link: "/badges",
   },
 ];
-
-// Fallback line-up for the health scorecard. Live platform activity
-// replaces these client-side whenever it offers analyzed repositories, so
-// this only has to be recognizable and reliably analyzed.
-const healthShowcaseRepos = [
-  "facebook/react",
-  "vercel/next.js",
-  "oven-sh/bun",
-  "denoland/deno",
-  "fastapi/fastapi",
-];
-
-const popularPairs = [
-  ["facebook/react", "vuejs/vue"],
-  ["denoland/deno", "oven-sh/bun"],
-  ["django/django", "fastapi/fastapi"],
-  ["gatsbyjs/gatsby", "vercel/next.js"],
-].map((repos) => ({
-  repos: [...repos].sort(),
-  label: repos.map((repo) => repo.split("/")[1]).join(" vs "),
-}));
 
 const featuredCategorySlugs = [
   "frontend-frameworks",
@@ -203,28 +214,11 @@ const featuredCategories = featuredCategorySlugs.flatMap((slug) => {
   const category = CATEGORIES.find((candidate) => candidate.slug === slug);
   return category ? [category] : [];
 });
+// Only the curated category rows remain on this page, so only their
+// repositories are worth warming.
 const landingWarmRepos = Array.from(
-  new Set([
-    ...healthShowcaseRepos,
-    ...popularPairs.flatMap((pair) => pair.repos),
-    ...featuredCategories.flatMap((category) => category.repos),
-  ]),
+  new Set(featuredCategories.flatMap((category) => category.repos)),
 );
-
-/**
- * The activity board, in the MomentumBoard idiom: 30px rows, tabular numerals,
- * one grid template shared by the header and every row. The template lives here
- * rather than in the script so Tailwind sees it and so the two can never drift.
- * Mobile keeps repository, stars and +30d; the rest join at `sm`.
- */
-const activityGrid =
-  "grid grid-cols-[minmax(0,1fr)_4.5rem_4.5rem] sm:grid-cols-[minmax(0,1fr)_5rem_4rem_4.5rem_4rem_4.5rem_5rem]";
-const activityHead =
-  "px-2 py-1.5 font-mono text-[10px] tracking-[0.12em] text-muted-foreground/70 uppercase";
-const activityRowClass = `${activityGrid} items-center border-b border-border/25 outline-none transition-colors duration-150 hover:bg-card/50 focus-visible:ring-2 focus-visible:ring-accent/30 focus-visible:ring-inset`;
-
-/** The three cache states, quoted inline in the board's legend. */
-const STATE_WORD = "text-foreground";
 ---
 
 <!doctype html>
@@ -246,8 +240,17 @@ const STATE_WORD = "text-foreground";
       <main id="main-content" class="flex-1 bg-background text-foreground">
         <section id="top" class="relative isolate overflow-hidden">
           <DitherField client:idle />
-          <div class="mx-auto max-w-6xl px-6 py-14 sm:py-20 lg:py-24">
-            <div class="grid gap-x-12 gap-y-10 lg:grid-cols-[minmax(0,1.08fr)_minmax(24rem,0.92fr)] lg:items-center">
+          <div class="mx-auto max-w-6xl px-6 py-10 sm:py-14 lg:py-16">
+            <div
+              class:list={[
+                "grid gap-x-12 gap-y-10 lg:items-center",
+                // Only split the hero when there is a board to put in the second
+                // column. A failed leaderboard fetch collapses it to one column
+                // rather than leaving an empty panel beside the headline.
+                heroRows.length > 0 &&
+                  "lg:grid-cols-[minmax(0,1.08fr)_minmax(24rem,0.92fr)]",
+              ]}
+            >
               <div class="min-w-0">
                 <p class="dither-chip reveal" style="--reveal-delay:0ms">
                   <span
@@ -256,40 +259,55 @@ const STATE_WORD = "text-foreground";
                   Built from public GitHub data
                 </p>
                 <h1
-                  class="reveal mt-6 max-w-[18ch] text-4xl tracking-tight text-balance sm:text-5xl lg:text-6xl"
+                  class="reveal mt-5 max-w-[18ch] text-3xl tracking-tight text-balance sm:text-4xl lg:text-5xl"
                   style="--reveal-delay:90ms"
                 >
                   Star history and repo health for any GitHub repo.
                 </h1>
                 <p
                   class:list={[
-                    "reveal mt-5 leading-relaxed text-pretty text-muted-foreground",
+                    "reveal mt-4 leading-relaxed text-pretty text-muted-foreground",
                     LEAD,
                   ]}
                   style="--reveal-delay:180ms"
                 >
                   One live report per repository: the star curve, where it was
-                  read from, and what the commit history says about maintenance,
-                  ownership, and repair load.
+                  read from, and what the commit history says about maintenance
+                  and repair load.
                 </p>
 
                 <div
                   id="lookup"
-                  class="reveal mt-8 scroll-mt-24"
+                  class="reveal mt-7 scroll-mt-24"
                   style="--reveal-delay:260ms"
                 >
                   <LandingRepoLookup client:load />
                 </div>
-
-                <div class="reveal mt-8" style="--reveal-delay:300ms">
-                  <StatStrip
-                    items={heroStats}
-                    aria-label="What gitdebt has analyzed"
-                  />
-                </div>
               </div>
 
-              <SignalFlowGraphic client:load apiBase={apiBase} />
+              {heroRows.length > 0 && (
+                <div class="reveal min-w-0" style="--reveal-delay:340ms">
+                  <div class={SECTION_HEADER}>
+                    <p class={EYEBROW}>Moving now</p>
+                    <a href="/leaderboard" class={SECTION_ACTION}>
+                      full leaderboard
+                      <span
+                        aria-hidden="true"
+                        class="transition-transform duration-150 group-hover:translate-x-0.5 motion-reduce:transition-none"
+                        >→</span
+                      >
+                    </a>
+                  </div>
+                  <div class="mt-3">
+                    <MomentumBoard
+                      client:visible
+                      variant="compact"
+                      rows={heroRows}
+                    />
+                  </div>
+                  <p class:list={["mt-3", CAPTION]}>{boardCaption}</p>
+                </div>
+              )}
             </div>
           </div>
         </section>
@@ -314,16 +332,9 @@ const STATE_WORD = "text-foreground";
             </div>
             <p class:list={["mt-2", BODY, MEASURE]}>
               Four readings from a repository's own commit history: maintenance,
-              ownership, repair load, and debt markers. Every number links back
-              to the full report.
+              ownership, repair load, and debt markers. Open any repository's
+              report to see them.
             </p>
-            <div class="mt-6">
-              <RepoHealthScorecard
-                client:visible
-                apiBase={apiBase}
-                repos={healthShowcaseRepos}
-              />
-            </div>
           </section>
 
           <section
@@ -331,7 +342,7 @@ const STATE_WORD = "text-foreground";
             class="mt-16 scroll-mt-24 border-t border-border/60 pt-12"
           >
             <div class={SECTION_HEADER}>
-              <h2 class={HEADING}>What people are looking at right now</h2>
+              <h2 class={HEADING}>Your live repositories</h2>
               <a href="/leaderboard" class={SECTION_ACTION}>
                 leaderboard
                 <span
@@ -342,43 +353,13 @@ const STATE_WORD = "text-foreground";
               </a>
             </div>
             <p class:list={["mt-2", BODY, MEASURE]}>
-              The repositories opened most recently on gitdebt, with the star
-              totals, growth, and history state it already has stored for each.
+              Repositories connected to your account. Nothing else is listed
+              here.
             </p>
 
-            <div
-              class="mt-8"
-              data-activity
-              data-api-base={apiBase}
-              data-row-class={activityRowClass}
-            >
-              <div class:list={[activityGrid, "items-center border-b border-border"]}>
-                <span class:list={[activityHead, "text-left"]}>Repository</span>
-                <span class:list={[activityHead, "hidden text-right sm:block"]}>Viewed</span>
-                <span class:list={[activityHead, "hidden text-right sm:block"]}>Views</span>
-                <span class:list={[activityHead, "text-right"]}>Stars</span>
-                <span class:list={[activityHead, "hidden text-right sm:block"]}>+7d</span>
-                <span class:list={[activityHead, "text-right"]}>+30d</span>
-                <span class:list={[activityHead, "hidden text-right sm:block"]}>State</span>
-              </div>
-              <ol data-activity-rows></ol>
-              <p
-                data-activity-status
-                aria-live="polite"
-                class:list={["px-2 py-4", CAPTION]}
-              >
-                Live activity needs JavaScript. The leaderboard is rendered
-                statically.
-              </p>
+            <div class="mt-8">
+              <LiveRepos client:load apiBase={apiBase} />
             </div>
-            <p class:list={["mt-3 px-2", CAPTION, MEASURE]}>
-              State reads gitdebt's own cache, never a judgement about the
-              repository: <span class={STATE_WORD}>ready</span> means the star
-              history and the health analysis are both stored,
-              <span class={STATE_WORD}>analyzing</span> means health is still
-              running, and <span class={STATE_WORD}>queued</span> means the star
-              history is still being built.
-            </p>
           </section>
 
           <section
@@ -449,23 +430,6 @@ const STATE_WORD = "text-foreground";
               <ComparisonModeGraphic client:idle />
 
               <div class="grid gap-x-10 gap-y-8 sm:grid-cols-2 lg:grid-cols-1">
-                <div>
-                  <p class={EYEBROW}>Head to head</p>
-                  <ul role="list" class="mt-3">
-                    {popularPairs.map((pair) => (
-                      <li>
-                        <a
-                          href={`/vs/${pair.repos[0]}/${pair.repos[1]}`}
-                          data-warm-repos={pair.repos.join(",")}
-                          class={ROW}
-                        >
-                          <span class="min-w-0 flex-1 truncate">{pair.label}</span>
-                        </a>
-                      </li>
-                    ))}
-                  </ul>
-                </div>
-
                 <div>
                   <p class={EYEBROW}>Curated fields</p>
                   <ul role="list" class="mt-3">
@@ -558,134 +522,5 @@ const STATE_WORD = "text-foreground";
 
       <SiteFooter showExtensionLink={false} />
     </div>
-
-    <script>
-      type ActivityRepo = {
-        repo: string;
-        stars: number;
-        views: number;
-        viewed_at: string;
-        history_ready: boolean;
-        analysis_ready: boolean;
-        gained_7d: number;
-        gained_30d: number;
-      };
-
-      /** Matches MomentumBoard. A leaderboard's job is comparison, and
-       *  comparison needs rows close enough to scan against one another. */
-      const ROW_HEIGHT = 30;
-
-      const NUMBER = new Intl.NumberFormat("en-US");
-      const COMPACT = new Intl.NumberFormat("en", {
-        notation: "compact",
-        maximumFractionDigits: 1,
-      });
-
-      const NAME_CELL = "truncate px-2 text-[13px] text-foreground";
-      const NUM_CELL =
-        "px-2 text-right font-mono text-[11px] tabular-nums text-muted-foreground";
-      const LEAD_CELL =
-        "px-2 text-right font-mono text-[11px] tabular-nums text-foreground";
-      const TEXT_CELL =
-        "px-2 text-right font-mono text-[11px] text-muted-foreground";
-      const AT_SM = "hidden sm:block";
-
-      function ago(value: string): string {
-        const stamp = new Date(value).getTime();
-        if (!Number.isFinite(stamp)) return "—";
-        const minutes = Math.max(0, Math.floor((Date.now() - stamp) / 60_000));
-        if (minutes < 1) return "just now";
-        if (minutes < 60) return `${minutes}m ago`;
-        const hours = Math.floor(minutes / 60);
-        if (hours < 24) return `${hours}h ago`;
-        return `${Math.floor(hours / 24)}d ago`;
-      }
-
-      /** gitdebt's own cache state, never a judgement about the repository. */
-      function stateOf(entry: ActivityRepo): string {
-        if (!entry.history_ready) return "queued";
-        return entry.analysis_ready ? "ready" : "analyzing";
-      }
-
-      function cell(text: string, className: string): HTMLSpanElement {
-        const span = document.createElement("span");
-        span.className = className;
-        span.textContent = text;
-        return span;
-      }
-
-      function rowFor(entry: ActivityRepo, rowClass: string): HTMLLIElement {
-        const item = document.createElement("li");
-        const link = document.createElement("a");
-        link.href = `/${entry.repo}`;
-        link.className = rowClass;
-        link.style.height = `${ROW_HEIGHT}px`;
-        // The visible row is a grid of columns whose headers are not associated
-        // programmatically, so the link carries the whole reading itself.
-        link.setAttribute(
-          "aria-label",
-          `${entry.repo}: viewed ${ago(entry.viewed_at)}, ` +
-            `${NUMBER.format(entry.views)} report views, ` +
-            `${NUMBER.format(entry.stars)} stars, ` +
-            `${NUMBER.format(entry.gained_7d)} in the last 7 days, ` +
-            `${NUMBER.format(entry.gained_30d)} in the last 30 days, ` +
-            stateOf(entry),
-        );
-        link.append(
-          cell(entry.repo, NAME_CELL),
-          cell(ago(entry.viewed_at), `${AT_SM} ${NUM_CELL}`),
-          cell(COMPACT.format(entry.views), `${AT_SM} ${NUM_CELL}`),
-          cell(COMPACT.format(entry.stars), LEAD_CELL),
-          cell(`+${COMPACT.format(entry.gained_7d)}`, `${AT_SM} ${NUM_CELL}`),
-          cell(`+${COMPACT.format(entry.gained_30d)}`, NUM_CELL),
-          cell(stateOf(entry), `${AT_SM} ${TEXT_CELL}`),
-        );
-        item.append(link);
-        return item;
-      }
-
-      // One request for the whole board. The endpoint is Postgres-only and
-      // caps itself at eight repositories, so the table is complete in a single
-      // response and never needs a second round trip.
-      function install(host: HTMLElement) {
-        const list = host.querySelector<HTMLOListElement>(
-          "[data-activity-rows]",
-        );
-        const status = host.querySelector<HTMLElement>("[data-activity-status]");
-        if (!list || !status) return;
-        const apiBase = host.dataset.apiBase ?? "";
-        const rowClass = host.dataset.rowClass ?? "";
-        status.textContent = "Loading recently viewed repositories…";
-
-        fetch(`${apiBase}/api/activity.json`, {
-          headers: { accept: "application/json" },
-        })
-          .then((response) => {
-            if (!response.ok) throw new Error(`activity ${response.status}`);
-            return response.json();
-          })
-          .then((body: { repos?: ActivityRepo[] } | null) => {
-            const repos = Array.isArray(body?.repos) ? body.repos : [];
-            if (repos.length === 0) {
-              status.textContent =
-                "No repository views recorded yet. Repos appear here when their reports are opened.";
-              return;
-            }
-            const fragment = document.createDocumentFragment();
-            for (const entry of repos) fragment.append(rowFor(entry, rowClass));
-            list.replaceChildren(fragment);
-            status.remove();
-          })
-          .catch(() => {
-            status.textContent = "Live activity is temporarily unavailable.";
-          });
-      }
-
-      for (const host of document.querySelectorAll<HTMLElement>(
-        "[data-activity]",
-      )) {
-        install(host);
-      }
-    </script>
   </body>
 </html>

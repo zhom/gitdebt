@@ -82,6 +82,14 @@ pub struct ApiState {
     /// baked into every SVG/PNG/WebP variant.
     pub(crate) avatar_data_cache: MokaCache<String, String>,
     pub(crate) avatar_http: reqwest::Client,
+    /// The ordered, bot-filtered author roster behind the contributors grid,
+    /// keyed by `owner/repo` + analysis revision. A README that links each
+    /// avatar embeds one image per rank, so a single page view asks for the
+    /// same ranking a dozen times within milliseconds; without this every slot
+    /// would repeat the ranked query. Rows carry the *remote* avatar URL —
+    /// only the rank a request actually renders is fetched and inlined.
+    pub(crate) contributor_roster_cache:
+        MokaCache<String, std::sync::Arc<Vec<crate::repo_charts::ContributorRow>>>,
     /// Built user aggregates (`aggregate::build` results), keyed by
     /// lowercased login. 5-min TTL like the analyze bodies. This is the
     /// single expensive step behind BOTH `/api/users/:login/analyze` and
@@ -271,6 +279,15 @@ impl ApiState {
             .connect_timeout(Duration::from_secs(3))
             .timeout(Duration::from_secs(8))
             .build()?;
+        // Entry-bounded, not byte-bounded: a roster is at most
+        // `CONTRIBUTOR_RANK_LIMIT` rows of login/name/URL, tens of kilobytes
+        // at the extreme, so 500 repositories fit in single-digit megabytes.
+        // The key carries the analysis revision, so a stale roster is
+        // unreachable rather than merely old; the day TTL just reclaims it.
+        let contributor_roster_cache = MokaCache::builder()
+            .max_capacity(500)
+            .time_to_live(day)
+            .build();
         let user_agg_cache = MokaCache::builder()
             .max_capacity(500)
             .time_to_live(Duration::from_secs(5 * 60))
@@ -287,6 +304,7 @@ impl ApiState {
             raster_cache,
             avatar_data_cache,
             avatar_http,
+            contributor_roster_cache,
             user_agg_cache,
             leaderboard_cache,
             gh_app,
@@ -3102,10 +3120,11 @@ async fn user_stat_dispatcher(
                 card_raster_response(&request_headers, format, std::sync::Arc::new(bytes), true)
             }
             UserStatFormat::Gif => {
-                let encoded =
-                    with_raster_permit(move || crate::animated_gif::encode_dither_loop(&svg))
-                        .await?
-                        .map_err(ApiError::from)?;
+                let encoded = with_raster_permit(move || {
+                    crate::animated_gif::encode_dither_loop(&svg, theme.bg)
+                })
+                .await?
+                .map_err(ApiError::from)?;
                 gif_media_response(
                     &request_headers,
                     std::sync::Arc::new(encoded.bytes),
@@ -3154,10 +3173,11 @@ async fn user_stat_dispatcher(
                 if q.in_app() { "app" } else { "embed" }
             );
             let (bytes, short_ttl) = single_flight_gif(&state.raster_cache, gif_key, async move {
-                let encoded =
-                    with_raster_permit(move || crate::animated_gif::encode_dither_loop(&svg))
-                        .await?
-                        .map_err(ApiError::from)?;
+                let encoded = with_raster_permit(move || {
+                    crate::animated_gif::encode_dither_loop(&svg, theme.bg)
+                })
+                .await?
+                .map_err(ApiError::from)?;
                 Ok(std::sync::Arc::new(encoded.bytes))
             })
             .await?;
@@ -4318,10 +4338,14 @@ async fn ensure_multi_gif(
     );
     let short_ttl = card.short_ttl;
     let svg = card.svg;
+    // Copy the backdrop out of the borrowed theme: the raster closure has to
+    // be `'static`, and `theme.bg` alone already is.
+    let backdrop = theme.bg;
     single_flight_gif(&state.raster_cache, key, async move {
-        let encoded = with_raster_permit(move || crate::animated_gif::encode_dither_loop(&svg))
-            .await?
-            .map_err(ApiError::from)?;
+        let encoded =
+            with_raster_permit(move || crate::animated_gif::encode_dither_loop(&svg, backdrop))
+                .await?
+                .map_err(ApiError::from)?;
         let bytes = std::sync::Arc::new(encoded.bytes);
         if short_ttl {
             Err(GifMiss::Pending(bytes))
@@ -5026,10 +5050,16 @@ fn needs_downloads(metrics: &[Metric]) -> bool {
 /// Render-revision constant baked into every media cache key (badges,
 /// cards, OG images, GIFs, charts). Bump it whenever renderer output
 /// changes for identical data so stale in-process/CDN entries can never
-/// serve the previous look under the same key. `r19` = star exports use the
-/// app-blue density wave, comparisons/cards/stat charts gain GitHub-safe GIF
-/// motion, and the profile-card hierarchy becomes data-scaled.
-pub(crate) const RENDER_REVISION: &str = "r19";
+/// serve the previous look under the same key. `r21` = the contributors grid
+/// draws the same roster the rank-addressed avatars resolve against, so tied
+/// commit counts now order by `author_email` instead of arbitrarily. The
+/// ordering is what a pasted README link is addressed by, so the grid and the
+/// per-rank tiles have to start from the new order together rather than let an
+/// edge-cached grid disagree with the avatars beside it for four hours. `r20`
+/// was: shareable assets (charts, stat charts, cards, badges, notice frames)
+/// paint no canvas and blend into the embedder's background; GIF frames
+/// composite onto the theme tone and OG images stay opaque.
+pub(crate) const RENDER_REVISION: &str = "r21";
 
 struct RepoRenderReadiness {
     stars: bool,
@@ -6601,10 +6631,14 @@ async fn ensure_user_card_gif(
     );
     let short_ttl = card.short_ttl;
     let svg = card.svg;
+    // Copy the backdrop out of the borrowed theme: the raster closure has to
+    // be `'static`, and `theme.bg` alone already is.
+    let backdrop = theme.bg;
     single_flight_gif(&state.raster_cache, key, async move {
-        let encoded = with_raster_permit(move || crate::animated_gif::encode_dither_loop(&svg))
-            .await?
-            .map_err(ApiError::from)?;
+        let encoded =
+            with_raster_permit(move || crate::animated_gif::encode_dither_loop(&svg, backdrop))
+                .await?
+                .map_err(ApiError::from)?;
         let bytes = std::sync::Arc::new(encoded.bytes);
         if short_ttl {
             Err(GifMiss::Pending(bytes))
@@ -6666,10 +6700,14 @@ async fn ensure_repo_card_gif(
     );
     let short_ttl = card.short_ttl;
     let svg = card.svg;
+    // Copy the backdrop out of the borrowed theme: the raster closure has to
+    // be `'static`, and `theme.bg` alone already is.
+    let backdrop = theme.bg;
     single_flight_gif(&state.raster_cache, key, async move {
-        let encoded = with_raster_permit(move || crate::animated_gif::encode_dither_loop(&svg))
-            .await?
-            .map_err(ApiError::from)?;
+        let encoded =
+            with_raster_permit(move || crate::animated_gif::encode_dither_loop(&svg, backdrop))
+                .await?
+                .map_err(ApiError::from)?;
         let bytes = std::sync::Arc::new(encoded.bytes);
         if short_ttl {
             Err(GifMiss::Pending(bytes))

@@ -30,9 +30,11 @@ pub struct Theme {
     /// correct categorical palette (and any non-palette-tracked colors)
     /// without a pointer-equality dance.
     pub dark: bool,
-    /// Opaque canvas used by raster exports. SVG colors are still baked
-    /// per theme, while this background ensures GIF/PNG embeds remain
-    /// readable when a host does not preserve transparency.
+    /// The tone this theme's ink is designed against — not a canvas that
+    /// gets painted. Shareable SVG/PNG/WebP surfaces paint no background so
+    /// they composite onto the embedder's own page; `bg` is what GIF frames
+    /// are flattened onto (GIF carries one bit of alpha) and what raster
+    /// fidelity checks composite over before judging luminance.
     pub bg: &'static str,
     pub fg: &'static str,
     pub muted: &'static str,

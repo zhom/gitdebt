@@ -164,11 +164,21 @@ pub(crate) struct MarkBox {
 #[cfg(test)]
 const INK_COVERAGE: f32 = 0.4;
 
+/// Channels of a `#rrggbb` string.
+#[cfg(test)]
+fn rgb(hex: &str) -> [f32; 3] {
+    let v = u32::from_str_radix(hex.trim_start_matches('#'), 16).expect("hex color");
+    [
+        ((v >> 16) & 0xff) as f32,
+        ((v >> 8) & 0xff) as f32,
+        (v & 0xff) as f32,
+    ]
+}
+
 /// Mean channel value of a `#rrggbb` string.
 #[cfg(test)]
 fn tone(hex: &str) -> f32 {
-    let v = u32::from_str_radix(hex.trim_start_matches('#'), 16).expect("hex color");
-    (((v >> 16) & 0xff) + ((v >> 8) & 0xff) + (v & 0xff)) as f32 / 3.0
+    rgb(hex).iter().sum::<f32>() / 3.0
 }
 
 #[cfg(test)]
@@ -232,13 +242,22 @@ impl MarkBox {
         let (rgba, img_w, _img_h) =
             crate::raster::rasterize_rgba(svg, self.scale).expect("surface raster");
         let (ox, oy, w, h) = self.pixels();
+        let canvas_rgb = rgb(self.canvas);
         let (ink, canvas) = (tone(self.ink), tone(self.canvas));
         let threshold = canvas + INK_COVERAGE * (ink - canvas);
         let mut mask = Vec::with_capacity((w * h) as usize);
         for row in 0..h {
             for col in 0..w {
                 let i = (((oy + row) * img_w + ox + col) * 4) as usize;
-                let lum = (rgba[i] as f32 + rgba[i + 1] as f32 + rgba[i + 2] as f32) / 3.0;
+                // Shareable surfaces paint no canvas, and `demultiply` turns
+                // a fully transparent pixel into RGB black — which would
+                // classify as ink on a light theme. Composite onto the tone
+                // the mark is designed against before judging luminance.
+                let a = rgba[i + 3] as f32 / 255.0;
+                let lum = (0..3)
+                    .map(|c| rgba[i + c] as f32 * a + canvas_rgb[c] * (1.0 - a))
+                    .sum::<f32>()
+                    / 3.0;
                 mask.push(if ink > canvas {
                     lum > threshold
                 } else {

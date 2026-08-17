@@ -207,7 +207,7 @@ faqs.push({
   // unconnected repository's series is rebuilt from public archive events, so
   // naming one source for every curve on this axis would be wrong.
   a: loadedEnough
-    ? `The table ranks public repository metadata by current total stars. Each curve is that repository's stored star series — read either from GitHub's stargazer list or rebuilt from public GH Archive star events — drawn on shared axes, with trailing 90-day growth estimated from it. The legend under the chart names each series' own source and coverage date. Repo-health charts come independently from each repository's commit history.`
+    ? `The table ranks public repository metadata by current total stars. Each curve is that repository's stored star series — read either from GitHub's stargazer list or rebuilt from historical star data — drawn on shared axes, with trailing 90-day growth estimated from it. The legend under the chart names each series' own source and coverage date. Repo-health charts come independently from each repository's commit history.`
     : `The table ranks public repository metadata by current total stars. The shared timeline and 90-day growth appear only for repositories whose star series gitdebt has read; repo-health charts come independently from each repository's commit history.`,
 });
 

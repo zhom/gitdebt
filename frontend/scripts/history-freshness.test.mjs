@@ -136,7 +136,7 @@ test("every state classifies to itself, so the table below is exhaustive", () =>
 test("sourceLabel names the method that produced the points", () => {
   assert.equal(sourceLabel(STATES.exact_current), "GitHub stargazer list");
   assert.equal(sourceLabel(STATES.exact_frozen), "GitHub stargazer list");
-  assert.equal(sourceLabel(STATES.archive), "Public GH Archive star events");
+  assert.equal(sourceLabel(STATES.archive), "Historical star data");
   assert.equal(sourceLabel(STATES.restricted), "No readable source");
   assert.equal(sourceLabel(STATES.unknown), "Source not established");
 });

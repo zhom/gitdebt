@@ -198,7 +198,7 @@ if (data && hasHistory) {
       !archiveHistory && gained90 !== null && gained90 > 0
         ? `, with about ${gained90.toLocaleString()} of them added in the last 90 days`
         : ""
-    }.${archiveHistory ? ` The chart itself is rebuilt from public GH Archive star events, which record star actions and not unstars, so it reads as an attention signal rather than a net star count.` : ""}`,
+    }.${archiveHistory ? ` The chart itself is rebuilt from historical star data, which records star actions and not unstars, so it reads as an attention signal rather than a net star count.` : ""}`,
   });
   if (gained90 !== null) {
     const pace =

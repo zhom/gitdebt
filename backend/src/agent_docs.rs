@@ -170,8 +170,9 @@ pub fn render_badge_catalog(site: &str, api: &str) -> String {
             &format!("{site}/badges"),
         ),
         "> Star-history charts, a metrics badge, evidence-backed signal badges, \
-         repository and maintainer cards, eight repository-health charts, and a \
-         social preview. Every asset is a plain public image URL."
+         repository and maintainer cards, a linked contributor grid, eight \
+         repository-health charts, and a social preview. Every asset is a plain \
+         public image URL."
             .to_string(),
         format!(
             "Replace `{PLACEHOLDER_SLUG}` with a lowercased `owner/repo` slug, \
@@ -334,7 +335,7 @@ gitdebt reports star history, growth, contributors, ownership concentration, lan
 
 Canonical HTML: https://gitdebt.com/badges
 
-> Star-history charts, a metrics badge, evidence-backed signal badges, repository and maintainer cards, eight repository-health charts, and a social preview. Every asset is a plain public image URL.
+> Star-history charts, a metrics badge, evidence-backed signal badges, repository and maintainer cards, a linked contributor grid, eight repository-health charts, and a social preview. Every asset is a plain public image URL.
 
 Replace `OWNER/REPO` with a lowercased `owner/repo` slug, and `LOGIN` with a GitHub account name. Nothing else needs to change: no account, no token, no build step, no GitHub Action.
 
@@ -342,7 +343,7 @@ Replace `OWNER/REPO` with a lowercased `owner/repo` slug, and `LOGIN` with a Git
 
 - No account, token, or API key is involved. Every URL is a plain public image.
 - Themes are baked into each asset because GitHub renders README images against the reader's OS preference, not the page. Publish both variants with an HTML `<picture>` element, or pick one explicitly with `theme=light` / `theme=dark`. There is no `theme=auto`.
-- Published snippets are static. Motion is opt-in: add `animate=1` to an SVG URL, or use the `.gif` variant where one exists, because GitHub strips SVG animation from README images in several contexts.
+- Published snippets are static: motion nobody asked for is bad manners in somebody else's README, and it keeps the SVG and raster forms of an asset identical. Motion is an explicit opt-in — add `animate=1` to an SVG URL and it plays in a GitHub README. The `.gif` variant is for the surfaces that take raster alone: rasterizers, CSS `background-image`, and README renderers outside GitHub such as npm, PyPI, and Docker Hub, which show an SVG as a single static frame.
 - Keep the surrounding link and its `?ref=readme` parameter. Attribution lives on the link; the image URL stays plain so CDNs can cache it.
 - Do not add cache-busting query parameters. Media is edge-cached for a few hours by design and refreshes on its own.
 - Alt text is not optional. Say what the image shows, not "chart".
@@ -423,6 +424,28 @@ Goes in next to the star-history chart, when the project ships a package.
     <img alt="OWNER/REPO stars versus package downloads" src="https://api.gitdebt.com/api/repos/OWNER/REPO/usage.svg?theme=light" />
   </picture>
 </a>
+```
+
+### Linked contributor grid
+
+The top twelve contributors as individually linked avatars. Each slot is its own `<a><img>` because an SVG embedded through `<img>` cannot carry a working link inside it, and each URL addresses a rank rather than a person, so the markup never needs regenerating: ranks past the end of the list render nothing, and a repository that grows past twelve keeps showing its top twelve until someone pastes more lines.
+
+Goes in a Contributors or Thanks section, where a reader is looking for the people rather than the numbers.
+
+```html
+<a href="https://api.gitdebt.com/api/repos/OWNER/REPO/contributors/0"><img src="https://api.gitdebt.com/api/repos/OWNER/REPO/contributors/0/avatar.svg" width="64" height="64" alt="OWNER/REPO contributor 1" /></a>
+<a href="https://api.gitdebt.com/api/repos/OWNER/REPO/contributors/1"><img src="https://api.gitdebt.com/api/repos/OWNER/REPO/contributors/1/avatar.svg" width="64" height="64" alt="OWNER/REPO contributor 2" /></a>
+<a href="https://api.gitdebt.com/api/repos/OWNER/REPO/contributors/2"><img src="https://api.gitdebt.com/api/repos/OWNER/REPO/contributors/2/avatar.svg" width="64" height="64" alt="OWNER/REPO contributor 3" /></a>
+<a href="https://api.gitdebt.com/api/repos/OWNER/REPO/contributors/3"><img src="https://api.gitdebt.com/api/repos/OWNER/REPO/contributors/3/avatar.svg" width="64" height="64" alt="OWNER/REPO contributor 4" /></a>
+<a href="https://api.gitdebt.com/api/repos/OWNER/REPO/contributors/4"><img src="https://api.gitdebt.com/api/repos/OWNER/REPO/contributors/4/avatar.svg" width="64" height="64" alt="OWNER/REPO contributor 5" /></a>
+<a href="https://api.gitdebt.com/api/repos/OWNER/REPO/contributors/5"><img src="https://api.gitdebt.com/api/repos/OWNER/REPO/contributors/5/avatar.svg" width="64" height="64" alt="OWNER/REPO contributor 6" /></a>
+<a href="https://api.gitdebt.com/api/repos/OWNER/REPO/contributors/6"><img src="https://api.gitdebt.com/api/repos/OWNER/REPO/contributors/6/avatar.svg" width="64" height="64" alt="OWNER/REPO contributor 7" /></a>
+<a href="https://api.gitdebt.com/api/repos/OWNER/REPO/contributors/7"><img src="https://api.gitdebt.com/api/repos/OWNER/REPO/contributors/7/avatar.svg" width="64" height="64" alt="OWNER/REPO contributor 8" /></a>
+<a href="https://api.gitdebt.com/api/repos/OWNER/REPO/contributors/8"><img src="https://api.gitdebt.com/api/repos/OWNER/REPO/contributors/8/avatar.svg" width="64" height="64" alt="OWNER/REPO contributor 9" /></a>
+<a href="https://api.gitdebt.com/api/repos/OWNER/REPO/contributors/9"><img src="https://api.gitdebt.com/api/repos/OWNER/REPO/contributors/9/avatar.svg" width="64" height="64" alt="OWNER/REPO contributor 10" /></a>
+<a href="https://api.gitdebt.com/api/repos/OWNER/REPO/contributors/10"><img src="https://api.gitdebt.com/api/repos/OWNER/REPO/contributors/10/avatar.svg" width="64" height="64" alt="OWNER/REPO contributor 11" /></a>
+<a href="https://api.gitdebt.com/api/repos/OWNER/REPO/contributors/11"><img src="https://api.gitdebt.com/api/repos/OWNER/REPO/contributors/11/avatar.svg" width="64" height="64" alt="OWNER/REPO contributor 12" /></a>
+<a href="https://gitdebt.com/OWNER/REPO?ref=readme">Contributor ranking on gitdebt</a>
 ```
 
 ### Commit calendar
@@ -655,7 +678,7 @@ One chart, several series, for a comparison table or a docs page.
 | Parameter | Applies to | Effect |
 | --- | --- | --- |
 | `theme=light\|dark` | every SVG and raster asset | Bakes that palette into the output. Default is light. |
-| `animate=1` | SVG charts, cards, and badges | Opts into motion. Off by default; use the `.gif` variant where GitHub strips SVG animation. |
+| `animate=1` | SVG charts, cards, and badges | Opts into motion, which plays in a GitHub README. Off by default; use the `.gif` variant for surfaces that show an SVG as a static frame. |
 | `from=YYYY-MM-DD&to=YYYY-MM-DD` | star-history charts | Inclusive date window. An invalid or inverted range is a 400. |
 | `rebase=1` | star-history charts | Starts every series at zero, so projects of different ages compare fairly. |
 | `type=date\|timeline` | star-history charts | Calendar dates, or days-since-first-star. |

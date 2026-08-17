@@ -1034,6 +1034,97 @@ mod tests {
         );
     }
 
+    /// Verbatim GH Archive records from `2026-08-14`, one per line, with only
+    /// the `actor` values neutralized — CLAUDE.md forbids storing stargazer
+    /// identity, and the parser must prove it never reads those fields. Every
+    /// key, nesting level, and JSON type is exactly as published, including the
+    /// `repo.url` and `actor.*` members the parser ignores and the `PushEvent`
+    /// payload that carries no `action` at all.
+    ///
+    /// This shape is byte-identical to a January 2026 record. It is pinned here
+    /// because a renamed field, a changed `action` value, or a new event type
+    /// replacing `WatchEvent` would not fail any mock-built test — it would
+    /// silently empty the star series instead, which is indistinguishable from
+    /// upstream simply carrying fewer events.
+    const LIVE_ARCHIVE_RECORDS: &str = concat!(
+        r#"{"id":"13268201074","type":"WatchEvent","actor":{"id":1,"login":"must-not-escape","display_login":"must-not-escape","gravatar_id":"","url":"https://api.github.com/users/must-not-escape","avatar_url":"https://avatars.githubusercontent.com/u/1?"},"repo":{"id":2325298,"name":"torvalds/linux","url":"https://api.github.com/repos/torvalds/linux"},"payload":{"action":"started"},"public":true,"created_at":"2026-08-14T04:28:08Z"}"#,
+        "\n",
+        r#"{"id":"13271400823","type":"WatchEvent","actor":{"id":2,"login":"must-not-escape","display_login":"must-not-escape","gravatar_id":"","url":"https://api.github.com/users/must-not-escape","avatar_url":"https://avatars.githubusercontent.com/u/2?"},"repo":{"id":658928958,"name":"ollama/ollama","url":"https://api.github.com/repos/ollama/ollama"},"payload":{"action":"started"},"public":true,"created_at":"2026-08-14T06:14:22Z"}"#,
+        "\n",
+        r#"{"id":"13306684751","type":"WatchEvent","actor":{"id":3,"login":"must-not-escape","display_login":"must-not-escape","gravatar_id":"","url":"https://api.github.com/users/must-not-escape","avatar_url":"https://avatars.githubusercontent.com/u/3?"},"repo":{"id":888092115,"name":"microsoft/markitdown","url":"https://api.github.com/repos/microsoft/markitdown"},"payload":{"action":"started"},"public":true,"created_at":"2026-08-14T19:17:44Z"}"#,
+        "\n",
+        r#"{"id":"13329007852","type":"WatchEvent","actor":{"id":4,"login":"must-not-escape","display_login":"must-not-escape","gravatar_id":"","url":"https://api.github.com/users/must-not-escape","avatar_url":"https://avatars.githubusercontent.com/u/4?"},"repo":{"id":1170291083,"name":"xingkongliang/skills-manager","url":"https://api.github.com/repos/xingkongliang/skills-manager"},"payload":{"action":"started"},"public":true,"created_at":"2026-08-14T12:01:55Z"}"#,
+        "\n",
+        r#"{"id":"13268201075","type":"PushEvent","actor":{"id":5,"login":"must-not-escape","display_login":"must-not-escape","gravatar_id":"","url":"https://api.github.com/users/must-not-escape","avatar_url":"https://avatars.githubusercontent.com/u/5?"},"repo":{"id":2325298,"name":"torvalds/linux","url":"https://api.github.com/repos/torvalds/linux"},"payload":{"repository_id":2325298,"push_id":26000000000,"ref":"refs/heads/master","head":"0000000000000000000000000000000000000000","before":"1111111111111111111111111111111111111111"},"public":true,"created_at":"2026-08-14T04:30:00Z"}"#,
+        "\n",
+    );
+
+    /// Pins the filter against the records GH Archive actually publishes, not
+    /// against a hand-built approximation of them.
+    #[test]
+    fn parser_matches_the_live_gh_archive_record_shape() {
+        let tracked = BTreeSet::from([2_325_298, 658_928_958, 888_092_115]);
+        let batch = parse_archive(
+            at(2026, 8, 14, 4, 0),
+            LIVE_ARCHIVE_RECORDS.as_bytes(),
+            &tracked,
+            1024 * 1024,
+            64 * 1024,
+            100,
+        )
+        .unwrap();
+
+        assert_eq!(batch.records_seen, 5);
+        assert_eq!(
+            batch.events,
+            vec![
+                GhArchiveStarEvent {
+                    github_repo_id: Some(2_325_298),
+                    repository: "torvalds/linux".to_string(),
+                    source_event_id: Some("13268201074".to_string()),
+                    created_at: at(2026, 8, 14, 4, 28) + TimeDelta::seconds(8),
+                },
+                GhArchiveStarEvent {
+                    github_repo_id: Some(658_928_958),
+                    repository: "ollama/ollama".to_string(),
+                    source_event_id: Some("13271400823".to_string()),
+                    created_at: at(2026, 8, 14, 6, 14) + TimeDelta::seconds(22),
+                },
+                GhArchiveStarEvent {
+                    github_repo_id: Some(888_092_115),
+                    repository: "microsoft/markitdown".to_string(),
+                    source_event_id: Some("13306684751".to_string()),
+                    created_at: at(2026, 8, 14, 19, 17) + TimeDelta::seconds(44),
+                },
+            ],
+            "the untracked repository and the PushEvent must both be dropped, \
+             and the three tracked stars kept in created_at order"
+        );
+
+        // The archive carries full actor profiles on every record; none of it
+        // may survive parsing.
+        assert!(!format!("{batch:?}").contains("must-not-escape"));
+    }
+
+    /// A `PushEvent` payload has no `action` member at all. Nothing about that
+    /// is exceptional — it is now ~98% of every hourly object — so it must be
+    /// skipped silently rather than rejecting the whole hour.
+    #[test]
+    fn payload_without_an_action_member_is_skipped_not_an_error() {
+        let batch = parse_archive(
+            at(2026, 8, 14, 4, 0),
+            br#"{"id":"1","type":"PushEvent","repo":{"id":42,"name":"owner/repo"},"payload":{"push_id":7,"ref":"refs/heads/main"},"public":true,"created_at":"2026-08-14T04:30:00Z"}"#,
+            &BTreeSet::from([42]),
+            1024 * 1024,
+            64 * 1024,
+            100,
+        )
+        .unwrap();
+
+        assert_eq!(batch.records_seen, 1);
+        assert!(batch.events.is_empty());
+    }
+
     #[test]
     fn parser_keeps_only_public_started_watch_events_for_tracked_numeric_ids() {
         let input = [

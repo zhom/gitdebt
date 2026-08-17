@@ -408,9 +408,9 @@ function ProvenanceExplainer({ className }: { className?: string }) {
     {
       freshness: archive,
       fill: SWATCH.purple,
-      term: "Public GH Archive star events",
+      term: "Historical star data",
       definition:
-        "Rebuilt from the public event archive. Star actions are recorded and unstars are not, so it reads as an attention signal rather than a net star count. It keeps flowing for every public repository.",
+        "Rebuilt from historical star data. Star actions are recorded and unstars are not, so it reads as an attention signal rather than a net star count. It keeps flowing for every public repository.",
     },
   ];
 

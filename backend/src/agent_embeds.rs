@@ -37,13 +37,36 @@ pub struct EmbedAsset {
     /// Alt text. Descriptive, because README images are read by screen readers.
     pub alt: String,
     /// Whether light and dark variants are both worth publishing. False for
-    /// assets that ship one baked appearance (social PNGs).
+    /// assets that ship one baked appearance (social PNGs, the contributor
+    /// grid).
     pub themed: bool,
     /// Every encoding the asset's route actually answers with, best first.
     pub formats: &'static [&'static str],
     pub group: EmbedGroup,
     /// Where the asset earns its place, in words an agent can act on.
     pub placement: &'static str,
+    /// Set when the asset publishes a grid of rank-addressed images rather than
+    /// the single image [`EmbedAsset::path`] names. [`EmbedAsset::path`] is
+    /// still the first slot, so previews and format swaps keep working.
+    pub grid: Option<EmbedGrid>,
+}
+
+/// A grid of rank-addressed images, each in its own link.
+///
+/// One `<a><img></a>` per slot rather than one linked image: an SVG embedded
+/// through `<img>` renders as an image and not as a document, so an `<a>` drawn
+/// inside it is inert. The only way to give twelve faces twelve destinations is
+/// twelve elements.
+#[derive(Debug, Clone)]
+pub struct EmbedGrid {
+    /// The rank-addressed route. `{route}/{rank}` redirects to whoever holds
+    /// that rank right now, and `{route}/{rank}/avatar.svg` renders them.
+    pub route: String,
+    /// How many slots the pasted markup carries. Ranks past the end of the list
+    /// render an empty image, so this is a ceiling and never a claim.
+    pub slots: usize,
+    /// Per-slot alt text, suffixed with the slot's 1-based rank.
+    pub alt: String,
 }
 
 /// Routes that rasterize but do not animate.
@@ -56,12 +79,28 @@ const SOCIAL_FORMATS: &[&str] = &["png", "webp"];
 const HEALTH_PLACEMENT: &str = "a Project health or Contributing section, where a prospective contributor \
      is already reading";
 
+/// Slots the published contributor grid carries. The URLs address ranks and
+/// never go stale, but the *number* of them is whatever the pasted markup says,
+/// so a round dozen: two full rows at most README widths, and short enough that
+/// a maintainer reads the block rather than scrolling past it.
+const CONTRIBUTOR_GRID_SLOTS: usize = 12;
+/// Rendered size of one avatar slot, in CSS pixels.
+const AVATAR_SLOT_PX: u32 = 64;
+
 /// README assets are static by default and animation is opt-in, so no builder
-/// here ever emits `animate=1`. GitHub sanitizes SMIL out of SVG in many
-/// contexts anyway; `.gif` is the honest way to ship motion.
-pub const STATIC_BY_DEFAULT: &str = "Published snippets are static. Motion is opt-in: add `animate=1` to an SVG \
-     URL, or use the `.gif` variant where one exists, because GitHub strips SVG \
-     animation from README images in several contexts.";
+/// here ever emits `animate=1`. Not because GitHub removes it — camo passes an
+/// SVG through byte for byte, and an `<img>`-embedded SVG runs in secure
+/// animated mode, where SMIL and CSS animation both play — but because motion
+/// in somebody else's README should be their decision, and because a static
+/// default keeps the SVG and the raster forms of an asset showing the same
+/// frame.
+pub const STATIC_BY_DEFAULT: &str = "Published snippets are static: motion nobody asked for is bad manners in \
+     somebody else's README, and it keeps the SVG and raster forms of an asset \
+     identical. Motion is an explicit opt-in — add `animate=1` to an SVG URL \
+     and it plays in a GitHub README. The `.gif` variant is for the surfaces \
+     that take raster alone: rasterizers, CSS `background-image`, and README \
+     renderers outside GitHub such as npm, PyPI, and Docker Hub, which show an \
+     SVG as a single static frame.";
 
 /// Repository-health charts share a route shape, a caveat, and a placement.
 struct HealthChart {
@@ -138,6 +177,7 @@ pub fn repo_embed_assets(slug: &str) -> Vec<EmbedAsset> {
             formats: STILL_FORMATS,
             group: EmbedGroup::Headline,
             placement: "the badge row directly under the project title, alongside CI and license badges",
+            grid: None,
         },
         EmbedAsset {
             id: "badge-signal",
@@ -150,6 +190,7 @@ pub fn repo_embed_assets(slug: &str) -> Vec<EmbedAsset> {
             formats: STILL_FORMATS,
             group: EmbedGroup::Headline,
             placement: "the badge row, but only for signals the repository has actually earned",
+            grid: None,
         },
         EmbedAsset {
             id: "chart",
@@ -161,6 +202,7 @@ pub fn repo_embed_assets(slug: &str) -> Vec<EmbedAsset> {
             formats: MOTION_FORMATS,
             group: EmbedGroup::Headline,
             placement: "a `## Star history` section near the bottom of the README, above License",
+            grid: None,
         },
         EmbedAsset {
             id: "card",
@@ -172,6 +214,7 @@ pub fn repo_embed_assets(slug: &str) -> Vec<EmbedAsset> {
             formats: MOTION_FORMATS,
             group: EmbedGroup::Headline,
             placement: "an About or Project status section, or a docs-site sidebar",
+            grid: None,
         },
         EmbedAsset {
             id: "usage",
@@ -184,6 +227,31 @@ pub fn repo_embed_assets(slug: &str) -> Vec<EmbedAsset> {
             formats: STILL_FORMATS,
             group: EmbedGroup::Headline,
             placement: "next to the star-history chart, when the project ships a package",
+            grid: None,
+        },
+        EmbedAsset {
+            id: "contributor-grid",
+            name: "Linked contributor grid",
+            purpose: "The top twelve contributors as individually linked avatars. Each slot is \
+                      its own `<a><img>` because an SVG embedded through `<img>` cannot carry a \
+                      working link inside it, and each URL addresses a rank rather than a person, \
+                      so the markup never needs regenerating: ranks past the end of the list \
+                      render nothing, and a repository that grows past twelve keeps showing its \
+                      top twelve until someone pastes more lines.",
+            // Rank zero: the asset's own path is the first slot, so a preview
+            // or a format swap resolves to a real image rather than a template.
+            path: format!("{base}/contributors/0/avatar.svg"),
+            alt: format!("{slug} contributor 1"),
+            themed: false,
+            formats: STILL_FORMATS,
+            group: EmbedGroup::Headline,
+            placement: "a Contributors or Thanks section, where a reader is looking for the \
+                        people rather than the numbers",
+            grid: Some(EmbedGrid {
+                route: format!("{base}/contributors"),
+                slots: CONTRIBUTOR_GRID_SLOTS,
+                alt: format!("{slug} contributor"),
+            }),
         },
     ];
     assets.extend(HEALTH_CHARTS.iter().map(|chart| EmbedAsset {
@@ -196,6 +264,7 @@ pub fn repo_embed_assets(slug: &str) -> Vec<EmbedAsset> {
         formats: MOTION_FORMATS,
         group: EmbedGroup::Health,
         placement: HEALTH_PLACEMENT,
+        grid: None,
     }));
     assets.push(EmbedAsset {
         id: "og",
@@ -207,6 +276,7 @@ pub fn repo_embed_assets(slug: &str) -> Vec<EmbedAsset> {
         formats: SOCIAL_FORMATS,
         group: EmbedGroup::Social,
         placement: "a docs-site `og:image` meta tag — not the README, where it would be redundant",
+        grid: None,
     });
     assets
 }
@@ -225,6 +295,7 @@ pub fn profile_embed_assets(login: &str) -> Vec<EmbedAsset> {
             formats: MOTION_FORMATS,
             group: EmbedGroup::Headline,
             placement: "the top of a profile README, under the introduction",
+            grid: None,
         },
         EmbedAsset {
             id: "chart",
@@ -236,6 +307,7 @@ pub fn profile_embed_assets(login: &str) -> Vec<EmbedAsset> {
             formats: MOTION_FORMATS,
             group: EmbedGroup::Headline,
             placement: "a profile README, below the card",
+            grid: None,
         },
         EmbedAsset {
             id: "contributions",
@@ -247,6 +319,7 @@ pub fn profile_embed_assets(login: &str) -> Vec<EmbedAsset> {
             formats: MOTION_FORMATS,
             group: EmbedGroup::Health,
             placement: "a profile README, in place of a generic contribution-count widget",
+            grid: None,
         },
         EmbedAsset {
             id: "languages",
@@ -258,6 +331,7 @@ pub fn profile_embed_assets(login: &str) -> Vec<EmbedAsset> {
             formats: MOTION_FORMATS,
             group: EmbedGroup::Health,
             placement: "a profile README, next to the contribution footprint",
+            grid: None,
         },
         EmbedAsset {
             id: "commit-activity",
@@ -269,6 +343,7 @@ pub fn profile_embed_assets(login: &str) -> Vec<EmbedAsset> {
             formats: MOTION_FORMATS,
             group: EmbedGroup::Health,
             placement: "a profile README, as the activity strip",
+            grid: None,
         },
         EmbedAsset {
             id: "og",
@@ -280,6 +355,7 @@ pub fn profile_embed_assets(login: &str) -> Vec<EmbedAsset> {
             formats: SOCIAL_FORMATS,
             group: EmbedGroup::Social,
             placement: "a personal site's `og:image` meta tag",
+            grid: None,
         },
     ]
 }
@@ -365,19 +441,51 @@ pub fn picture_embed(api: &str, asset: &EmbedAsset, link: &str) -> String {
     .join("\n")
 }
 
-/// The snippet to publish: theme-aware where that is meaningful, Markdown
-/// otherwise.
+/// One `<a><img></a>` per rank, then the attributed link.
+///
+/// Every anchor above belongs to a contributor, so this is the one published
+/// snippet with no single wrapper to hang `?ref=readme` on; it goes on a line of
+/// its own underneath instead. The image URLs stay plain.
+///
+/// The slots carry no `theme`: an avatar is a photograph inside a ring, the
+/// ring is the only themed ink on it, and a `<picture>` per slot would triple a
+/// block somebody else has to read in their own README.
+pub fn linked_grid_embed(api: &str, grid: &EmbedGrid, link: &str) -> String {
+    let mut lines: Vec<String> = (0..grid.slots)
+        .map(|rank| {
+            format!(
+                "<a href=\"{api}{route}/{rank}\"><img src=\"{api}{route}/{rank}/avatar.svg\" \
+                 width=\"{AVATAR_SLOT_PX}\" height=\"{AVATAR_SLOT_PX}\" alt=\"{alt} {position}\" \
+                 /></a>",
+                route = grid.route,
+                alt = grid.alt,
+                position = rank + 1,
+            )
+        })
+        .collect();
+    lines.push(format!(
+        "<a href=\"{link}\">Contributor ranking on gitdebt</a>"
+    ));
+    lines.join("\n")
+}
+
+/// The snippet to publish: a grid where the asset is one, theme-aware where
+/// that is meaningful, Markdown otherwise.
 pub fn best_embed(api: &str, asset: &EmbedAsset, link: &str) -> String {
-    if asset.themed {
-        picture_embed(api, asset, link)
-    } else {
-        markdown_embed(api, asset, link, "dark")
+    match &asset.grid {
+        Some(grid) => linked_grid_embed(api, grid, link),
+        None if asset.themed => picture_embed(api, asset, link),
+        None => markdown_embed(api, asset, link, "dark"),
     }
 }
 
 /// The dialect [`best_embed`] returned, for fencing it in a code block.
 pub fn best_embed_language(asset: &EmbedAsset) -> &'static str {
-    if asset.themed { "html" } else { "markdown" }
+    if asset.themed || asset.grid.is_some() {
+        "html"
+    } else {
+        "markdown"
+    }
 }
 
 /// One asset as a heading, why it earns its place, and its paste-ready snippet.
@@ -432,8 +540,8 @@ pub const QUERY_REFERENCE: &[QueryParam] = &[
     QueryParam {
         param: "animate=1",
         applies: "SVG charts, cards, and badges",
-        effect: "Opts into motion. Off by default; use the `.gif` variant where GitHub strips \
-                 SVG animation.",
+        effect: "Opts into motion, which plays in a GitHub README. Off by default; use the \
+                 `.gif` variant for surfaces that show an SVG as a static frame.",
     },
     QueryParam {
         param: "from=YYYY-MM-DD&to=YYYY-MM-DD",
@@ -596,6 +704,47 @@ mod tests {
         assert!(snippet.contains("chart.svg?theme=dark"));
         assert!(snippet.contains("chart.svg?theme=light"));
         assert!(snippet.contains("alt=\"owner/repo star history\""));
+    }
+
+    /// The grid's whole promise is that it never needs regenerating: every URL
+    /// in it addresses a rank, so nothing in the markup names a person and
+    /// nothing has to be renumbered when the ranking changes.
+    #[test]
+    fn the_contributor_grid_addresses_ranks_and_never_a_person() {
+        let assets = repo_embed_assets("owner/repo");
+        let asset = assets
+            .iter()
+            .find(|asset| asset.id == "contributor-grid")
+            .expect("contributor grid");
+        let grid = asset.grid.as_ref().expect("the grid");
+        assert_eq!(grid.slots, CONTRIBUTOR_GRID_SLOTS);
+        assert_eq!(best_embed_language(asset), "html");
+        // The asset's own path is slot one, so its alt describes slot one too.
+        assert_eq!(asset.path, format!("{}/0/avatar.svg", grid.route));
+        assert_eq!(asset.alt, format!("{} 1", grid.alt));
+
+        let link = readme_link(SITE, "/owner/repo");
+        let snippet = best_embed(API, asset, &link);
+        let lines: Vec<&str> = snippet.lines().collect();
+        assert_eq!(lines.len(), grid.slots + 1);
+        for (rank, line) in lines[..grid.slots].iter().enumerate() {
+            assert_eq!(
+                *line,
+                format!(
+                    "<a href=\"{API}/api/repos/owner/repo/contributors/{rank}\">\
+                     <img src=\"{API}/api/repos/owner/repo/contributors/{rank}/avatar.svg\" \
+                     width=\"64\" height=\"64\" alt=\"owner/repo contributor {}\" /></a>",
+                    rank + 1
+                )
+            );
+        }
+        // Attribution is the last line, because every anchor above it belongs to
+        // a contributor rather than to gitdebt.
+        assert_eq!(
+            lines[grid.slots],
+            format!("<a href=\"{link}\">Contributor ranking on gitdebt</a>")
+        );
+        assert!(!snippet.contains("github.com"));
     }
 
     #[test]

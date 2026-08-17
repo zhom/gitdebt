@@ -45,8 +45,8 @@
   labelling.
 
 > [!NOTE]
-> New star history comes from GH Archive, which records public star events but
-> not unstars, so archive-backed curves are approximate public star activity.
+> New star history is rebuilt from historical data, which records public star
+> events but not unstars, so those curves are approximate public star activity.
 > Repositories cached from GitHub earlier keep their exact snapshots.
 
 ## Usage

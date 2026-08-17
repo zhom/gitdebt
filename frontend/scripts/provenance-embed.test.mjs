@@ -26,6 +26,17 @@ const archive = {
   history_coverage_end: "2026-08-08T11:30:21Z",
 };
 
+/** Exact through the splice, historical activity after it. A README line for one
+ *  of these has to name both sources, because the picture beside it is both. */
+const spliced = {
+  history_complete: true,
+  history_kind: "stargazers_then_activity",
+  history_approximate: true,
+  history_status: "ready",
+  history_coverage_end: "2026-08-15T09:12:44Z",
+  history_splice_at: "2026-07-20T13:47:16Z",
+};
+
 const chartAsset = () => repoEmbedAssets(SLUG).find((a) => a.id === "chart");
 
 function block(snapshot) {
@@ -76,7 +87,7 @@ test("the on-page preview revision never reaches a copied snippet", () => {
   // MEDIA_RENDER_REVISION exists to keep the site's own previews off stale edge
   // objects. In somebody's README it would be a cache-busting parameter, which
   // the embed rules forbid outright.
-  for (const snapshot of [frozen, archive]) {
+  for (const snapshot of [frozen, archive, spliced]) {
     const { snippet } = block(snapshot);
     assert.doesNotMatch(snippet, /\brev=/, snippet);
     assert.ok(!snippet.includes(`=${MEDIA_RENDER_REVISION}`), snippet);
@@ -101,6 +112,12 @@ test("the provenance line states source, date and state — and never a count", 
   for (const [snapshot, expected] of [
     [frozen, "GitHub stargazer list · Covers through July 20, 2026 · No longer updating"],
     [archive, "Historical star data · Covers through August 8, 2026 · Still updating"],
+    // Both sources named, coverage running past the splice, and "Still
+    // updating" — the whole point of splicing a frozen series.
+    [
+      spliced,
+      "GitHub stargazer list, then historical star data · Covers through August 15, 2026 · Still updating",
+    ],
   ]) {
     const line = block(snapshot).snippet.split("\n\n")[1];
     assert.ok(line.includes(expected), line);
@@ -109,4 +126,19 @@ test("the provenance line states source, date and state — and never a count", 
     assert.doesNotMatch(prose, COUNT, prose);
     assert.doesNotMatch(prose, VERDICT, prose);
   }
+});
+
+test("a spliced README line stays one line and names no exempt role", () => {
+  // A README is the most permanent place any of this copy lands. It gets the
+  // same shape as every other state — source · date · state, one <sub> line —
+  // and the same ban on naming who GitHub does serve, since the person most
+  // likely to paste it is the repository's own owner.
+  const { snippet, language } = block(spliced);
+  assert.equal(language, "html");
+  const [picture, ...rest] = snippet.split("\n\n");
+  assert.equal(rest.length, 1);
+  assert.equal(picture, bestEmbed(API, chartAsset(), readmeLink(SITE, `/${SLUG}`)));
+  assert.match(rest[0], /^<sub>Star history source: .+<\/sub>$/);
+  assert.doesNotMatch(rest[0], /\b(admins?|administrators?|collaborators?)\b/i, rest[0]);
+  assert.equal(historyFreshness(spliced).state, "spliced");
 });

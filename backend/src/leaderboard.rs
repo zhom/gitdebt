@@ -65,19 +65,11 @@ pub async fn refresh_if_stale(db: &Db) -> Result<bool> {
 /// that only ever serves its first few pages.
 const MAX_STORED_RANK: i64 = 20_100;
 
-async fn refresh(tx: &mut Transaction<'_, Postgres>) -> Result<()> {
-    sqlx::query("DELETE FROM leaderboard_snapshots")
-        .execute(&mut **tx)
-        .await
-        .context("clear previous leaderboard snapshot")?;
-
-    // `activity` is materialized once so the 30-day history range is scanned
-    // once even though it feeds three rankings. Eligibility is restricted to
-    // complete, successfully fetched public metadata; private/404 tombstones
-    // can therefore never enter a snapshot.
-    sqlx::query(
-        "WITH eligible AS MATERIALIZED (\
-             SELECT repo, COALESCE(star_count, 0)::BIGINT AS stars \
+/// The whole daily snapshot, hoisted so the eligibility rules it encodes can
+/// be asserted without a database.
+const SNAPSHOT_SQL: &str = "WITH eligible AS MATERIALIZED (\
+             SELECT repo, COALESCE(star_count, 0)::BIGINT AS stars, \
+                    history_source IN ('gh_archive', 'spliced') AS advancing \
              FROM repos \
              WHERE history_complete = TRUE \
                AND missing = FALSE \
@@ -89,7 +81,7 @@ async fn refresh(tx: &mut Transaction<'_, Postgres>) -> Result<()> {
                     COUNT(*) FILTER (WHERE s.starred_at >= NOW() - INTERVAL '7 days')::BIGINT AS gained_7d, \
                     COUNT(*)::BIGINT AS gained_30d \
              FROM active_repo_star_history s \
-             JOIN eligible e ON e.repo = s.repo \
+             JOIN eligible e ON e.repo = s.repo AND e.advancing \
              WHERE s.starred_at >= NOW() - INTERVAL '30 days' \
              GROUP BY s.repo\
          ), ranked AS MATERIALIZED (\
@@ -121,12 +113,31 @@ async fn refresh(tx: &mut Transaction<'_, Postgres>) -> Result<()> {
              WHERE gained_7d > 0 AND rank_7d <= $1 \
          UNION ALL \
          SELECT 'velocity', 30, rank_30d, repo, stars, gained_30d, NOW() FROM ranked \
-             WHERE gained_30d > 0 AND rank_30d <= $1",
-    )
-    .bind(MAX_STORED_RANK)
-    .execute(&mut **tx)
-    .await
-    .context("build leaderboard snapshot")?;
+             WHERE gained_30d > 0 AND rank_30d <= $1";
+
+async fn refresh(tx: &mut Transaction<'_, Postgres>) -> Result<()> {
+    sqlx::query("DELETE FROM leaderboard_snapshots")
+        .execute(&mut **tx)
+        .await
+        .context("clear previous leaderboard snapshot")?;
+
+    // `activity` is materialized once so the 30-day history range is scanned
+    // once even though it feeds three rankings. Eligibility is restricted to
+    // complete, successfully fetched public metadata; private/404 tombstones
+    // can therefore never enter a snapshot.
+    //
+    // Activity is counted only for a series that can still advance. A frozen
+    // exact snapshot keeps rows inside the window for a few weeks after the
+    // stargazer list stopped serving, and counting them measures how recently
+    // the repository was read rather than how fast it is growing — a dead
+    // series briefly outranks live ones and then vanishes as its tail ages
+    // out. `advancing` is the source test, not a date test, because the fix
+    // has to hold for whenever a given repository froze.
+    sqlx::query(SNAPSHOT_SQL)
+        .bind(MAX_STORED_RANK)
+        .execute(&mut **tx)
+        .await
+        .context("build leaderboard snapshot")?;
 
     sqlx::query(
         "INSERT INTO leaderboard_snapshot_state (id, computed_at) VALUES (TRUE, NOW()) \
@@ -141,7 +152,27 @@ async fn refresh(tx: &mut Transaction<'_, Postgres>) -> Result<()> {
 #[cfg(test)]
 mod tests {
     use super::MAX_STORED_RANK;
-    use super::{REFRESH_EVERY_HOURS, REFRESH_LOCK_ID};
+    use super::{REFRESH_EVERY_HOURS, REFRESH_LOCK_ID, SNAPSHOT_SQL};
+
+    /// A frozen exact snapshot keeps rows inside the 30-day window for weeks
+    /// after its source stopped serving, so counting them ranks a dead series
+    /// above live ones. Only a source that can still receive points may
+    /// contribute activity, and the gate has to sit on the join — filtering
+    /// later would still let the counts be computed and surface as a delta.
+    #[test]
+    fn only_a_series_that_can_still_advance_contributes_activity() {
+        assert!(
+            SNAPSHOT_SQL.contains("history_source IN ('gh_archive', 'spliced') AS advancing"),
+            "activity eligibility must be decided by source, not by date"
+        );
+        assert!(
+            SNAPSHOT_SQL.contains("JOIN eligible e ON e.repo = s.repo AND e.advancing"),
+            "the advancing gate must be on the activity join itself"
+        );
+        // The star ranking is unaffected: it orders by the metadata star count,
+        // which stays accurate for a frozen repository.
+        assert!(SNAPSHOT_SQL.contains("ORDER BY e.stars DESC, e.repo ASC"));
+    }
 
     #[test]
     fn refresh_cadence_and_lock_are_stable() {

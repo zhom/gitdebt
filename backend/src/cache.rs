@@ -22,6 +22,16 @@ pub struct Cache {
 
 pub type StargazerEvent = (i64, DateTime<Utc>);
 
+/// The exact current-membership snapshot from GitHub's stargazer list.
+/// Frozen since GitHub restricted that endpoint on 2026-07-20.
+pub const HISTORY_SOURCE_EXACT: &str = "github_api";
+/// Approximate public star activity reconstructed from the GH Archive corpus.
+pub const HISTORY_SOURCE_ARCHIVE: &str = "gh_archive";
+/// The exact segment through `repos.history_splice_at`, then archive activity
+/// strictly after it. Approximate in its tail and exact everywhere else, which
+/// is why it is a third source rather than a flavour of either.
+pub const HISTORY_SOURCE_SPLICED: &str = "spliced";
+
 #[derive(Debug, Clone, Eq, PartialEq)]
 pub struct ArchiveStarEvent {
     pub source_event_id: Option<String>,
@@ -118,6 +128,16 @@ pub struct RepoSummary {
     pub history_observed_count: Option<i64>,
     pub history_coverage_start: Option<DateTime<Utc>>,
     pub history_coverage_end: Option<DateTime<Utc>>,
+    /// Where a spliced series changes method. Read here rather than derived,
+    /// because it is the one provenance fact the series itself cannot show:
+    /// the curve is continuous across the join and nothing in the drawing says
+    /// the points on either side were measured differently.
+    ///
+    /// Only meaningful while `history_source` is `spliced` — a repository whose
+    /// source moves back to an exact snapshot keeps the old boundary in the
+    /// column, so every reader must gate on the source (see
+    /// [`Self::history_splice_at_if_spliced`]).
+    pub history_splice_at: Option<DateTime<Utc>>,
     pub created_at: Option<DateTime<Utc>>,
     pub archived: bool,
     pub pushed_at: Option<DateTime<Utc>>,
@@ -148,6 +168,7 @@ impl<'row> sqlx::FromRow<'row, sqlx::postgres::PgRow> for RepoSummary {
             history_observed_count: row.try_get("history_observed_count")?,
             history_coverage_start: row.try_get("history_coverage_start")?,
             history_coverage_end: row.try_get("history_coverage_end")?,
+            history_splice_at: row.try_get("history_splice_at")?,
             created_at: row.try_get("created_at")?,
             archived: row.try_get("archived")?,
             pushed_at: row.try_get("pushed_at")?,
@@ -170,14 +191,46 @@ impl RepoSummary {
     /// Mirror of [`Cache::repo_stargazers_fresh_within`] over the
     /// already-loaded summary. Exact GitHub API snapshots are immutable
     /// once complete; only approximate GH Archive histories age out.
+    ///
+    /// A spliced series is deliberately NOT permanently fresh. Its exact
+    /// segment is immutable, but its archive tail is the part that has to keep
+    /// moving — treating the whole thing as frozen because half of it is exact
+    /// would recreate the stall the splice exists to end.
     pub fn stargazers_fresh_within(&self, ttl: chrono::Duration) -> bool {
-        if self.stargazers_complete && self.history_source.as_deref() == Some("github_api") {
+        if self.stargazers_complete && self.history_source.as_deref() == Some(HISTORY_SOURCE_EXACT)
+        {
             return true;
         }
         match (self.stargazers_complete, self.stargazers_fetched_at) {
             (true, Some(fetched_at)) => Utc::now() - fetched_at < ttl,
             _ => false,
         }
+    }
+
+    /// Whether any part of the plotted series is GH Archive activity.
+    ///
+    /// True for a spliced series as well as a purely archive-backed one: its
+    /// tail counts public star actions, which omit unstars and (since the
+    /// upstream corpus lost most of its WatchEvent volume in 2026) undercount
+    /// what it does include. A series is approximate if any part of it is.
+    pub fn history_is_approximate(&self) -> bool {
+        matches!(
+            self.history_source.as_deref(),
+            Some(HISTORY_SOURCE_ARCHIVE | HISTORY_SOURCE_SPLICED)
+        )
+    }
+
+    /// The splice boundary, but only for a series that actually has one.
+    ///
+    /// The column outlives the source. `put_repo_stargazers` and
+    /// `finish_repo_stargazers_partial` set `history_source = 'github_api'`
+    /// without clearing the boundary, so a spliced repository that later takes
+    /// an exact write keeps a stale instant in the row. Publishing it would
+    /// date a join that no longer exists — the read surfaces ask this instead
+    /// of the field.
+    pub fn history_splice_at_if_spliced(&self) -> Option<DateTime<Utc>> {
+        self.history_splice_at
+            .filter(|_| self.history_source.as_deref() == Some(HISTORY_SOURCE_SPLICED))
     }
 }
 
@@ -428,6 +481,7 @@ impl Cache {
                         AS stargazers_fetched_at, \
                     metadata_fetched_at, star_count, history_source, \
                     history_observed_count, history_coverage_start, history_coverage_end, \
+                    history_splice_at, \
                     created_at, archived, pushed_at, updated_at, default_branch, \
                     license_spdx, topics, has_issues, has_discussions, has_pages, \
                     is_template, subscribers_count, open_issues_count, view_count \
@@ -456,9 +510,9 @@ impl Cache {
     }
 
     /// True iff the history needs no refresh. Exact GitHub API snapshots are
-    /// never re-fetched after completion. Approximate GH Archive histories
-    /// are fresh only within `ttl` and may be refreshed from later
-    /// partitions.
+    /// never re-fetched after completion. Approximate GH Archive histories —
+    /// including the archive tail of a spliced one — are fresh only within
+    /// `ttl` and may be refreshed from later partitions.
     pub async fn repo_stargazers_fresh_within(
         &self,
         repo: &str,
@@ -474,7 +528,7 @@ impl Cache {
         .fetch_optional(&self.db.pool)
         .await?;
         match row {
-            Some((true, _, Some(source))) if source == "github_api" => Ok(true),
+            Some((true, _, Some(source))) if source == HISTORY_SOURCE_EXACT => Ok(true),
             Some((true, Some(fetched_at), _)) => Ok(Utc::now() - fetched_at < ttl),
             _ => Ok(false),
         }
@@ -550,120 +604,6 @@ impl Cache {
         Ok(rows)
     }
 
-    /// Atomically replace a repository's star-event timeline with the
-    /// complete GH Archive result. `authoritative_total` remains GitHub's
-    /// current star count; GH Archive WatchEvents are an event history and
-    /// can differ because unstars are not public events and coverage begins
-    /// in 2011. Keeping both values avoids presenting the archive event count
-    /// as the current GitHub total.
-    pub async fn put_repo_stargazers_from_archive(
-        &self,
-        repo: &str,
-        items: &[ArchiveStarEvent],
-        authoritative_total: i64,
-        coverage_start: DateTime<Utc>,
-        coverage_end: DateTime<Utc>,
-        truncated_before: bool,
-    ) -> Result<()> {
-        let mut tx = self.db.pool.begin().await?;
-        sqlx::query("INSERT INTO repos (repo) VALUES ($1) ON CONFLICT DO NOTHING")
-            .bind(repo)
-            .execute(&mut *tx)
-            .await?;
-        sqlx::query("UPDATE repos SET archive_complete = FALSE WHERE repo = $1")
-            .bind(repo)
-            .execute(&mut *tx)
-            .await?;
-        sqlx::query("DELETE FROM repo_star_arrivals WHERE repo = $1")
-            .bind(repo)
-            .execute(&mut *tx)
-            .await?;
-        upsert_archive_events(&mut tx, repo, 1, items).await?;
-        sqlx::query(
-            "UPDATE repos SET archive_fetched_at = $1, archive_complete = TRUE, \
-                history_complete = TRUE, \
-                star_count = $2, history_source = 'gh_archive', \
-                history_observed_count = $3, history_coverage_start = $4, \
-                history_coverage_end = $5, archive_truncated_before = $6, \
-                missing = FALSE \
-             WHERE repo = $7",
-        )
-        .bind(Utc::now())
-        .bind(authoritative_total.max(0))
-        .bind(items.len() as i64)
-        .bind(coverage_start)
-        .bind(coverage_end)
-        .bind(truncated_before)
-        .bind(repo)
-        .execute(&mut *tx)
-        .await?;
-        tx.commit().await?;
-        Ok(())
-    }
-
-    /// Append only the novel tail returned by GH Archive and advance the
-    /// archive coverage cursor atomically. The worker removes the overlap
-    /// multiset before calling this method; positions are assigned here so
-    /// retries and multi-worker operation cannot race a caller-computed
-    /// offset.
-    pub async fn append_repo_stargazers_from_archive(
-        &self,
-        repo: &str,
-        items: &[ArchiveStarEvent],
-        authoritative_total: i64,
-        coverage_start: DateTime<Utc>,
-        coverage_end: DateTime<Utc>,
-    ) -> Result<i64> {
-        let mut tx = self.db.pool.begin().await?;
-        sqlx::query("INSERT INTO repos (repo) VALUES ($1) ON CONFLICT DO NOTHING")
-            .bind(repo)
-            .execute(&mut *tx)
-            .await?;
-        // Queue dedup already gives one writer per repo. Locking the row here
-        // makes the position assignment safe even if an operator manually
-        // starts a second process against the same database.
-        sqlx::query("SELECT repo FROM repos WHERE repo = $1 FOR UPDATE")
-            .bind(repo)
-            .fetch_one(&mut *tx)
-            .await?;
-        let base: i64 = sqlx::query_scalar(
-            "SELECT COALESCE(MAX(position), 0)::BIGINT \
-             FROM repo_star_arrivals WHERE repo = $1",
-        )
-        .bind(repo)
-        .fetch_one(&mut *tx)
-        .await?;
-        upsert_archive_events(&mut tx, repo, base.saturating_add(1), items).await?;
-        let observed: i64 =
-            sqlx::query_scalar("SELECT COUNT(*)::BIGINT FROM repo_star_arrivals WHERE repo = $1")
-                .bind(repo)
-                .fetch_one(&mut *tx)
-                .await?;
-        sqlx::query(
-            "UPDATE repos SET archive_fetched_at = $1, archive_complete = TRUE, \
-                history_complete = TRUE, \
-                star_count = $2, \
-                history_source = 'gh_archive', \
-                history_observed_count = $3, \
-                history_coverage_start = LEAST( \
-                    COALESCE(history_coverage_start, $4), $4), \
-                history_coverage_end = GREATEST( \
-                    COALESCE(history_coverage_end, $5), $5), \
-                missing = FALSE \
-             WHERE repo = $6",
-        )
-        .bind(Utc::now())
-        .bind(authoritative_total.max(0))
-        .bind(observed)
-        .bind(coverage_start)
-        .bind(coverage_end)
-        .bind(repo)
-        .execute(&mut *tx)
-        .await?;
-        tx.commit().await?;
-        Ok(observed)
-    }
-
     /// Durable state for a historical GH Archive backfill. `cursor` is the
     /// first day that has not yet been committed.
     pub async fn get_archive_backfill_state(
@@ -698,6 +638,84 @@ impl Cache {
             },
         ))
     }
+
+    /// Settle the source of a completed archive backfill, and with it the
+    /// splice boundary.
+    ///
+    /// Three cases, decided from the row's own state inside the writer's
+    /// transaction rather than by the caller:
+    ///
+    ///   * The repository already carries a COMPLETE exact stargazer-list
+    ///     snapshot. Replacing it with archive activity is a strict loss — the
+    ///     exact curve is non-approximate, and the corpus lost most of its
+    ///     WatchEvent volume in 2026, so the replacement would be both
+    ///     approximate and badly undercounted over exactly the recent window
+    ///     people look at. The exact rows are kept and the archive rows become
+    ///     the tail: `spliced`, boundary at the exact segment's last star.
+    ///   * No exact segment (or a partial one, which no reader may trust):
+    ///     the ordinary cold-repository result, `gh_archive`, unchanged.
+    ///   * Mid-backfill (`complete = FALSE`): the source is left exactly as it
+    ///     was. That is what lets a repository being migrated keep serving its
+    ///     old, complete, exact series until the last window lands — the
+    ///     accumulating `repo_star_arrivals` rows are not selected by
+    ///     `active_repo_star_history` while the source still says `github_api`.
+    ///
+    /// `history_complete` follows the same rule for the same reason: flipping
+    /// it false mid-migration would blank a repository that is currently
+    /// serving a complete series, so it only falls for sources whose rows the
+    /// view is already selecting.
+    const ARCHIVE_WINDOW_SETTLE_SQL: &str = "UPDATE repos SET archive_cursor = $1, \
+            archive_complete = $2, \
+            archive_fetched_at = CASE WHEN $2 THEN $3 ELSE archive_fetched_at END, \
+            archive_truncated_before = TRUE, \
+            history_complete = CASE \
+                WHEN $2 THEN TRUE \
+                WHEN repos.history_source = 'github_api' THEN repos.history_complete \
+                ELSE FALSE END, \
+            history_source = CASE \
+                WHEN NOT $2 THEN repos.history_source \
+                WHEN exact_segment.splice_at IS NOT NULL THEN 'spliced' \
+                ELSE 'gh_archive' END, \
+            history_splice_at = CASE \
+                WHEN NOT $2 THEN repos.history_splice_at \
+                WHEN exact_segment.splice_at IS NOT NULL THEN exact_segment.splice_at \
+                ELSE NULL END, \
+            history_splice_position = CASE \
+                WHEN NOT $2 THEN repos.history_splice_position \
+                WHEN exact_segment.splice_at IS NOT NULL THEN exact_segment.splice_position \
+                ELSE NULL END, \
+            missing = FALSE \
+         FROM ( \
+             SELECT MAX(stars.starred_at) AS splice_at, \
+                    MAX(stars.position) AS splice_position \
+             FROM repo_stargazers stars \
+             JOIN repos exact_repo ON exact_repo.repo = stars.repo \
+             WHERE stars.repo = $4 AND exact_repo.stargazers_complete \
+         ) AS exact_segment \
+         WHERE repos.repo = $4";
+
+    /// Restate a repository's provenance from the series a reader actually
+    /// gets. Runs after [`Self::ARCHIVE_WINDOW_SETTLE_SQL`] in the same
+    /// transaction, because it reads `active_repo_star_history` and therefore
+    /// needs the new `history_source` and boundary to already be in place — a
+    /// subquery inside the settle statement would still see the old row.
+    ///
+    /// Reading the view rather than `repo_star_arrivals` is what keeps these
+    /// three figures true for a splice: that table holds the archive's full
+    /// history back to 2011, but a spliced series uses only the part after the
+    /// boundary. Counting the table would inflate the event count and drag
+    /// COVERAGE START back to a date the published series does not begin on.
+    const ARCHIVE_WINDOW_PROVENANCE_SQL: &str = "UPDATE repos SET \
+            history_observed_count = series.observed, \
+            history_coverage_start = series.coverage_start, \
+            history_coverage_end = series.coverage_end \
+         FROM ( \
+             SELECT COUNT(*)::BIGINT AS observed, \
+                    MIN(starred_at) AS coverage_start, \
+                    MAX(starred_at) AS coverage_end \
+             FROM active_repo_star_history WHERE repo = $1 \
+         ) AS series \
+         WHERE repos.repo = $1";
 
     /// Commit one fully-fetched BigQuery date window and advance the cursor
     /// in the same transaction. Archive rows stay invisible until `complete`
@@ -747,34 +765,30 @@ impl Cache {
         .await?;
         upsert_archive_events(&mut tx, repo, base.saturating_add(1), items).await?;
 
+        // Settle the source (and, for an exact segment, the splice boundary)
+        // first: the provenance figures below read the view, which selects on
+        // exactly the columns this statement writes.
+        sqlx::query(Self::ARCHIVE_WINDOW_SETTLE_SQL)
+            .bind(next_cursor)
+            .bind(complete)
+            .bind(Utc::now())
+            .bind(repo)
+            .execute(&mut *tx)
+            .await?;
+        if complete {
+            sqlx::query(Self::ARCHIVE_WINDOW_PROVENANCE_SQL)
+                .bind(repo)
+                .execute(&mut *tx)
+                .await?;
+        }
+        // What the caller logs and the coordinator reports as progress: the
+        // rows now stored for this repository, not the subset the published
+        // series draws from.
         let observed: i64 =
             sqlx::query_scalar("SELECT COUNT(*)::BIGINT FROM repo_star_arrivals WHERE repo = $1")
                 .bind(repo)
                 .fetch_one(&mut *tx)
                 .await?;
-        sqlx::query(
-            "UPDATE repos SET archive_cursor = $1, archive_complete = $2, \
-                archive_fetched_at = CASE WHEN $2 THEN $3 ELSE archive_fetched_at END, \
-                archive_truncated_before = TRUE, \
-                history_complete = $2, \
-                history_source = CASE WHEN $2 THEN 'gh_archive' ELSE history_source END, \
-                history_observed_count = CASE WHEN $2 THEN $4 ELSE history_observed_count END, \
-                history_coverage_start = CASE WHEN $2 THEN \
-                    (SELECT MIN(starred_at) FROM repo_star_arrivals WHERE repo = $5) \
-                    ELSE history_coverage_start END, \
-                history_coverage_end = CASE WHEN $2 THEN \
-                    (SELECT MAX(starred_at) FROM repo_star_arrivals WHERE repo = $5) \
-                    ELSE history_coverage_end END, \
-                missing = FALSE \
-             WHERE repo = $5",
-        )
-        .bind(next_cursor)
-        .bind(complete)
-        .bind(Utc::now())
-        .bind(observed)
-        .bind(repo)
-        .execute(&mut *tx)
-        .await?;
         tx.commit().await?;
         Ok(observed)
     }
@@ -1354,7 +1368,10 @@ impl Cache {
 
 #[cfg(test)]
 mod tests {
-    use super::{PLATFORM_ACTIVITY_SQL, SITEMAP_ELIGIBLE_SQL, SITEMAP_UPDATED_AT_SQL};
+    use super::{
+        DateTime, NaiveDate, PLATFORM_ACTIVITY_SQL, SITEMAP_ELIGIBLE_SQL, SITEMAP_UPDATED_AT_SQL,
+        Utc,
+    };
     // The cache functions require a live Postgres pool, so they're
     // exercised by integration smoke tests rather than unit tests here.
     // What we *can* assert without a DB is the read-side completeness
@@ -1419,5 +1436,273 @@ mod tests {
     #[test]
     fn platform_activity_has_its_ordering_index() {
         assert!(crate::db::schema_sql().contains("idx_repos_last_viewed"));
+    }
+
+    /// A migration must not blank a repository that is currently serving a
+    /// complete exact series.
+    ///
+    /// The archive rows accumulate over many windows, and the view only starts
+    /// selecting them when `history_source` flips at the end. So the source
+    /// and the completeness flag must both be left alone while a `github_api`
+    /// row is being migrated — writing `history_complete = FALSE` per window
+    /// (as the archive path does for its own rows, which the view *is*
+    /// selecting) would take a working chart offline for the length of a
+    /// full-history backfill.
+    #[test]
+    fn migrating_an_exact_series_keeps_it_readable_until_the_flip() {
+        let sql = super::Cache::ARCHIVE_WINDOW_SETTLE_SQL;
+        assert!(
+            sql.contains("WHEN repos.history_source = 'github_api' THEN repos.history_complete"),
+            "an exact series stays complete across the windows of its migration"
+        );
+        assert!(
+            sql.contains("WHEN NOT $2 THEN repos.history_source"),
+            "an unfinished window must not move the source"
+        );
+    }
+
+    /// The splice is decided from the row, not from the caller.
+    ///
+    /// A completed archive backfill lands on a repository that either has a
+    /// trustworthy exact segment or does not, and only the writer's
+    /// transaction can read that without racing. `stargazers_complete` is the
+    /// gate: a capped, partial stargazer fetch also leaves rows behind, and
+    /// splicing onto those would publish exactly the partial data the
+    /// completeness invariant exists to hide.
+    #[test]
+    fn splice_requires_a_complete_exact_segment() {
+        let sql = super::Cache::ARCHIVE_WINDOW_SETTLE_SQL;
+        assert!(sql.contains("AND exact_repo.stargazers_complete"));
+        assert!(sql.contains("WHEN exact_segment.splice_at IS NOT NULL THEN 'spliced'"));
+        assert!(
+            sql.contains("ELSE 'gh_archive' END"),
+            "a repository that was never on the exact path must behave as it does today"
+        );
+        // Boundary and offset are written together — the view needs both, and
+        // `repos_spliced_needs_boundary` rejects the row without them.
+        assert!(sql.contains("history_splice_at = CASE"));
+        assert!(sql.contains("history_splice_position = CASE"));
+    }
+
+    /// Provenance is restated from the published series, never from the table
+    /// underneath it. `repo_star_arrivals` holds the archive's full history
+    /// back to 2011; a spliced series publishes only the part after the
+    /// boundary, so counting the table would inflate the event count and
+    /// report a COVERAGE START the series does not have.
+    #[test]
+    fn spliced_provenance_is_measured_from_the_published_series() {
+        let sql = super::Cache::ARCHIVE_WINDOW_PROVENANCE_SQL;
+        assert!(sql.contains("FROM active_repo_star_history WHERE repo = $1"));
+        assert!(!sql.contains("repo_star_arrivals"));
+        for column in [
+            "history_observed_count",
+            "history_coverage_start",
+            "history_coverage_end",
+        ] {
+            assert!(sql.contains(column), "{column} must be restated");
+        }
+    }
+
+    /// The archive tail of a spliced series is the half that has to keep
+    /// moving. Treating the whole series as permanently fresh because its
+    /// first half is exact would park it exactly where a frozen `github_api`
+    /// row is parked today — the stall the splice exists to end.
+    #[test]
+    fn a_spliced_series_is_never_permanently_fresh() {
+        let ttl = chrono::Duration::hours(6);
+        let stale = |source: &str| super::RepoSummary {
+            stargazers_complete: true,
+            stargazers_fetched_at: Some(Utc::now() - chrono::Duration::days(30)),
+            history_source: Some(source.to_string()),
+            ..Default::default()
+        };
+        assert!(
+            stale(super::HISTORY_SOURCE_EXACT).stargazers_fresh_within(ttl),
+            "an exact snapshot is immutable once complete"
+        );
+        assert!(!stale(super::HISTORY_SOURCE_SPLICED).stargazers_fresh_within(ttl));
+        assert!(!stale(super::HISTORY_SOURCE_ARCHIVE).stargazers_fresh_within(ttl));
+    }
+
+    /// Approximate is a property of the whole series: a spliced one is exact
+    /// up to its boundary and public star actions after it, and any surface
+    /// that reports it as exact is over-claiming about its tail.
+    #[test]
+    fn spliced_series_report_as_approximate() {
+        let with = |source: Option<&str>| super::RepoSummary {
+            history_source: source.map(str::to_string),
+            ..Default::default()
+        };
+        assert!(with(Some(super::HISTORY_SOURCE_SPLICED)).history_is_approximate());
+        assert!(with(Some(super::HISTORY_SOURCE_ARCHIVE)).history_is_approximate());
+        assert!(!with(Some(super::HISTORY_SOURCE_EXACT)).history_is_approximate());
+        assert!(!with(None).history_is_approximate());
+    }
+
+    /// The boundary column outlives the source that gave it meaning: the exact
+    /// writers set `history_source = 'github_api'` and leave
+    /// `history_splice_at` where it was. Publishing the raw column would date a
+    /// join the series no longer has, on the one surface whose entire job is
+    /// stating where the method changed.
+    #[test]
+    fn the_splice_instant_is_published_only_while_the_series_is_spliced() {
+        let at = DateTime::<Utc>::from_timestamp(1_784_000_836, 0).expect("valid instant");
+        let with = |source: &str| super::RepoSummary {
+            history_source: Some(source.to_string()),
+            history_splice_at: Some(at),
+            ..Default::default()
+        };
+        assert_eq!(
+            with(super::HISTORY_SOURCE_SPLICED).history_splice_at_if_spliced(),
+            Some(at)
+        );
+        assert_eq!(
+            with(super::HISTORY_SOURCE_EXACT).history_splice_at_if_spliced(),
+            None
+        );
+        assert_eq!(
+            with(super::HISTORY_SOURCE_ARCHIVE).history_splice_at_if_spliced(),
+            None
+        );
+        assert_eq!(
+            super::RepoSummary {
+                history_source: Some(super::HISTORY_SOURCE_SPLICED.to_string()),
+                ..Default::default()
+            }
+            .history_splice_at_if_spliced(),
+            None
+        );
+    }
+
+    /// End to end against Postgres: an archive backfill landing on a complete
+    /// exact snapshot must keep every exact point, append only archive
+    /// activity from strictly after the boundary, and leave the view a single
+    /// ordered series with no duplicated or lost point where the two meet.
+    #[tokio::test]
+    async fn archive_backfill_splices_onto_a_frozen_exact_series() {
+        let Some(db) = crate::test_db::shared().await else {
+            eprintln!("skipping: set GITDEBT_TEST_DATABASE_URL to run");
+            return;
+        };
+        let cache = super::Cache::new(db.clone());
+        let repo = format!("gitdebt-splice-test/{}", std::process::id());
+        let at = |day: u32, hour: u32| {
+            chrono::TimeZone::with_ymd_and_hms(&Utc, 2026, 7, day, hour, 0, 0).unwrap()
+        };
+        let boundary = at(20, 12);
+
+        cleanup_splice_fixture(&db, &repo).await;
+        sqlx::query(
+            "INSERT INTO repos (repo, github_id, star_count, metadata_fetched_at, \
+                stargazers_complete, history_complete, history_source) \
+             VALUES ($1, 4242, 3, NOW(), TRUE, TRUE, 'github_api')",
+        )
+        .bind(&repo)
+        .execute(&db.pool)
+        .await
+        .unwrap();
+        let exact: Vec<super::StargazerEvent> = vec![(1, at(1, 0)), (2, at(10, 0)), (3, boundary)];
+        for (position, starred_at) in &exact {
+            sqlx::query(
+                "INSERT INTO repo_stargazers (repo, position, starred_at) VALUES ($1, $2, $3)",
+            )
+            .bind(&repo)
+            .bind(position)
+            .bind(starred_at)
+            .execute(&db.pool)
+            .await
+            .unwrap();
+        }
+
+        // The archive's own view of this repository: it covers the whole
+        // history, including the part the exact segment already describes, and
+        // one event lands exactly ON the boundary.
+        let events: Vec<super::ArchiveStarEvent> =
+            [at(2, 0), at(11, 0), boundary, at(21, 9), at(22, 9)]
+                .into_iter()
+                .enumerate()
+                .map(|(index, starred_at)| super::ArchiveStarEvent {
+                    source_event_id: Some(format!("splice-{index}")),
+                    starred_at,
+                })
+                .collect();
+        let window_start = NaiveDate::from_ymd_opt(2011, 2, 12).unwrap();
+        let next_cursor = NaiveDate::from_ymd_opt(2026, 8, 1).unwrap();
+        cache
+            .commit_archive_backfill_window(&repo, window_start, next_cursor, &events, true)
+            .await
+            .unwrap();
+
+        /// `(history_source, splice_at, splice_position, observed_count,
+        /// coverage_start, coverage_end)` as the statement below selects them.
+        type SplicedRow = (
+            Option<String>,
+            Option<DateTime<Utc>>,
+            Option<i64>,
+            Option<i64>,
+            Option<DateTime<Utc>>,
+            Option<DateTime<Utc>>,
+        );
+        let (source, splice_at, splice_position, observed, coverage_start, coverage_end): SplicedRow = sqlx::query_as(
+            "SELECT history_source, history_splice_at, history_splice_position, \
+                    history_observed_count, history_coverage_start, history_coverage_end \
+             FROM repos WHERE repo = $1",
+        )
+        .bind(&repo)
+        .fetch_one(&db.pool)
+        .await
+        .unwrap();
+        assert_eq!(source.as_deref(), Some(super::HISTORY_SOURCE_SPLICED));
+        assert_eq!(splice_at, Some(boundary));
+        assert_eq!(splice_position, Some(3));
+
+        let series: Vec<(i64, DateTime<Utc>)> = sqlx::query_as(
+            "SELECT position, starred_at FROM active_repo_star_history \
+             WHERE repo = $1 ORDER BY position",
+        )
+        .bind(&repo)
+        .fetch_all(&db.pool)
+        .await
+        .unwrap();
+        // Exact through the boundary, archive strictly after it. The archive's
+        // pre-boundary events are dropped (the exact segment already counted
+        // those stars) and its on-boundary event is dropped too — that is the
+        // one instant both halves could otherwise claim.
+        assert_eq!(
+            series.iter().map(|(_, at)| *at).collect::<Vec<_>>(),
+            vec![at(1, 0), at(10, 0), boundary, at(21, 9), at(22, 9)]
+        );
+        let positions: Vec<i64> = series.iter().map(|(position, _)| *position).collect();
+        assert!(
+            positions.windows(2).all(|pair| pair[0] < pair[1]),
+            "position must stay a single strictly-increasing order: {positions:?}"
+        );
+
+        // Provenance describes the published series, not the arrivals table:
+        // the archive rows before the boundary are stored but not published.
+        assert_eq!(observed, Some(5));
+        assert_eq!(coverage_start, Some(at(1, 0)));
+        assert_eq!(coverage_end, Some(at(22, 9)));
+        assert_eq!(
+            cache.get_repo_stargazers(&repo).await.unwrap(),
+            Some(series.iter().map(|(_, at)| *at).collect::<Vec<_>>()),
+            "the completeness-gated reader serves the spliced series"
+        );
+
+        cleanup_splice_fixture(&db, &repo).await;
+    }
+
+    async fn cleanup_splice_fixture(db: &crate::db::Db, repo: &str) {
+        for statement in [
+            "DELETE FROM repo_stargazers WHERE repo = $1",
+            "DELETE FROM repo_star_arrivals WHERE repo = $1",
+            "DELETE FROM repos WHERE repo = $1",
+        ] {
+            sqlx::query(statement)
+                .bind(repo)
+                .execute(&db.pool)
+                .await
+                .unwrap();
+        }
     }
 }

@@ -157,11 +157,13 @@ pub async fn enqueue_cold_or_stale_many(db: &Db, repos: &[String], priority: i64
 /// landed on the API path before GH Archive was available can never be
 /// refreshed by anything, and its curve stops on the day it was first read.
 ///
-/// Migration — not refresh — is the way out. One archive backfill rewrites the
-/// series from the corpus and flips `history_source` to `gh_archive`, after
-/// which the existing hourly follower keeps it current forever. This offers
-/// those repositories to the ordinary star-fetch queue; the archive coordinator
-/// claims them like any other job.
+/// Migration — not refresh — is the way out. One archive backfill splices
+/// archive activity onto the frozen exact segment and flips `history_source` to
+/// `spliced` (see [`crate::cache::Cache::commit_archive_backfill_window`]),
+/// after which the existing hourly follower keeps the tail current forever. The
+/// exact curve is kept, not overwritten: it is non-approximate, and the archive
+/// is not. This offers those repositories to the ordinary star-fetch queue; the
+/// archive coordinator claims them like any other job.
 ///
 /// Only meaningful when GH Archive is configured. With it disabled the same
 /// queue is drained by the stargazer-list fallback, which would re-paginate an
@@ -194,6 +196,50 @@ pub async fn enqueue_archive_migrations(db: &Db, limit: usize) -> Result<u64> {
     .execute(&db.pool)
     .await?;
     Ok(result.rows_affected())
+}
+
+/// Eligibility for a migration, identical to the sweep's — stated once so the
+/// single-repository path cannot drift from it. Not a search: every clause is
+/// an equality or an existence check against an indexed key.
+const ARCHIVE_MIGRATION_ELIGIBLE_SQL: &str = "repos.repo = $1 \
+       AND repos.history_source = 'github_api' \
+       AND repos.history_complete = TRUE \
+       AND NOT repos.missing \
+       AND NOT repos.archive_complete \
+       AND repos.github_id IS NOT NULL \
+       AND NOT EXISTS ( \
+           SELECT 1 FROM star_fetch_queue q WHERE q.repo = $1 \
+       )";
+
+/// Offer ONE frozen repository to GH Archive, now.
+///
+/// [`enqueue_archive_migrations`] runs once per worker start over the biggest
+/// repositories first, so a modest one waits behind every larger one and can
+/// sit at its 2026-07-20 boundary through any number of deploys. The person
+/// looking at that repository's report is the best possible signal that it is
+/// worth a backfill, and this is what lets their visit start one instead of
+/// joining a queue that may never reach them.
+///
+/// Returns whether this call created the job. It sits on a hot path — a report
+/// view — so it must stay two indexed probes and it must be idempotent: an
+/// existing queue row (of any status) makes it a no-op, so repeated views of
+/// the same repository add nothing. Callers MUST gate on GH Archive being
+/// configured for the reason [`enqueue_archive_migrations`] documents.
+///
+/// `priority` is the caller's popularity snapshot, so a repository somebody is
+/// actually looking at drains ahead of the sweep's priority-0 backlog.
+pub async fn enqueue_archive_migration(db: &Db, repo: &str, priority: i64) -> Result<bool> {
+    let sql = format!(
+        "INSERT INTO star_fetch_queue (repo, status, priority, enqueued_at) \
+         SELECT $1, 'pending', $2, NOW() FROM repos WHERE {ARCHIVE_MIGRATION_ELIGIBLE_SQL} \
+         ON CONFLICT (repo) DO NOTHING"
+    );
+    let result = sqlx::query(sqlx::AssertSqlSafe(sql))
+        .bind(repo)
+        .bind(priority.max(0))
+        .execute(&db.pool)
+        .await?;
+    Ok(result.rows_affected() > 0)
 }
 
 /// True iff the repo currently has a `pending` or `in_progress` row.
@@ -595,6 +641,125 @@ mod tests {
                 clause.contains("'pending', 'in_progress'"),
                 "subquery {index} describes work in flight: {clause}"
             );
+        }
+    }
+
+    /// The on-demand path must offer exactly what the sweep offers.
+    ///
+    /// A single-repository path that is looser than the sweep is how an
+    /// already-archived or already-queued repository gets a duplicate job, and
+    /// how a repository with no numeric id reaches a coordinator that cannot
+    /// query for it. Rather than restate the predicate twice, both read the
+    /// same clauses — this checks each one is actually in there.
+    #[test]
+    fn on_demand_migration_shares_the_sweep_eligibility() {
+        for clause in [
+            "history_source = 'github_api'",
+            "history_complete = TRUE",
+            "missing",
+            "archive_complete",
+            "github_id IS NOT NULL",
+            "NOT EXISTS",
+        ] {
+            assert!(
+                ARCHIVE_MIGRATION_ELIGIBLE_SQL.contains(clause),
+                "on-demand eligibility is missing `{clause}`"
+            );
+        }
+        // A queue row in ANY status blocks a second one: `dead` included, or a
+        // restricted park would be re-offered on every single report view.
+        assert!(
+            !ARCHIVE_MIGRATION_ELIGIBLE_SQL.contains("status"),
+            "an existing row of any status must make this a no-op"
+        );
+    }
+
+    /// Against Postgres: the on-demand offer creates at most one job, and only
+    /// for a repository the sweep would also have picked.
+    #[tokio::test]
+    async fn on_demand_migration_is_idempotent_and_skips_ineligible_repos() {
+        let Some(db) = crate::test_db::shared().await else {
+            eprintln!("skipping: set GITDEBT_TEST_DATABASE_URL to run");
+            return;
+        };
+        let prefix = format!("gitdebt-migrate-test-{}", std::process::id());
+        let frozen = format!("{prefix}/frozen");
+        let archived = format!("{prefix}/archived");
+        let queued = format!("{prefix}/queued");
+        let all = [frozen.clone(), archived.clone(), queued.clone()];
+        clear_migration_fixture(&db, &all).await;
+
+        for (repo, source, archive_complete) in [
+            (&frozen, "github_api", false),
+            // Already migrated: nothing left to offer.
+            (&archived, "spliced", true),
+            // Frozen, but a job already exists — a second row is impossible
+            // (the slug is the primary key) and re-offering is pure noise.
+            (&queued, "github_api", false),
+        ] {
+            sqlx::query(
+                "INSERT INTO repos (repo, github_id, star_count, metadata_fetched_at, \
+                    stargazers_complete, history_complete, history_source, archive_complete, \
+                    history_splice_at, history_splice_position) \
+                 VALUES ($1, 777, 10, NOW(), TRUE, TRUE, $2, $3, \
+                    CASE WHEN $2 = 'spliced' THEN NOW() END, \
+                    CASE WHEN $2 = 'spliced' THEN 1 END)",
+            )
+            .bind(repo)
+            .bind(source)
+            .bind(archive_complete)
+            .execute(&db.pool)
+            .await
+            .unwrap();
+        }
+        sqlx::query(
+            "INSERT INTO star_fetch_queue (repo, status, priority, enqueued_at) \
+             VALUES ($1, 'dead', 0, NOW())",
+        )
+        .bind(&queued)
+        .execute(&db.pool)
+        .await
+        .unwrap();
+
+        assert!(
+            enqueue_archive_migration(&db, &frozen, 5).await.unwrap(),
+            "a frozen exact snapshot is what this path exists for"
+        );
+        assert!(
+            !enqueue_archive_migration(&db, &frozen, 5).await.unwrap(),
+            "a second report view must add nothing"
+        );
+        assert!(!enqueue_archive_migration(&db, &archived, 5).await.unwrap());
+        assert!(!enqueue_archive_migration(&db, &queued, 5).await.unwrap());
+        assert!(
+            !enqueue_archive_migration(&db, &format!("{prefix}/unknown"), 5)
+                .await
+                .unwrap(),
+            "an unknown repository has no exact series to migrate"
+        );
+
+        let jobs: i64 = sqlx::query_scalar(
+            "SELECT COUNT(*) FROM star_fetch_queue WHERE repo = ANY($1) AND status = 'pending'",
+        )
+        .bind(&all[..])
+        .fetch_one(&db.pool)
+        .await
+        .unwrap();
+        assert_eq!(jobs, 1, "exactly one migration job across the fixture");
+
+        clear_migration_fixture(&db, &all).await;
+    }
+
+    async fn clear_migration_fixture(db: &Db, repos: &[String]) {
+        for statement in [
+            "DELETE FROM star_fetch_queue WHERE repo = ANY($1)",
+            "DELETE FROM repos WHERE repo = ANY($1)",
+        ] {
+            sqlx::query(statement)
+                .bind(repos)
+                .execute(&db.pool)
+                .await
+                .unwrap();
         }
     }
 }

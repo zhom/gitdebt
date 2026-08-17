@@ -11,7 +11,6 @@ import {
   HEADING,
   MEASURE,
   PANEL,
-  SECTION_ACTION,
 } from "@/components/style-tokens";
 import { useInView } from "@/components/ui/use-in-view";
 import { SWATCH, type RGB } from "@/lib/dither";
@@ -74,8 +73,6 @@ export type SeriesProvenanceProps = {
    *  When omitted the source-keyed swatch is used. Hue never encodes source on
    *  a multi-series surface: hue = which series, density = which source. */
   fill?: RGB;
-  /** {apiBase}/auth/github/start?return_to=… . Omit to render no action. */
-  signInHref?: string;
   /** aria-labelledby target for variant="panel"; default "series-provenance". */
   headingId?: string;
   className?: string;
@@ -91,6 +88,11 @@ const SOURCE_FILL: Record<HistoryFreshness["state"], RGB> = {
   exact_current: SWATCH.blue,
   exact_frozen: SWATCH.blue,
   archive: SWATCH.purple,
+  // A spliced series keeps the stargazer-list hue: it *is* that series, kept
+  // whole and continued, and most of its curve is still those points. One hue
+  // cannot say "two sources" — density and the text do that — so it says which
+  // lineage the line belongs to, which is the fact hue is for.
+  spliced: SWATCH.blue,
   restricted: SWATCH.grey,
   unknown: SWATCH.grey,
 };
@@ -108,7 +110,6 @@ export function SeriesProvenance({
   slug,
   variant = "panel",
   fill,
-  signInHref,
   headingId = "series-provenance",
   className,
 }: SeriesProvenanceProps): JSX.Element {
@@ -135,7 +136,6 @@ export function SeriesProvenance({
       freshness={freshness}
       fill={resolved}
       slug={slug}
-      signInHref={signInHref}
       headingId={headingId}
       className={className}
     />
@@ -276,24 +276,15 @@ function ProvenancePanel({
   freshness,
   fill,
   slug,
-  signInHref,
   headingId,
   className,
 }: {
   freshness: HistoryFreshness;
   fill: RGB;
   slug?: string;
-  signInHref?: string;
   headingId: string;
   className?: string;
 }) {
-  // The action exists only where a reader can act on it, and it describes
-  // exactly what sign-in does. There is no connect endpoint, so no wording here
-  // may imply one.
-  const showAction =
-    Boolean(signInHref) &&
-    (freshness.state === "exact_frozen" || freshness.state === "restricted");
-
   const facts: [string, string][] = [
     ["Source", sourceLabel(freshness)],
     ["Coverage", coverageLabel(freshness)],
@@ -327,17 +318,6 @@ function ProvenancePanel({
         ))}
       </dl>
 
-      {showAction && (
-        <div className="mt-4">
-          <a className={SECTION_ACTION} href={signInHref}>
-            Sign in with GitHub →
-          </a>
-          <p className={cn(CAPTION, MEASURE, "mt-1.5")}>
-            Signing in lets gitdebt recognise the repositories you own and queue
-            them for analysis. It does not restore a stargazer read on its own.
-          </p>
-        </div>
-      )}
     </aside>
   );
 }
@@ -396,21 +376,36 @@ function ProvenanceExplainer({ className }: { className?: string }) {
     history_kind: "public_star_actions",
     history_approximate: true,
   });
+  const spliced = historyFreshness({
+    history_complete: true,
+    history_kind: "stargazers_then_activity",
+    history_approximate: true,
+  });
 
-  const rows: { freshness: HistoryFreshness; fill: RGB; term: string; definition: string }[] = [
+  // Terms come from `sourceLabel`, so the key and the chart caption cannot drift
+  // apart: one wording, one module, exactly as the fact rows use.
+  const rows: { freshness: HistoryFreshness; fill: RGB; definition: string }[] = [
     {
       freshness: exact,
       fill: SWATCH.blue,
-      term: "GitHub stargazer list",
+      // Says what the restriction does to gitdebt, not who it exempts. The key
+      // is read by owners too, and "served to admins" reads to an owner as a
+      // capability they have; they do not, because gitdebt reads with its own
+      // application credentials no matter who is signed in.
       definition:
-        "Exact — one point per star, with its own timestamp. Since July 2026 GitHub serves this list only to a repository's own admins and collaborators, so a series read this way stops on a fixed date.",
+        "Exact — one point per star, with its own timestamp. Since July 2026 GitHub serves this list only to applications that administer the repository, and gitdebt is not one of them, so a series read this way stops on a fixed date and no sign-in restarts it.",
     },
     {
       freshness: archive,
       fill: SWATCH.purple,
-      term: "Historical star data",
       definition:
         "Rebuilt from historical star data. Star actions are recorded and unstars are not, so it reads as an attention signal rather than a net star count. It keeps flowing for every public repository.",
+    },
+    {
+      freshness: spliced,
+      fill: SWATCH.blue,
+      definition:
+        "One line, two methods, joined on a fixed date. The exact list runs up to the join and star activity continues after it, so the tail counts actions rather than current stargazers and does not record every star. Every chart built this way names the date it changes method.",
     },
   ];
 
@@ -421,7 +416,7 @@ function ProvenanceExplainer({ className }: { className?: string }) {
       </h2>
       <dl className="mt-6 grid gap-x-12 gap-y-8 sm:grid-cols-2">
         {rows.map((row) => (
-          <div key={row.term} className="space-y-2">
+          <div key={row.freshness.state} className="space-y-2">
             <dt className="space-y-2">
               <ProvenanceBand
                 freshness={row.freshness}
@@ -429,7 +424,7 @@ function ProvenanceExplainer({ className }: { className?: string }) {
                 width={BAND.width}
                 height={BAND.height}
               />
-              <span className="block text-[13px]">{row.term}</span>
+              <span className="block text-[13px]">{sourceLabel(row.freshness)}</span>
             </dt>
             <dd className={cn(BODY, MEASURE)}>{row.definition}</dd>
           </div>

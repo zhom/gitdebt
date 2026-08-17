@@ -184,7 +184,10 @@ pub struct AnalysisResult {
     pub history_complete: bool,
     /// Semantics of the plotted series. `current_stargazers` is the legacy
     /// exact current-membership snapshot; `public_star_actions` comes from
-    /// GH Archive WatchEvents and is approximate because unstars are absent.
+    /// GH Archive WatchEvents and is approximate because unstars are absent;
+    /// `stargazers_then_activity` is an exact snapshot that stopped being
+    /// refreshable, with archive activity appended after the instant it
+    /// stopped — exact up to that boundary, approximate after it.
     pub history_kind: &'static str,
     /// Number of source events represented by the plotted series. This can
     /// differ from `total_stars`, which remains GitHub's current metadata
@@ -192,6 +195,15 @@ pub struct AnalysisResult {
     pub history_event_count: u32,
     pub history_coverage_start: Option<DateTime<Utc>>,
     pub history_coverage_end: Option<DateTime<Utc>>,
+    /// Where a `stargazers_then_activity` series changes method: exact points
+    /// at or before this instant, archive-derived points strictly after it.
+    /// Null for every other kind.
+    ///
+    /// The frontend's provenance copy is the only place this instant is ever
+    /// stated, and it is the one fact the chart cannot show for itself — the
+    /// line is continuous across the join, so a reader who is not told the
+    /// date reads a change of measurement as a change in the repository.
+    pub history_splice_at: Option<DateTime<Utc>>,
     pub history_approximate: bool,
     /// True when a background fetch is in flight / was just enqueued for
     /// this repo (cold, stale, or already queued). The frontend polls
@@ -281,6 +293,7 @@ async fn analyze_repo_with_enqueue(
             history_event_count: 0,
             history_coverage_start: None,
             history_coverage_end: None,
+            history_splice_at: None,
             history_approximate: false,
             pending: false,
             backfilling: false,
@@ -355,6 +368,32 @@ async fn analyze_repo_with_enqueue(
         let priority = summary.as_ref().map(|s| s.view_count).unwrap_or(0);
         enqueue_fetch_known(ctx, &repo_full, priority).await;
     }
+    // A frozen exact snapshot takes neither branch above: it is complete, and
+    // it is permanently "fresh" because re-reading an exact list can only
+    // return identical rows — except that since 2026-07-20 GitHub will not
+    // serve that list at all, so the curve simply stops. Only an archive
+    // migration moves it again, and the startup sweep works down from the
+    // largest repositories, which can mean never for this one. Somebody
+    // opening the report is the signal that it is worth doing now.
+    if enqueue
+        && should_offer_archive_migration(summary.as_ref(), crate::gh_archive::is_configured())
+    {
+        let priority = summary.as_ref().map(|s| s.view_count).unwrap_or(0);
+        match queue::enqueue_archive_migration(ctx.cache.db(), &repo_full, priority).await {
+            Ok(true) => tracing::info!(
+                repo = %repo_full,
+                "frozen exact history offered to GH Archive on demand"
+            ),
+            // Already queued, already migrated, or not eligible: the ordinary
+            // outcome on every view after the first.
+            Ok(false) => {}
+            Err(error) => tracing::warn!(
+                repo = %repo_full,
+                %error,
+                "on-demand archive migration enqueue failed"
+            ),
+        }
+    }
     let pending = !history_complete;
     let queue_status = queue::repo_status(ctx.cache.db(), &repo_full)
         .await
@@ -375,18 +414,7 @@ async fn analyze_repo_with_enqueue(
         created_at,
         queued: queue_status.queued.clamp(0, u32::MAX as i64) as u32,
         history_complete,
-        history_kind: if public
-            && summary
-                .as_ref()
-                .and_then(|value| value.history_source.as_deref())
-                == Some("gh_archive")
-        {
-            "public_star_actions"
-        } else if history_complete {
-            "current_stargazers"
-        } else {
-            "unavailable"
-        },
+        history_kind: history_kind(summary.as_ref(), public, history_complete),
         history_event_count: summary
             .as_ref()
             .and_then(|value| value.history_observed_count)
@@ -400,11 +428,14 @@ async fn analyze_repo_with_enqueue(
             .as_ref()
             .filter(|_| public)
             .and_then(|value| value.history_coverage_end),
+        history_splice_at: summary
+            .as_ref()
+            .filter(|_| public)
+            .and_then(crate::cache::RepoSummary::history_splice_at_if_spliced),
         history_approximate: public
             && summary
                 .as_ref()
-                .and_then(|value| value.history_source.as_deref())
-                == Some("gh_archive"),
+                .is_some_and(crate::cache::RepoSummary::history_is_approximate),
         pending,
         backfilling: queue_status.backfilling,
         history_status: if history_complete {
@@ -496,6 +527,59 @@ pub async fn enqueue_fetch(ctx: &AnalyzerCtx, repo_full: &str) {
     if let Err(e) = queue::enqueue(db, repo_full, priority).await {
         tracing::warn!(repo = %repo_full, error = %e, "star-fetch enqueue failed");
     }
+}
+
+/// Semantics of the plotted series, as reported to every read surface.
+///
+/// The three physical sources map one-to-one onto the three public values;
+/// nothing else may. A spliced series is exact through its boundary and public
+/// star actions after it, which is neither of the other two — reporting it as
+/// `current_stargazers` would claim its tail counts net stars, and as
+/// `public_star_actions` would throw away the exactness of everything before
+/// the boundary.
+fn history_kind(
+    summary: Option<&crate::cache::RepoSummary>,
+    public: bool,
+    history_complete: bool,
+) -> &'static str {
+    let source = summary
+        .filter(|_| public)
+        .and_then(|value| value.history_source.as_deref());
+    match source {
+        Some(crate::cache::HISTORY_SOURCE_ARCHIVE) => "public_star_actions",
+        Some(crate::cache::HISTORY_SOURCE_SPLICED) => "stargazers_then_activity",
+        _ if history_complete => "current_stargazers",
+        _ => "unavailable",
+    }
+}
+
+/// Whether this repository is a frozen exact snapshot worth offering to GH
+/// Archive on this view.
+///
+/// Pure, so the gate that matters most here is testable without a database:
+/// `archive_configured` false must veto everything. With GH Archive disabled
+/// the star-fetch queue is drained by the stargazer-list fallback, and handing
+/// it an already-exact snapshot would make it re-paginate an endpoint GitHub
+/// no longer serves — the exact thing the frozen-by-design rules prevent.
+///
+/// The remaining clauses are the cheap half of
+/// [`queue::enqueue_archive_migration`]'s eligibility, evaluated against the
+/// summary the caller has already loaded so an ineligible repository costs no
+/// query at all. The statement itself re-checks everything (including
+/// `archive_complete`, which the summary does not carry) inside Postgres, so
+/// this is an optimization and never the authority.
+fn should_offer_archive_migration(
+    summary: Option<&crate::cache::RepoSummary>,
+    archive_configured: bool,
+) -> bool {
+    archive_configured
+        && summary.is_some_and(|summary| {
+            !summary.missing
+                && summary.metadata_fetched_at.is_some()
+                && summary.stargazers_complete
+                && summary.github_id.is_some()
+                && summary.history_source.as_deref() == Some(crate::cache::HISTORY_SOURCE_EXACT)
+        })
 }
 
 /// Like [`enqueue_fetch`] but for callers (the `/analyze` hot path) that
@@ -600,6 +684,105 @@ mod tests {
     use super::*;
     use chrono::TimeZone;
 
+    fn summary(source: Option<&str>) -> crate::cache::RepoSummary {
+        crate::cache::RepoSummary {
+            github_id: Some(7),
+            stargazers_complete: true,
+            metadata_fetched_at: Some(Utc.timestamp_opt(1_546_300_800, 0).unwrap()),
+            history_source: source.map(str::to_string),
+            ..Default::default()
+        }
+    }
+
+    /// Each physical source has exactly one public name, and the spliced one
+    /// is neither of the other two: it is exact up to its boundary and public
+    /// star actions after it. Calling it `current_stargazers` would claim its
+    /// tail counts net stars; calling it `public_star_actions` would discard
+    /// the exactness of everything before the boundary.
+    #[test]
+    fn each_history_source_reports_its_own_kind() {
+        let kinds = |source: Option<&str>| history_kind(Some(&summary(source)), true, true);
+        assert_eq!(kinds(Some("github_api")), "current_stargazers");
+        assert_eq!(kinds(Some("gh_archive")), "public_star_actions");
+        assert_eq!(kinds(Some("spliced")), "stargazers_then_activity");
+        // Unchanged edges: a repository without public metadata reports no
+        // series semantics, and an incomplete one is `unavailable`.
+        assert_eq!(
+            history_kind(Some(&summary(Some("spliced"))), false, false),
+            "unavailable"
+        );
+        assert_eq!(history_kind(None, true, false), "unavailable");
+        assert_eq!(history_kind(None, true, true), "current_stargazers");
+    }
+
+    /// `history_kind` says the series changes method; only this field says
+    /// where. The frontend's spliced copy names that day and degrades to a
+    /// dateless sentence without it, so a payload that reports the kind and
+    /// omits the instant is the feature half-shipped.
+    #[test]
+    fn a_spliced_payload_carries_the_instant_its_copy_names() {
+        let at = Utc.timestamp_opt(1_784_000_836, 0).unwrap();
+        let spliced = crate::cache::RepoSummary {
+            history_splice_at: Some(at),
+            ..summary(Some("spliced"))
+        };
+        assert_eq!(spliced.history_splice_at_if_spliced(), Some(at));
+        // Same row after a later exact write: the column is stale, and the
+        // payload must not date a join the series no longer has.
+        let exact = crate::cache::RepoSummary {
+            history_splice_at: Some(at),
+            ..summary(Some("github_api"))
+        };
+        assert_eq!(exact.history_splice_at_if_spliced(), None);
+    }
+
+    /// The migration offer is gated on GH Archive being configured, and that
+    /// gate is not advisory. Without it the same queue is drained by the
+    /// stargazer-list fallback, which would re-paginate an exact snapshot
+    /// against an endpoint GitHub restricted in July 2026 — burning budget to
+    /// re-fetch rows we already hold exactly, or to be refused outright.
+    #[test]
+    fn a_migration_is_never_offered_without_the_archive() {
+        let frozen = summary(Some("github_api"));
+        assert!(should_offer_archive_migration(Some(&frozen), true));
+        assert!(!should_offer_archive_migration(Some(&frozen), false));
+    }
+
+    /// Only a repository that is actually stuck is offered. An archive-backed
+    /// or already-spliced series is moving on its own, a cold one is the
+    /// ordinary queue's job, and a repository with no numeric id cannot be
+    /// asked for by the corpus query at all.
+    #[test]
+    fn only_frozen_exact_snapshots_are_offered_for_migration() {
+        for source in [Some("gh_archive"), Some("spliced"), None] {
+            assert!(
+                !should_offer_archive_migration(Some(&summary(source)), true),
+                "{source:?} does not need a migration"
+            );
+        }
+        let incomplete = crate::cache::RepoSummary {
+            stargazers_complete: false,
+            ..summary(Some("github_api"))
+        };
+        assert!(!should_offer_archive_migration(Some(&incomplete), true));
+        let unverified = crate::cache::RepoSummary {
+            metadata_fetched_at: None,
+            ..summary(Some("github_api"))
+        };
+        assert!(!should_offer_archive_migration(Some(&unverified), true));
+        let tombstoned = crate::cache::RepoSummary {
+            missing: true,
+            ..summary(Some("github_api"))
+        };
+        assert!(!should_offer_archive_migration(Some(&tombstoned), true));
+        let no_id = crate::cache::RepoSummary {
+            github_id: None,
+            ..summary(Some("github_api"))
+        };
+        assert!(!should_offer_archive_migration(Some(&no_id), true));
+        assert!(!should_offer_archive_migration(None, true));
+    }
+
     /// Locks the exact `/analyze` JSON shape the frontend codes against.
     /// Field names + nesting must not drift without a coordinated change.
     #[test]
@@ -614,6 +797,7 @@ mod tests {
             history_event_count: 10,
             history_coverage_start: None,
             history_coverage_end: None,
+            history_splice_at: None,
             history_approximate: false,
             pending: false,
             backfilling: false,
@@ -642,6 +826,9 @@ mod tests {
         assert_eq!(v["history_kind"], "current_stargazers");
         assert_eq!(v["history_event_count"], 10);
         assert_eq!(v["history_approximate"], false);
+        // Present and null on every kind but `stargazers_then_activity`, so
+        // the frontend can read it unconditionally.
+        assert!(v["history_splice_at"].is_null());
         // `pending` is the extension/poll contract flag.
         assert_eq!(v["pending"], false);
         // New flags: present, default false on a healthy complete repo.
@@ -685,6 +872,7 @@ mod tests {
             history_event_count: 0,
             history_coverage_start: None,
             history_coverage_end: None,
+            history_splice_at: None,
             history_approximate: false,
             pending: true,
             backfilling: false,
@@ -716,6 +904,7 @@ mod tests {
             history_event_count: 40_000,
             history_coverage_start: None,
             history_coverage_end: None,
+            history_splice_at: None,
             history_approximate: false,
             pending: false,
             backfilling: true,
@@ -743,6 +932,7 @@ mod tests {
             history_event_count: 0,
             history_coverage_start: None,
             history_coverage_end: None,
+            history_splice_at: None,
             history_approximate: false,
             pending: false,
             backfilling: false,
@@ -785,6 +975,7 @@ mod tests {
             history_event_count: 0,
             history_coverage_start: None,
             history_coverage_end: None,
+            history_splice_at: None,
             history_approximate: false,
             pending: false,
             backfilling: false,

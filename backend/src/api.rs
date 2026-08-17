@@ -2006,9 +2006,9 @@ async fn build_star_export(
     let deltas = export::load_day_deltas(cache.db(), &repo_full).await?;
     let full = export::accumulate(&deltas);
     // Full total, NOT window-filtered (matches /analyze semantics).
-    let archive_activity = summary
+    let approximate = summary
         .as_ref()
-        .is_some_and(|value| value.history_source.as_deref() == Some("gh_archive"));
+        .is_some_and(crate::cache::RepoSummary::history_is_approximate);
     let total_stars = summary
         .as_ref()
         .and_then(|value| value.star_count)
@@ -2020,13 +2020,19 @@ async fn build_star_export(
         repo: repo_full,
         total_stars,
         complete: true,
-        history_kind: if archive_activity {
-            "public_star_actions"
-        } else {
-            "current_stargazers"
+        // Same three values `/analyze` reports, from the same column, so a
+        // downloaded CSV and the chart above it never disagree about what the
+        // series is.
+        history_kind: match summary
+            .as_ref()
+            .and_then(|value| value.history_source.as_deref())
+        {
+            Some(crate::cache::HISTORY_SOURCE_ARCHIVE) => "public_star_actions",
+            Some(crate::cache::HISTORY_SOURCE_SPLICED) => "stargazers_then_activity",
+            _ => "current_stargazers",
         }
         .to_string(),
-        approximate: archive_activity,
+        approximate,
         series,
     })
 }
@@ -3883,10 +3889,9 @@ async fn ensure_chart_gif(
 
     let cfg = ChartConfig {
         repo: repo_full,
-        metric_label: if summary
-            .as_ref()
-            .is_some_and(|value| value.history_source.as_deref() == Some("gh_archive"))
-        {
+        metric_label: if summary.as_ref().is_some_and(|value| {
+            value.history_source.as_deref() == Some(crate::cache::HISTORY_SOURCE_ARCHIVE)
+        }) {
             "public star actions"
         } else {
             "stars"
@@ -3963,9 +3968,20 @@ fn star_data_revision(summary: Option<&crate::cache::RepoSummary>) -> String {
 
 /// Which physical history a repository's series comes from. Part of the memo
 /// key because it also selects the rendered metric label.
+///
+/// All three sources are distinguished here even though only the archive one
+/// changes the label: a repository that migrates from `github` to `spliced`
+/// gets a different curve under the same slug, and a shared key would serve
+/// the pre-migration render until the rest of the key happened to move.
+///
+/// A spliced chart is deliberately still labelled "stars", not "public star
+/// actions": most of that curve IS an exact stargazer count, and only its tail
+/// is activity. Its approximateness is stated in provenance, which can say
+/// where the boundary is — an axis label cannot.
 fn history_source_key(summary: Option<&crate::cache::RepoSummary>) -> &'static str {
     match summary.and_then(|value| value.history_source.as_deref()) {
-        Some("gh_archive") => "archive",
+        Some(crate::cache::HISTORY_SOURCE_ARCHIVE) => "archive",
+        Some(crate::cache::HISTORY_SOURCE_SPLICED) => "spliced",
         _ => "github",
     }
 }
@@ -3993,9 +4009,9 @@ async fn ensure_chart_svg(
     let repo = repo.to_ascii_lowercase();
     let repo_full = format!("{owner}/{repo}");
     let summary = state.analyzer.cache.get_repo_summary(&repo_full).await?;
-    let archive_activity = summary
-        .as_ref()
-        .is_some_and(|value| value.history_source.as_deref() == Some("gh_archive"));
+    let archive_activity = summary.as_ref().is_some_and(|value| {
+        value.history_source.as_deref() == Some(crate::cache::HISTORY_SOURCE_ARCHIVE)
+    });
     let source_key = history_source_key(summary.as_ref());
     let key = format!(
         "{repo_full}|{theme_key}|{source_key}|{}|{}|{}",
@@ -6309,11 +6325,14 @@ async fn load_repo_card_data(
     summary: &crate::cache::RepoSummary,
 ) -> Result<cards::RepoCardData, ApiError> {
     let db = state.analyzer.cache.db();
-    let archive_activity = summary.history_source.as_deref() == Some("gh_archive");
+    // Approximate, not "archive-backed": a spliced series belongs on this side
+    // too. Its headline must come from GitHub's own count because its tail
+    // undercounts, and its trailing 30 days are entirely archive activity.
+    let approximate = summary.history_is_approximate();
 
     let (stars, stars_30d, spark) = if summary.stargazers_complete {
         let day_stats = export::accumulate(&export::load_day_deltas(db, repo_full).await?);
-        let total = if archive_activity {
+        let total = if approximate {
             summary
                 .star_count
                 .filter(|value| *value >= 0)
@@ -6324,7 +6343,7 @@ async fn load_repo_card_data(
         // A WatchEvent count is not net new stars because unstars are absent.
         // Do not render it under the github-readme-stats-compatible
         // `stars_30d` label.
-        let stars_30d = (!archive_activity)
+        let stars_30d = (!approximate)
             .then(|| {
                 day_stats.last().map(|last| {
                     let cutoff = last.date - chrono::Duration::days(30);

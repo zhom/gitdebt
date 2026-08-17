@@ -27,11 +27,21 @@ const STAR_WORKERS: usize = 4;
 /// How many frozen `github_api` histories one process start offers to GH
 /// Archive.
 ///
-/// A migration is a full-history corpus scan, so this is a spend control, not a
-/// throughput one. The backlog is finite and shrinks by this much per start
-/// rather than arriving all at once; a redeploy loop therefore cannot turn a
-/// one-time migration into a repeated bill.
-const ARCHIVE_MIGRATIONS_PER_START: usize = 50;
+/// Still a spend control, but it was priced against the wrong unit. BigQuery
+/// bills for the corpus a query scans, and the repository filter is a semi-join
+/// over a parameter array that prunes nothing (see `archive_worker::
+/// fetch_complete`) — so a date window costs the same whether it is asked about
+/// 50 repositories or 500. Migration candidates all share one cold cursor and
+/// therefore land in one cohort, which means 50 per start bought the same
+/// number of scans as 500 and spread them across ten times as many deploys.
+///
+/// 500 keeps a redeploy loop from turning a one-time migration into a repeated
+/// bill, stays well under `archive_worker::DEFAULT_BATCH_SIZE` (1500) so one
+/// coordinator pass can still hold a start's worth alongside ordinary work, and
+/// leaves the peak memory of a pass inside the bound that batch size was chosen
+/// for. Repositories nobody is waiting on drain from here; the ones somebody
+/// opens jump the queue through `queue::enqueue_archive_migration`.
+const ARCHIVE_MIGRATIONS_PER_START: usize = 500;
 
 #[tokio::main]
 async fn main() -> Result<()> {
@@ -107,10 +117,11 @@ async fn main() -> Result<()> {
     // Repositories still carrying an exact GitHub-API snapshot cannot be
     // refreshed by anything: the snapshot never ages out, the enqueue path
     // refuses them, and the hourly follower only selects archive-backed rows.
-    // Offering them for an archive backfill is what migrates them onto the
-    // followed path — after which they stay current on their own. Gated on the
-    // archive client because with it absent this same queue is drained by the
-    // stargazer fallback, which would re-paginate an already-exact snapshot.
+    // Offering them for an archive backfill splices archive activity onto the
+    // frozen exact curve and moves them onto the followed path — after which
+    // they stay current on their own. Gated on the archive client because with
+    // it absent this same queue is drained by the stargazer fallback, which
+    // would re-paginate an already-exact snapshot.
     if archive_client.is_some() {
         match gitdebt::queue::enqueue_archive_migrations(&db, ARCHIVE_MIGRATIONS_PER_START).await {
             Ok(0) => {}

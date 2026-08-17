@@ -9,10 +9,19 @@ export type BuildAnalyzeResponse = {
   history_kind:
     | "current_stargazers"
     | "public_star_actions"
+    | "stargazers_then_activity"
     | "unavailable";
   history_event_count: number;
   history_coverage_start: string | null;
   history_coverage_end: string | null;
+  /**
+   * Where a `stargazers_then_activity` series changes method; null on every
+   * other kind. Optional so an older cached snapshot still type-checks — the
+   * copy states the change without naming a day when it is absent, and naming
+   * the day is the whole point of the state, so it belongs in the build
+   * payload rather than only in the live one.
+   */
+  history_splice_at?: string | null;
   history_approximate: boolean;
   /**
    * Optional and additive: nothing that already reads this type breaks, and it

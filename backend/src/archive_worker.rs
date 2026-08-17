@@ -256,10 +256,25 @@ async fn prepare_job(
         }
 
         let state = state.context("repository metadata row was not persisted")?;
-        if state.exact_history_complete {
-            queue::complete(ctx.cache.db(), &repo).await?;
-            return Ok(None);
-        }
+        // A complete exact snapshot used to settle the job here as "nothing to
+        // do". Since GitHub restricted the stargazer list on 2026-07-20 that is
+        // exactly backwards: such a series can never advance again on its own,
+        // and an archive pass is the only thing that can move it. It does not
+        // overwrite the exact curve — the commit path splices archive activity
+        // onto it (`cache::commit_archive_backfill_window`) — so settling here
+        // would strand precisely the repositories a migration exists to rescue.
+        //
+        // Almost every job reaching this point is a migration the sweep or the
+        // on-demand offer asked for, and both want the backfill to run:
+        // `queue::enqueue` refuses a complete `github_api` row. It refuses it
+        // only when `metadata_fetched_at` is also set, though, so
+        // `worker::sweep_missing_metadata` can still enqueue a complete exact
+        // row whose metadata stamp is NULL, and that one now runs a backfill
+        // instead of settling once the metadata heals. That is a spend
+        // question rather than a correctness one, and the same one the
+        // migration sweep already answers: a date window costs the same
+        // whether one repository or five hundred share it, and these legacy
+        // rows fall in the same cold cursor cohort.
         Ok(Some(Prepared {
             repo: repo.clone(),
             state,
@@ -653,9 +668,10 @@ mod tests {
 
     #[test]
     fn healed_repos_skip_the_metadata_call() {
-        // Fully-stamped rows spend no GitHub budget in prepare: complete
-        // repos settle immediately, incomplete ones go straight to the
-        // BigQuery batch.
+        // Fully-stamped rows spend no GitHub budget in prepare: they go
+        // straight to the BigQuery batch, whether their exact history is
+        // complete (a migration, which splices onto it) or not (a cold
+        // backfill).
         assert!(!needs_metadata(Some(&state(
             Some(1),
             Some(10),

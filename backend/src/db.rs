@@ -104,7 +104,12 @@ const SCHEMA_MIGRATION_LOCK_ID: i64 = 0x6769_7464_6562_7401;
 /// Bump whenever [`SCHEMA`] gains a required table, column, constraint, or
 /// non-concurrent index. Once this revision is recorded, later process starts
 /// can avoid taking DDL locks against live worker transactions.
-const CURRENT_SCHEMA_VERSION: i32 = 4;
+///
+/// v5 adds `repos.history_splice_at` / `repos.history_splice_position` and the
+/// `spliced` branch of `active_repo_star_history`. Without the bump an already
+/// deployed v4 database skips the whole schema statement and every read of the
+/// new columns fails at runtime.
+const CURRENT_SCHEMA_VERSION: i32 = 5;
 
 /// Attempts at the schema transaction before startup fails. The statements
 /// are idempotent; retrying absorbs a `lock_timeout` abort caused by a
@@ -186,6 +191,16 @@ CREATE TABLE IF NOT EXISTS repos (
     history_observed_count BIGINT,
     history_coverage_start TIMESTAMPTZ,
     history_coverage_end   TIMESTAMPTZ,
+    -- Splice boundary for `history_source = 'spliced'`: the instant the exact
+    -- stargazer-list segment ends. Exact rows are used AT OR BEFORE it,
+    -- archive rows STRICTLY AFTER it, so the two never describe the same star.
+    history_splice_at      TIMESTAMPTZ,
+    -- The exact segment's highest `repo_stargazers.position`, captured with
+    -- the splice instant. `position` is only unique within one physical table,
+    -- and a spliced series draws from two whose sequences both start at 1, so
+    -- the view offsets archive positions by this value. Without it the two
+    -- halves collide and `ORDER BY position` interleaves them.
+    history_splice_position BIGINT,
     archive_complete      BOOLEAN NOT NULL DEFAULT FALSE,
     archive_fetched_at    TIMESTAMPTZ,
     archive_truncated_before BOOLEAN NOT NULL DEFAULT FALSE,
@@ -286,6 +301,26 @@ ALTER TABLE repos ADD COLUMN IF NOT EXISTS history_source         TEXT;
 ALTER TABLE repos ADD COLUMN IF NOT EXISTS history_observed_count BIGINT;
 ALTER TABLE repos ADD COLUMN IF NOT EXISTS history_coverage_start TIMESTAMPTZ;
 ALTER TABLE repos ADD COLUMN IF NOT EXISTS history_coverage_end   TIMESTAMPTZ;
+ALTER TABLE repos ADD COLUMN IF NOT EXISTS history_splice_at      TIMESTAMPTZ;
+ALTER TABLE repos ADD COLUMN IF NOT EXISTS history_splice_position BIGINT;
+-- A spliced row without a boundary selects nothing from either half of the
+-- view, which would present a complete repository as having no history at all.
+-- The writer can only ever set both together (`cache::commit_archive_backfill_
+-- window`); this makes that unrepresentable rather than merely intended.
+-- NOT VALID: enforced for every new and updated row without scanning the table
+-- at startup. No existing row can violate it — `spliced` is a new value.
+DO $$
+BEGIN
+    IF NOT EXISTS (
+        SELECT 1 FROM pg_constraint WHERE conname = 'repos_spliced_needs_boundary'
+    ) THEN
+        ALTER TABLE repos ADD CONSTRAINT repos_spliced_needs_boundary
+            CHECK (
+                history_source IS DISTINCT FROM 'spliced'
+                OR (history_splice_at IS NOT NULL AND history_splice_position IS NOT NULL)
+            ) NOT VALID;
+    END IF;
+END $$;
 ALTER TABLE repos ADD COLUMN IF NOT EXISTS archive_complete       BOOLEAN NOT NULL DEFAULT FALSE;
 ALTER TABLE repos ADD COLUMN IF NOT EXISTS archive_fetched_at     TIMESTAMPTZ;
 ALTER TABLE repos ADD COLUMN IF NOT EXISTS archive_truncated_before BOOLEAN NOT NULL DEFAULT FALSE;
@@ -344,6 +379,15 @@ CREATE TABLE IF NOT EXISTS leaderboard_snapshot_state (
 CREATE INDEX IF NOT EXISTS idx_leaderboard_snapshot_page
     ON leaderboard_snapshots (metric, window_days, rank);
 
+-- The selected star series per repository, as (repo, position, starred_at).
+--
+-- `position` is the series' own total order — `cache::get_repo_stargazers`
+-- reads `ORDER BY position`, and `get_repo_stargazers_since` uses it as the
+-- deterministic tiebreak between equal timestamps. Each physical table numbers
+-- its own rows from 1, so the third source below (which draws from both) must
+-- keep positions unique and increasing with time by offsetting the archive half
+-- past the exact half's last position. Nothing in the view may be allowed to
+-- emit two rows with the same (repo, position).
 CREATE OR REPLACE VIEW active_repo_star_history AS
     SELECT stars.repo, stars.position, stars.starred_at
     FROM repo_stargazers AS stars
@@ -353,7 +397,29 @@ CREATE OR REPLACE VIEW active_repo_star_history AS
     SELECT arrivals.repo, arrivals.position, arrivals.starred_at
     FROM repo_star_arrivals AS arrivals
     JOIN repos ON repos.repo = arrivals.repo
-    WHERE repos.history_source = 'gh_archive';
+    WHERE repos.history_source = 'gh_archive'
+    UNION ALL
+    -- Spliced, first half: the exact stargazer-list series through the instant
+    -- it stopped being able to advance. GitHub restricted that endpoint on
+    -- 2026-07-20, so this segment is frozen — but it is exact, and replacing it
+    -- with approximate archive activity would be a strict loss.
+    SELECT stars.repo, stars.position, stars.starred_at
+    FROM repo_stargazers AS stars
+    JOIN repos ON repos.repo = stars.repo
+    WHERE repos.history_source = 'spliced'
+      AND stars.starred_at <= repos.history_splice_at
+    UNION ALL
+    -- Spliced, second half: archive activity STRICTLY after the boundary, so a
+    -- star already counted by the exact half is never counted twice. The
+    -- offset is what keeps `position` a single total order across the two
+    -- tables; `repos_spliced_needs_boundary` guarantees it is never NULL here.
+    SELECT arrivals.repo,
+           arrivals.position + repos.history_splice_position AS position,
+           arrivals.starred_at
+    FROM repo_star_arrivals AS arrivals
+    JOIN repos ON repos.repo = arrivals.repo
+    WHERE repos.history_source = 'spliced'
+      AND arrivals.starred_at > repos.history_splice_at;
 
 -- Star-history fetch queue. Keyed by repo slug (owner/repo, lowercased).
 -- A repo is enqueued on a cold/stale/unknown lookup and drained by the
@@ -821,6 +887,8 @@ CREATE INDEX IF NOT EXISTS idx_login_repos_rank ON login_repos(login, rank);
 -- v1: initial schema. v2: timestamp columns moved from TEXT to TIMESTAMPTZ.
 -- v3: clear false repo tombstones created when restricted stargazer 404s
 --     were incorrectly treated as repository-metadata 404s.
+-- v5: `history_splice_at` / `history_splice_position` and the `spliced`
+--     branch of `active_repo_star_history`.
 CREATE TABLE IF NOT EXISTS schema_version (
     id           INTEGER PRIMARY KEY,
     version      INTEGER NOT NULL,
@@ -919,8 +987,8 @@ BEGIN
     END IF;
 END$$;
 UPDATE schema_version
-SET version = 4, applied_at = NOW()
-WHERE id = 1 AND version < 4;
+SET version = 5, applied_at = NOW()
+WHERE id = 1 AND version < 5;
 "#;
 
 /// Large-table indexes built with `CREATE INDEX CONCURRENTLY` *after* the
@@ -1743,6 +1811,76 @@ mod tests {
             }),
             "hourly and BigQuery overlap must deduplicate by archive event ID"
         );
+    }
+
+    /// The spliced source keeps an exact frozen series AND a live archive
+    /// tail, which means it is the one source that draws from two tables.
+    ///
+    /// `position` is the view's total order (`cache::get_repo_stargazers`
+    /// reads `ORDER BY position`), and each table numbers its own rows from one.
+    /// Emitting them unchanged would give one repository two rows at every low
+    /// position and shuffle the exact segment into the middle of the archive
+    /// tail — a chart that is wrong without any query failing. The offset is
+    /// therefore load-bearing, not cosmetic.
+    #[test]
+    fn spliced_view_keeps_position_a_single_total_order() {
+        assert!(SCHEMA.contains("repos.history_source = 'spliced'"));
+        // Exact rows AT OR BEFORE the boundary, archive rows STRICTLY after:
+        // a star at exactly the boundary belongs to the exact half only, so
+        // the two halves can never both claim it.
+        assert!(SCHEMA.contains("AND stars.starred_at <= repos.history_splice_at"));
+        assert!(SCHEMA.contains("AND arrivals.starred_at > repos.history_splice_at"));
+        assert!(
+            SCHEMA.contains("arrivals.position + repos.history_splice_position AS position"),
+            "the archive half must be offset past the exact half's last position"
+        );
+    }
+
+    /// A spliced row whose boundary is NULL selects nothing from either half,
+    /// so a complete repository would render as having no history. The
+    /// constraint makes that unrepresentable, and `NOT VALID` keeps startup
+    /// from scanning the table to learn what the new value already guarantees.
+    #[test]
+    fn spliced_rows_cannot_exist_without_a_boundary() {
+        assert!(SCHEMA.contains("CONSTRAINT repos_spliced_needs_boundary"));
+        assert!(
+            SCHEMA.contains("history_source IS DISTINCT FROM 'spliced'"),
+            "the check must exempt every non-spliced row"
+        );
+        assert!(
+            SCHEMA
+                .contains("history_splice_at IS NOT NULL AND history_splice_position IS NOT NULL")
+        );
+        assert!(
+            SCHEMA.contains(") NOT VALID;"),
+            "validating would take a table scan for a value no existing row can hold"
+        );
+        assert!(
+            SCHEMA.contains(
+                "SELECT 1 FROM pg_constraint WHERE conname = 'repos_spliced_needs_boundary'"
+            ),
+            "ADD CONSTRAINT is not idempotent on its own and this runs every start"
+        );
+    }
+
+    /// New columns are only reached by a process that actually runs the DDL,
+    /// and [`Db::schema_is_current`] skips it whenever the recorded revision
+    /// is already at [`CURRENT_SCHEMA_VERSION`]. A production database sitting
+    /// at v4 would therefore keep skipping, and the first read of
+    /// `history_splice_at` would fail with `column does not exist`.
+    #[test]
+    fn splice_columns_come_with_a_schema_revision_bump() {
+        for column in ["history_splice_at", "history_splice_position"] {
+            assert!(
+                SCHEMA.contains(&format!(
+                    "ALTER TABLE repos ADD COLUMN IF NOT EXISTS {column}"
+                )),
+                "existing installations need {column} added idempotently"
+            );
+        }
+        // A required column added without bumping the revision leaves
+        // already-deployed databases skipping the migration forever.
+        const { assert!(CURRENT_SCHEMA_VERSION >= 5) };
     }
 
     #[test]

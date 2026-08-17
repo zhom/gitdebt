@@ -16,6 +16,61 @@ use crate::gh_archive_hourly::{
 
 const HOURLY_COMMIT_LOCK: i64 = 0x6769_7464_6562_7402;
 
+// Every selector below matches `history_source IN ('gh_archive', 'spliced')`.
+//
+// `spliced` belongs there for the same reason `gh_archive` does: its tail IS
+// archive activity, and this follower is the only thing that advances it hour
+// by hour. Leaving it out would let a repository be migrated onto the spliced
+// path and then sit at its boundary forever — the migration would have bought
+// nothing at all, and silently, because every query still returns rows.
+// `every_follower_selector_reaches_spliced_repositories` keeps the three in
+// agreement.
+
+/// Repositories whose forward star activity this follower ingests.
+const TRACKED_REPOSITORY_IDS_SQL: &str = "SELECT DISTINCT github_id FROM repos \
+     WHERE github_id IS NOT NULL AND archive_complete = TRUE \
+       AND history_source IN ('gh_archive', 'spliced') AND NOT missing";
+
+/// Resolve the repositories an hour's events belong to. `DISTINCT ON` keeps
+/// one slug per numeric id when a repository has been renamed.
+const COMMIT_REPO_LOOKUP_SQL: &str = "SELECT DISTINCT ON (github_id) repo, github_id \
+     FROM repos WHERE github_id = ANY($1::BIGINT[]) \
+       AND archive_complete = TRUE AND history_source IN ('gh_archive', 'spliced') \
+       AND NOT missing \
+     ORDER BY github_id, metadata_fetched_at DESC NULLS LAST, repo";
+
+/// Coverage, not activity: a committed hour proves the follower saw every
+/// WatchEvent in it, so every tracked repository is current through that hour —
+/// including the ones that gained no stars. Stamping only the repositories that
+/// appeared in the hour left the long tail permanently "stale", so every view
+/// of them re-enqueued a history fetch that had nothing to do. The staleness
+/// bound keeps this to a fraction of the rows per pass instead of rewriting the
+/// whole table every hour.
+const COVERAGE_STAMP_SQL: &str = "UPDATE repos SET archive_fetched_at = NOW() \
+     WHERE archive_complete AND history_source IN ('gh_archive', 'spliced') AND NOT missing \
+       AND (archive_fetched_at IS NULL \
+            OR archive_fetched_at < NOW() - INTERVAL '6 hours')";
+
+/// Restate provenance from the series a reader actually gets.
+///
+/// `repo_star_arrivals` alone is the wrong source for a spliced repository: it
+/// holds the archive's full history back to 2011, while the published series
+/// uses the exact segment up to the boundary and arrivals only after it. Read
+/// from the table, COVERAGE START would jump back years and the event count
+/// would include stars the series never plots — and if the archive tail is
+/// empty, COVERAGE DATE would move *backwards* past the exact segment's end.
+const REPO_PROVENANCE_SQL: &str = "UPDATE repos SET archive_fetched_at = NOW(), \
+        history_observed_count = series.observed, \
+        history_coverage_start = series.coverage_start, \
+        history_coverage_end = series.coverage_end \
+     FROM ( \
+         SELECT COUNT(*)::BIGINT AS observed, \
+                MIN(starred_at) AS coverage_start, \
+                MAX(starred_at) AS coverage_end \
+         FROM active_repo_star_history WHERE repo = $1 \
+     ) AS series \
+     WHERE repos.repo = $1";
+
 /// Session advisory lock electing the single hourly follower across worker
 /// replicas. Commits were always idempotent under [`HOURLY_COMMIT_LOCK`];
 /// leadership additionally stops non-leaders from redundantly downloading
@@ -56,14 +111,10 @@ impl PostgresHourlyArchive {
 #[async_trait]
 impl TrackedRepositorySource for PostgresHourlyArchive {
     async fn tracked_repository_ids(&self) -> Result<BTreeSet<i64>, HourlyArchiveError> {
-        let ids: Vec<i64> = sqlx::query_scalar(
-            "SELECT DISTINCT github_id FROM repos \
-             WHERE github_id IS NOT NULL AND archive_complete = TRUE \
-               AND history_source = 'gh_archive' AND NOT missing",
-        )
-        .fetch_all(&self.db.pool)
-        .await
-        .map_err(repository_error)?;
+        let ids: Vec<i64> = sqlx::query_scalar(TRACKED_REPOSITORY_IDS_SQL)
+            .fetch_all(&self.db.pool)
+            .await
+            .map_err(repository_error)?;
         Ok(ids.into_iter().filter(|id| *id > 0).collect())
     }
 }
@@ -109,17 +160,11 @@ impl HourlyArchiveSink for PostgresHourlyArchive {
             .iter()
             .filter_map(|event| event.github_repo_id)
             .collect::<Vec<_>>();
-        let rows = sqlx::query(
-            "SELECT DISTINCT ON (github_id) repo, github_id \
-             FROM repos WHERE github_id = ANY($1::BIGINT[]) \
-               AND archive_complete = TRUE AND history_source = 'gh_archive' \
-               AND NOT missing \
-             ORDER BY github_id, metadata_fetched_at DESC NULLS LAST, repo",
-        )
-        .bind(&ids)
-        .fetch_all(&mut *tx)
-        .await
-        .map_err(sink_error)?;
+        let rows = sqlx::query(COMMIT_REPO_LOOKUP_SQL)
+            .bind(&ids)
+            .fetch_all(&mut *tx)
+            .await
+            .map_err(sink_error)?;
         let repo_by_id = rows
             .into_iter()
             .filter_map(|row| {
@@ -182,39 +227,17 @@ impl HourlyArchiveSink for PostgresHourlyArchive {
             .execute(&mut *tx)
             .await
             .map_err(sink_error)?;
-            sqlx::query(
-                "UPDATE repos SET archive_fetched_at = NOW(), \
-                    history_observed_count = (SELECT COUNT(*) FROM repo_star_arrivals \
-                                              WHERE repo = $1), \
-                    history_coverage_start = (SELECT MIN(starred_at) FROM repo_star_arrivals \
-                                              WHERE repo = $1), \
-                    history_coverage_end = (SELECT MAX(starred_at) FROM repo_star_arrivals \
-                                            WHERE repo = $1) \
-                 WHERE repo = $1",
-            )
-            .bind(&repo)
+            sqlx::query(REPO_PROVENANCE_SQL)
+                .bind(&repo)
+                .execute(&mut *tx)
+                .await
+                .map_err(sink_error)?;
+        }
+
+        sqlx::query(COVERAGE_STAMP_SQL)
             .execute(&mut *tx)
             .await
             .map_err(sink_error)?;
-        }
-
-        // Coverage, not activity: a committed hour proves the follower saw
-        // every WatchEvent in it, so every tracked archive-backed repository
-        // is current through that hour — including the ones that gained no
-        // stars. Stamping only the repositories that appeared in the hour left
-        // the long tail permanently "stale", so every view of them re-enqueued
-        // a history fetch that had nothing to do. The staleness bound keeps
-        // this to a fraction of the rows per pass instead of rewriting the
-        // whole table every hour.
-        sqlx::query(
-            "UPDATE repos SET archive_fetched_at = NOW() \
-             WHERE archive_complete AND history_source = 'gh_archive' AND NOT missing \
-               AND (archive_fetched_at IS NULL \
-                    OR archive_fetched_at < NOW() - INTERVAL '6 hours')",
-        )
-        .execute(&mut *tx)
-        .await
-        .map_err(sink_error)?;
 
         sqlx::query(
             "INSERT INTO gh_archive_hours \
@@ -399,6 +422,46 @@ mod tests {
                 assert_ne!(left, right);
             }
         }
+    }
+
+    /// Every selector in this follower must reach spliced repositories.
+    ///
+    /// This is the quiet failure mode of the whole splice: a repository is
+    /// migrated, its boundary is written, its chart looks right — and then
+    /// nothing ever advances the tail, because the follower that owns forward
+    /// ingestion is still asking for `history_source = 'gh_archive'` alone. No
+    /// query errors, no rows go missing, the curve just stops again. All three
+    /// selectors have to agree, so they are asserted together.
+    #[test]
+    fn every_follower_selector_reaches_spliced_repositories() {
+        const FOLLOWED: &str = "history_source IN ('gh_archive', 'spliced')";
+        for (name, sql) in [
+            ("tracked ids", TRACKED_REPOSITORY_IDS_SQL),
+            ("commit repo lookup", COMMIT_REPO_LOOKUP_SQL),
+            ("coverage stamp", COVERAGE_STAMP_SQL),
+        ] {
+            assert!(
+                sql.contains(FOLLOWED),
+                "{name} must select `{FOLLOWED}`: {sql}"
+            );
+            assert!(
+                !sql.contains("history_source = 'gh_archive'"),
+                "{name} still selects the archive source alone: {sql}"
+            );
+        }
+    }
+
+    /// The per-repository provenance restatement reads the published series,
+    /// not `repo_star_arrivals`. For a spliced repository that table also
+    /// holds every archive event from before the boundary, which the series
+    /// does not plot: counting it would inflate the event count and report a
+    /// COVERAGE START years before the series begins. Worse, an hour that adds
+    /// nothing after the boundary would move COVERAGE DATE *backwards*, past
+    /// the exact segment's own end.
+    #[test]
+    fn provenance_is_restated_from_the_published_series() {
+        assert!(REPO_PROVENANCE_SQL.contains("FROM active_repo_star_history WHERE repo = $1"));
+        assert!(!REPO_PROVENANCE_SQL.contains("repo_star_arrivals"));
     }
 
     #[test]

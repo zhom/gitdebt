@@ -22,7 +22,11 @@ import { cn } from "@/lib/utils";
 
 export type StarPoint = { date: string; stars: number };
 export type HistoryKind =
-  "current_stargazers" | "public_star_actions" | "unavailable";
+  | "current_stargazers"
+  | "public_star_actions"
+  /** Exact through `history_splice_at`, archive-derived after it. */
+  | "stargazers_then_activity"
+  | "unavailable";
 /**
  * `restricted` is a real terminal value the analyzer emits: GitHub serves the
  * repository's stargazer list only to its own admins and collaborators, so
@@ -51,6 +55,8 @@ export type AnalyzeResponse = {
   history_event_count: number;
   history_coverage_start: string | null;
   history_coverage_end: string | null;
+  /** Where a spliced series changes method; null on every other kind. */
+  history_splice_at?: string | null;
   history_approximate: boolean;
   history_status?: HistoryStatus;
   history_unavailable?: boolean;
@@ -472,15 +478,17 @@ export function RepoHero({ owner, repo, apiBase, initialData }: Props) {
         }))}
       />
 
-      {/* All five states, not just the archive one. An owner arriving at their
-          own frozen repository previously saw nothing at all here. */}
+      {/* Every state, not just the archive one. An owner arriving at their
+          own frozen repository previously saw nothing at all here. The panel
+          carries no sign-in action: for the two states that used to offer one,
+          the copy beside it says signing in changes nothing gitdebt can read,
+          and a button under that sentence only reads as a contradiction. */}
       {data && (
         <SeriesProvenance
           snapshot={data}
           slug={slug}
           variant="panel"
           headingId="star-history-provenance"
-          signInHref={`${apiBase}/auth/github/start?return_to=${encodeURIComponent(`/${slug}`)}`}
         />
       )}
 

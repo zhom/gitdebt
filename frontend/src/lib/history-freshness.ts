@@ -4,7 +4,8 @@
  * One boolean cannot say this honestly. Since GitHub restricted the stargazer
  * list to a repository's own admins and collaborators (July 2026), a chart can
  * be behind for reasons that are not interchangeable: the exact series stopped
- * on the day the endpoint closed; the approximate series is still flowing;
+ * on the day the endpoint closed; the approximate series is still flowing; the
+ * exact series stopped and approximate activity was spliced onto its end;
  * gitdebt was never able to read this repository at all. Each deserves a
  * different sentence, and none of them is the owner's fault — most owners have
  * no idea the endpoint changed.
@@ -17,11 +18,22 @@
  * older cached payload degrades to `unknown` rather than throwing. */
 export type HistorySnapshot = {
   history_complete?: boolean;
-  /** "current_stargazers" (exact) | "public_star_actions" (archive) | "unavailable" */
+  /**
+   * "current_stargazers" (exact) | "public_star_actions" (archive) |
+   * "stargazers_then_activity" (exact through the splice, archive after it) |
+   * "unavailable"
+   */
   history_kind?: string;
   history_approximate?: boolean;
   history_status?: string;
   history_coverage_end?: string | null;
+  /**
+   * Where a spliced series changes method: exact points at or before this
+   * instant, archive-derived points strictly after it. Optional like the rest —
+   * a payload that omits it still classifies as `spliced`, and the copy states
+   * the method change without naming the day rather than inventing one.
+   */
+  history_splice_at?: string | null;
   not_found?: boolean;
 };
 
@@ -32,6 +44,13 @@ export type HistoryFreshness =
   | { state: "exact_frozen"; through: Date | null }
   /** Archive-derived: approximate by nature (no unstars), still flowing. */
   | { state: "archive"; through: Date | null }
+  /**
+   * Exact up to `splicedAt`, archive-derived after it. Two methods in one line,
+   * which is exactly the case provenance exists to disclose: the head counts
+   * current stargazers and the tail counts star actions, so the curve does not
+   * mean the same thing on both sides of the join.
+   */
+  | { state: "spliced"; through: Date | null; splicedAt: Date | null }
   /** GitHub will not serve this repository's stargazers to gitdebt at all. */
   | { state: "restricted"; through: Date | null }
   /** Nothing to say yet: cold, queued, or a payload too old to classify. */
@@ -60,6 +79,14 @@ export function historyFreshness(snapshot: HistorySnapshot | null | undefined): 
 
   if (!snapshot.history_complete) return { state: "unknown", through: null };
 
+  // Before the archive branch, and keyed on the kind alone. A spliced series is
+  // approximate in its tail and therefore carries `history_approximate: true`,
+  // so the test below would otherwise swallow it and describe a curve that is
+  // mostly exact as if none of it were.
+  if (snapshot.history_kind === "stargazers_then_activity") {
+    return { state: "spliced", through, splicedAt: parseDate(snapshot.history_splice_at) };
+  }
+
   const archive =
     snapshot.history_approximate === true || snapshot.history_kind === "public_star_actions";
   if (archive) return { state: "archive", through };
@@ -73,9 +100,19 @@ export function historyFreshness(snapshot: HistorySnapshot | null | undefined): 
   return { state: "exact_current", through };
 }
 
-/** Do we have anything worth telling a reader? */
+/**
+ * Do we have anything worth telling a reader?
+ *
+ * `spliced` qualifies even though the series is healthy and still advancing:
+ * the line changes meaning partway along, and a reader who takes the tail for
+ * more of the same head is reading a different measurement than they think.
+ */
 export function needsNotice(freshness: HistoryFreshness): boolean {
-  return freshness.state === "exact_frozen" || freshness.state === "restricted";
+  return (
+    freshness.state === "exact_frozen" ||
+    freshness.state === "restricted" ||
+    freshness.state === "spliced"
+  );
 }
 
 const MONTH_DAY_YEAR: Intl.DateTimeFormatOptions = {
@@ -85,9 +122,43 @@ const MONTH_DAY_YEAR: Intl.DateTimeFormatOptions = {
   timeZone: "UTC",
 };
 
+/**
+ * A coverage instant in the reader's prose form. Two different instants share
+ * it — where coverage ends, and where a spliced series changes method — because
+ * a reader comparing them should not have to reconcile two date formats.
+ */
 export function formatThrough(through: Date | null): string | null {
   return through ? through.toLocaleDateString("en-US", MONTH_DAY_YEAR) : null;
 }
+
+/**
+ * Who the restriction shuts out, said from gitdebt's side of it.
+ *
+ * These sentences used to name the exception — "only to a repository's own
+ * admins and collaborators" — which is a true description of GitHub's rule and
+ * the wrong sentence to put in front of the one reader most likely to see it.
+ * A repository's own owner reads "admins and collaborators" as *so it should
+ * work for me*, signs in, and finds the chart still stopped, because gitdebt
+ * reads GitHub with its own application credentials and those administer
+ * nothing. Naming the people who can read the list, in a product that cannot,
+ * is an invitation to a door that does not exist.
+ *
+ * So: state the limit as it applies to gitdebt, and close the sign-in door in
+ * the same breath. No remedy is offered because there is none to offer — there
+ * is no repository connection flow, no endpoint, no install link and no grant
+ * field in the analyze payload — and no sentence hints that one may appear,
+ * which would be a promise this module cannot keep. The wording also has to
+ * survive being read beside the sign-in caption on the same card, which already
+ * says in as many words that signing in does not restore a stargazer read.
+ *
+ * The readers GitHub kept are one shared phrase rather than two hand-written
+ * ones, because `NO_SIGN_IN` says "not one of them" and every sentence it joins
+ * has to leave that pronoun the same antecedent to point at.
+ */
+const ADMINISTERING_APPS = "applications that administer the repository";
+const RESTRICTION = `GitHub restricted stargazer lists to ${ADMINISTERING_APPS}`;
+const NO_SIGN_IN =
+  "gitdebt is not one of them, and signing in — even as this repository's owner — does not change what gitdebt can read";
 
 /**
  * The notice copy.
@@ -100,26 +171,58 @@ export function formatThrough(through: Date | null): string | null {
  * Tone rule: this describes gitdebt's read access, never the owner's conduct.
  *
  * It also describes only what the product does TODAY. There is no repository
- * connection flow — no endpoint, no install link, no grant field in the analyze
- * payload — so no sentence here may offer connecting a repository as a
+ * connection flow, so no sentence here may offer connecting a repository as a
  * remedy the reader can take. It would be an invented capability, and it would
  * contradict both the privacy policy and the sign-in caption these sentences
  * are rendered beside. State the restriction; do not promise a way around it.
+ *
+ * The switch is exhaustive on purpose: `string | null` plus `strictNullChecks`
+ * makes a new unhandled state a compile error rather than a silent `undefined`.
  */
 export function noticeText(freshness: HistoryFreshness): string | null {
   const through = formatThrough(freshness.through);
-  const restriction =
-    "In July 2026 GitHub limited stargazer lists to a repository's own admins and collaborators";
   switch (freshness.state) {
     case "exact_frozen":
       return through
-        ? `Star history is complete through ${through}. ${restriction}, so gitdebt can no longer read new stars from that list and this chart stops there.`
-        : `${restriction}, so gitdebt can no longer read new stars from that list and this chart stops where it does.`;
+        ? `Star history is complete through ${through}. In July 2026 ${RESTRICTION}. ${NO_SIGN_IN}, so the exact series ends there.`
+        : `In July 2026 ${RESTRICTION}. ${NO_SIGN_IN}, so the exact series ends where it does.`;
     case "restricted":
-      return `GitHub serves this repository's stargazer list only to its own admins and collaborators, so gitdebt cannot read it.`;
-    default:
+      return `GitHub serves this repository's stargazer list only to ${ADMINISTERING_APPS}. ${NO_SIGN_IN}.`;
+    case "spliced":
+      return spliceNotice(freshness.splicedAt);
+    case "exact_current":
+    case "archive":
+    case "unknown":
       return null;
   }
+}
+
+/**
+ * The hardest sentence in this module.
+ *
+ * Four facts have to land at once, and three of them pull against each other:
+ *
+ *  1. The line changes method partway along, on a stated date. A curve whose
+ *     semantics change mid-line is precisely what provenance exists to
+ *     disclose, and it is invisible in the drawing.
+ *  2. The head counts *current stargazers*; the tail counts *star actions*.
+ *     Different measurements, not different resolutions of the same one.
+ *  3. The tail is an approximate read that does not record every star, so a
+ *     tail that flattens may be the source thinning and not the repository
+ *     losing momentum. Leaving this out lets an honest chart tell a lie about
+ *     somebody's project, which is the failure this whole state exists to fix.
+ *  4. None of that may be quantified. No count, no share, no gap: an archive
+ *     series counts re-stars and can exceed the repository's own star total, so
+ *     any figure would be wrong exactly where it looks most precise. "Does not
+ *     record every star" says *some are missing* and refuses to say how many,
+ *     which is the most that can be said truthfully.
+ */
+function spliceNotice(splicedAt: Date | null): string {
+  const at = formatThrough(splicedAt);
+  const head = at
+    ? `Two sources in one line, joined on ${at}. Every point up to that date is one current stargazer, timestamped, read from GitHub's stargazer list.`
+    : `Two sources in one line. Every point up to the join is one current stargazer, timestamped, read from GitHub's stargazer list.`;
+  return `${head} After it the series counts star actions instead: an approximate read that cannot see unstars and does not record every star, so a flatter tail can be the source thinning rather than this repository slowing.`;
 }
 
 /* ------------------------------------------------------------------------- *
@@ -131,8 +234,8 @@ export function noticeText(freshness: HistoryFreshness): string | null {
  * every one of these describes gitdebt's read access.
  *
  * They live here rather than in the component so the wording exists once and
- * is unit-testable without a DOM, and so `sourceDetail` can delegate the two
- * July-2026 sentences straight to `noticeText`.
+ * is unit-testable without a DOM, and so `sourceDetail` can delegate every
+ * exceptional-state sentence straight to `noticeText`.
  * ------------------------------------------------------------------------- */
 
 /** What produced the points. Not a judgement, a method. */
@@ -143,6 +246,11 @@ export function sourceLabel(freshness: HistoryFreshness): string {
       return "GitHub stargazer list";
     case "archive":
       return "Historical star data";
+    // Both sources, in the order the line uses them. Naming only one would be
+    // false about half the curve, and "then" is doing real work: it is the only
+    // part of the label that says the series changes method partway along.
+    case "spliced":
+      return "GitHub stargazer list, then historical star data";
     case "restricted":
       return "No readable source";
     case "unknown":
@@ -155,6 +263,10 @@ export function stateLabel(freshness: HistoryFreshness): string {
   switch (freshness.state) {
     case "exact_current":
     case "archive":
+    // A spliced series genuinely advances again — that is the whole point of
+    // splicing one. What changed is the method, and the method is the source
+    // label's job to say, not this one's.
+    case "spliced":
       return "Still updating";
     case "exact_frozen":
       return "No longer updating";
@@ -171,17 +283,23 @@ export function coverageLabel(freshness: HistoryFreshness): string {
   return through ? `Covers through ${through}` : "Coverage window not established";
 }
 
-/** The paragraph under the mark. Two states delegate, so they are never retyped. */
+/** The paragraph under the mark. Three states delegate, so they are never retyped. */
 export function sourceDetail(freshness: HistoryFreshness): string {
   switch (freshness.state) {
     case "exact_current":
       return "Every point is one star with its own timestamp, read from GitHub's stargazer list.";
     case "archive":
-      return "Rebuilt from historical star data. Star actions are recorded and unstars are not, so this is an attention signal rather than a net star count.";
+      // The second sentence is not decoration. Historical star data does not
+      // record every star, and how much it records has varied over time, so a
+      // flattening tail is as likely to be the source thinning as the
+      // repository slowing. Saying only "attention signal" leaves the reader
+      // to draw the wrong conclusion from the shape of the line.
+      return "Rebuilt from historical star data. Star actions are recorded and unstars are not, so this is an attention signal rather than a net star count — and it does not record every star, so a flatter stretch can be the source thinning rather than this repository slowing.";
     case "exact_frozen":
     case "restricted":
-      // `noticeText` is total for these two states; the fallback exists only so
-      // the return type stays a plain string, and it asserts nothing.
+    case "spliced":
+      // `noticeText` is total for these three states; the fallback exists only
+      // so the return type stays a plain string, and it asserts nothing.
       return noticeText(freshness) ?? UNESTABLISHED;
     case "unknown":
       return UNESTABLISHED;
@@ -206,6 +324,12 @@ export function sourceDensity(freshness: HistoryFreshness): number {
     case "exact_current":
     case "exact_frozen":
       return 0.85;
+    // Its own constant between the two it is made of, because it is made of
+    // both — not because anything was measured. Nothing here is a ratio of
+    // exact to approximate points; if it were, it would be the completeness
+    // score this whole module refuses to publish.
+    case "spliced":
+      return 0.65;
     case "archive":
       return 0.45;
     case "restricted":
@@ -216,5 +340,9 @@ export function sourceDensity(freshness: HistoryFreshness): number {
 
 /** True iff the series still receives points. Drives the mark's aperture. */
 export function seriesOpen(freshness: HistoryFreshness): boolean {
-  return freshness.state === "exact_current" || freshness.state === "archive";
+  return (
+    freshness.state === "exact_current" ||
+    freshness.state === "archive" ||
+    freshness.state === "spliced"
+  );
 }

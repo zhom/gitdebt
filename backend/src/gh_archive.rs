@@ -436,6 +436,28 @@ impl fmt::Debug for GhArchiveBigQueryClient {
     }
 }
 
+/// Whether this process's environment selects the GH Archive pipeline.
+///
+/// The api process never builds a client — it has nothing to query BigQuery
+/// for — but it does need to know which pipeline the workers are running,
+/// because that decides who drains `star_fetch_queue`. With GH Archive enabled
+/// the coordinator claims jobs and reads the corpus; with it disabled the same
+/// queue is drained by the stargazer-list fallback, which would re-paginate an
+/// exact snapshot that GitHub will not even serve any more. So a request path
+/// that enqueues a migration has to ask this first.
+///
+/// This is exactly the condition `gitdebt-worker` branches on: a configured
+/// environment that then fails to authenticate is fatal there, so "configured"
+/// and "running the archive pipeline" cannot disagree for long.
+///
+/// Answers from the environment alone — no network, no credentials — and
+/// caches, because the environment cannot change under a running process and
+/// this is called from a report path.
+pub fn is_configured() -> bool {
+    static CONFIGURED: std::sync::OnceLock<bool> = std::sync::OnceLock::new();
+    *CONFIGURED.get_or_init(|| matches!(GhArchiveConfig::from_env(), Ok(Some(_))))
+}
+
 impl GhArchiveBigQueryClient {
     /// Build an enabled client from environment configuration. Authentication
     /// is not attempted when `GH_ARCHIVE_ENABLED` is false.

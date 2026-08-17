@@ -50,8 +50,13 @@ pub struct StarExport {
     /// then empty — readers never trust partial data (see `cache.rs`).
     pub complete: bool,
     /// `current_stargazers` for a legacy exact snapshot,
-    /// `public_star_actions` for GH Archive WatchEvents.
+    /// `public_star_actions` for GH Archive WatchEvents, and
+    /// `stargazers_then_activity` for an exact snapshot with archive activity
+    /// spliced onto the instant it stopped being refreshable. The same three
+    /// values `/analyze` reports, from the same column.
     pub history_kind: String,
+    /// True whenever any part of `series` is archive activity — so it is set
+    /// for a spliced export even though most of that series is exact.
     pub approximate: bool,
     pub series: Vec<DayStat>,
 }

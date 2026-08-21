@@ -6,6 +6,29 @@ import { pathToFileURL } from "node:url";
 
 const DEFAULT_SITE = "https://gitdebt.com";
 
+/**
+ * The marker `[owner]/[repo].astro` puts on a page it de-indexed because the
+ * build could not read that repository's analyze snapshot — as opposed to the
+ * far more common, entirely legitimate "this repository has no history yet".
+ *
+ * Kept as a literal copy of `src/lib/repo-indexability.ts`: this script runs as
+ * plain `.mjs` under `node` with no type stripping, so it cannot import the
+ * module the pages use. `repo-indexability.test.mjs` asserts the two agree.
+ */
+export const BUILD_DEFECT_META = {
+  name: "gitdebt:build-defect",
+  unreachable: "snapshot-unreachable",
+};
+
+/** How many de-indexed routes a single report line will name before it stops. */
+const NAMED_ROUTE_LIMIT = 10;
+
+function namedRoutes(routes) {
+  const named = routes.slice(0, NAMED_ROUTE_LIMIT).join(", ");
+  const rest = routes.length - NAMED_ROUTE_LIMIT;
+  return rest > 0 ? `${named}, and ${rest} more` : named;
+}
+
 function walkFiles(directory, predicate) {
   if (!fs.existsSync(directory)) return [];
 
@@ -148,6 +171,12 @@ function pageData(distDir, filePath) {
     canonical,
     robots,
     noindex: isNoindex(robots),
+    // Not merely "noindex": noindex *because the build could not ask*. Folding
+    // this into the noindex total is what hid it — a build that reached nothing
+    // and a build where every repository was simply cold print the same number.
+    snapshotUnreachable:
+      metaContent(html, "name", BUILD_DEFECT_META.name) ===
+      BUILD_DEFECT_META.unreachable,
     h1Count: tags(html, "h1").length,
     jsonLd,
   };
@@ -294,6 +323,10 @@ export function pruneNoindexSitemapUrls({
 export function auditSeo({
   distDir,
   site = process.env.PUBLIC_SITE_URL ?? DEFAULT_SITE,
+  // The same switch the pages gate on. A build that declares itself production
+  // throws on an unreadable snapshot before the page is written, so a marker
+  // surviving into this output contradicts the declaration.
+  productionBuild = process.env.STATIC_CATALOG_REQUIRED === "1",
 }) {
   const absoluteDist = path.resolve(distDir);
   const errors = [];
@@ -304,7 +337,12 @@ export function auditSeo({
   if (!fs.existsSync(absoluteDist)) {
     return {
       pages: 0,
+      // Every other return path reports this, and the CLI prints it
+      // unconditionally; omitting it here printed "undefined indexable".
+      indexablePages: 0,
       sitemapUrls: 0,
+      unreachableSnapshots: 0,
+      unreachableRoutes: [],
       errors: [`Build output does not exist: ${absoluteDist}`],
       warnings,
     };
@@ -480,6 +518,23 @@ export function auditSeo({
     }
   }
 
+  // Reported on its own line rather than inside the noindex total, and an
+  // outright failure when the build claims to be production: the page-level
+  // throw should already have stopped it, so reaching here means that guard
+  // did not run, and the belt-and-braces cost of saying so is one comparison.
+  const unreachableRoutes = pages
+    .filter((page) => page.snapshotUnreachable)
+    .map((page) => page.route)
+    .sort();
+  if (productionBuild && unreachableRoutes.length > 0) {
+    errors.push(
+      `Static snapshot refresh failed for /api/repos/{owner}/{repo}/analyze on ` +
+        `${unreachableRoutes.length} page(s), which a production build ` +
+        `(STATIC_CATALOG_REQUIRED=1) must fail on rather than de-index: ` +
+        `${namedRoutes(unreachableRoutes)}`,
+    );
+  }
+
   const indexablePages = pages.filter((page) => !page.noindex);
   const sitemapRoutes = new Set(
     graph.pageUrls.flatMap((loc) => {
@@ -505,6 +560,8 @@ export function auditSeo({
     pages: pages.length,
     indexablePages: indexablePages.length,
     sitemapUrls: seenSitemapUrls.size,
+    unreachableSnapshots: unreachableRoutes.length,
+    unreachableRoutes,
     errors: [...new Set(errors)],
     warnings: [...new Set(warnings)],
   };
@@ -534,7 +591,13 @@ function parseArgs(argv) {
       throw new Error(`Unknown argument: ${arg}`);
     }
   }
-  return { distDir, site, prune, json };
+  return {
+    distDir,
+    site,
+    prune,
+    json,
+    productionBuild: process.env.STATIC_CATALOG_REQUIRED === "1",
+  };
 }
 
 function runCli() {
@@ -556,6 +619,23 @@ function runCli() {
       console.log(
         `Pruned ${pruned.pruned} noindex sitemap URLs across ${pruned.filesChanged} files`,
       );
+    }
+    // Its own line, above the warnings, because the noindex total it used to
+    // hide inside is a number a healthy build also prints.
+    if (result.unreachableSnapshots > 0) {
+      console.warn(
+        `BACKEND UNREACHABLE: ${result.unreachableSnapshots} of ${result.pages} ` +
+          `pages were de-indexed because this build could not read ` +
+          `/api/repos/{owner}/{repo}/analyze — not because those repositories ` +
+          `have no history`,
+      );
+      console.warn(`  ${namedRoutes(result.unreachableRoutes)}`);
+      if (!options.productionBuild) {
+        console.warn(
+          `  This build did not set STATIC_CATALOG_REQUIRED=1, so nothing ` +
+            `failed. A production build would have stopped at the first one.`,
+        );
+      }
     }
     for (const warning of result.warnings) console.warn(`warning: ${warning}`);
     for (const error of result.errors) console.error(`error: ${error}`);

@@ -38,6 +38,7 @@ import { categoriesForRepo, relatedRepos } from "@/data/categories";
 import { starFacts } from "@/lib/agent-prompt";
 import { historyFreshness, sourceLabel } from "@/lib/history-freshness";
 import { provenanceReadmeBlock } from "@/lib/provenance-embed";
+import { BUILD_DEFECT_META, repoIndexability } from "@/lib/repo-indexability";
 import { profileLogin } from "@/lib/static-routing.mjs";
 import {
   firstStarYear as historyFirstYear,
@@ -54,8 +55,15 @@ export async function getStaticPaths() {
 }
 
 const { owner: rawOwner, repo: rawRepo } = Astro.params;
-const { updatedAt = null } = Astro.props as { updatedAt?: string | null };
-const requiredSnapshot = Boolean(updatedAt && staticCatalogRequired());
+// A production build must publish a page it could actually read, full stop.
+// This used to also require a non-null `updatedAt` prop, which is the freshness
+// of the *catalog row* and says nothing about whether the backend answered.
+// In practice that gate was near-redundant in production — the API always
+// sends `updated_at`, and `compare/[category].astro` already awaits every
+// curated repository uncaught — so what it really did was make local and
+// preview builds silently de-index instead of failing loudly. Gating on the
+// build kind alone is both simpler and honest about what is being asserted.
+const requiredSnapshot = staticCatalogRequired();
 
 const validSlug = /^[A-Za-z0-9._-]+$/;
 if (!rawOwner || !rawRepo || !validSlug.test(rawOwner) || !validSlug.test(rawRepo)) {
@@ -122,15 +130,20 @@ try {
   fetchError = err instanceof Error ? err.message : String(err);
 }
 
+// Only an unreadable snapshot fails the build. A cold repository still answers
+// 200 with an empty `history`, so `data` is set and this throws nothing — the
+// page is published, de-indexed for the honest reason, and indexes itself on a
+// later build once history lands.
 if (
   requiredSnapshot &&
   !repoNotFound &&
   (!data || fetchError)
 ) {
   throw new Error(
-    `Static snapshot refresh failed for ${owner}/${repo}: ${
-      fetchError ?? "missing analysis data"
-    }`,
+    `Static snapshot refresh failed for ` +
+      `${apiBase}/api/repos/${owner}/${repo}/analyze: ${
+        fetchError ?? "the backend returned no analysis payload"
+      }`,
   );
 }
 
@@ -184,8 +197,17 @@ const description = data
 
 const ogImage = `${apiBase}/api/repos/${owner}/${repo}/og.png`;
 
-// Cold and failed pages stay out of search results until history is available.
-const noindex = data === null || fetchError !== null || !hasHistory;
+// Cold and failed pages stay out of search results until history is available —
+// the same robots meta for both, but no longer the same *reason*. "No history
+// yet" is a fact about the repository; "the build could not read a snapshot" is
+// a defect in this build, and only the second one gets a marker.
+const indexability = repoIndexability({
+  hasSnapshot: data !== null,
+  fetchError,
+  notFound: repoNotFound,
+  hasHistory,
+});
+const noindex = indexability.noindex;
 
 const faqs: { q: string; a: string }[] = [];
 if (data && hasHistory) {
@@ -382,6 +404,14 @@ const readmeBlock = provenanceReadmeBlock({
       noindex={noindex}
       jsonLd={jsonLd}
     />
+    {/* This page is de-indexed because the build could not read its snapshot,
+        not because the repository has nothing to show. `audit-seo` counts the
+        marker and reports it on its own line. A production build throws above
+        before such a page can be emitted, so the marker being here at all is
+        the proof that this build was not a production one. */}
+    {indexability.buildDefect && (
+      <meta name={BUILD_DEFECT_META.name} content={BUILD_DEFECT_META.unreachable} />
+    )}
   </head>
   <body>
     <div class="isolate flex min-h-dvh flex-col">

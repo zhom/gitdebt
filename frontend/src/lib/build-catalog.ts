@@ -4,6 +4,15 @@ import { profileLogin } from "@/lib/static-routing.mjs";
 
 export type CatalogRepo = {
   slug: string;
+  /**
+   * Freshness of the *catalog row*, and the sitemap's `<lastmod>` — nothing
+   * more. It is null for every curated repository the API catalog does not
+   * list, and null again for any catalog row whose `updated_at` is not a
+   * string, so it must never gate build-time correctness: doing that quietly
+   * exempts exactly the repositories the landing, category and comparison
+   * pages link to. `[owner]/[repo].astro` gates on `staticCatalogRequired()`
+   * alone for that reason, and is handed no props at all.
+   */
   updatedAt: string | null;
 };
 
@@ -182,12 +191,14 @@ export function loadBuildCatalog(): Promise<CatalogRepo[]> {
 
 export async function staticRepoPaths() {
   const repos = await loadBuildCatalog();
-  return repos.map(({ slug, updatedAt }) => {
+  return repos.map(({ slug }) => {
     const [owner, repo] = slug.split("/");
-    return {
-      params: { owner, repo },
-      props: { updatedAt },
-    };
+    // No props on purpose. `updatedAt` used to ride along and became the
+    // required-snapshot gate, which meant a curated repository absent from the
+    // API catalog was exempt from the one check that keeps an unreadable page
+    // out of production. The sitemap reads `updatedAt` from the catalog
+    // directly; the page has no business seeing it.
+    return { params: { owner, repo } };
   });
 }
 

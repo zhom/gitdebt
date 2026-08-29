@@ -963,7 +963,7 @@ async fn stat_dispatcher(
         }
         if format == OutputFormat::Gif {
             let encoded = crate::api::with_raster_permit(move || {
-                crate::animated_gif::encode_dither_loop(&svg, theme.bg)
+                crate::animated_gif::encode_media_gif(&svg, theme.bg)
             })
             .await?
             .map_err(ApiError::from)?;
@@ -1011,7 +1011,7 @@ async fn stat_dispatcher(
         StatKind::BusFactor => ensure_bus_factor_svg(&state, &full, theme, &theme_key).await?,
         StatKind::CommitTrend => ensure_commit_trend_svg(&state, &full, theme, &theme_key).await?,
     };
-    let mut svg = crate::texture::decorate(stat_svg_motion(animated_svg, q.animate()), theme);
+    let mut svg = stat_svg_motion(animated_svg, q.animate());
     if q.in_app() {
         svg = brand::without_embed_footer(svg);
     }
@@ -1022,7 +1022,7 @@ async fn stat_dispatcher(
             return Ok(gif_response_with_policy(&request_headers, cached, false));
         }
         let encoded = crate::api::with_raster_permit(move || {
-            crate::animated_gif::encode_dither_loop(&svg, theme.bg)
+            crate::animated_gif::encode_media_gif(&svg, theme.bg)
         })
         .await?
         .map_err(ApiError::from)?;

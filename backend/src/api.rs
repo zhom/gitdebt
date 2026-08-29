@@ -3127,7 +3127,7 @@ async fn user_stat_dispatcher(
             }
             UserStatFormat::Gif => {
                 let encoded = with_raster_permit(move || {
-                    crate::animated_gif::encode_dither_loop(&svg, theme.bg)
+                    crate::animated_gif::encode_media_gif(&svg, theme.bg)
                 })
                 .await?
                 .map_err(ApiError::from)?;
@@ -3180,7 +3180,7 @@ async fn user_stat_dispatcher(
             );
             let (bytes, short_ttl) = single_flight_gif(&state.raster_cache, gif_key, async move {
                 let encoded = with_raster_permit(move || {
-                    crate::animated_gif::encode_dither_loop(&svg, theme.bg)
+                    crate::animated_gif::encode_media_gif(&svg, theme.bg)
                 })
                 .await?
                 .map_err(ApiError::from)?;
@@ -3311,17 +3311,14 @@ async fn ensure_user_chart_svg(
     let agg = build_user_aggregate(state, &login).await?;
     let series = export::filter_points(&agg.series, &spec);
     let pending = agg.repos_included == 0 || series.is_empty();
-    let svg = crate::texture::decorate(
-        render_svg(
-            &series,
-            &ChartConfig {
-                repo: login,
-                ..ChartConfig::default()
-            },
-            theme,
-            &q.opts(),
-        ),
+    let svg = render_svg(
+        &series,
+        &ChartConfig {
+            repo: login,
+            ..ChartConfig::default()
+        },
         theme,
+        &q.opts(),
     );
     if pending {
         // Aggregate still filling (or the window is empty): short TTL,
@@ -4028,23 +4025,20 @@ async fn ensure_chart_svg(
         // but serve it short-TTL and never pin it in the 24h svg cache, so a
         // first view can't lock "no data" at origin + CDN for a day.
         let empty = series.is_empty();
-        let svg = crate::texture::decorate(
-            render_svg(
-                &series,
-                &ChartConfig {
-                    repo: repo_full,
-                    metric_label: if archive_activity {
-                        "public star actions"
-                    } else {
-                        "stars"
-                    }
-                    .to_string(),
-                    ..ChartConfig::default()
-                },
-                theme,
-                &q.opts(),
-            ),
+        let svg = render_svg(
+            &series,
+            &ChartConfig {
+                repo: repo_full,
+                metric_label: if archive_activity {
+                    "public star actions"
+                } else {
+                    "stars"
+                }
+                .to_string(),
+                ..ChartConfig::default()
+            },
             theme,
+            &q.opts(),
         );
         if empty {
             return Err(RenderMiss::Pending(svg));
@@ -4294,10 +4288,7 @@ async fn ensure_multi_svg(
             }
             series_per_repo.push((format!("{owner}/{repo}"), series));
         }
-        let svg = crate::texture::decorate(
-            render_multi_svg(&series_per_repo, &ChartConfig::default(), theme, &q.opts()),
-            theme,
-        );
+        let svg = render_multi_svg(&series_per_repo, &ChartConfig::default(), theme, &q.opts());
         if pending {
             return Err(RenderMiss::Pending(svg));
         }
@@ -4336,9 +4327,10 @@ async fn ensure_multi_raster(
     ))
 }
 
-/// Animated comparison export. The chart geometry and categorical line
-/// colors stay fixed; only the ordered-dither signal phase moves, so every
-/// frame remains a truthful rendering of the same Postgres-backed series.
+/// Comparison export as a GIF. A finished comparison sheet has no pen left
+/// to follow, so this encodes one still frame of it (see
+/// [`crate::animated_gif::encode_media_gif`]) rather than inventing motion:
+/// the frame is a truthful rendering of the same Postgres-backed series.
 async fn ensure_multi_gif(
     state: &ApiState,
     theme: &crate::theme::Theme,
@@ -4359,7 +4351,7 @@ async fn ensure_multi_gif(
     let backdrop = theme.bg;
     single_flight_gif(&state.raster_cache, key, async move {
         let encoded =
-            with_raster_permit(move || crate::animated_gif::encode_dither_loop(&svg, backdrop))
+            with_raster_permit(move || crate::animated_gif::encode_media_gif(&svg, backdrop))
                 .await?
                 .map_err(ApiError::from)?;
         let bytes = std::sync::Arc::new(encoded.bytes);
@@ -4633,19 +4625,16 @@ async fn ensure_usage_svg(
         // Cold repo (no cached star series yet): render the placeholder but
         // serve it short-TTL — never pin an empty overlay for 24h.
         let empty = stars.is_empty();
-        let svg = crate::texture::decorate(
-            render_overlay_svg(
-                &stars,
-                &cum,
-                &ChartConfig::default(),
-                &OverlayConfig {
-                    repo: bundle.repo_full,
-                    downloads_label: label,
-                },
-                theme,
-                &q.opts(),
-            ),
+        let svg = render_overlay_svg(
+            &stars,
+            &cum,
+            &ChartConfig::default(),
+            &OverlayConfig {
+                repo: bundle.repo_full,
+                downloads_label: label,
+            },
             theme,
+            &q.opts(),
         );
         if empty {
             return Err(RenderMiss::Pending(svg));
@@ -6655,7 +6644,7 @@ async fn ensure_user_card_gif(
     let backdrop = theme.bg;
     single_flight_gif(&state.raster_cache, key, async move {
         let encoded =
-            with_raster_permit(move || crate::animated_gif::encode_dither_loop(&svg, backdrop))
+            with_raster_permit(move || crate::animated_gif::encode_media_gif(&svg, backdrop))
                 .await?
                 .map_err(ApiError::from)?;
         let bytes = std::sync::Arc::new(encoded.bytes);
@@ -6724,7 +6713,7 @@ async fn ensure_repo_card_gif(
     let backdrop = theme.bg;
     single_flight_gif(&state.raster_cache, key, async move {
         let encoded =
-            with_raster_permit(move || crate::animated_gif::encode_dither_loop(&svg, backdrop))
+            with_raster_permit(move || crate::animated_gif::encode_media_gif(&svg, backdrop))
                 .await?
                 .map_err(ApiError::from)?;
         let bytes = std::sync::Arc::new(encoded.bytes);
@@ -9004,8 +8993,9 @@ mod tests {
         assert!(q.range_spec().unwrap().rebase);
         assert_eq!(q.gif_motion().unwrap(), "draw");
         assert!(
-            theme_for(ChartQuery::default().theme.as_deref()).dark,
-            "GIF/SVG default theme is dark"
+            !theme_for(ChartQuery::default().theme.as_deref()).dark,
+            "GIF/SVG default theme is light: the drawing is graphite on paper, \
+             and ?theme=dark opts into the second print"
         );
     }
 

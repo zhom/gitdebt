@@ -1,39 +1,34 @@
 ---
 export const prerender = true;
 
-import "@/styles/globals.css";
-
-import BaseHead from "@/components/BaseHead.astro";
+import Sheet from "@/layouts/Sheet.astro";
 import { ButtonLink } from "@/components/ButtonLink";
-import Seo from "@/components/Seo.astro";
-import SiteHeader from "@/components/SiteHeader.astro";
-import SiteFooter from "@/components/SiteFooter.astro";
-import { ComparisonModeGraphic } from "@/components/ComparisonModeGraphic";
-import { DitherField } from "@/components/DitherField";
 import { LandingRepoLookup } from "@/components/LandingRepoLookup";
-import { LiveRepos } from "@/components/LiveRepos";
 import { MomentumBoard } from "@/components/MomentumBoard";
-import { ReportLayerGraphic } from "@/components/ReportLayerGraphic";
-import { SeriesProvenance } from "@/components/SeriesProvenance";
+import { StarSheet } from "@/components/StarSheet";
 import { ThemeEmbedPreview } from "@/components/ThemeEmbedPreview";
 import { WarmRepos } from "@/components/WarmRepos";
 import {
   BODY,
   CAPTION,
-  EYEBROW,
+  FIELD,
   HEADING,
   LEAD,
   MEASURE,
   ROW,
-  ROW_BADGE,
   SECTION_ACTION,
   SECTION_HEADER,
-  TILE,
-  TILE_DESC,
-  TILE_TITLE,
+  TITLE,
 } from "@/components/style-tokens";
 import { CATEGORIES } from "@/data/categories";
+import { loadBuildRepoSnapshot } from "@/lib/build-repo-snapshot";
 import { heroMomentumRows, type LeaderboardResponse } from "@/lib/hero-momentum";
+import {
+  coverageLabel,
+  historyFreshness,
+  sourceLabel,
+  stateLabel,
+} from "@/lib/history-freshness";
 import { repoEmbedAssets } from "@/lib/readme-embeds";
 import { staticApiBase } from "@/lib/static-api-base";
 
@@ -41,14 +36,10 @@ const apiBase = staticApiBase();
 const site = (Astro.site ?? new URL("https://gitdebt.com")).href.replace(/\/$/, "");
 
 const title = "GitHub star history & repository health charts | gitdebt";
-// Distinguishing clause first, and short enough that `Seo.astro`'s 160-character
-// truncation never fires: the previous string was cut mid-enumeration.
 const description =
   "Star history for any public GitHub repo, plus what its commit history says about maintenance, ownership, repair load, and debt — as README-ready charts.";
 const ogImage = `${apiBase}/api/og.png`;
 
-// Stable node identities. `badges.astro` already points its `isPartOf` at
-// `{site}/#website`; without an `@id` here that reference dangles.
 const jsonLd = [
   {
     "@context": "https://schema.org",
@@ -68,11 +59,7 @@ const jsonLd = [
       "@type": "Organization",
       name: "Internet Technology Services LLC",
     },
-    offers: {
-      "@type": "Offer",
-      price: 0,
-      priceCurrency: "USD",
-    },
+    offers: { "@type": "Offer", price: 0, priceCurrency: "USD" },
   },
   {
     "@context": "https://schema.org",
@@ -84,11 +71,6 @@ const jsonLd = [
   },
 ];
 
-/**
- * Build-time JSON with the same retry shape `leaderboard.astro` uses. Every
- * failure path returns `null`: the landing page states a count or it states
- * nothing, and it never fails the build over a catalogue figure.
- */
 async function fetchJson<T>(url: string): Promise<T | null> {
   for (let attempt = 0; attempt < 3; attempt += 1) {
     try {
@@ -99,7 +81,6 @@ async function fetchJson<T>(url: string): Promise<T | null> {
       if (res.ok) return (await res.json()) as T;
       if (res.status < 500 && res.status !== 429) return null;
     } catch {}
-
     if (attempt < 2) {
       await new Promise((resolve) => setTimeout(resolve, 500 * 2 ** attempt));
     }
@@ -107,37 +88,47 @@ async function fetchJson<T>(url: string): Promise<T | null> {
   return null;
 }
 
-/**
- * One velocity board per window, at the deepest page the API allows. Depth is
- * what gives the merge overlap: a repository has to be ranked in more than one
- * window before its windows can be compared, which is what the trend arrow and
- * the bar's leading tip are read from.
- */
 const fetchBoard = (days: 1 | 7 | 30) =>
   fetchJson<LeaderboardResponse>(
     `${apiBase}/api/leaderboard.json?metric=velocity&window=${days}&per=100&page=0`,
   );
 
-const [analyzedRepos, monthBoard, weekBoard, dayBoard] = await Promise.all([
-  (async () => {
-    const result = await fetchJson<{ total?: number }>(
-      `${apiBase}/api/sitemap/repos?page=0&per=1`,
-    );
-    return typeof result?.total === "number" ? result.total : null;
-  })(),
-  fetchBoard(30),
-  fetchBoard(7),
-  fetchBoard(1),
-]);
-
 /**
- * The hero's board, baked here rather than fetched after mount.
+ * The hero draws a real repository's real star history.
  *
- * What stood here before was a client-only panel that opened as a 432px
- * "Connecting to live repository activity…" placeholder — the largest element
- * above the fold said nothing until JavaScript had run and a request had
- * returned. Eight rows is what balances the headline column beside it.
+ * This is the product doing its job in the first viewport rather than
+ * describing it. `facebook/react` is the example the rest of the site already
+ * uses — the report link, the embed catalogue — so the page stays consistent
+ * with itself, and the drawing is labelled with the repository it is of.
  */
+const HERO_REPO = "facebook/react";
+
+const [analyzedRepos, monthBoard, weekBoard, dayBoard, heroSnapshot] =
+  await Promise.all([
+    (async () => {
+      const result = await fetchJson<{ total?: number }>(
+        `${apiBase}/api/sitemap/repos?page=0&per=1`,
+      );
+      return typeof result?.total === "number" ? result.total : null;
+    })(),
+    fetchBoard(30),
+    fetchBoard(7),
+    fetchBoard(1),
+    loadBuildRepoSnapshot(HERO_REPO),
+  ]);
+
+const heroData = heroSnapshot.data;
+const heroHistory = heroData?.history ?? [];
+const heroFreshness = historyFreshness(heroData);
+const heroProvenance =
+  heroHistory.length > 1
+    ? {
+        source: sourceLabel(heroFreshness),
+        coverage: coverageLabel(heroFreshness),
+        state: stateLabel(heroFreshness),
+      }
+    : undefined;
+
 const HERO_BOARD_ROWS = 8;
 const heroRows = heroMomentumRows(
   {
@@ -148,379 +139,231 @@ const heroRows = heroMomentumRows(
   HERO_BOARD_ROWS,
 );
 
-// Both counts are derived from the embed library that renders /badges and is
-// byte-parity-locked to the Rust renderers, so neither can drift from what the
-// product actually ships.
-const embedAssets = repoEmbedAssets("facebook/react");
-const healthChartCount = embedAssets.filter(
-  (asset) => asset.group === "health",
-).length;
+const embedAssets = repoEmbedAssets(HERO_REPO);
+const healthChartCount = embedAssets.filter((a) => a.group === "health").length;
 const embedAssetCount = embedAssets.length;
 
 const nf = new Intl.NumberFormat("en-US");
-
-const countsLine = [
-  ...(analyzedRepos !== null
-    ? [`${nf.format(analyzedRepos)} repositories analyzed`]
-    : []),
-  `${healthChartCount} health charts`,
-  `${embedAssetCount} embeddable assets`,
-].join(" · ");
-
-// The board is baked at build time, so the honest freshness claim is the build
-// date — the same claim `/leaderboard` makes about the same daily snapshot.
 const boardUpdated = new Date().toLocaleDateString("en-US", {
   month: "short",
   day: "numeric",
   year: "numeric",
   timeZone: "UTC",
 });
-const boardCaption = [
-  "Ranked by stars gained in the last 30 days",
-  ...(analyzedRepos !== null
-    ? [`across ${nf.format(analyzedRepos)} analyzed repos`]
-    : []),
-  `updated ${boardUpdated}`,
-].join(" · ");
 
-const reportLayers = [
-  {
-    graphic: "stars" as const,
-    title: "Star history",
-    desc: "See when attention arrived. Compare launches by calendar date or from day zero in the comparison tool.",
-    link: "/compare",
-  },
-  {
-    graphic: "health" as const,
-    title: "Repository health",
-    desc: "Find maintenance cadence, file change frequency, fix-labelled changes, and recent TODO/FIXME movement.",
-    link: "/facebook/react",
-  },
-  {
-    graphic: "readme" as const,
-    title: "README stats",
-    desc: "Embed theme-aware SVG, PNG, WebP, and GIF charts that link back to the live report.",
-    link: "/badges",
-  },
-];
-
-const featuredCategorySlugs = [
+const featuredCategories = [
   "frontend-frameworks",
   "build-tools",
   "ai-coding-tools",
   "sql-databases",
-];
-const featuredCategories = featuredCategorySlugs.flatMap((slug) => {
-  const category = CATEGORIES.find((candidate) => candidate.slug === slug);
+].flatMap((slug) => {
+  const category = CATEGORIES.find((c) => c.slug === slug);
   return category ? [category] : [];
 });
-// Only the curated category rows remain on this page, so only their
-// repositories are worth warming.
 const landingWarmRepos = Array.from(
-  new Set(featuredCategories.flatMap((category) => category.repos)),
+  new Set(featuredCategories.flatMap((c) => c.repos)),
 );
+
+/** The four readings the commit history yields. Real, and named exactly. */
+const readings = [
+  {
+    field: "Maintenance",
+    value: "Commit cadence",
+    note: "How regularly work actually lands, not when the last release was tagged.",
+  },
+  {
+    field: "Ownership",
+    value: "Author concentration",
+    note: "Whether the work is spread across a team or resting on one person.",
+  },
+  {
+    field: "Repair load",
+    value: "Fix-labelled share",
+    note: "How much of recent work is fixing rather than building.",
+  },
+  {
+    field: "Debt markers",
+    value: "TODO / FIXME movement",
+    note: "Whether the markers left in the code are being cleared or accumulating.",
+  },
+];
 ---
 
-<!doctype html>
-<html lang="en">
-  <head>
-    <BaseHead />
-    <Seo
-      title={title}
-      description={description}
-      canonicalPath="/"
-      ogImage={ogImage}
-      jsonLd={jsonLd}
-    />
-  </head>
-  <body>
-    <div class="isolate flex min-h-dvh flex-col">
-      <SiteHeader />
+<Sheet
+  title={title}
+  description={description}
+  canonicalPath="/"
+  ogImage={ogImage}
+  jsonLd={jsonLd}
+>
+  {/* ── The sheet. The drawing owns the fold; the words are lettered on it. ── */}
+  <section class="registered border-b border-rule bg-paper">
+    <div class="mx-auto max-w-6xl px-6 pt-14 pb-10 sm:pt-20">
+      <div class="grid gap-x-12 gap-y-10 lg:grid-cols-[minmax(0,1fr)_20rem] lg:items-end">
+        {/*
+          No terminal punctuation. The drawing's hand sets its full stop as an
+          open ring — authentic to a face built from modules, and unmistakable
+          for a CJK full stop at the end of a sentence. A two-line display
+          headline does not need the periods: the line break separates the
+          clauses, which is ordinary display typography and sidesteps the one
+          glyph in this face that fights its own reading.
+        */}
+        <h1 class={TITLE}>
+          Stars say a repository is popular<br />
+          Its commits say whether it is alive
+        </h1>
 
-      <main id="main-content" class="flex-1 bg-background text-foreground">
-        <section id="top" class="relative isolate overflow-hidden">
-          <DitherField client:idle />
-          <div class="mx-auto max-w-6xl px-6 py-10 sm:py-14 lg:py-16">
-            <div
-              class:list={[
-                "grid gap-x-12 gap-y-10 lg:items-center",
-                // Only split the hero when there is a board to put in the second
-                // column. A failed leaderboard fetch collapses it to one column
-                // rather than leaving an empty panel beside the headline.
-                heroRows.length > 0 &&
-                  "lg:grid-cols-[minmax(0,1.08fr)_minmax(24rem,0.92fr)]",
-              ]}
-            >
-              <div class="min-w-0">
-                <p class="dither-chip reveal" style="--reveal-delay:0ms">
-                  <span
-                    class="size-1.5 shrink-0 rounded-full bg-[var(--swatch-green)]"
-                    aria-hidden="true"></span>
-                  Built from public GitHub data
-                </p>
-                <h1
-                  class="reveal mt-5 max-w-[18ch] text-3xl tracking-tight text-balance sm:text-4xl lg:text-5xl"
-                  style="--reveal-delay:90ms"
-                >
-                  Star history and repo health for any GitHub repo.
-                </h1>
-                <p
-                  class:list={[
-                    "reveal mt-4 leading-relaxed text-pretty text-muted-foreground",
-                    LEAD,
-                  ]}
-                  style="--reveal-delay:180ms"
-                >
-                  One live report per repository: the star curve, where it was
-                  read from, and what the commit history says about maintenance
-                  and repair load.
-                </p>
-
-                <div
-                  id="lookup"
-                  class="reveal mt-7 scroll-mt-24"
-                  style="--reveal-delay:260ms"
-                >
-                  <LandingRepoLookup client:load />
-                </div>
-              </div>
-
-              {heroRows.length > 0 && (
-                <div class="reveal min-w-0" style="--reveal-delay:340ms">
-                  <div class={SECTION_HEADER}>
-                    <p class={EYEBROW}>Moving now</p>
-                    <a href="/leaderboard" class={SECTION_ACTION}>
-                      full leaderboard
-                      <span
-                        aria-hidden="true"
-                        class="transition-transform duration-150 group-hover:translate-x-0.5 motion-reduce:transition-none"
-                        >→</span
-                      >
-                    </a>
-                  </div>
-                  <div class="mt-3">
-                    <MomentumBoard
-                      client:visible
-                      variant="compact"
-                      rows={heroRows}
-                    />
-                  </div>
-                  <p class:list={["mt-3", CAPTION]}>{boardCaption}</p>
-                </div>
-              )}
-            </div>
+        {/*
+          The lookup is the drawing's input field, not a hero CTA. It is
+          labelled the way a field on a drawing is labelled, and it sits under
+          the title rather than in a panel floated to the right — that
+          arrangement is the one every tool ships and it is not this one.
+        */}
+        <div id="lookup" class="scroll-mt-24 lg:pb-1">
+          <p class={FIELD}>Repository</p>
+          <div class="mt-2.5">
+            <LandingRepoLookup client:load />
           </div>
-        </section>
-
-        <div class="mx-auto max-w-6xl px-6">
-          <section
-            id="health"
-            class="mt-16 scroll-mt-24 border-t border-border/60 pt-12"
-          >
-            <div class={SECTION_HEADER}>
-              <h2 class={HEADING}>
-                Stars say it’s popular. The commit history says if it’s healthy.
-              </h2>
-              <a href="#lookup" class={SECTION_ACTION}>
-                score your repo
-                <span
-                  aria-hidden="true"
-                  class="transition-transform duration-150 group-hover:translate-x-0.5 motion-reduce:transition-none"
-                  >→</span
-                >
-              </a>
-            </div>
-            <p class:list={["mt-2", BODY, MEASURE]}>
-              Four readings from a repository's own commit history: maintenance,
-              ownership, repair load, and debt markers. Open any repository's
-              report to see them.
-            </p>
-          </section>
-
-          <section
-            id="live"
-            class="mt-16 scroll-mt-24 border-t border-border/60 pt-12"
-          >
-            <div class={SECTION_HEADER}>
-              <h2 class={HEADING}>Your live repositories</h2>
-              <a href="/leaderboard" class={SECTION_ACTION}>
-                leaderboard
-                <span
-                  aria-hidden="true"
-                  class="transition-transform duration-150 group-hover:translate-x-0.5 motion-reduce:transition-none"
-                  >→</span
-                >
-              </a>
-            </div>
-            <p class:list={["mt-2", BODY, MEASURE]}>
-              Repositories connected to your account. Nothing else is listed
-              here.
-            </p>
-
-            <div class="mt-8">
-              <LiveRepos client:load apiBase={apiBase} />
-            </div>
-          </section>
-
-          <section
-            id="how-it-works"
-            class="mt-16 scroll-mt-24 border-t border-border/60 pt-12"
-          >
-            <div class={SECTION_HEADER}>
-              <h2 class={HEADING}>Popularity, momentum, and maintenance</h2>
-              <a href="/facebook/react" class={SECTION_ACTION}>
-                see a full report
-                <span
-                  aria-hidden="true"
-                  class="transition-transform duration-150 group-hover:translate-x-0.5 motion-reduce:transition-none"
-                  >→</span
-                >
-              </a>
-            </div>
-
-            <SeriesProvenance
-              client:visible
-              variant="explainer"
-              className="mt-6"
-            />
-
-            <ul
-              id="features"
-              role="list"
-              class="mt-8 grid scroll-mt-24 gap-x-12 gap-y-10 sm:grid-cols-3"
-            >
-              {reportLayers.map((layer) => (
-                <li>
-                  <a href={layer.link} class={TILE}>
-                    <div
-                      inert
-                      class="flex h-24 items-center overflow-hidden opacity-80 transition-opacity duration-200 group-hover:opacity-100 motion-reduce:transition-none"
-                    >
-                      <ReportLayerGraphic client:visible kind={layer.graphic} />
-                    </div>
-                    <h3 class={TILE_TITLE}>{layer.title}</h3>
-                    <p class={TILE_DESC}>{layer.desc}</p>
-                  </a>
-                </li>
-              ))}
-            </ul>
-          </section>
-
-          <section
-            id="compare"
-            class="mt-16 scroll-mt-24 border-t border-border/60 pt-12"
-          >
-            <div class={SECTION_HEADER}>
-              <h2 class={HEADING}>Compare growth, not just totals</h2>
-              <a href="/compare" class={SECTION_ACTION}>
-                comparison builder
-                <span
-                  aria-hidden="true"
-                  class="transition-transform duration-150 group-hover:translate-x-0.5 motion-reduce:transition-none"
-                  >→</span
-                >
-              </a>
-            </div>
-            <p class:list={["mt-2", BODY, MEASURE]}>
-              Put up to eight GitHub star histories on one chart. Switch
-              between calendar time and equal-start growth.
-            </p>
-
-            <div class="mt-8 grid gap-x-12 gap-y-10 lg:grid-cols-[1.12fr_0.88fr] lg:items-start">
-              <ComparisonModeGraphic client:idle />
-
-              <div class="grid gap-x-10 gap-y-8 sm:grid-cols-2 lg:grid-cols-1">
-                <div>
-                  <p class={EYEBROW}>Curated fields</p>
-                  <ul role="list" class="mt-3">
-                    {featuredCategories.map((category) => (
-                      <li>
-                        <a
-                          href={`/compare/${category.slug}`}
-                          data-warm-repos={category.repos.join(",")}
-                          class={ROW}
-                        >
-                          <span class="min-w-0 flex-1 truncate">
-                            {category.name}
-                          </span>
-                          <span class={ROW_BADGE}>{category.repos.length}</span>
-                        </a>
-                      </li>
-                    ))}
-                  </ul>
-                </div>
-              </div>
-            </div>
-          </section>
-
-          <section
-            id="share"
-            class="mt-16 scroll-mt-24 border-t border-border/60 pt-12"
-          >
-            <div class={SECTION_HEADER}>
-              <h2 class={HEADING}>README stats, ready to paste</h2>
-              <a href="/badges" class={SECTION_ACTION}>
-                badge studio
-                <span
-                  aria-hidden="true"
-                  class="transition-transform duration-150 group-hover:translate-x-0.5 motion-reduce:transition-none"
-                  >→</span
-                >
-              </a>
-            </div>
-            <p class:list={["mt-2", BODY, MEASURE]}>
-              Add star history, health cards, and badges to any GitHub README
-              with a theme-aware <code class="font-mono text-[12px] text-foreground"
-                >&lt;picture&gt;</code
-              > snippet.
-            </p>
-
-            <div class="mt-8 grid gap-x-12 gap-y-10 lg:grid-cols-[1.08fr_0.92fr] lg:items-start">
-              <ThemeEmbedPreview client:idle />
-
-              <div>
-                <p class={EYEBROW}>What you paste</p>
-                <ul role="list" class:list={["mt-3 space-y-2", BODY]}>
-                  <li>One snippet, light and dark variants behind it.</li>
-                  <li>Cacheable image URLs; attribution stays on the link.</li>
-                  <li>Static by default — animation is always explicit.</li>
-                </ul>
-              </div>
-            </div>
-          </section>
         </div>
+      </div>
 
-        <section
-          class="relative isolate mt-16 overflow-hidden border-t border-border/60"
-        >
-          <DitherField
-            client:idle
-            render="static"
-            opacity={0.14}
-            vignette={0.7}
-            colors={["#12161f", "#1d2b45"]}
-          />
-          <div class="mx-auto flex max-w-6xl flex-col gap-6 px-6 py-10 sm:flex-row sm:items-end sm:justify-between">
-            <div>
-              <h2 class={HEADING}>Look up any public repository</h2>
-              <p class:list={["mt-2", BODY, MEASURE]}>{countsLine}</p>
-            </div>
-            <ButtonLink
-              client:visible
-              href="#lookup"
-              variant="outline"
-              size="lg"
-              pulse
-            >
-              Analyze a repository
-            </ButtonLink>
-          </div>
-        </section>
-
-        <WarmRepos client:load apiBase={apiBase} repos={landingWarmRepos} />
-      </main>
-
-      <SiteFooter showExtensionLink={false} />
+      <p class:list={["mt-6", LEAD, MEASURE]}>
+        One drawing per repository: the star curve, where it was read from, and
+        what the commit history says about maintenance and repair load.
+      </p>
     </div>
-  </body>
-</html>
+
+    {/*
+      The trace, full width. It inks in along its own measured length, and the
+      pointer re-dimensions it: move along the curve and the leader follows,
+      measuring a real sampled datum rather than an interpolated one.
+    */}
+    {heroHistory.length > 1 && (
+      <div class="mx-auto max-w-6xl px-6 pb-12">
+        <div class={SECTION_HEADER}>
+          <p class={FIELD}>Drawing of — {HERO_REPO}</p>
+          <a href={`/${HERO_REPO}`} class={SECTION_ACTION}>
+            open the full report
+          </a>
+        </div>
+        <div class="mt-4">
+          <StarSheet
+            client:load
+            repo={HERO_REPO}
+            history={heroHistory}
+            provenance={heroProvenance}
+          />
+        </div>
+      </div>
+    )}
+  </section>
+
+  {/* ── What the commits say ─────────────────────────────────────────────── */}
+  <section id="how-it-works" class="scroll-mt-24 border-b border-rule bg-table">
+    <div class="mx-auto max-w-6xl px-6 py-16">
+      <h2 class={HEADING}>
+        Four readings taken from the repository's own commit history
+      </h2>
+      <p class:list={["mt-3", BODY, MEASURE]}>
+        None of these come from stars. They are measured from commits, which is
+        why they can disagree with the star curve — and why it matters when they
+        do.
+      </p>
+
+      <dl class="mt-10 grid grid-cols-1 border border-rule-strong bg-paper sm:grid-cols-2 lg:grid-cols-4 divide-y sm:divide-y-0 lg:divide-x divide-rule">
+        {
+          readings.map((reading) => (
+            <div class="p-5">
+              <dt class={FIELD}>{reading.field}</dt>
+              <dd class="mt-2.5 font-draft text-[1.0625rem] text-ink">
+                {reading.value}
+              </dd>
+              <dd class:list={["mt-2", CAPTION]}>{reading.note}</dd>
+            </div>
+          ))
+        }
+      </dl>
+
+      <div class="mt-8">
+        <ButtonLink href={`/${HERO_REPO}`} variant="primary">
+          See all four on a real repository
+        </ButtonLink>
+      </div>
+    </div>
+  </section>
+
+  {/* ── Moving now ───────────────────────────────────────────────────────── */}
+  {heroRows.length > 0 && (
+    <section class="border-b border-rule bg-paper">
+      <div class="mx-auto max-w-6xl px-6 py-16">
+        <div class={SECTION_HEADER}>
+          <h2 class={HEADING}>Moving now</h2>
+          <a href="/leaderboard" class={SECTION_ACTION}>full leaderboard</a>
+        </div>
+        <p class:list={["mt-3", CAPTION]}>
+          Ranked by stars gained in the last 30 days
+          {analyzedRepos !== null && ` across ${nf.format(analyzedRepos)} analyzed repositories`}
+          {` · updated ${boardUpdated}`}
+        </p>
+        <div class="mt-6">
+          <MomentumBoard client:visible variant="compact" rows={heroRows} />
+        </div>
+      </div>
+    </section>
+  )}
+
+  {/* ── Compare ──────────────────────────────────────────────────────────── */}
+  <section id="compare" class="scroll-mt-24 border-b border-rule bg-table">
+    <div class="mx-auto max-w-6xl px-6 py-16">
+      <div class={SECTION_HEADER}>
+        <h2 class={HEADING}>Compare growth, not just totals</h2>
+        <a href="/compare" class={SECTION_ACTION}>comparison builder</a>
+      </div>
+      <p class:list={["mt-3", BODY, MEASURE]}>
+        Put up to eight star histories on one drawing. Switch between calendar
+        time and equal-start growth, so a project launched last year can be read
+        against one launched in 2015.
+      </p>
+
+      <ul role="list" class="mt-8 grid gap-px border border-rule-strong bg-rule sm:grid-cols-2 lg:grid-cols-4">
+        {
+          featuredCategories.map((category) => (
+            <li class="bg-paper">
+              <a
+                href={`/compare/${category.slug}`}
+                data-warm-repos={category.repos.join(",")}
+                class:list={[ROW, "min-h-14 justify-between"]}
+              >
+                <span class="min-w-0 flex-1 truncate">{category.name}</span>
+                <span class="font-mono text-[0.75rem] tabular-nums text-ink-3">
+                  {category.repos.length}
+                </span>
+              </a>
+            </li>
+          ))
+        }
+      </ul>
+    </div>
+  </section>
+
+  {/* ── README embeds ────────────────────────────────────────────────────── */}
+  <section id="share" class="scroll-mt-24 bg-paper">
+    <div class="mx-auto max-w-6xl px-6 py-16">
+      <div class={SECTION_HEADER}>
+        <h2 class={HEADING}>README charts, ready to paste</h2>
+        <a href="/badges" class={SECTION_ACTION}>badge studio</a>
+      </div>
+      <p class:list={["mt-3", BODY, MEASURE]}>
+        {healthChartCount} health charts and {embedAssetCount} embeddable assets
+        in total. One snippet carries a light and a dark drawing behind it, and
+        every URL is cacheable and renders without JavaScript.
+      </p>
+
+      <div class="mt-8">
+        <ThemeEmbedPreview client:idle />
+      </div>
+    </div>
+  </section>
+
+  <WarmRepos client:load apiBase={apiBase} repos={landingWarmRepos} />
+</Sheet>

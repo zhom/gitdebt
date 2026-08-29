@@ -4,8 +4,41 @@ gitdebt is an open-source GitHub star-history and repository-health analytics
 tool. The backend is Rust/Axum/Postgres built as two binaries — `gitdebt-api`
 serves HTTP and `gitdebt-worker` runs ingestion and analysis; any replica
 count of either is safe. The frontend is static Astro/React, and `extension/`
-is a zero-build MV3 browser extension. The visual system is dark-first dither:
-dark is the default theme for the site and for server-rendered assets.
+is a zero-build MV3 browser extension. The visual system is a light-first
+dimensioned technical drawing; light is the default theme for the site and for
+server-rendered assets.
+
+## Design system
+
+The product measures a repository, so every surface is drawn as a technical
+drawing of one. `DESIGN.md` is the full record; these are the rules that a
+change can silently break.
+
+- **Every line terminates on something real.** A dimension line spans two
+  measured points and carries a value; a leader points at a datum; a frame
+  encloses a sheet. A rule that measures nothing, separates nothing and
+  encloses nothing does not belong on the sheet. There is no page grid, no
+  graph paper, no texture, no gradient, and no glow anywhere in the product.
+- **One saturated colour.** Drafting red (`#cc291f` light, `#f0674e` dark) is
+  spent only on a measured value and its terminators, on the primary data
+  trace, and on at most one primary action per surface. It is never a tag, a
+  status dot, or a category colour. Everything else is graphite in three steps.
+- **Three type voices.** Format 1452 (self-hosted, OFL) letters the drawing —
+  headings, field labels, measured values. `system-ui` carries prose. Geist
+  Mono carries data. A caption is prose set small, not a field label; keeping
+  those distinct is what stops one tracked-caps costume landing on every short
+  string.
+- **Square, with one cut.** Everything is square except a 10px chamfer on the
+  bottom-right of a panel and of the primary action. Depth comes from the
+  paper/table step and from line weight, not from shadow.
+- **Content is never gated on an animation.** Nothing starts at `opacity: 0`
+  waiting for JavaScript, a timeline, or an observer. Charts render as
+  server-side SVG plus a screen-reader table, so the data is in the markup
+  before any script runs. Motion is the pen travelling over a finished drawing,
+  and every animation resolves instantly under `prefers-reduced-motion`.
+- The site's `globals.css` holds the palette in oklch and `backend/src/theme.rs`
+  holds the same colours as hex. They must not drift: if they do, a chart stops
+  belonging to the page that embeds it.
 
 ## Product boundary
 

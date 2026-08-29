@@ -1,15 +1,10 @@
 ---
 export const prerender = true;
 
-import "@/styles/globals.css";
-import BaseHead from "@/components/BaseHead.astro";
-import Seo from "@/components/Seo.astro";
-import SiteHeader from "@/components/SiteHeader.astro";
-import SiteFooter from "@/components/SiteFooter.astro";
-import { DitherField } from "@/components/DitherField";
+import Sheet from "@/layouts/Sheet.astro";
 import { LiveRepoReport } from "@/components/LiveRepoReport";
 import { SeriesProvenance } from "@/components/SeriesProvenance";
-import { BODY, MEASURE, PANEL_PADDED } from "@/components/style-tokens";
+import { BODY, CAPTION, MEASURE, PANEL, TITLE } from "@/components/style-tokens";
 import { staticApiBase } from "@/lib/static-api-base";
 
 const apiBase = staticApiBase();
@@ -19,73 +14,70 @@ const apiBase = staticApiBase();
 // including the one whose missing static page brought the agent here.
 const agentMarkdown = `${apiBase}/api/md/{owner}/{repo}`;
 
+/**
+ * The served title stays "Page not found", and that is correct.
+ *
+ * This document is what the host returns for a genuinely unmatched path, so the
+ * HTML a crawler reads must say so; the route is `noindex` for the same reason.
+ * Its most common *live* state is different — a public repository that is not
+ * in the static catalog, where the island below renders a full report — and the
+ * island retitles the document once it knows what it resolved. This page does
+ * not compete with that: it renders no heading of its own except in the one
+ * state where the island cannot run at all.
+ */
 const title = "Page not found · gitdebt";
 const description =
   "We couldn't find that repo or page. Search any GitHub owner/repo to chart its star history on gitdebt.";
 const ogImage = `${apiBase}/api/og.png`;
 ---
 
-<!doctype html>
-<html lang="en">
-  <head>
-    <BaseHead />
-    <Seo
-      title={title}
-      description={description}
-      canonicalPath="/404"
-      ogImage={ogImage}
-      noindex={true}
-    />
-    <meta name="gitdebt-route-fallback" content="missing-repo" />
-    <meta name="gitdebt-agent-markdown" content={agentMarkdown} />
-  </head>
-  <body>
-    <div class="isolate flex min-h-dvh flex-col">
-      <SiteHeader />
+<Sheet
+  title={title}
+  description={description}
+  canonicalPath="/404"
+  ogImage={ogImage}
+  noindex={true}
+>
+  <meta slot="head" name="gitdebt-route-fallback" content="missing-repo" />
+  <meta slot="head" name="gitdebt-agent-markdown" content={agentMarkdown} />
 
-      {
-        /*
-         * The same host treatment as /report, deliberately: both routes mount
-         * the same island and must not drift. `main` keeps real layout height
-         * and owns the field's box — `DitherField` measures its own canvas,
-         * which is stretched to `inset-0` here.
-         */
-      }
-      <main id="main-content" class="relative isolate flex-1 overflow-hidden">
-        <DitherField
-          client:idle
-          opacity={0.12}
-          vignette={0.7}
-          colors={["#12161f", "#1d2b45"]}
-        />
-        <div class="mx-auto w-full max-w-6xl px-6 py-12">
-          <LiveRepoReport client:only="react" apiBase={apiBase} />
-          <noscript>
-            <div class:list={[PANEL_PADDED, BODY, MEASURE]}>
-              JavaScript is required to open a repository that has not been
-              included in the static catalog yet. Without it, {agentMarkdown} returns
-              the report as Markdown for any public repository, and queues the analysis
-              when there is none yet.
-            </div>
-          </noscript>
-          {
-            /*
-             * This route's most common real state is not "page missing" but "a
-             * public repository that is not in the static catalog", where the
-             * island renders the full report. The explainer covers the state
-             * that is genuinely empty, and says what gitdebt reads without
-             * claiming anything about a repository it has not read.
-             */
-          }
-          <SeriesProvenance
-            client:visible
-            variant="explainer"
-            className="mt-16 scroll-mt-24 border-t border-border/60 pt-12"
-          />
+  <section class="border-b border-rule bg-paper">
+    <div class="mx-auto w-full max-w-6xl px-6 py-12">
+      <LiveRepoReport client:only="react" apiBase={apiBase} />
+      {/*
+        Scripting off is the only state in which this really is a dead end, so
+        it is the only state that says so — and it carries the `<h1>`, because
+        the island that normally owns the heading never ran.
+      */}
+      <noscript>
+        <h1 class={TITLE}>That sheet is not on file</h1>
+        <div class:list={["mt-6 max-w-2xl", PANEL]}>
+          <p class:list={[BODY, MEASURE]}>
+            Opening a repository that is not in the static catalog needs
+            JavaScript. Without it, <span class="font-mono text-[0.8125rem] text-ink"
+              >{agentMarkdown}</span
+            > returns the report as Markdown for any public repository, and queues
+            the analysis when there is none yet.
+          </p>
         </div>
-      </main>
-
-      <SiteFooter />
+      </noscript>
     </div>
-  </body>
-</html>
+  </section>
+
+  {/*
+    This route's most common real state is not "page missing" but "a public
+    repository that is not in the static catalog", where the island renders the
+    full report. The explainer covers the state that is genuinely empty, and
+    says what gitdebt reads without claiming anything about a repository it has
+    not read.
+  */}
+  <section class="bg-table">
+    <div class="mx-auto w-full max-w-6xl px-6 py-16">
+      <SeriesProvenance client:visible variant="explainer" />
+      <p class:list={["mt-8", CAPTION, MEASURE]}>
+        A repository gitdebt has already drawn has its own page at
+        <span class="font-mono">gitdebt.com/owner/name</span>.
+      </p>
+    </div>
+  </section>
+</Sheet>

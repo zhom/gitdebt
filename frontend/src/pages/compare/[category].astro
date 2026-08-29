@@ -1,43 +1,46 @@
 ---
-import "@/styles/globals.css";
-import { staticCategoryPaths } from "@/lib/build-catalog";
-import { staticApiBase } from "@/lib/static-api-base";
+export const prerender = true;
+
+import Sheet from "@/layouts/Sheet.astro";
 import {
-  loadBuildRepoSnapshot,
-  type BuildAnalyzeResponse,
-} from "@/lib/build-repo-snapshot";
-import BaseHead from "@/components/BaseHead.astro";
-import Seo from "@/components/Seo.astro";
-import SiteHeader from "@/components/SiteHeader.astro";
-import SiteFooter from "@/components/SiteFooter.astro";
-import {
-  DitherComparisonChart,
+  ComparisonSheet,
   comparisonColors,
-} from "@/components/DitherComparisonChart";
+} from "@/components/ComparisonSheet";
 import { RepoComparisonMatrix } from "@/components/RepoComparisonMatrix";
 import { SeriesProvenance } from "@/components/SeriesProvenance";
 import { WarmRepos } from "@/components/WarmRepos";
 import {
   BODY,
+  BREADCRUMB,
   CAPTION,
-  EYEBROW,
+  CRUMB,
+  DATUM,
+  FIELD,
+  FIGURE,
   HEADING,
   LEAD,
   MEASURE,
-  PANEL_PADDED,
+  PANEL,
+  PROSE_LINK,
   ROW,
-  ROW_BADGE,
   SECTION_ACTION,
   SECTION_HEADER,
   TITLE,
+  VALUE,
 } from "@/components/style-tokens";
 import { getCategory, relatedCategories } from "@/data/categories";
+import { staticCategoryPaths } from "@/lib/build-catalog";
+import {
+  loadBuildRepoSnapshot,
+  type BuildAnalyzeResponse,
+} from "@/lib/build-repo-snapshot";
 import {
   firstStarYear,
   formatCompact,
   formatMonthYear,
   gainedInTrailingDays,
 } from "@/lib/star-insights";
+import { staticApiBase } from "@/lib/static-api-base";
 
 export function getStaticPaths() {
   return staticCategoryPaths();
@@ -146,7 +149,7 @@ const ogImage = `${apiBase}/api/og.png?repos=${encodeURIComponent(
 // Every /vs page this category emits, not just the top three. `getStaticPaths`
 // builds one page per within-category pair, and 89 of the 278 had no inbound
 // link from anywhere on the site; the pair list here is generated the same way
-// so a chip can never point at a page that was never built.
+// so a link can never point at a page that was never built.
 const pairKeys = new Set<string>();
 const pairs: [string, string][] = [];
 for (let i = 0; i < category.repos.length; i++) {
@@ -242,7 +245,7 @@ const jsonLd: Record<string, unknown>[] = [
   },
 ];
 if (showPairs) {
-  // Generated from the same array the chips render, so the markup and the
+  // Generated from the same array the links render, so the markup and the
   // visible list cannot drift apart.
   jsonLd.push({
     "@context": "https://schema.org",
@@ -269,282 +272,350 @@ if (faqs.length > 0 && hasCurrentRanking) {
   });
 }
 
-const thClass =
-  "py-3 pr-4 font-mono text-[0.6875rem] font-medium text-muted-foreground/70 whitespace-nowrap";
-const rowClass = "border-b border-border/40 last:border-0";
+/** The ranking table's own column heads, lettered as fields on the drawing. */
+const TH = "px-4 py-3 whitespace-nowrap";
 ---
 
-<!doctype html>
-<html lang="en">
-  <head>
-    <BaseHead />
-    <Seo
-      title={`${title} · gitdebt`}
-      description={description}
-      canonicalPath={canonicalPath}
-      ogImage={ogImage}
-      imageAlt={`Star history comparison card for ${category.name}`}
-      noindex={noindex}
-      jsonLd={jsonLd}
-    />
-  </head>
-  <body>
-    <div class="isolate flex min-h-dvh flex-col">
-      <SiteHeader />
+<Sheet
+  title={`${title} · gitdebt`}
+  description={description}
+  canonicalPath={canonicalPath}
+  ogImage={ogImage}
+  imageAlt={`Star history comparison card for ${category.name}`}
+  noindex={noindex}
+  jsonLd={jsonLd}
+>
+  {/* ── The title block ──────────────────────────────────────────────────── */}
+  <section class="registered border-b border-rule bg-paper">
+    <div class="mx-auto w-full min-w-0 max-w-6xl px-6 pt-8 pb-14">
+      <nav aria-label="Breadcrumb" class={BREADCRUMB}>
+        <a href="/" class={CRUMB}>gitdebt</a>
+        <span class="px-1.5 text-rule-strong" aria-hidden="true">/</span>
+        <a href="/compare" class={CRUMB}>compare</a>
+        <span class="px-1.5 text-rule-strong" aria-hidden="true">/</span>
+        <span class="text-ink">{category.slug}</span>
+      </nav>
 
-      <main id="main-content" class="mx-auto min-w-0 w-full max-w-6xl flex-1 px-6 py-12">
-        <nav aria-label="Breadcrumb" class="font-mono text-[11px] text-muted-foreground">
-          <a
-            href="/"
-            class="rounded outline-none transition-colors duration-150 hover:text-foreground focus-visible:ring-2 focus-visible:ring-accent/30"
-            >gitdebt</a
-          >
-          <span class="px-1.5 text-border" aria-hidden="true">/</span>
-          <a
-            href="/compare"
-            class="rounded outline-none transition-colors duration-150 hover:text-foreground focus-visible:ring-2 focus-visible:ring-accent/30"
-            >compare</a
-          >
-          <span class="px-1.5 text-border" aria-hidden="true">/</span>
-          <span class="text-foreground">{category.slug}</span>
-        </nav>
+      <div
+        class="mt-6 grid gap-x-12 gap-y-8 lg:grid-cols-[minmax(0,1fr)_auto] lg:items-end"
+      >
+        <h1 class={TITLE}>{category.name}: star history compared</h1>
 
-        <header class="mt-8">
-          <h1 class={TITLE}>{category.name}: star history compared</h1>
-          <p class:list={["mt-3", BODY, LEAD]}>
-            {category.intro}
-          </p>
-          <p class:list={["mt-3 font-mono", CAPTION]}>
-            Ranked by current GitHub stars · growth = stars gained in the trailing 90
-            days{updatedLabel ? ` · data updated ${updatedLabel}` : ""}
-          </p>
-        </header>
+        {/* The one measured value in the head, dimensioned: the leader's star
+            total, with the repository it belongs to named under it. A figure
+            never appears here without its subject. */}
+        {leader && (
+          <div class="lg:text-right">
+            <p class={FIELD}>Most starred</p>
+            <p class:list={["mt-2.5", VALUE, FIGURE]}>
+              {formatCompact(leader.stars)}
+            </p>
+            <p class:list={["mt-1.5", CAPTION]}>{leader.slug}</p>
+          </div>
+        )}
+      </div>
 
-        {loadedEnough && (
-          <div class="mt-12">
-            <DitherComparisonChart
-              client:load
-              apiBase={apiBase}
-              path={overlayPath}
-              caption={`${category.name} — star history`}
-              embedLink={canonical}
-              label={category.name}
-              series={chartSeries}
-            />
-            {/* These curves share one axis but not one source: an exact series
-                stops on a fixed date, an archive series keeps flowing. The
-                legend says which is which per repository, in source, date and
-                state — never a gap and never a share. */}
-            <p class:list={["mt-6", EYEBROW]}>How each series was read</p>
-            <ul role="list" class="mt-3 grid gap-x-12 gap-y-4 sm:grid-cols-2">
-              {chartMembers.map((m) => (
-                <li class="min-w-0">
-                  <p class="truncate font-mono text-[12px]">{m.slug}</p>
-                  <SeriesProvenance
-                    client:visible
-                    variant="inline"
-                    className="mt-1.5"
-                    fill={seriesColors.get(m.slug)}
-                    snapshot={m.snapshot}
-                  />
+      <p class:list={["mt-6", LEAD, MEASURE]}>{category.intro}</p>
+      <p class:list={["mt-4", CAPTION]}>
+        Ranked by current GitHub stars · growth = stars gained in the trailing
+        90 days{updatedLabel ? ` · data updated ${updatedLabel}` : ""}
+      </p>
+    </div>
+  </section>
+
+  {/* ── The drawing ──────────────────────────────────────────────────────── */}
+  {loadedEnough && (
+    <section class="border-b border-rule bg-table">
+      <div class="mx-auto w-full min-w-0 max-w-6xl px-6 py-16">
+        <ComparisonSheet
+          client:load
+          apiBase={apiBase}
+          path={overlayPath}
+          caption={`${category.name} — star history`}
+          embedLink={canonical}
+          label={category.name}
+          series={chartSeries}
+        />
+        {/* These curves share one axis but not one source: an exact series
+            stops on a fixed date, an archive series keeps flowing. The legend
+            says which is which per repository, in source, date and state —
+            never a gap and never a share. */}
+        <p class:list={["mt-8", FIELD]}>How each series was read</p>
+        <ul role="list" class="mt-3 grid gap-x-12 gap-y-4 sm:grid-cols-2">
+          {chartMembers.map((m) => (
+            <li class="min-w-0">
+              <p class:list={[DATUM, "truncate text-ink"]}>{m.slug}</p>
+              <SeriesProvenance
+                client:visible
+                variant="inline"
+                className="mt-1.5"
+                fill={seriesColors.get(m.slug)}
+                snapshot={m.snapshot}
+              />
+            </li>
+          ))}
+        </ul>
+      </div>
+    </section>
+  )}
+
+  {members.length > 0 ? (
+    <Fragment>
+      {/* ── The ranking, and the health matrix that reads off it ─────────── */}
+      <section class="border-b border-rule bg-paper">
+        <div class="mx-auto w-full min-w-0 max-w-6xl px-6 py-16">
+          {!loadedEnough && (
+            <div class:list={["mb-12 max-w-2xl", PANEL]}>
+              <p class={FIELD}>Current ranking ready</p>
+              <p class:list={["mt-2.5", BODY, MEASURE]}>
+                Current GitHub star totals and repository-health links are
+                usable now. Historical curves and 90-day growth appear only for
+                repositories whose star series gitdebt has read.
+              </p>
+            </div>
+          )}
+
+          <div class={SECTION_HEADER}>
+            <h2 class={HEADING}>Ranking</h2>
+            <p class={CAPTION}>{members.length} repositories</p>
+          </div>
+
+          <div class="mt-8 overflow-x-auto border border-rule-strong bg-paper">
+            <table class="w-full min-w-[42rem] border-collapse text-left">
+              <caption class="sr-only">
+                {category.name} ranked by current total GitHub stars
+              </caption>
+              <thead>
+                <tr class="border-b border-rule-strong">
+                  <th scope="col" class:list={[FIELD, TH]}>#</th>
+                  <th scope="col" class:list={[FIELD, TH]}>Repository</th>
+                  <th scope="col" class:list={[FIELD, TH, "text-right"]}>
+                    Stars
+                  </th>
+                  <th scope="col" class:list={[FIELD, TH, "text-right"]}>
+                    +90d
+                  </th>
+                  <th scope="col" class:list={[FIELD, TH, "text-right"]}>
+                    First star
+                  </th>
+                  <th scope="col" class:list={[FIELD, TH]}>Health</th>
+                </tr>
+              </thead>
+              <tbody>
+                {members.map((m, i) => (
+                  <tr class="border-b border-rule last:border-0">
+                    <td class:list={[DATUM, "px-4 py-3 text-ink-3"]}>{i + 1}</td>
+                    <td class="px-4 py-3">
+                      <a
+                        href={`/${m.slug}`}
+                        class:list={[
+                          DATUM,
+                          "text-ink outline-none transition-colors duration-[--duration-ui] hover:text-signal focus-visible:outline-2 focus-visible:outline-offset-2 focus-visible:outline-signal",
+                        ]}
+                      >
+                        {m.slug}
+                      </a>
+                    </td>
+                    <td class:list={[DATUM, "px-4 py-3 text-right text-ink"]}>
+                      {m.stars.toLocaleString()}
+                    </td>
+                    <td class:list={[DATUM, "px-4 py-3 text-right text-ink-2"]}>
+                      {m.gained90 !== null ? `~${formatCompact(m.gained90)}` : "—"}
+                    </td>
+                    <td class:list={[DATUM, "px-4 py-3 text-right text-ink-3"]}>
+                      {m.firstYear ?? "—"}
+                    </td>
+                    <td class="px-4 py-3">
+                      <a
+                        href={`/${m.slug}#stats`}
+                        class:list={[
+                          "text-[0.8125rem] text-ink-2",
+                          PROSE_LINK,
+                        ]}
+                      >
+                        debt charts
+                      </a>
+                    </td>
+                  </tr>
+                ))}
+              </tbody>
+            </table>
+          </div>
+
+          <RepoComparisonMatrix
+            client:visible
+            apiBase={apiBase}
+            repos={members.map((member) => member.slug)}
+            initial={comparisonInitial}
+          />
+        </div>
+      </section>
+
+      {/* ── Head to head ─────────────────────────────────────────────────── */}
+      {showPairs && (
+        <section class="border-b border-rule bg-table">
+          <div class="mx-auto w-full min-w-0 max-w-6xl px-6 py-16">
+            <div class={SECTION_HEADER}>
+              <h2 class={HEADING}>Head to head</h2>
+              <a
+                href={`/compare?repos=${encodeURIComponent(reposParam)}`}
+                class={SECTION_ACTION}
+              >
+                open in the builder
+              </a>
+            </div>
+            <ul
+              role="list"
+              class="mt-8 grid gap-px border border-rule-strong bg-rule sm:grid-cols-2 lg:grid-cols-3"
+            >
+              {pairs.map(([a, b]) => (
+                <li class="bg-paper">
+                  <a
+                    href={`/vs/${a}/${b}`}
+                    data-warm-repos={`${a},${b}`}
+                    class:list={[ROW, "min-h-14"]}
+                  >
+                    <span class:list={[DATUM, "min-w-0 flex-1 truncate"]}>
+                      {a} <span class="text-ink-3">vs</span> {b}
+                    </span>
+                  </a>
                 </li>
               ))}
             </ul>
           </div>
-        )}
+        </section>
+      )}
 
-        {members.length > 0 ? (
-          <>
-            {!loadedEnough && (
-              <section class:list={["mt-12", PANEL_PADDED]}>
-                <p class={EYEBROW}>Current ranking ready</p>
-                <p class:list={["mt-2", BODY, MEASURE]}>
-                  Current GitHub star totals and repository-health links are
-                  usable now. Historical curves and 90-day growth appear only
-                  for repositories whose star series gitdebt has read.
-                </p>
-              </section>
-            )}
-
-            <section class="mt-16 scroll-mt-24 border-t border-border/60 pt-12">
-              <div class={SECTION_HEADER}>
-                <h2 class={HEADING}>Ranking</h2>
-                <p class={CAPTION}>{members.length} repositories</p>
-              </div>
-              <div class="-mx-6 mt-8 overflow-x-auto">
-                <div class="inline-block min-w-full px-6 py-2 align-middle">
-                  <table class="w-full text-left text-base sm:text-sm">
-                    <thead>
-                      <tr class="border-b border-border">
-                        <th class={thClass}>#</th>
-                        <th class={thClass}>Repository</th>
-                        <th class={`${thClass} text-right`}>Stars</th>
-                        <th class={`${thClass} text-right`}>+90d</th>
-                        <th class={`${thClass} text-right`}>First star</th>
-                        <th class={thClass}>Health</th>
-                      </tr>
-                    </thead>
-                    <tbody class="tabular-nums">
-                      {members.map((m, i) => (
-                        <tr class={rowClass}>
-                          <td class="py-3 pr-4 font-mono text-[11px] text-muted-foreground">{i + 1}</td>
-                          <td class="py-3 pr-4">
-                            <a
-                              href={`/${m.slug}`}
-                              class="rounded outline-none transition-colors duration-150 hover:text-foreground focus-visible:ring-2 focus-visible:ring-accent/30"
-                            >
-                              {m.slug}
-                            </a>
-                          </td>
-                          <td class="py-3 pr-4 text-right">
-                            {m.stars.toLocaleString()}
-                          </td>
-                          <td class="py-3 pr-4 text-right">
-                            {m.gained90 !== null ? `~${formatCompact(m.gained90)}` : "—"}
-                          </td>
-                          <td class="py-3 pr-4 text-right text-muted-foreground">
-                            {m.firstYear ?? "—"}
-                          </td>
-                          <td class="py-3">
-                            <a
-                              href={`/${m.slug}#stats`}
-                              class="rounded font-mono text-[11px] text-muted-foreground underline decoration-border underline-offset-4 outline-none transition-colors duration-150 hover:text-foreground hover:decoration-foreground/60 focus-visible:ring-2 focus-visible:ring-accent/30"
-                            >
-                              debt charts
-                            </a>
-                          </td>
-                        </tr>
-                      ))}
-                    </tbody>
-                  </table>
-                </div>
-              </div>
-            </section>
-
-            <RepoComparisonMatrix
-              client:visible
-              apiBase={apiBase}
-              repos={members.map((member) => member.slug)}
-              initial={comparisonInitial}
-            />
-
-            {showPairs && (
-              <section class="mt-16 scroll-mt-24 border-t border-border/60 pt-12">
-                <div class={SECTION_HEADER}>
-                  <h2 class={HEADING}>Head to head</h2>
-                  <a
-                    href={`/compare?repos=${encodeURIComponent(reposParam)}`}
-                    class={SECTION_ACTION}
+      {/* ── Frequently asked ─────────────────────────────────────────────── */}
+      {faqs.length > 0 && (
+        <section class="border-b border-rule bg-paper">
+          <div class="mx-auto w-full min-w-0 max-w-6xl px-6 py-16">
+            <h2 class={HEADING}>Frequently asked</h2>
+            <div class="mt-8 border-t border-rule">
+              {faqs.map((f) => (
+                <details class="faq border-b border-rule">
+                  <summary
+                    class="flex cursor-pointer list-none items-start gap-3 py-4 text-[0.9375rem] text-ink outline-none transition-colors duration-[--duration-ui] hover:text-signal focus-visible:outline-2 focus-visible:outline-offset-2 focus-visible:outline-signal [&::-webkit-details-marker]:hidden"
                   >
-                    open in the builder
-                    <span
-                      aria-hidden="true"
-                      class="transition-transform duration-150 group-hover:translate-x-0.5 motion-reduce:transition-none"
-                      >→</span
-                    >
-                  </a>
-                </div>
-                <div class="mt-6 flex flex-wrap items-center gap-2">
-                  {pairs.map(([a, b]) => (
-                    <a
-                      href={`/vs/${a}/${b}`}
-                      data-warm-repos={`${a},${b}`}
-                      class="dither-chip rounded-md outline-none focus-visible:ring-2 focus-visible:ring-accent/30"
-                    >
-                      {a} vs {b}
-                    </a>
-                  ))}
-                </div>
-              </section>
-            )}
+                    {/*
+                      The disclosure mark is two rules crossing, which is the
+                      notation already on this sheet — not a chevron borrowed
+                      from an icon pack. Opening removes the vertical stroke and
+                      leaves the horizontal one, so a plus becomes a minus.
 
-            {faqs.length > 0 && (
-              <section class="mt-16 scroll-mt-24 border-t border-border/60 pt-12">
-                <div class={SECTION_HEADER}>
-                  <h2 class={HEADING}>Frequently asked</h2>
-                </div>
-                <div class="mt-6">
-                  {faqs.map((f) => (
-                    <details class="group border-b border-border/40 py-4 last:border-0">
-                      <summary class="cursor-pointer list-none rounded-md py-1 text-[13px] outline-none transition-colors duration-150 hover:text-foreground focus-visible:ring-2 focus-visible:ring-accent/30 [&::-webkit-details-marker]:hidden">
-                        {f.q}
-                      </summary>
-                      <p class:list={["mt-2", BODY, MEASURE]}>{f.a}</p>
-                    </details>
-                  ))}
-                </div>
-              </section>
-            )}
-          </>
-        ) : (
-          <section class:list={["mt-12", PANEL_PADDED]}>
-            <p class={EYEBROW}>Warming up</p>
-            <p class:list={["mt-2", BODY, MEASURE]}>
-              Repository metadata has not loaded for this field yet. The repos
-              below are being initialized automatically; open any one to watch
-              its analysis progress:
-            </p>
-            <div class="mt-4 flex flex-wrap gap-2">
-              {category.repos.map((slug) => (
-                <a
-                  href={`/${slug}`}
-                  data-warm-repos={slug}
-                  class="dither-chip rounded-md outline-none focus-visible:ring-2 focus-visible:ring-accent/30"
-                >
-                  {slug}
-                </a>
-              ))}
-            </div>
-          </section>
-        )}
-
-        {related.length > 0 && (
-          <section class="mt-16 scroll-mt-24 border-t border-border/60 pt-12">
-            <div class={SECTION_HEADER}>
-              <h2 class={HEADING}>Related categories</h2>
-              <a href="/compare#categories" class={SECTION_ACTION}>
-                all categories
-                <span
-                  aria-hidden="true"
-                  class="transition-transform duration-150 group-hover:translate-x-0.5 motion-reduce:transition-none"
-                  >→</span
-                >
-              </a>
-            </div>
-            <ul role="list" class="mt-8 grid gap-x-10 sm:grid-cols-2">
-              {related.map((relatedCategory) => (
-                <li>
-                  <a
-                    href={`/compare/${relatedCategory.slug}`}
-                    data-warm-repos={relatedCategory.repos.join(",")}
-                    class={ROW}
-                  >
-                    <span class="min-w-0 flex-1 py-2">
-                      <span class="block truncate">{relatedCategory.name}</span>
-                      <span class="mt-0.5 block truncate text-[11px] text-muted-foreground/80 group-hover:text-muted-foreground">
-                        {relatedCategory.short}
-                      </span>
+                      Its box is one line tall (`h-[1.5em]`, the inherited
+                      line-height) and centres its own content, so the mark sits
+                      on the optical centre of the question's first line at any
+                      font size — rather than on a guessed top margin that only
+                      happens to look right at one size.
+                    */}
+                    <span aria-hidden="true" class="relative h-[1.5em] w-3 shrink-0">
+                      <span
+                        class="absolute inset-x-0 top-1/2 h-px -translate-y-1/2 rounded-full bg-ink-3"
+                      ></span>
+                      <span
+                        class="faq-stroke absolute top-1/2 left-1/2 h-3 w-px -translate-x-1/2 -translate-y-1/2 rounded-full bg-ink-3 transition-opacity duration-[--duration-ui]"
+                      ></span>
                     </span>
-                    <span class={ROW_BADGE}>{relatedCategory.repos.length}</span>
-                  </a>
-                </li>
+                    <span class="min-w-0">{f.q}</span>
+                  </summary>
+                  <p class:list={["pb-4 pl-6", BODY, MEASURE]}>{f.a}</p>
+                </details>
               ))}
-            </ul>
-            <p class:list={["mt-6", BODY]}>
+            </div>
+          </div>
+        </section>
+      )}
+    </Fragment>
+  ) : (
+    <section class="border-b border-rule bg-table">
+      <div class="mx-auto w-full min-w-0 max-w-6xl px-6 py-16">
+        <div class:list={["max-w-2xl", PANEL]}>
+          <p class={FIELD}>Warming up</p>
+          <p class:list={["mt-2.5", BODY, MEASURE]}>
+            Repository metadata has not loaded for this field yet. The repos
+            below are being initialized automatically; open any one to watch its
+            analysis progress.
+          </p>
+        </div>
+        <ul
+          role="list"
+          class="mt-8 grid gap-px border border-rule-strong bg-rule sm:grid-cols-2 lg:grid-cols-3"
+        >
+          {category.repos.map((slug) => (
+            <li class="bg-paper">
               <a
-                href="/leaderboard"
-                class="rounded underline decoration-border underline-offset-4 outline-none transition-colors duration-150 hover:text-foreground hover:decoration-foreground/60 focus-visible:ring-2 focus-visible:ring-accent/30"
+                href={`/${slug}`}
+                data-warm-repos={slug}
+                class:list={[ROW, "min-h-14"]}
               >
-                Fastest-growing repos across all of gitdebt
+                <span class:list={[DATUM, "min-w-0 flex-1 truncate"]}>
+                  {slug}
+                </span>
               </a>
-            </p>
-          </section>
-        )}
+            </li>
+          ))}
+        </ul>
+      </div>
+    </section>
+  )}
 
-        <WarmRepos client:load apiBase={apiBase} repos={warmTargets} />
-      </main>
+  {/* ── Related categories ───────────────────────────────────────────────── */}
+  {related.length > 0 && (
+    <section class="bg-table">
+      <div class="mx-auto w-full min-w-0 max-w-6xl px-6 py-16">
+        <div class={SECTION_HEADER}>
+          <h2 class={HEADING}>Related categories</h2>
+          <a href="/compare#categories" class={SECTION_ACTION}>all categories</a>
+        </div>
+        <ul
+          role="list"
+          class="mt-8 grid gap-px border border-rule-strong bg-rule sm:grid-cols-2"
+        >
+          {related.map((relatedCategory) => (
+            <li class="bg-paper">
+              <a
+                href={`/compare/${relatedCategory.slug}`}
+                data-warm-repos={relatedCategory.repos.join(",")}
+                class:list={[ROW, "min-h-16 justify-between py-2.5"]}
+              >
+                <span class="min-w-0 flex-1">
+                  <span class="block truncate">{relatedCategory.name}</span>
+                  <span class:list={["mt-0.5 block truncate", CAPTION]}>
+                    {relatedCategory.short}
+                  </span>
+                </span>
+                <span class:list={[DATUM, "shrink-0 text-ink-3"]}>
+                  {relatedCategory.repos.length}
+                </span>
+              </a>
+            </li>
+          ))}
+        </ul>
+        <p class:list={["mt-6", BODY, MEASURE]}>
+          <a href="/leaderboard" class={PROSE_LINK}
+            >Fastest-growing repos across all of gitdebt</a
+          >
+        </p>
+      </div>
+    </section>
+  )}
 
-      <SiteFooter />
-    </div>
-  </body>
-</html>
+  <WarmRepos client:load apiBase={apiBase} repos={warmTargets} />
+</Sheet>
+
+<style>
+  /* The vertical stroke of the disclosure mark. It is removed on open, so a
+     plus becomes a minus — the mark states the state rather than spinning a
+     borrowed chevron. Opacity only: nothing here scales, so no stroke cap ever
+     flips mid-transition, and the mark is fully drawn with no script at all. */
+  .faq[open] .faq-stroke {
+    opacity: 0;
+  }
+
+  @media (prefers-reduced-motion: reduce) {
+    .faq-stroke {
+      transition: none;
+    }
+  }
+</style>

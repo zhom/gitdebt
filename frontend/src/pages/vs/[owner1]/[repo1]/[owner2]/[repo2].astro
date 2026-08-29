@@ -1,22 +1,16 @@
 ---
-import "@/styles/globals.css";
+import Sheet from "@/layouts/Sheet.astro";
 import { staticComparisonPaths } from "@/lib/build-catalog";
 import { staticApiBase } from "@/lib/static-api-base";
-import {
-  loadBuildRepoSnapshot,
-} from "@/lib/build-repo-snapshot";
-import BaseHead from "@/components/BaseHead.astro";
-import Seo from "@/components/Seo.astro";
-import SiteHeader from "@/components/SiteHeader.astro";
-import SiteFooter from "@/components/SiteFooter.astro";
-import { comparisonColors } from "@/components/DitherComparisonChart";
+import { loadBuildRepoSnapshot } from "@/lib/build-repo-snapshot";
 import { LiveVsComparison } from "@/components/LiveVsComparison";
-import { SeriesProvenance } from "@/components/SeriesProvenance";
+import { Terminator } from "@/components/ui/marks";
 import {
   BODY,
+  CAPTION,
+  FIELD,
   HEADING,
   MEASURE,
-  SECTION_HEADER,
 } from "@/components/style-tokens";
 import {
   coverageLabel,
@@ -119,15 +113,30 @@ const ogImage = `${apiBase}/api/og.png?repos=${reposParam}`;
 
 const noindex = !ready || fetchError !== null;
 
-// A head-to-head is exactly where two series with different sources and
-// different coverage ends get read as directly comparable. Hue is series
-// identity — the same map the overlay chart builds — and the mark's density
-// carries the source.
-const vsColors = comparisonColors([slug1, slug2]);
-const seriesRows = [
-  { slug: slug1, snapshot: left.data, fill: vsColors.get(slug1) },
-  { slug: slug2, snapshot: right.data, fill: vsColors.get(slug2) },
-];
+/**
+ * The schedule: how each series was read, one column per repository.
+ *
+ * A head-to-head is exactly where two series with different sources and
+ * different coverage ends get read as directly comparable, so the two readings
+ * are set as a schedule with a shared row for every field. Identity is the
+ * slug at the head of the column and nothing else — a colour swatch here would
+ * have to claim a hue the overlay chart assigns, and a swatch that disagrees
+ * with the line it names is worse than no swatch at all.
+ *
+ * Every string comes from `history-freshness.ts`: source, coverage date, state,
+ * and never a count, a share, or anything implying how much is missing.
+ */
+const readingRows: { field: string; values: string[] }[] = [];
+if (bothLoaded) {
+  const readings = [left.data, right.data].map((snapshot) =>
+    historyFreshness(snapshot),
+  );
+  readingRows.push(
+    { field: "Source", values: readings.map(sourceLabel) },
+    { field: "Coverage", values: readings.map(coverageLabel) },
+    { field: "State", values: readings.map(stateLabel) },
+  );
+}
 
 const faqs: { q: string; a: string }[] = [];
 if (left.data && right.data) {
@@ -210,41 +219,35 @@ if (faqs.length > 0) {
 }
 ---
 
-<!doctype html>
-<html lang="en">
-  <head>
-    <BaseHead />
-    <Seo
-      title={title}
-      description={description}
-      canonicalPath={canonicalPath}
-      ogImage={ogImage}
-      imageAlt={`Star history comparison card for ${slug1} versus ${slug2}`}
-      noindex={noindex}
-      jsonLd={jsonLd}
-    />
-  </head>
-  <body>
-    <div class="isolate flex min-h-dvh flex-col">
-      <SiteHeader />
+<Sheet
+  title={title}
+  description={description}
+  canonicalPath={canonicalPath}
+  ogImage={ogImage}
+  imageAlt={`Star history comparison card for ${slug1} versus ${slug2}`}
+  noindex={noindex}
+  jsonLd={jsonLd}
+>
+  {/* ── The sheet: two objects on one set of axes ────────────────────────── */}
+  <section class="registered border-b border-rule bg-paper">
+    <div class="mx-auto max-w-6xl px-6 pt-8 pb-16">
+      <nav aria-label="Breadcrumb" class="font-mono text-[0.75rem] text-ink-3">
+        <a
+          href="/"
+          class="outline-none transition-colors duration-[--duration-ui] hover:text-ink focus-visible:outline-2 focus-visible:outline-offset-2 focus-visible:outline-signal"
+          >gitdebt</a
+        >
+        <span class="px-1.5 text-rule-strong" aria-hidden="true">/</span>
+        <a
+          href="/compare"
+          class="outline-none transition-colors duration-[--duration-ui] hover:text-ink focus-visible:outline-2 focus-visible:outline-offset-2 focus-visible:outline-signal"
+          >vs</a
+        >
+        <span class="px-1.5 text-rule-strong" aria-hidden="true">/</span>
+        <span class="text-ink">{slug1} · {slug2}</span>
+      </nav>
 
-      <main id="main-content" class="mx-auto min-w-0 w-full max-w-6xl flex-1 px-6 py-12">
-        <nav aria-label="Breadcrumb" class="font-mono text-[11px] text-muted-foreground">
-          <a
-            href="/"
-            class="rounded outline-none transition-colors duration-150 hover:text-foreground focus-visible:ring-2 focus-visible:ring-accent/30"
-            >gitdebt</a
-          >
-          <span class="px-1.5 text-border" aria-hidden="true">/</span>
-          <a
-            href="/compare"
-            class="rounded outline-none transition-colors duration-150 hover:text-foreground focus-visible:ring-2 focus-visible:ring-accent/30"
-            >vs</a
-          >
-          <span class="px-1.5 text-border" aria-hidden="true">/</span>
-          <span class="text-foreground">{slug1} · {slug2}</span>
-        </nav>
-
+      <div class="min-w-0">
         <LiveVsComparison
           client:load
           apiBase={apiBase}
@@ -255,63 +258,101 @@ if (faqs.length > 0) {
           slug1={slug1}
           slug2={slug2}
         />
-
-        {bothLoaded && (
-          <section class="mt-16 scroll-mt-24 border-t border-border/60 pt-12">
-            <div class={SECTION_HEADER}>
-              <h2 class={HEADING}>How each series was read</h2>
-            </div>
-            <p class:list={["mt-2", BODY, MEASURE]}>
-              The overlay puts both repositories on one axis. It does not put
-              them on one source: since July 2026 a stargazer-list series stops
-              on a fixed date, while a series rebuilt from public archive events
-              keeps receiving points. Each mark below shows its own source,
-              coverage date, and state.
-            </p>
-            <ul role="list" class="mt-6 grid gap-x-12 gap-y-4 sm:grid-cols-2">
-              {seriesRows.map((row) => (
-                <li class="min-w-0">
-                  <p class="truncate font-mono text-[12px]">{row.slug}</p>
-                  <SeriesProvenance
-                    client:visible
-                    variant="inline"
-                    className="mt-1.5"
-                    fill={row.fill}
-                    snapshot={row.snapshot}
-                  />
-                </li>
-              ))}
-            </ul>
-          </section>
-        )}
-
-        {faqs.length > 0 && (
-          <section class="mt-16 scroll-mt-24 border-t border-border/60 pt-12">
-            <div class={SECTION_HEADER}>
-              <h2 class={HEADING}>Frequently asked</h2>
-            </div>
-            <div class="mt-6">
-              {faqs.map((f) => (
-                <details class="group border-b border-border/40 py-4 last:border-0">
-                  <summary class="cursor-pointer list-none rounded-md py-1 text-[13px] outline-none transition-colors duration-150 hover:text-foreground focus-visible:ring-2 focus-visible:ring-accent/30 [&::-webkit-details-marker]:hidden">
-                    {f.q}
-                  </summary>
-                  <p class:list={["mt-2", BODY, MEASURE]}>{f.a}</p>
-                </details>
-              ))}
-            </div>
-          </section>
-        )}
-      </main>
-
-      <SiteFooter
-        signalValues={[
-          left.data?.total_stars ?? 0,
-          right.data?.total_stars ?? 0,
-          left.data?.history.length ?? 0,
-          right.data?.history.length ?? 0,
-        ]}
-      />
+      </div>
     </div>
-  </body>
-</html>
+  </section>
+
+  {/* ── The schedule ──────────────────────────────────────────────────────
+      Dense, and the densest thing on the page: three fields read across two
+      columns, every row on one line. */}
+  {readingRows.length > 0 && (
+    <section class="border-b border-rule bg-table">
+      <div class="mx-auto max-w-6xl px-6 py-16">
+        <h2 class={HEADING}>One axis, two sources</h2>
+        <p class:list={["mt-3", BODY, MEASURE]}>
+          The overlay puts both repositories on one axis. It does not put them
+          on one source: since July 2026 a stargazer-list series stops on a
+          fixed date, while a series rebuilt from public archive events keeps
+          receiving points. Each column below states its own reading.
+        </p>
+
+        <div class="mt-8 overflow-x-auto border border-rule-strong bg-paper">
+          <table class="w-full min-w-[36rem] border-collapse text-left">
+            <caption class="sr-only">
+              How the star series for {slug1} and {slug2} were read
+            </caption>
+            <thead>
+              <tr class="border-b border-rule-strong">
+                {/* A schedule's corner cell carries no lettering; the column
+                    it heads is the field names themselves. */}
+                <th scope="col" class="w-[9rem] px-4 py-3">
+                  <span class="sr-only">Field</span>
+                </th>
+                {[slug1, slug2].map((slug) => (
+                  <th
+                    scope="col"
+                    class="px-4 py-3 font-mono text-[0.8125rem] font-normal text-ink"
+                  >
+                    {slug}
+                  </th>
+                ))}
+              </tr>
+            </thead>
+            <tbody>
+              {readingRows.map((row) => (
+                <tr class="border-b border-rule last:border-0">
+                  <th scope="row" class="px-4 py-3 align-top">
+                    <span class={FIELD}>{row.field}</span>
+                  </th>
+                  {row.values.map((value) => (
+                    <td class="px-4 py-3 align-top text-[0.8125rem] leading-[1.5] text-ink-2">
+                      {value}
+                    </td>
+                  ))}
+                </tr>
+              ))}
+            </tbody>
+          </table>
+        </div>
+
+        <p class:list={["mt-4", CAPTION, MEASURE]}>
+          No row states how much of a history is missing. An archive series
+          records star actions and not unstars, so it can exceed a repository's
+          own star total, and a figure for the difference would be wrong exactly
+          where it looks most precise.
+        </p>
+      </div>
+    </section>
+  )}
+
+  {/* ── Notes ─────────────────────────────────────────────────────────────
+      The quiet passage after the schedule: long answers, folded away, opened
+      by a native disclosure that works with no script at all. */}
+  {faqs.length > 0 && (
+    <section class="bg-paper">
+      <div class="mx-auto max-w-6xl px-6 py-16">
+        <h2 class={HEADING}>Notes on this comparison</h2>
+        <ul role="list" class="mt-6 max-w-[72ch] border-t border-rule">
+          {faqs.map((f) => (
+            <li class="border-b border-rule">
+              <details class="group">
+                <summary
+                  class="flex min-h-14 cursor-pointer list-none items-center gap-5 py-3 text-[0.9375rem] leading-[1.45] text-ink-2 outline-none transition-colors duration-[--duration-ui] hover:text-ink focus-visible:outline-2 focus-visible:outline-offset-2 focus-visible:outline-signal [&::-webkit-details-marker]:hidden"
+                >
+                  <span class="min-w-0 flex-1">{f.q}</span>
+                  <span
+                    aria-hidden="true"
+                    class="shrink-0 text-ink-3 transition-transform duration-[--duration-ui] group-open:rotate-90 motion-reduce:transition-none"
+                  >
+                    <Terminator size={14} />
+                  </span>
+                </summary>
+                <p class:list={["pb-5", BODY]}>{f.a}</p>
+              </details>
+            </li>
+          ))}
+        </ul>
+      </div>
+    </section>
+  )}
+</Sheet>

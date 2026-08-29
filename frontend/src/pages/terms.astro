@@ -1,27 +1,28 @@
 ---
 export const prerender = true;
 
-import "@/styles/globals.css";
-import BaseHead from "@/components/BaseHead.astro";
-import Seo from "@/components/Seo.astro";
-import SiteHeader from "@/components/SiteHeader.astro";
-import SiteFooter from "@/components/SiteFooter.astro";
+import Sheet from "@/layouts/Sheet.astro";
 import {
   BODY,
+  BREADCRUMB,
   CAPTION,
+  CRUMB,
+  FIELD,
   HEADING,
   MEASURE,
+  PROSE_LINK,
   TITLE,
 } from "@/components/style-tokens";
 import { staticApiBase } from "@/lib/static-api-base";
 
 /**
- * Page-body motion here is deliberately absent, not missing.
+ * The shortest sheet in the set, and it stays that way.
  *
- * Two sections and no number, series, or state to encode — a generative field
- * would be wallpaper on a legal document, and `PageInsightSection` already
- * puts one mosaic `PageSignalCanvas` on this same scroll via the footer.
- * This is the shortest page in the product and it should stay that way.
+ * There is nothing measured on this page — no series, no magnitude, no state —
+ * so it carries no trace, no figure and no drafting red. What it does carry is
+ * the drawing's structure: a title block at the head, the clauses ruled into
+ * real cells, and a revision date. A legal page is a notes sheet, and a notes
+ * sheet is still a sheet.
  */
 
 const apiBase = staticApiBase();
@@ -69,73 +70,74 @@ const jsonLd = {
 };
 ---
 
-<!doctype html>
-<html lang="en">
-  <head>
-    <BaseHead />
-    <Seo
-      title={title}
-      description={description}
-      canonicalPath="/terms"
-      ogImage={ogImage}
-      jsonLd={jsonLd}
-    />
-  </head>
-  <body>
-    <div class="isolate flex min-h-dvh flex-col">
-      <SiteHeader />
+<Sheet
+  title={title}
+  description={description}
+  canonicalPath="/terms"
+  ogImage={ogImage}
+  jsonLd={jsonLd}
+>
+  {/* ── The title block ──────────────────────────────────────────────────── */}
+  <section class="registered border-b border-rule bg-paper">
+    <div class="mx-auto w-full max-w-6xl px-6 pt-8 pb-14">
+      <nav aria-label="Breadcrumb" class={BREADCRUMB}>
+        <a href="/" class={CRUMB}>gitdebt</a>
+        <span class="px-1.5 text-rule-strong" aria-hidden="true">/</span>
+        <span class="text-ink">terms</span>
+      </nav>
 
-      <main id="main-content" class="mx-auto w-full max-w-3xl flex-1 px-6 py-12">
-        <nav aria-label="Breadcrumb" class="font-mono text-[11px] text-muted-foreground">
-          <a
-            href="/"
-            class="rounded outline-none transition-colors duration-150 hover:text-foreground focus-visible:ring-2 focus-visible:ring-accent/30"
-            >gitdebt</a
-          >
-          <span class="px-1.5 text-border" aria-hidden="true">/</span>
-          <span class="text-foreground">terms</span>
-        </nav>
-
-        <header class="mt-8">
-          <h1 class={TITLE}>Terms of use</h1>
-          <p class:list={["mt-3", CAPTION]}>
-            Last updated <time datetime={updated} class="tabular-nums">{updated}</time>
+      <div
+        class="mt-6 grid gap-x-12 gap-y-6 lg:grid-cols-[minmax(0,1fr)_auto] lg:items-end"
+      >
+        <h1 class={TITLE}>Terms of use</h1>
+        <div class="lg:text-right">
+          <p class={FIELD}>Revision</p>
+          <p class="mt-2 font-mono text-[0.8125rem] tabular-nums text-ink">
+            <time datetime={updated}>{updated}</time>
           </p>
-        </header>
+        </div>
+      </div>
 
-        <section class="mt-12">
-          <p class:list={[MEASURE, BODY]}>
-            By using gitdebt you agree to these terms. If you don't agree,
-            please don't use the service.
-          </p>
-          <dl class="mt-8 grid gap-x-12 gap-y-8 sm:grid-cols-2">
-            {
-              terms.map((item) => (
-                <div>
-                  <dt class="text-[13px] text-foreground/90">{item.term}</dt>
-                  <dd class:list={["mt-1.5", MEASURE, BODY]}>{item.desc}</dd>
-                </div>
-              ))
-            }
-          </dl>
-        </section>
-
-        <section class="mt-16 scroll-mt-24 border-t border-border/60 pt-12">
-          <h2 class={HEADING}>Contact</h2>
-          <p class:list={["mt-6", MEASURE, BODY]}>
-            Questions about these terms? Open a
-            <a
-              href="https://github.com/zhom/gitdebt/issues"
-              class="rounded underline decoration-border underline-offset-4 outline-none transition-colors duration-150 hover:text-foreground hover:decoration-foreground/60 focus-visible:ring-2 focus-visible:ring-accent/30"
-            >
-              GitHub issue
-            </a>
-            without including private information.
-          </p>
-        </section>
-      </main>
-
-      <SiteFooter />
+      <p class:list={["mt-6", BODY, MEASURE]}>
+        By using gitdebt you agree to these terms. If you don't agree, please
+        don't use the service.
+      </p>
     </div>
-  </body>
-</html>
+  </section>
+
+  {/* ── The clauses ──────────────────────────────────────────────────────── */}
+  <section class="border-b border-rule bg-table">
+    <div class="mx-auto w-full max-w-6xl px-6 py-16">
+      {/* 1px gaps showing the ground through, not `divide-*`: a divided grid
+          drops its rules the moment it wraps, and every clause here needs a
+          line on each side of it at every width. */}
+      <dl
+        class="grid grid-cols-1 gap-px border border-rule-strong bg-rule sm:grid-cols-2 lg:grid-cols-3"
+      >
+        {
+          terms.map((item) => (
+            <div class="bg-paper p-5">
+              <dt class="min-h-[2.55rem] font-draft text-[1.0625rem] leading-[1.2] text-ink">
+                {item.term}
+              </dt>
+              <dd class:list={["mt-2.5", CAPTION]}>{item.desc}</dd>
+            </div>
+          ))
+        }
+      </dl>
+    </div>
+  </section>
+
+  {/* ── Contact ──────────────────────────────────────────────────────────── */}
+  <section class="bg-paper">
+    <div class="mx-auto w-full max-w-6xl px-6 py-16">
+      <h2 class={HEADING}>Contact</h2>
+      <p class:list={["mt-4", BODY, MEASURE]}>
+        Questions about these terms? Open a <a
+          href="https://github.com/zhom/gitdebt/issues"
+          class={PROSE_LINK}>GitHub issue</a
+        > without including private information.
+      </p>
+    </div>
+  </section>
+</Sheet>

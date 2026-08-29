@@ -1,19 +1,15 @@
 ---
 export const prerender = true;
 
-import "@/styles/globals.css";
-import BaseHead from "@/components/BaseHead.astro";
-import Seo from "@/components/Seo.astro";
-import SiteFooter from "@/components/SiteFooter.astro";
-import SiteHeader from "@/components/SiteHeader.astro";
-import { DitherField } from "@/components/DitherField";
-import { DitherMeter } from "@/components/DitherMeter";
+import Sheet from "@/layouts/Sheet.astro";
+import { ButtonLink } from "@/components/ButtonLink";
 import {
   BODY,
+  CAPTION,
+  FIELD,
   LEAD,
   MEASURE,
-  PANEL_PADDED,
-  SECTION_ACTION,
+  PANEL,
   TITLE,
 } from "@/components/style-tokens";
 import { staticApiBase } from "@/lib/static-api-base";
@@ -24,184 +20,249 @@ const apiBase = staticApiBase();
 // their public repositories; it does not connect a repository, and nothing on
 // this page may imply that it does.
 const loginHref = `${apiBase}/auth/github/start?return_to=${encodeURIComponent("/profile")}`;
+
+/**
+ * The served title says what this route is, not whose profile it shows.
+ *
+ * It used to say "Your GitHub profile report", which is false for any
+ * `?login=` that is not the viewer's — and this page redirects to
+ * `/{login}` the moment it resolves one, so the honest served title is the
+ * neutral one. The resolved page names the account itself.
+ */
+const title = "GitHub profile report · gitdebt";
+
+/** What the aggregate is made of. Stated, so the page is not an empty room. */
+const contents = [
+  {
+    field: "Star history",
+    note: "Every public repository's series, summed on one axis.",
+  },
+  {
+    field: "Commit activity",
+    note: "Authored commits over time, and the longest run of active days.",
+  },
+  {
+    field: "Language footprint",
+    note: "Which languages the public work is actually written in.",
+  },
+  {
+    field: "README assets",
+    note: "The same charts as embeddable images, with a snippet to paste.",
+  },
+];
 ---
 
-<!doctype html>
-<html lang="en">
-  <head>
-    <BaseHead />
-    <Seo
-      title="Your GitHub profile report · gitdebt"
-      description="Open a live aggregate report for your public GitHub repositories: star history, commit activity, language footprint and embeddable README assets."
-      canonicalPath="/profile"
-      ogImage={`${apiBase}/api/og.png`}
-      noindex={true}
-    />
-  </head>
-  <body>
-    <div class="isolate flex min-h-dvh flex-col">
-      <SiteHeader />
-      <main id="main-content" class="relative isolate flex-1 overflow-hidden">
-        <DitherField client:idle opacity={0.14} vignette={0.7} />
-        {
-          /*
-           * `data-session` is the page's whole state machine: `reading` while
-           * the session fetch is in flight, then `signed-out` or `error`. The
-           * rail below moves only in the first state, so the motion encodes a
-           * real, live state and stops the moment that state resolves.
-           */
-        }
-        <div
-          data-session="reading"
-          data-motion="off"
-          data-api-base={apiBase}
-          class="mx-auto w-full max-w-6xl px-6 py-12"
-        >
-          <h1 class={TITLE}>Your profile report</h1>
-          <p
-            data-profile-status
-            class:list={[BODY, LEAD, "mt-3"]}
-            aria-live="polite"
-          >
-            Reading your signed-in GitHub account.
-          </p>
+<Sheet
+  title={title}
+  description="Open a live aggregate report for your public GitHub repositories: star history, commit activity, language footprint and embeddable README assets."
+  canonicalPath="/profile"
+  ogImage={`${apiBase}/api/og.png`}
+  noindex={true}
+>
+  {/*
+    `data-session` is the page's whole state machine. It starts at `static`,
+    which is the state a reader with no JavaScript stays in — so the sign-in
+    action is on screen from first paint and nothing here waits on a script to
+    become visible. The script moves it to `reading` while the session fetch is
+    in flight, then to `signed-out` or `error`. The rail travels only in
+    `reading`, so the motion encodes a real live state and stops when it ends.
+  */}
+  <section class="registered border-b border-rule bg-paper">
+    <div
+      data-session="static"
+      data-motion="off"
+      data-api-base={apiBase}
+      class="mx-auto w-full max-w-6xl px-6 pt-14 pb-16"
+    >
+      <h1 class={TITLE}>Profile report</h1>
+      <p
+        data-profile-status
+        class:list={["mt-5", LEAD, MEASURE]}
+        aria-live="polite"
+      >
+        gitdebt draws one aggregate sheet for the public repositories of the
+        GitHub account you are signed in as.
+      </p>
 
-          <div
-            class="session-rail mt-6 h-1.5 w-full max-w-[22rem] overflow-hidden rounded-[2px]"
-            aria-hidden="true"
-          >
-            <div class="session-sweep h-full w-1/3">
-              <DitherMeter client:idle ratio={1} className="h-full" />
-            </div>
-          </div>
-
-          <div class="session-action mt-6">
-            <a class={SECTION_ACTION} href={loginHref}>
-              Sign in with GitHub →
-            </a>
-          </div>
-
-          <noscript>
-            <div class:list={[PANEL_PADDED, BODY, MEASURE, "mt-6"]}>
-              JavaScript is required to read your session here. Sign in with
-              GitHub from the header, then open gitdebt.com/ followed by your
-              GitHub login to reach the same report.
-            </div>
-          </noscript>
+      {/* The wait, drawn as a span: two extension ticks, a track between them,
+          and a segment travelling it. It exists only while the session is
+          genuinely being read. */}
+      <div
+        class="session-rail relative mt-8 h-3 w-full max-w-[20rem]"
+        aria-hidden="true"
+      >
+        <div class="absolute left-0 top-0 h-3 w-px bg-rule-strong"></div>
+        <div class="absolute right-0 top-0 h-3 w-px bg-rule-strong"></div>
+        <div class="absolute inset-x-0 top-1/2 h-px -translate-y-1/2 bg-rule"></div>
+        <div class="absolute inset-x-0 top-1/2 h-px -translate-y-1/2 overflow-hidden">
+          <div class="session-sweep h-px w-1/4 bg-ink"></div>
         </div>
-      </main>
-      <SiteFooter />
+      </div>
+
+      <div class="session-action mt-8">
+        <ButtonLink href={loginHref} variant="primary">
+          Sign in with GitHub
+        </ButtonLink>
+      </div>
+
+      <noscript>
+        <div class:list={["mt-8 max-w-2xl", PANEL]}>
+          <p class:list={[BODY, MEASURE]}>
+            Reading your session here needs JavaScript. Sign in from the header,
+            then open <span class="font-mono text-[0.8125rem] text-ink"
+              >gitdebt.com/</span
+            > followed by your GitHub login to reach the same sheet.
+          </p>
+        </div>
+      </noscript>
     </div>
-    {/* Deliberately NOT `is:inline`, and therefore not `define:vars` (which
-        forces inline): Astro's CSP hashes only the scripts it processes, so an
-        `is:inline` script carries no hash and `script-src` blocks it at
-        runtime — which silently disabled this page's whole redirect. The API
-        origin rides a `data-` attribute instead, the same way SiteHeader
-        passes it. */}
-    <script>
-      const root = document.querySelector("[data-session]");
-      const status = document.querySelector("[data-profile-status]");
-      const rail = document.querySelector(".session-rail");
-      const apiBase = root instanceof HTMLElement ? (root.dataset.apiBase ?? "") : "";
+  </section>
 
-      // The sweep runs only while its track is on screen and the tab is
-      // visible, and it is recomputed in both directions. With no observer, or
-      // with no script at all, it parks on one deterministic frame.
-      let onScreen = false;
-      const syncMotion = () => {
-        if (root) {
-          root.setAttribute(
-            "data-motion",
-            onScreen && !document.hidden ? "on" : "off",
-          );
+  <section class="bg-table">
+    <div class="mx-auto w-full max-w-6xl px-6 py-16">
+      {/* The internal rules are 1px gaps showing the ground through, not
+          `divide-*`: a divided grid loses its rules the moment it wraps to two
+          columns, and every cell here has to keep a field on each side of every
+          line at every width. */}
+      <dl
+        class="grid grid-cols-1 gap-px border border-rule-strong bg-rule sm:grid-cols-2 lg:grid-cols-4"
+      >
+        {
+          contents.map((entry) => (
+            <div class="bg-paper p-5">
+              <dt class={FIELD}>{entry.field}</dt>
+              <dd class:list={["mt-2.5", CAPTION]}>{entry.note}</dd>
+            </div>
+          ))
         }
-      };
-      if (rail && typeof IntersectionObserver === "function") {
-        new IntersectionObserver(
-          (entries) => {
-            onScreen = entries.some((entry) => entry.isIntersecting);
-            syncMotion();
-          },
-          { rootMargin: "128px" },
-        ).observe(rail);
-      } else {
-        onScreen = true;
-      }
-      syncMotion();
-      document.addEventListener("visibilitychange", syncMotion);
+      </dl>
+      <p class:list={["mt-6", CAPTION, MEASURE]}>
+        Signing in lets gitdebt recognise which public repositories are yours
+        and queue them for analysis. It reads public data only, and there is no
+        repository to connect.
+      </p>
+    </div>
+  </section>
+</Sheet>
 
-      const settle = (state: "signed-out" | "error", message: string) => {
-        if (root) root.setAttribute("data-session", state);
-        if (status) status.textContent = message;
+{/* Deliberately NOT `is:inline`, and therefore not `define:vars` (which
+    forces inline): Astro's CSP hashes only the scripts it processes, so an
+    `is:inline` script carries no hash and `script-src` blocks it at
+    runtime — which silently disabled this page's whole redirect. The API
+    origin rides a `data-` attribute instead, the same way SiteHeader
+    passes it. */}
+<script>
+  const root = document.querySelector("[data-session]");
+  const status = document.querySelector("[data-profile-status]");
+  const rail = document.querySelector(".session-rail");
+  const apiBase = root instanceof HTMLElement ? (root.dataset.apiBase ?? "") : "";
+
+  // The sweep runs only while its track is on screen and the tab is
+  // visible, and it is recomputed in both directions. With no observer, or
+  // with no script at all, it parks on one deterministic frame.
+  let onScreen = false;
+  const syncMotion = () => {
+    if (root) {
+      root.setAttribute(
+        "data-motion",
+        onScreen && !document.hidden ? "on" : "off",
+      );
+    }
+  };
+  if (rail && typeof IntersectionObserver === "function") {
+    new IntersectionObserver(
+      (entries) => {
+        onScreen = entries.some((entry) => entry.isIntersecting);
         syncMotion();
-      };
+      },
+      { rootMargin: "128px" },
+    ).observe(rail);
+  } else {
+    onScreen = true;
+  }
 
-      fetch(`${apiBase}/api/me`, {
-        credentials: "include",
-        headers: { accept: "application/json" },
-      })
-        .then(async (response) => (response.ok ? await response.json() : null))
-        .then((user) => {
-          const login =
-            typeof user?.login === "string" &&
-            /^[a-z0-9](?:[a-z0-9-]{0,37}[a-z0-9])?$/.test(user.login.toLowerCase())
-              ? user.login.toLowerCase()
-              : null;
-          if (login) {
-            location.replace(`/${encodeURIComponent(login)}`);
-            return;
-          }
-          settle(
-            "signed-out",
-            "Not signed in. Signing in lets gitdebt recognise the repositories you own and queue your public ones for analysis.",
-          );
-        })
-        .catch(() => {
-          settle(
-            "error",
-            "Your session could not be read. Sign in again to continue.",
-          );
-        });
-    </script>
+  const settle = (state: "signed-out" | "error", message: string) => {
+    if (root) root.setAttribute("data-session", state);
+    if (status) status.textContent = message;
+    syncMotion();
+  };
 
-    <style>
-      /* The indeterminate sweep: a third-width dithered rail crossing its
-         track. It is paused by default and runs only when the page's own
-         script says the track is on screen and the tab is visible. */
-      .session-sweep {
-        transform: translateX(-65%);
-        animation-name: session-sweep;
-        animation-duration: 1.4s;
-        animation-timing-function: var(--motion-ease-out);
-        animation-iteration-count: infinite;
-        animation-play-state: paused;
+  // The reading state is entered by the script and only by the script, so the
+  // action it hides is never hidden from a reader who has no script.
+  if (root) root.setAttribute("data-session", "reading");
+  if (status) status.textContent = "Reading your signed-in GitHub account.";
+  syncMotion();
+  document.addEventListener("visibilitychange", syncMotion);
+
+  fetch(`${apiBase}/api/me`, {
+    credentials: "include",
+    headers: { accept: "application/json" },
+  })
+    .then(async (response) => (response.ok ? await response.json() : null))
+    .then((user) => {
+      const login =
+        typeof user?.login === "string" &&
+        /^[a-z0-9](?:[a-z0-9-]{0,37}[a-z0-9])?$/.test(user.login.toLowerCase())
+          ? user.login.toLowerCase()
+          : null;
+      if (login) {
+        location.replace(`/${encodeURIComponent(login)}`);
+        return;
       }
+      settle(
+        "signed-out",
+        "Not signed in. Signing in lets gitdebt recognise the repositories you own and queue your public ones for analysis.",
+      );
+    })
+    .catch(() => {
+      settle(
+        "error",
+        "Your session could not be read. Sign in again to continue.",
+      );
+    });
+</script>
 
-      [data-session="reading"][data-motion="on"] .session-sweep {
-        animation-play-state: running;
-      }
+<style>
+  /* The indeterminate sweep: a quarter-width segment travelling a measured
+     track. It is paused by default and runs only when the page's own script
+     says the track is on screen and the tab is visible. */
+  .session-sweep {
+    transform: translateX(0);
+    animation-name: session-sweep;
+    animation-duration: 1.5s;
+    animation-timing-function: var(--ease-draw);
+    animation-iteration-count: infinite;
+    animation-play-state: paused;
+  }
 
-      @keyframes session-sweep {
-        to {
-          transform: translateX(260%);
-        }
-      }
+  [data-session="reading"][data-motion="on"] .session-sweep {
+    animation-play-state: running;
+  }
 
-      /* One affordance at a time: the rail belongs to the indeterminate state,
-         the sign-in link to the two states a reader can act on. */
-      [data-session]:not([data-session="reading"]) .session-rail {
-        display: none;
-      }
+  @keyframes session-sweep {
+    from {
+      transform: translateX(-100%);
+    }
+    to {
+      transform: translateX(500%);
+    }
+  }
 
-      [data-session="reading"] .session-action {
-        display: none;
-      }
+  /* One affordance at a time: the rail belongs to the state that is genuinely
+     indeterminate, the sign-in action to every state a reader can act on —
+     including the no-script state this page starts in. */
+  [data-session]:not([data-session="reading"]) .session-rail {
+    display: none;
+  }
 
-      @media (prefers-reduced-motion: reduce) {
-        .session-sweep {
-          animation-name: none;
-        }
-      }
-    </style>
-  </body>
-</html>
+  [data-session="reading"] .session-action {
+    display: none;
+  }
+
+  @media (prefers-reduced-motion: reduce) {
+    /* The travel goes; the mark stays, parked at the head of its track. */
+    .session-sweep {
+      animation-name: none;
+    }
+  }
+</style>

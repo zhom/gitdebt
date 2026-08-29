@@ -10,7 +10,6 @@ use std::path::{Path, PathBuf};
 use gitdebt::raster::{RasterFormat, rasterize};
 
 const SOURCE_SIZE: f32 = 512.0;
-const MARK_PATTERN: &str = "M0 0h24v24H0zM25 25h7v7h-7zM0 27h5v5H0zM27 0h5v5h-5z";
 
 /// Ink bounds of the robot path inside the 512 artboard. Icons place the
 /// glyph by these bounds so a 16px raster spends its pixels on the mark
@@ -22,10 +21,6 @@ const INK_H: f32 = 299.305;
 /// Fraction of the icon plate the glyph spans.
 const ICON_FILL: f32 = 0.94;
 
-/// Icon sizes at or below this keep a solid mark: the artwork's 32-unit
-/// dither cell lands under one device pixel and the silhouette dissolves.
-const DITHER_MIN_ICON: u32 = 96;
-
 fn main() {
     let root = Path::new(env!("CARGO_MANIFEST_DIR"))
         .parent()
@@ -34,8 +29,7 @@ fn main() {
     let mark = fs::read_to_string(&source_path).expect("read background-free robot mark");
     validate_mark(&mark);
 
-    let dithered_icon = app_icon_svg(&svg_body(&mark).replace("fill=\"#000\"", "fill=\"#fff\""));
-    let solid_icon = app_icon_svg(&solid_body(&mark, "#fff"));
+    let icon = app_icon_svg(&solid_body(&mark, "#fff"));
 
     write(&root.join("assets/gitdebt-logo.svg"), mark.as_bytes());
     write(&root.join("frontend/public/logo.svg"), mark.as_bytes());
@@ -44,7 +38,7 @@ fn main() {
         root.join("frontend/public/favicon.svg"),
         root.join("extension/icons/icon.svg"),
     ] {
-        write(&destination, solid_icon.as_bytes());
+        write(&destination, icon.as_bytes());
     }
 
     for (destination, size) in [
@@ -57,13 +51,8 @@ fn main() {
         (root.join("extension/icons/icon-48.png"), 48),
         (root.join("extension/icons/icon-128.png"), 128),
     ] {
-        let icon = if size >= DITHER_MIN_ICON {
-            &dithered_icon
-        } else {
-            &solid_icon
-        };
         let png =
-            rasterize(icon, RasterFormat::Png, size as f32 / SOURCE_SIZE).expect("rasterize logo");
+            rasterize(&icon, RasterFormat::Png, size as f32 / SOURCE_SIZE).expect("rasterize logo");
         write(&destination, &png);
     }
 
@@ -72,13 +61,8 @@ fn main() {
         (root.join("frontend/public/icon-maskable-192.png"), 192),
         (root.join("frontend/public/icon-maskable-512.png"), 512),
     ] {
-        let source = if size >= DITHER_MIN_ICON {
-            &dithered_icon
-        } else {
-            &solid_icon
-        };
         let png = rasterize(
-            &maskable_svg(source),
+            &maskable_svg(&icon),
             RasterFormat::Png,
             size as f32 / SOURCE_SIZE,
         )
@@ -102,19 +86,11 @@ fn validate_mark(mark: &str) {
         !mark.contains("filter"),
         "mark must not contain raster effects"
     );
-    assert!(
-        mark.contains(MARK_PATTERN),
-        "canonical dither pattern changed"
-    );
 }
 
-/// The robot path alone, filled flat: no `<defs>`, no pattern reference.
+/// The robot path alone, re-inked from the artwork's authored black.
 fn solid_body(mark: &str, ink: &str) -> String {
-    let body = svg_body(mark);
-    let defs_start = body.find("<defs>").expect("logo defs");
-    let defs_end = body.find("</defs>").expect("logo defs close") + "</defs>".len();
-    format!("{}{}", &body[..defs_start], &body[defs_end..])
-        .replace("fill=\"url(#gitdebt-dither)\"", &format!("fill=\"{ink}\""))
+    svg_body(mark).replace("fill=\"#000\"", &format!("fill=\"{ink}\""))
 }
 
 /// Rounded plate with the glyph centred by its ink bounds.

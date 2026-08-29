@@ -1,8 +1,8 @@
 ---
-import { Menu, X } from "lucide-react";
 import Brand from "@/components/Brand.astro";
 import { GitHubLoginButton } from "@/components/GitHubLoginButton";
 import { NavStarCount } from "@/components/NavStarCount";
+import { Index, Cut } from "@/components/ui/marks";
 import {
   GITDEBT_REPO,
   GITDEBT_REPO_URL,
@@ -10,17 +10,25 @@ import {
 } from "@/lib/nav-star-seed";
 import { staticApiBase } from "@/lib/static-api-base";
 
+/**
+ * The header is the sheet's top frame.
+ *
+ * It is solid paper, not glass. A drawing sheet is opaque, and a translucent
+ * blurred bar over a white page buys nothing but a chance to band. The single
+ * rule along its bottom edge is the frame line: it separates the chrome from
+ * the sheet, so it encloses something real.
+ *
+ * The current page is marked by ink alone — full graphite against ink-3 for
+ * the rest. There is no dot, no pill and no underline bolted beneath it.
+ */
+
 const navLinks = [
   { label: "Analyze", href: "/#lookup" },
   { label: "Compare", href: "/compare" },
   { label: "Leaderboard", href: "/leaderboard" },
 ];
 
-// gitdebt's own star count, seeded from gitdebt's own API at build time and
-// refreshed live on the client. See `navStarSeed` for why it is a seed rather
-// than the source of truth.
 const gitdebtStars = await navStarSeed();
-
 const apiBase = staticApiBase();
 const returnTo = `${Astro.url.pathname}${Astro.url.search}`;
 const loginHref = `${apiBase}/auth/github/start?return_to=${encodeURIComponent(returnTo)}`;
@@ -30,34 +38,40 @@ function isCurrent(href: string): boolean {
   const path = href.split("#")[0].replace(/\/+$/, "") || "/";
   return path !== "/" && currentPath === path;
 }
+
+const NAV_LINK =
+  "inline-flex min-h-10 items-center px-3 font-draft text-[0.8125rem] tracking-[0.06em] uppercase outline-none transition-colors duration-[--duration-ui] hover:text-ink focus-visible:outline-2 focus-visible:outline-offset-2 focus-visible:outline-signal";
 ---
 
 <a
   href="#main-content"
-  class="fixed top-3 left-3 z-999 inline-flex min-h-10 -translate-y-20 items-center rounded-md bg-foreground px-4 font-mono text-xs text-background focus:translate-y-0 focus-visible:ring-2 focus-visible:ring-accent/30"
+  class="fixed top-3 left-3 z-[999] inline-flex min-h-10 -translate-y-24 items-center bg-ink px-4 font-draft text-[0.8125rem] tracking-[0.06em] text-paper uppercase transition-transform focus:translate-y-0"
 >
   Skip to content
 </a>
 
-<header class="site-header chrome sticky top-0 z-50">
+<header class="site-header sticky top-0 z-50 border-b border-rule bg-paper">
   <div
-    class="mx-auto flex h-16 max-w-6xl items-center justify-between gap-3 px-4 sm:px-6 lg:grid lg:grid-cols-[1fr_auto_1fr]"
+    class="mx-auto flex h-16 max-w-6xl items-center justify-between gap-3 px-6 lg:grid lg:grid-cols-[1fr_auto_1fr]"
   >
     <a
       href="/"
       aria-label="gitdebt homepage"
-      class="inline-flex min-h-10 min-w-0 shrink-0 items-center rounded-md outline-none focus-visible:ring-2 focus-visible:ring-accent/30 focus-visible:ring-offset-4 focus-visible:ring-offset-background"
+      class="inline-flex min-h-10 min-w-0 shrink-0 items-center outline-none focus-visible:outline-2 focus-visible:outline-offset-2 focus-visible:outline-signal"
     >
       <Brand />
     </a>
 
-    <nav class="hidden items-center gap-1 lg:flex">
+    <nav class="hidden items-center lg:flex" aria-label="Primary">
       {
         navLinks.map((link) => (
           <a
             href={link.href}
             aria-current={isCurrent(link.href) ? "page" : undefined}
-            class="group relative inline-flex min-h-10 items-center gap-2.5 rounded-md px-2.5 font-mono text-[12px] text-muted-foreground outline-none transition-colors duration-150 hover:bg-card/60 hover:text-foreground focus-visible:ring-2 focus-visible:ring-accent/30 aria-[current=page]:bg-card aria-[current=page]:text-foreground"
+            class:list={[
+              NAV_LINK,
+              isCurrent(link.href) ? "text-ink" : "text-ink-3",
+            ]}
           >
             {link.label}
           </a>
@@ -65,7 +79,7 @@ function isCurrent(href: string): boolean {
       }
     </nav>
 
-    <div class="flex shrink-0 items-center gap-1 justify-self-end sm:gap-2">
+    <div class="flex shrink-0 items-center gap-2 justify-self-end">
       <div class="hidden sm:block">
         <NavStarCount
           client:load
@@ -80,37 +94,34 @@ function isCurrent(href: string): boolean {
           <GitHubLoginButton client:load href={loginHref} />
         </div>
       </div>
+
       <details class="relative lg:hidden" data-mobile-menu data-state="closed">
         <summary
-          class="grid size-10 cursor-pointer list-none place-items-center rounded-md text-foreground outline-none transition-colors duration-150 hover:bg-card/60 focus-visible:ring-2 focus-visible:ring-accent/30 [&::-webkit-details-marker]:hidden"
+          class="grid size-10 cursor-pointer list-none place-items-center text-ink outline-none transition-colors duration-[--duration-ui] hover:bg-table focus-visible:outline-2 focus-visible:outline-offset-2 focus-visible:outline-signal [&::-webkit-details-marker]:hidden"
           aria-label="Open navigation"
           aria-controls="mobile-navigation"
           aria-expanded="false"
         >
-          <Menu
-            className="mobile-nav-icon mobile-nav-icon-menu size-5"
-            strokeWidth={1.75}
-            aria-hidden="true"
-          />
-          <X
-            className="mobile-nav-icon mobile-nav-icon-close size-5"
-            strokeWidth={1.75}
-            aria-hidden="true"
-          />
+          <Index size={18} className="mobile-nav-icon mobile-nav-icon-menu" />
+          <Cut size={18} className="mobile-nav-icon mobile-nav-icon-close" />
         </summary>
         <div
-          class="mobile-nav-panel absolute right-0 mt-2 w-[min(18rem,calc(100vw-2rem))] origin-top-right rounded-lg border border-border/80 bg-card p-2 text-popover-foreground shadow-[0_8px_24px_rgba(0,0,0,0.32)]"
+          class="mobile-nav-panel lifted absolute right-0 mt-2 w-[min(18rem,calc(100vw-2rem))] origin-top-right border border-rule-strong bg-paper p-2"
           data-mobile-menu-panel
           aria-hidden="true"
           inert
         >
-          <nav id="mobile-navigation" class="flex flex-col">
+          <nav id="mobile-navigation" class="flex flex-col" aria-label="Primary">
             {
               navLinks.map((link) => (
                 <a
                   href={link.href}
                   aria-current={isCurrent(link.href) ? "page" : undefined}
-                  class="relative flex min-h-10 items-center gap-2.5 rounded-md px-2.5 font-mono text-[12px] text-muted-foreground outline-none transition-colors duration-150 hover:bg-card/60 hover:text-foreground focus-visible:ring-2 focus-visible:ring-accent/30 aria-[current=page]:bg-card aria-[current=page]:text-foreground"
+                  class:list={[
+                    NAV_LINK,
+                    "px-2.5",
+                    isCurrent(link.href) ? "text-ink" : "text-ink-3",
+                  ]}
                 >
                   {link.label}
                 </a>
@@ -122,6 +133,56 @@ function isCurrent(href: string): boolean {
     </div>
   </div>
 </header>
+
+<style>
+  /* The menu and close marks occupy one grid cell so they cross-fade in place
+     rather than reflowing the summary box. Both are in the DOM from the start;
+     only opacity and a 3% scale move. */
+  .mobile-nav-icon {
+    grid-area: 1 / 1;
+    transition:
+      opacity var(--duration-ui) var(--ease-land),
+      transform var(--duration-ui) var(--ease-land);
+  }
+
+  .mobile-nav-icon-close {
+    opacity: 0;
+    transform: scale(0.97);
+  }
+
+  details[open][data-state="open"] .mobile-nav-icon-menu {
+    opacity: 0;
+    transform: scale(0.97);
+  }
+
+  details[open][data-state="open"] .mobile-nav-icon-close {
+    opacity: 1;
+    transform: scale(1);
+  }
+
+  .mobile-nav-panel {
+    opacity: 0;
+    pointer-events: none;
+    transform: translateY(-6px);
+    transition:
+      opacity var(--duration-ui) var(--ease-land),
+      transform var(--duration-ui) var(--ease-land);
+  }
+
+  details[open][data-state="open"] .mobile-nav-panel {
+    opacity: 1;
+    pointer-events: auto;
+    transform: translateY(0);
+  }
+
+  @media (prefers-reduced-motion: reduce) {
+    .mobile-nav-icon,
+    .mobile-nav-panel {
+      transform: none;
+      transition-property: opacity;
+    }
+  }
+</style>
 
 <script>
   const CLOSE_MS = 140;
@@ -219,12 +280,14 @@ function isCurrent(href: string): boolean {
     avatar_url?: string | null;
   };
 
+  // These mirror the drafting control treatment. They live as strings because
+  // this menu is built after a fetch resolves, outside Astro's render.
   const ACCOUNT_TRIGGER =
-    "relative isolate inline-flex min-h-10 cursor-pointer list-none items-center justify-center gap-2 overflow-hidden rounded-md border border-border/60 px-3 py-2 font-mono text-xs whitespace-nowrap text-foreground outline-none transition-[opacity,scale] active:scale-[0.96] motion-reduce:transition-none focus-visible:ring-2 focus-visible:ring-accent/30 focus-visible:ring-offset-2 focus-visible:ring-offset-background [&::-webkit-details-marker]:hidden";
+    "inline-flex min-h-10 cursor-pointer list-none items-center justify-center gap-2 whitespace-nowrap border border-rule-strong px-3 font-draft text-[0.8125rem] tracking-[0.04em] text-ink uppercase outline-none transition-colors duration-[140ms] hover:bg-table focus-visible:outline-2 focus-visible:outline-offset-2 focus-visible:outline-signal [&::-webkit-details-marker]:hidden";
   const ACCOUNT_MENU =
-    "absolute right-0 z-50 mt-2 w-72 rounded-lg border border-border/80 bg-card p-2 text-popover-foreground shadow-[0_8px_24px_rgba(0,0,0,0.32)]";
+    "lifted absolute right-0 z-50 mt-2 w-72 border border-rule-strong bg-paper p-2";
   const ACCOUNT_ITEM =
-    "flex min-h-9 w-full items-center rounded-md px-2.5 text-left font-mono text-[12px] text-muted-foreground outline-none hover:bg-card/60 hover:text-foreground focus-visible:ring-2 focus-visible:ring-accent/30";
+    "flex min-h-10 w-full items-center px-2.5 text-left text-[0.8125rem] text-ink-2 outline-none transition-colors duration-[140ms] hover:bg-table hover:text-ink focus-visible:outline-2 focus-visible:outline-signal";
 
   function element<K extends keyof HTMLElementTagNameMap>(
     tag: K,
@@ -242,7 +305,7 @@ function isCurrent(href: string): boolean {
     trigger.setAttribute("aria-label", `Open account menu for ${login}`);
 
     if (user.avatar_url) {
-      const avatar = element("img", "size-6 rounded-full [image-rendering:auto]");
+      const avatar = element("img", "size-6");
       avatar.src = user.avatar_url;
       avatar.alt = "";
       avatar.width = 24;
@@ -254,27 +317,15 @@ function isCurrent(href: string): boolean {
     loginText.textContent = login;
     trigger.append(loginText);
 
-    const caret = element(
-      "span",
-      "hidden text-muted-foreground transition-transform duration-150 group-open:rotate-180 sm:inline",
-    );
-    caret.textContent = "⌄";
-    caret.setAttribute("aria-hidden", "true");
-    trigger.append(caret);
-
     const menu = element("div", ACCOUNT_MENU);
     const identity = element("div", "px-2.5 py-2");
-    const name = element("p", "truncate text-[13px]");
+    const name = element("p", "truncate text-[0.8125rem] text-ink");
     name.textContent = user.name || login;
-    const handle = element(
-      "p",
-      "truncate font-mono text-[11px] text-muted-foreground",
-    );
+    const handle = element("p", "truncate font-mono text-[0.75rem] text-ink-3");
     handle.textContent = `@${login}`;
     identity.append(name, handle);
 
-    const divider = element("div", "my-1.5 h-px bg-border/40");
-    divider.setAttribute("aria-hidden", "true");
+    const divider = element("hr", "rule-drawn my-1.5");
 
     const profile = element("a", ACCOUNT_ITEM);
     profile.href = `/${encodeURIComponent(login)}`;

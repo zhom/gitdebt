@@ -1,143 +1,135 @@
 ---
-import { CATEGORIES } from "@/data/categories";
 import Brand from "@/components/Brand.astro";
-import { FooterAsciiMark } from "@/components/FooterAsciiMark";
-import PageInsightSection from "@/components/PageInsightSection.astro";
-import logoSource from "../../../assets/gitdebt-logo.svg?raw";
-import { pageInsightForPath } from "@/lib/signal-art";
 
-interface Props {
-  /** Optional page data makes the route-specific signal field quantitative. */
-  signalValues?: number[];
-  /**
-   * Reserved. Kept in the type so existing callers keep type-checking; the
-   * extension entry it used to gate has been removed because it pointed at
-   * `/#extension`, an id that exists on no page.
-   */
-  showExtensionLink?: boolean;
-}
+/**
+ * The footer is the sheet's title block.
+ *
+ * A technical drawing states, in a ruled block at the foot of the sheet, who
+ * drew it, what it is of, and when. That is exactly what a footer is for, so
+ * this one is drawn as one: a grid whose cells are divided by real rules,
+ * because each rule separates two real fields.
+ *
+ * What this replaces was the standard footer — wordmark, tagline, three columns
+ * of link lists under tracked-out mono labels, a divider, a copyright row — sat
+ * on two blurred gradient blobs and an animated character-field mark. The blobs
+ * and the mark are gone. So are the seven category links: they are one click
+ * away on /compare, and a footer that lists every category is a sitemap
+ * wearing a footer's clothes.
+ */
 
 const year = new Date().getFullYear();
-const { signalValues } = Astro.props;
-const routeInsight = pageInsightForPath(Astro.url.pathname);
-const pageInsight = signalValues?.some(Number.isFinite)
-  ? { ...routeInsight, values: signalValues }
-  : routeInsight;
 
-const robot = logoSource.match(/fill="url\(#gitdebt-dither\)"\s+d="([^"]+)"/);
-if (!robot) {
-  throw new Error("assets/gitdebt-logo.svg no longer exposes the robot path");
-}
-const ROBOT_PATH = robot[1];
-
-const footerLinks = [
-  { label: "How it works", href: "/#how-it-works" },
-  { label: "Features", href: "/#features" },
-  { label: "Compare repos", href: "/compare" },
-  { label: "Repo leaderboard", href: "/leaderboard" },
+const explore = [
+  { label: "Compare repositories", href: "/compare" },
+  { label: "Leaderboard", href: "/leaderboard" },
   { label: "README badges", href: "/badges" },
+  { label: "How it works", href: "/#how-it-works" },
 ];
 
-const categoryLinks = [
-  ...CATEGORIES.slice(0, 6).map((c) => ({
-    label: c.name,
-    href: `/compare/${c.slug}`,
-  })),
-  { label: "All categories →", href: "/compare#categories" },
-];
-
-const legalLinks = [
+const legal = [
   { label: "About", href: "/about" },
   { label: "Privacy", href: "/privacy" },
   { label: "Terms", href: "/terms" },
 ];
 ---
 
-<footer class="relative isolate overflow-hidden border-t border-border/60">
-  <div
-    class="pointer-events-none absolute inset-0 -z-20 overflow-hidden bg-background"
-    aria-hidden="true"
-  >
-    <div class="absolute inset-0 bg-linear-to-b from-background via-background to-card/55"></div>
-    <div class="absolute -top-48 -left-40 size-96 rounded-full bg-[var(--swatch-blue)] opacity-[0.055] blur-3xl"></div>
-    <div class="absolute -right-40 -bottom-56 size-[30rem] rounded-full bg-[var(--swatch-pink)] opacity-[0.045] blur-3xl"></div>
-  </div>
-  <FooterAsciiMark client:visible path={ROBOT_PATH} />
-  <div class="relative mx-auto max-w-6xl px-4 pt-12 pb-14 sm:px-6 sm:pt-14 sm:pb-20">
-    <div class="pb-12 sm:pb-14">
-      <PageInsightSection insight={pageInsight} />
-    </div>
-    <div class="grid gap-10 lg:grid-cols-[minmax(0,1fr)_auto] lg:gap-16">
-      <div class="max-w-sm space-y-3">
+<footer class="mt-24 bg-table">
+  <div class="mx-auto max-w-6xl px-6">
+    <!--
+      The block itself. `divide-*` draws the internal rules, so every line in
+      here has a field on each side of it.
+    -->
+    <div
+      class="grid grid-cols-1 border border-rule-strong bg-paper sm:grid-cols-2 lg:grid-cols-4 lg:divide-x divide-y lg:divide-y-0 divide-rule"
+    >
+      <section class="p-5">
+        <p class="drafted">Drawn by</p>
         <a
           href="/"
           aria-label="gitdebt homepage"
-          class="inline-flex min-h-10 items-center rounded-md outline-none focus-visible:ring-2 focus-visible:ring-accent/30 focus-visible:ring-offset-4 focus-visible:ring-offset-background"
+          class="mt-3 inline-flex min-h-10 items-center outline-none focus-visible:outline-2 focus-visible:outline-offset-2 focus-visible:outline-signal"
         >
-          <Brand markClass="size-7" />
+          <Brand />
         </a>
-        <p class="text-[13px] leading-relaxed text-muted-foreground [text-wrap:pretty]">
-          GitHub star history and repo-debt analytics. Chart any repo's star
-          growth, overlay several at once, and embed it in your README.
+        <p class="mt-2 text-[0.8125rem] leading-[1.55] text-ink-2 [text-wrap:pretty]">
+          Star history and repository health for any public GitHub repository.
         </p>
-      </div>
+      </section>
 
-      <div class="grid grid-cols-2 gap-x-6 gap-y-10 sm:grid-cols-3 sm:gap-x-12">
-        <nav class="flex min-w-0 flex-col">
-          <p class="mb-2 font-mono text-[10px] tracking-[0.25em] text-muted-foreground/70 uppercase">
-            Explore
-          </p>
+      <nav class="p-5" aria-label="Explore">
+        <p class="drafted">Sheets</p>
+        <ul role="list" class="mt-3 flex flex-col">
           {
-            footerLinks.map((link) => (
-              <a
-                href={link.href}
-                class="-mx-2.5 flex min-h-10 items-center rounded-md px-2.5 text-[13px] text-muted-foreground outline-none transition-colors duration-150 hover:bg-card/60 hover:text-foreground focus-visible:ring-2 focus-visible:ring-accent/30"
-              >
-                {link.label}
-              </a>
+            explore.map((link) => (
+              <li>
+                <a
+                  href={link.href}
+                  class="-mx-2 flex min-h-10 items-center px-2 text-[0.8125rem] text-ink-2 outline-none transition-colors duration-[--duration-ui] hover:bg-table hover:text-ink focus-visible:outline-2 focus-visible:outline-signal"
+                >
+                  {link.label}
+                </a>
+              </li>
             ))
           }
-        </nav>
+        </ul>
+      </nav>
 
-        <nav class="flex min-w-0 flex-col">
-          <p class="mb-2 font-mono text-[10px] tracking-[0.25em] text-muted-foreground/70 uppercase">
-            Categories
-          </p>
+      <nav class="p-5" aria-label="Legal">
+        <p class="drafted">Notes</p>
+        <ul role="list" class="mt-3 flex flex-col">
           {
-            categoryLinks.map((link) => (
-              <a
-                href={link.href}
-                class="-mx-2.5 flex min-h-10 items-center rounded-md px-2.5 text-[13px] text-muted-foreground outline-none transition-colors duration-150 hover:bg-card/60 hover:text-foreground focus-visible:ring-2 focus-visible:ring-accent/30"
-              >
-                {link.label}
-              </a>
+            legal.map((link) => (
+              <li>
+                <a
+                  href={link.href}
+                  class="-mx-2 flex min-h-10 items-center px-2 text-[0.8125rem] text-ink-2 outline-none transition-colors duration-[--duration-ui] hover:bg-table hover:text-ink focus-visible:outline-2 focus-visible:outline-signal"
+                >
+                  {link.label}
+                </a>
+              </li>
             ))
           }
-        </nav>
+        </ul>
+      </nav>
 
-        <nav class="col-span-2 flex min-w-0 flex-col sm:col-span-1">
-          <p class="mb-2 font-mono text-[10px] tracking-[0.25em] text-muted-foreground/70 uppercase">
-            Legal
-          </p>
-          {
-            legalLinks.map((link) => (
-              <a
-                href={link.href}
-                class="-mx-2.5 flex min-h-10 items-center rounded-md px-2.5 text-[13px] text-muted-foreground outline-none transition-colors duration-150 hover:bg-card/60 hover:text-foreground focus-visible:ring-2 focus-visible:ring-accent/30"
-              >
-                {link.label}
-              </a>
-            ))
-          }
-        </nav>
-      </div>
+      <section class="p-5">
+        <p class="drafted">Sheet data</p>
+        <dl class="mt-3 grid grid-cols-[auto_1fr] gap-x-4 gap-y-1.5 text-[0.8125rem]">
+          <dt class="text-ink-3">Revision</dt>
+          <dd class="font-mono tabular-nums text-ink-2">{year}</dd>
+          <dt class="text-ink-3">Source</dt>
+          <dd class="text-ink-2">Public GitHub data</dd>
+          <dt class="text-ink-3">Licence</dt>
+          <dd class="text-ink-2">
+            <a
+              href="https://github.com/zhom/gitdebt"
+              class="underline decoration-rule-strong underline-offset-[3px] outline-none transition-colors duration-[--duration-ui] hover:text-signal hover:decoration-signal focus-visible:outline-2 focus-visible:outline-signal"
+              >MIT, open source</a
+            >
+          </dd>
+        </dl>
+        <p class="mt-4 text-[0.75rem] leading-[1.5] text-ink-3">
+          Not affiliated with GitHub.
+        </p>
+      </section>
     </div>
+  </div>
 
-    <div
-      class="mt-10 flex flex-col gap-2 border-t border-border/60 pt-6 font-mono text-[10px] tracking-[0.25em] text-muted-foreground/70 uppercase sm:flex-row sm:items-center sm:justify-between"
+  <!--
+    The signature. Set in the drawing's own hand, tracked out, and anchored
+    flush to the bottom edge so it bleeds off the sheet.
+
+    It is clipped at the BOTTOM only: `pt-8` and the line-height give the cap
+    tops real clearance, and the negative bottom margin pushes the baseline past
+    the edge. A wordmark whose cap tops are shaved is the failure this is
+    written to avoid, so the clearance above is not optional.
+  -->
+  <div class="mt-16 overflow-hidden" aria-hidden="true">
+    <p
+      class="px-6 pt-8 -mb-[0.16em] text-center font-draft leading-[0.8] tracking-[0.16em] text-rule-strong select-none"
+      style="font-size: clamp(3.5rem, 17vw, 13rem)"
     >
-      <p>© <span class="tabular-nums">{year}</span> gitdebt</p>
-      <p>Not affiliated with GitHub</p>
-    </div>
+      GITDEBT
+    </p>
   </div>
 </footer>

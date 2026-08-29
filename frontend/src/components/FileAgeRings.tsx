@@ -1,29 +1,49 @@
-"use client";
+import { useEffect, useId, useMemo, useState } from "react";
 
-import { useEffect, useMemo, useRef, useState } from "react";
-
-import {
-  BAYER4,
-  INK,
-  OFF_TIER,
-  RasterBuffer,
-  SWATCH,
-  type RGB,
-} from "@/lib/dither";
+import { CAPTION, FIELD, FIGURE } from "@/components/style-tokens";
+import { FIELD_CELL, FIELD_ROWS } from "@/components/StatStrip";
 import {
   AGE_LABEL,
-  ageRingAtPoint,
   layoutAgeRings,
+  type AgeRing,
   type FileAgeBand,
 } from "@/lib/repo-signal-visuals";
 import { cn } from "@/lib/utils";
+
+/**
+ * File age against change frequency, drawn as an angular dimension stack.
+ *
+ * Four concentric bands, one per age range, all swept clockwise from a single
+ * datum at twelve o'clock. How far a band sweeps is its share of the tracked
+ * files; how heavily it is drawn is how often those files change. Each band
+ * carries a leader out to its own label and value, and the leader terminates on
+ * the arc's end — the measured extent itself, never a point in space.
+ *
+ * The radii, shares and intensities are `layoutAgeRings()`'s, unchanged. What
+ * changed is the drawing: this was a 2D canvas painting four rings pixel by
+ * pixel at sixty frames a second, which rendered a blank square until the
+ * script ran, offered a screen reader nothing, and hit-tested the pointer by
+ * hand. It is now SVG that is complete in the markup, and the bands are real
+ * shapes the pointer can simply land on.
+ */
 
 export type FileAgeRingsProps = {
   bands: readonly FileAgeBand[];
   className?: string;
 };
 
-const FRAME_MS = 50;
+const VIEW_W = 520;
+const VIEW_H = 330;
+const CX = 148;
+const CY = 165;
+/** Pixels per unit radius. `layoutAgeRings` works in 0..0.96. */
+const SCALE = 138;
+/** Where every leader's shoulder ends and its lettering begins. */
+const ELBOW_X = 288;
+const SHOULDER_X = 312;
+const LABEL_X = 322;
+/** Row pitch of the label stack. Four rows, all on one grid. */
+const ROW_Y = [52, 122, 192, 262];
 
 const compact = (value: number) =>
   new Intl.NumberFormat("en", {
@@ -31,25 +51,58 @@ const compact = (value: number) =>
     maximumFractionDigits: 1,
   }).format(value);
 
-function mixColor(a: RGB, b: RGB, t: number): RGB {
-  const amount = Math.max(0, Math.min(1, t));
-  return [
-    Math.round(a[0] + (b[0] - a[0]) * amount),
-    Math.round(a[1] + (b[1] - a[1]) * amount),
-    Math.round(a[2] + (b[2] - a[2]) * amount),
-  ];
+type Point = { x: number; y: number };
+
+/** A point on a ring, `turn` clockwise from the twelve o'clock datum. */
+function onRing(radius: number, turn: number): Point {
+  const angle = -Math.PI / 2 + turn * Math.PI * 2;
+  return {
+    x: CX + Math.cos(angle) * radius,
+    y: CY + Math.sin(angle) * radius,
+  };
 }
 
-function angleFraction(dx: number, dy: number): number {
-  const angle = Math.atan2(dy, dx) + Math.PI / 2;
-  return ((angle % (Math.PI * 2)) + Math.PI * 2) % (Math.PI * 2) /
-    (Math.PI * 2);
+/** The swept arc, as a path. A full turn is drawn as two half arcs. */
+function arcPath(radius: number, turn: number): string {
+  const clamped = Math.min(1, Math.max(0, turn));
+  if (clamped <= 0) return "";
+  const start = onRing(radius, 0);
+  if (clamped >= 0.999) {
+    const half = onRing(radius, 0.5);
+    return `M${start.x.toFixed(2)} ${start.y.toFixed(2)} A${radius} ${radius} 0 1 1 ${half.x.toFixed(2)} ${half.y.toFixed(2)} A${radius} ${radius} 0 1 1 ${start.x.toFixed(2)} ${start.y.toFixed(2)}`;
+  }
+  const end = onRing(radius, clamped);
+  const large = clamped > 0.5 ? 1 : 0;
+  return `M${start.x.toFixed(2)} ${start.y.toFixed(2)} A${radius} ${radius} 0 ${large} 1 ${end.x.toFixed(2)} ${end.y.toFixed(2)}`;
 }
 
-export function FileAgeRings({
-  bands,
-  className,
-}: FileAgeRingsProps) {
+/** A filled arrowhead landing on `at`, pointing away from `from`. */
+function terminator(at: Point, from: Point): string {
+  const dx = at.x - from.x;
+  const dy = at.y - from.y;
+  const length = Math.hypot(dx, dy) || 1;
+  const ux = dx / length;
+  const uy = dy / length;
+  const baseX = at.x - ux * 7.5;
+  const baseY = at.y - uy * 7.5;
+  return `M${at.x.toFixed(2)} ${at.y.toFixed(2)} L${(baseX - uy * 2.6).toFixed(2)} ${(baseY + ux * 2.6).toFixed(2)} L${(baseX + uy * 2.6).toFixed(2)} ${(baseY - ux * 2.6).toFixed(2)} z`;
+}
+
+type Geometry = {
+  ring: AgeRing;
+  index: number;
+  mid: number;
+  band: number;
+  /** Weight of the swept arc: thin construction to a heavy object line. */
+  weight: number;
+  end: Point;
+  elbow: Point;
+  rowY: number;
+  length: number;
+};
+
+export function FileAgeRings({ bands, className }: FileAgeRingsProps) {
+  const uid = useId();
   const rings = useMemo(() => layoutAgeRings(bands), [bands]);
   const hottest = useMemo(() => {
     let index = 0;
@@ -61,174 +114,255 @@ export function FileAgeRings({
     return index;
   }, [rings]);
   const [activeIndex, setActiveIndex] = useState(hottest);
-  const activeIndexRef = useRef(activeIndex);
-  activeIndexRef.current = activeIndex;
-  const canvasRef = useRef<HTMLCanvasElement>(null);
-  const totalFiles = rings.reduce((sum, ring) => sum + ring.files, 0);
-  const active = rings[activeIndex] ?? rings[0];
 
   useEffect(() => {
     setActiveIndex(hottest);
   }, [hottest]);
 
-  useEffect(() => {
-    const canvas = canvasRef.current;
-    if (!canvas) return;
-    const context = canvas.getContext("2d");
-    if (!context) return;
+  const totalFiles = rings.reduce((sum, ring) => sum + ring.files, 0);
+  const active = rings[activeIndex] ?? rings[0];
 
-    let buffer: RasterBuffer | null = null;
-    let frame = 0;
-    let visible = true;
-    let reduced = window.matchMedia("(prefers-reduced-motion: reduce)").matches;
-    let lastPaint = 0;
-    const started = performance.now();
-    const motion = window.matchMedia("(prefers-reduced-motion: reduce)");
-
-    const paint = (now: number) => {
-      const box = canvas.getBoundingClientRect();
-      const cols = Math.max(80, Math.min(190, Math.round(box.width / 2.4)));
-      const rows = Math.max(80, Math.min(190, Math.round(box.height / 2.4)));
-      if (!buffer || buffer.cols !== cols || buffer.rows !== rows) {
-        buffer = new RasterBuffer(cols, rows);
-        canvas.width = cols;
-        canvas.height = rows;
-      }
-      buffer.clear();
-      const cx = cols / 2;
-      const cy = rows / 2;
-      const radiusScale = Math.min(cols, rows) * 0.5;
-      const phase = reduced ? 0 : (now - started) / 1_700;
-      const phaseStep = reduced ? 0 : Math.floor(phase * 2) & 3;
-
-      for (let y = 0; y < rows; y += 1) {
-        const dy = y + 0.5 - cy;
-        for (let x = 0; x < cols; x += 1) {
-          const dx = x + 0.5 - cx;
-          const radius = Math.hypot(dx, dy) / radiusScale;
-          const index = rings.findIndex(
-            (ring) =>
-              radius >= ring.innerRadius && radius <= ring.outerRadius,
-          );
-          if (index < 0) continue;
-          const ring = rings[index];
-          const fraction = angleFraction(dx, dy);
-          const inShare = fraction <= ring.fileShare;
-          const selected = index === activeIndexRef.current;
-          const wave =
-            0.5 +
-            0.5 *
-              Math.sin(fraction * Math.PI * 8 - phase * 1.6 + index * 0.9);
-          const density = inShare
-            ? Math.min(
-                0.98,
-                0.28 +
-                  ring.changeIntensity * 0.56 +
-                  (selected ? wave * 0.12 : 0),
-              )
-            : selected
-              ? 0.16 + wave * 0.05
-              : 0.08;
-          const threshold =
-            BAYER4[(y + phaseStep) & 3][(x + index) & 3];
-          const lit = density > threshold;
-          const color = inShare
-            ? mixColor(SWATCH.blue, SWATCH.orange, ring.changeIntensity)
-            : INK;
-          const alpha = inShare
-            ? (0.3 + density * 0.7) * (lit ? 1 : OFF_TIER)
-            : lit
-              ? 0.14
-              : 0.035;
-          buffer.set(x, y, color, alpha);
-        }
-      }
-      context.putImageData(buffer.image, 0, 0);
-    };
-
-    const tick = (now: number) => {
-      frame = 0;
-      if (!visible) return;
-      if (now - lastPaint >= FRAME_MS) {
-        lastPaint = now;
-        paint(now);
-      }
-      if (!reduced) frame = requestAnimationFrame(tick);
-    };
-    const start = () => {
-      if (reduced) paint(performance.now());
-      else if (!frame && visible) frame = requestAnimationFrame(tick);
-    };
-    const stop = () => {
-      if (frame) cancelAnimationFrame(frame);
-      frame = 0;
-    };
-    const intersection = new IntersectionObserver(([entry]) => {
-      visible = entry?.isIntersecting ?? true;
-      if (visible) start();
-      else stop();
+  const geometry = useMemo<Geometry[]>(() => {
+    const ends = rings.map((ring) => {
+      const mid = ((ring.innerRadius + ring.outerRadius) / 2) * SCALE;
+      return { mid, end: onRing(mid, ring.fileShare) };
     });
-    intersection.observe(canvas);
-    const resize = new ResizeObserver(() => paint(performance.now()));
-    resize.observe(canvas);
-    const updateMotion = () => {
-      reduced = motion.matches;
-      stop();
-      start();
-    };
-    motion.addEventListener("change", updateMotion);
-    start();
+    // Rows are handed out down the sheet in the order the arcs end down the
+    // plate, so no leader ever has to cross another one to reach its label.
+    // Which row a band lands in therefore follows the drawing, not the list.
+    const order = rings
+      .map((_, index) => index)
+      .sort((a, b) => ends[a].end.y - ends[b].end.y || a - b);
+    const rowFor = new Map(order.map((index, row) => [index, ROW_Y[row]]));
 
-    return () => {
-      stop();
-      intersection.disconnect();
-      resize.disconnect();
-      motion.removeEventListener("change", updateMotion);
-    };
+    return rings.map((ring, index) => {
+      const { mid, end } = ends[index];
+      const rowY = rowFor.get(index) ?? ROW_Y[ROW_Y.length - 1];
+      return {
+        ring,
+        index,
+        mid,
+        band: (ring.outerRadius - ring.innerRadius) * SCALE,
+        weight: 3 + ring.changeIntensity * 6,
+        end,
+        elbow: { x: ELBOW_X, y: rowY },
+        rowY,
+        length: Math.ceil(2 * Math.PI * mid * ring.fileShare) || 1,
+      };
+    });
   }, [rings]);
 
-  const selectPointerRing = (clientX: number, clientY: number) => {
-    const canvas = canvasRef.current;
-    if (!canvas) return;
-    const box = canvas.getBoundingClientRect();
-    const index = ageRingAtPoint(
-      clientX - box.left,
-      clientY - box.top,
-      box.width,
-      box.height,
-      rings,
+  if (totalFiles === 0) {
+    return (
+      <p className={cn(CAPTION, "p-4", className)}>
+        No file ages have been recorded for this repository yet.
+      </p>
     );
-    if (index !== null) setActiveIndex(index);
-  };
+  }
+
+  const datumTop = CY - rings[rings.length - 1].outerRadius * SCALE;
+  const datumBottom = CY - rings[0].innerRadius * SCALE;
+  const ordered = [...geometry].sort(
+    (a, b) =>
+      Number(a.index === activeIndex) - Number(b.index === activeIndex),
+  );
 
   return (
-    <figure className={cn("min-w-0 p-3.5", className)}>
-      <div className="relative mx-auto aspect-square w-full max-w-72 overflow-hidden">
-        <canvas
-          ref={canvasRef}
-          aria-hidden="true"
-          className="size-full touch-pan-y [image-rendering:pixelated]"
-          onPointerMove={(event) =>
-            selectPointerRing(event.clientX, event.clientY)
-          }
-          onPointerDown={(event) =>
-            selectPointerRing(event.clientX, event.clientY)
-          }
-          onPointerLeave={() => setActiveIndex(hottest)}
-        />
-        <div className="pointer-events-none absolute inset-[37%] grid place-items-center rounded-full bg-background/85 text-center">
-          <div>
-            <p className="font-mono text-lg font-medium tabular-nums">
-              {compact(totalFiles)}
-            </p>
-            <p className="font-mono text-[0.625rem] tracking-wide text-muted-foreground uppercase">
-              files
-            </p>
-          </div>
-        </div>
+    <figure className={cn("min-w-0", className)}>
+      <div className="overflow-x-auto p-4">
+        <svg
+          viewBox={`0 0 ${VIEW_W} ${VIEW_H}`}
+          width="100%"
+          height={VIEW_H}
+          preserveAspectRatio="xMidYMid meet"
+          role="img"
+          aria-labelledby={`${uid}-title`}
+          className="block min-w-[420px] touch-pan-y select-none"
+        >
+          <title id={`${uid}-title`}>
+            {`How ${compact(totalFiles)} tracked files divide across four age ranges, and how often each range changes.`}
+          </title>
+
+          {/* The datum. Every sweep on this plate starts on this line, which is
+              what makes four arcs at four radii one comparable measurement. */}
+          <line
+            x1={CX}
+            y1={datumTop - 8}
+            x2={CX}
+            y2={datumBottom}
+            stroke="var(--rule-strong)"
+            strokeWidth="1"
+          />
+
+          {/* The band being read is drawn last, so nothing quiet is ever laid
+              across the reading. */}
+          {ordered.map(({ ring, index, mid, weight, end, length }) => {
+            const selected = index === activeIndex;
+            const inner = onRing(ring.innerRadius * SCALE, ring.fileShare);
+            const outer = onRing(ring.outerRadius * SCALE, ring.fileShare);
+            return (
+              <g key={ring.range}>
+                {/* The band's full extent: what the share is a share OF. */}
+                <circle
+                  cx={CX}
+                  cy={CY}
+                  r={mid}
+                  fill="none"
+                  stroke="var(--rule)"
+                  strokeWidth="1"
+                />
+                {ring.fileShare > 0 && (
+                  <path
+                    d={arcPath(mid, ring.fileShare)}
+                    fill="none"
+                    stroke={selected ? "var(--signal)" : "var(--ink-2)"}
+                    strokeWidth={weight}
+                    strokeLinecap="butt"
+                    className="inks-in"
+                    style={{
+                      ["--draw-length" as string]: String(length),
+                      ["--draw-delay" as string]: `${index * 90}ms`,
+                    }}
+                  />
+                )}
+                {/* The extension tick at the end of the sweep: the second of
+                    the two points this angular dimension spans. */}
+                <line
+                  x1={inner.x}
+                  y1={inner.y}
+                  x2={outer.x}
+                  y2={outer.y}
+                  stroke={selected ? "var(--signal)" : "var(--rule-strong)"}
+                  strokeWidth="1"
+                />
+                <circle
+                  cx={end.x}
+                  cy={end.y}
+                  r={selected ? 0 : 1.8}
+                  fill="var(--ink-3)"
+                />
+              </g>
+            );
+          })}
+
+          {/* The leaders. Each runs from the end of its own arc out to the row
+              that letters that band, and the active one is the measured
+              reading: drafting red, with an arrowhead landing on the arc. */}
+          {ordered.map(({ ring, index, end, elbow, rowY }) => {
+            const selected = index === activeIndex;
+            return (
+              <g key={`${ring.range}-leader`}>
+                <path
+                  d={`M${end.x.toFixed(2)} ${end.y.toFixed(2)} L${elbow.x} ${elbow.y} L${SHOULDER_X} ${rowY}`}
+                  fill="none"
+                  stroke={selected ? "var(--signal)" : "var(--rule-strong)"}
+                  strokeWidth="1"
+                  strokeLinejoin="round"
+                />
+                {selected && (
+                  <path d={terminator(end, elbow)} fill="var(--signal)" />
+                )}
+              </g>
+            );
+          })}
+
+          {/* The lettering. Four rows, one grid: the name, the figure and the
+              note sit on the same three baselines in every row. */}
+          {geometry.map(({ ring, index, rowY }) => {
+            const selected = index === activeIndex;
+            return (
+              <g key={`${ring.range}-label`}>
+                <text
+                  x={LABEL_X}
+                  y={rowY}
+                  className="font-draft"
+                  fontSize="12.5"
+                  letterSpacing="0.08em"
+                  fill="var(--ink-3)"
+                >
+                  {AGE_LABEL[ring.range].toUpperCase()}
+                </text>
+                <text
+                  x={LABEL_X}
+                  y={rowY + 27}
+                  className="font-draft"
+                  fontSize="21"
+                  fill={selected ? "var(--signal)" : "var(--ink)"}
+                  style={{ fontVariantNumeric: "tabular-nums" }}
+                >
+                  {compact(ring.files)}
+                  <tspan fontSize="12.5" fill="var(--ink-3)" dx="6">
+                    FILES
+                  </tspan>
+                </text>
+                <text
+                  x={LABEL_X}
+                  y={rowY + 45}
+                  className="font-draft"
+                  fontSize="10.5"
+                  letterSpacing="0.04em"
+                  fill="var(--ink-3)"
+                  style={{ fontVariantNumeric: "tabular-nums" }}
+                >
+                  {/* Kept short on the plate so it cannot run past the sheet
+                      edge in a fallback face. The cell below spells it out. */}
+                  {`${Math.round(ring.fileShare * 100)}% · ${ring.changeRate.toFixed(1)}/FILE`}
+                </text>
+              </g>
+            );
+          })}
+
+          {/* The total, dead centre of the plate the four bands divide. */}
+          <text
+            x={CX}
+            y={CY - 7}
+            textAnchor="middle"
+            dominantBaseline="central"
+            className="font-draft"
+            fontSize="22"
+            fill="var(--ink)"
+            style={{ fontVariantNumeric: "tabular-nums" }}
+          >
+            {compact(totalFiles)}
+          </text>
+          <text
+            x={CX}
+            y={CY + 12}
+            textAnchor="middle"
+            dominantBaseline="central"
+            className="font-draft"
+            fontSize="10.5"
+            letterSpacing="0.12em"
+            fill="var(--ink-3)"
+          >
+            FILES
+          </text>
+
+          {/* Hit targets last, so they sit over the drawing. The band itself is
+              the target — there is no hand-rolled nearest-point search any
+              more, because a stroked arc is a shape the pointer can land on. */}
+          {geometry.map(({ ring, index, mid, band }) => (
+            <circle
+              key={`${ring.range}-hit`}
+              cx={CX}
+              cy={CY}
+              r={mid}
+              fill="none"
+              stroke="transparent"
+              strokeWidth={Math.max(14, band)}
+              pointerEvents="stroke"
+              onPointerEnter={() => setActiveIndex(index)}
+            />
+          ))}
+        </svg>
       </div>
 
-      <figcaption className="grid gap-2 sm:grid-cols-2">
+      {/* The reading, in text, on a shared grid. These are the touch targets
+          and the focus targets; the plate above is the pointer's version of the
+          same four cells. */}
+      <figcaption
+        className={cn("grid border-t border-rule sm:grid-cols-2", FIELD_ROWS)}
+      >
         {rings.map((ring, index) => (
           <button
             key={ring.range}
@@ -236,29 +370,37 @@ export function FileAgeRings({
             aria-pressed={index === activeIndex}
             onPointerEnter={() => setActiveIndex(index)}
             onFocus={() => setActiveIndex(index)}
-            className="min-w-0 rounded-md border border-border/60 p-2.5 text-left outline-none transition-transform duration-200 hover:-translate-y-0.5 focus-visible:ring-2 focus-visible:ring-accent/30 aria-pressed:border-foreground/30 aria-pressed:bg-card/70 motion-reduce:transition-none"
+            onClick={() => setActiveIndex(index)}
+            className={cn(
+              FIELD_CELL,
+              "min-h-11 p-4 text-left outline-none transition-colors duration-[--duration-ui] hover:bg-table focus-visible:outline-2 focus-visible:-outline-offset-2 focus-visible:outline-signal aria-pressed:bg-table",
+              // Each rule separates two real cells and no rule lands on the
+              // outside edge, which is the frame's job rather than a cell's.
+              index > 0 && "border-t border-rule",
+              index === 1 && "sm:border-t-0",
+              index % 2 === 1 && "sm:border-l sm:border-rule",
+            )}
           >
-            <div className="flex items-center justify-between gap-2">
-              <p className="min-w-0 truncate font-mono text-base text-muted-foreground sm:text-[0.6875rem]">
-                {AGE_LABEL[ring.range]}
-              </p>
-              <p className="font-mono text-base tabular-nums sm:text-[0.6875rem]">
-                {compact(ring.files)}
-              </p>
-            </div>
-            <div className="mt-1 flex items-center justify-between gap-2 font-mono text-sm text-muted-foreground tabular-nums sm:text-[0.625rem]">
-              <p>{Math.round(ring.fileShare * 100)}% of files</p>
-              <p>{ring.changeRate.toFixed(1)} changes/file</p>
-            </div>
+            <span className={FIELD}>{AGE_LABEL[ring.range]}</span>
+            <span
+              className={cn(
+                FIGURE,
+                "mt-2.5",
+                index === activeIndex ? "text-signal" : "text-ink",
+              )}
+            >
+              {compact(ring.files)}
+            </span>
+            <span className={cn(CAPTION, "mt-2")}>
+              {`${Math.round(ring.fileShare * 100)}% of files · ${ring.changeRate.toFixed(1)} changes per file`}
+            </span>
           </button>
         ))}
       </figcaption>
-      <p
-        className="mt-3 text-pretty text-base text-muted-foreground sm:text-sm"
-        aria-live="polite"
-      >
+
+      <p className={cn(CAPTION, "px-4 pt-3 pb-4")} aria-live="polite">
         {active
-          ? `${AGE_LABEL[active.range]}: ${active.files.toLocaleString()} files and ${active.changes.toLocaleString()} recorded changes. Hotter color means more changes per file.`
+          ? `${AGE_LABEL[active.range]}: ${active.files.toLocaleString()} files and ${active.changes.toLocaleString()} recorded changes. A heavier arc is a range whose files change more often.`
           : "File ages are unavailable."}
       </p>
     </figure>

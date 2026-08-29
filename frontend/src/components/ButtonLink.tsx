@@ -1,64 +1,47 @@
-"use client";
-
 import * as React from "react";
 
-import { BRAND, SWATCH, type RGB } from "@/lib/dither";
 import { buttonVariants } from "@/components/ui/button";
-import { useDitherSurface } from "@/components/ui/dither-surface";
+import { Leader } from "@/components/ui/marks";
 
 type ButtonVariants = Omit<
   NonNullable<Parameters<typeof buttonVariants>[0]>,
   "class" | "className"
 >;
 
-const CANVAS_FILL: Record<string, RGB> = {
-  default: BRAND,
-  primary: BRAND,
-  accent: SWATCH.blue,
-  soft: BRAND,
-};
-
-const CANVAS_ALPHA: Record<string, number> = { soft: 0.42 };
-
 export type ButtonLinkProps = React.AnchorHTMLAttributes<HTMLAnchorElement> &
   ButtonVariants & {
     /**
-     * Explicitly gives a quiet link the same cursor-positioned dither pulse as
-     * a primary action, without adding a filled resting surface.
+     * Appends the leader arrow. On by default for `link`, because a text
+     * action needs to read as one; off elsewhere, because a filled action is
+     * already unmistakably an action and an arrow on it is decoration.
      */
-    pulse?: boolean;
+    leader?: boolean;
   };
 
 /**
- * An anchor wearing the button treatment. Navigation stays an `<a>`; textured
- * variants mount a filled canvas, while an opted-in quiet action mounts only
- * the transparent pulse layer.
+ * An anchor wearing the action treatment. Navigation stays an `<a>`.
+ *
+ * The leader arrow travels on hover — the one authored gesture an action gets.
+ * It moves up and to the right, along its own axis, which is the direction it
+ * points; a button that jumps upward on hover is the template's reflex and
+ * this one does not move at all.
  */
 export const ButtonLink = React.forwardRef<HTMLAnchorElement, ButtonLinkProps>(
-  ({ className, variant, size, pulse, children, ...props }, ref) => {
-    const fill = CANVAS_FILL[variant ?? "default"];
-    const textured = fill !== undefined;
-    const pulseEnabled = pulse ?? textured;
-    const surfaceEnabled = textured || pulseEnabled;
-    const { surface, handlers } = useDitherSurface({
-      fill: fill ?? SWATCH.blue,
-      variant: "gradient",
-      animated: surfaceEnabled,
-      alpha: textured ? CANVAS_ALPHA[variant ?? "default"] : 0,
-      pulse: pulseEnabled,
-    });
+  ({ className, variant, size, leader, children, ...props }, ref) => {
+    const showLeader = leader ?? variant === "link";
     return (
       <a
         ref={ref}
-        data-press="off"
         className={buttonVariants({ variant, size, className })}
         {...props}
-        {...(surfaceEnabled ? handlers : {})}
       >
-        {surfaceEnabled ? surface : null}
-        <span className="relative inline-flex items-center gap-2">
-          {children}
-        </span>
+        {children}
+        {showLeader && (
+          <Leader
+            size={13}
+            className="transition-transform duration-[--duration-ui] group-hover:-translate-y-px group-hover:translate-x-px motion-reduce:transition-none"
+          />
+        )}
       </a>
     );
   },

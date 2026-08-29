@@ -1,0 +1,96 @@
+---
+import "@/styles/globals.css";
+import BaseHead from "@/components/BaseHead.astro";
+import Seo from "@/components/Seo.astro";
+import SiteHeader from "@/components/SiteHeader.astro";
+import SiteFooter from "@/components/SiteFooter.astro";
+
+/**
+ * The one root layout.
+ *
+ * Every page used to open its own `<!doctype html>`, wire its own `<head>`, and
+ * repeat the same header/footer scaffolding — seventeen copies of one document
+ * shell, which is how `BaseHead` drifted dark while the rest of the site moved.
+ * There is one shell now.
+ *
+ * It also carries the direction contract as the first child of `<body>`. That
+ * position is deliberate: Astro strips a comment that leads a slot, so the
+ * contract has to be emitted by the root layout itself to survive the build.
+ */
+
+type JsonLd = Record<string, unknown>;
+
+interface Props {
+  title: string;
+  description: string;
+  canonicalPath: string | URL;
+  ogImage: string | URL;
+  ogType?: "website" | "article";
+  noindex?: boolean;
+  robots?: string;
+  imageAlt?: string;
+  jsonLd?: JsonLd | JsonLd[];
+  /** Extra attributes for the `<main>` element, e.g. a scroll anchor class. */
+  mainClass?: string;
+}
+
+const {
+  title,
+  description,
+  canonicalPath,
+  ogImage,
+  ogType,
+  noindex,
+  robots,
+  imageAlt,
+  jsonLd,
+  mainClass,
+} = Astro.props;
+---
+
+<!doctype html>
+<html lang="en">
+  <head>
+    <BaseHead />
+    <Seo
+      title={title}
+      description={description}
+      canonicalPath={canonicalPath}
+      ogImage={ogImage}
+      ogType={ogType}
+      noindex={noindex}
+      robots={robots}
+      imageAlt={imageAlt}
+      jsonLd={jsonLd}
+    />
+    <slot name="head" />
+  </head>
+  <body>
+    <!--
+      THESIS: gitdebt measures a repository, so the page is a technical drawing
+      of one. It refuses the developer-tool hero stack — eyebrow, headline,
+      subline, two buttons, product panel on the right.
+      OWN-WORLD: Plot paper on a drafting table. Graphite in three steps, one
+      drafting red spent only on a measured value. Format 1452 letters the
+      drawing, system-ui carries prose, Geist Mono carries data. Square corners,
+      one 10px cut on a panel. Every line terminates on something real.
+      STORY: The visitor sees a repository measured rather than marketed, learns
+      that stars and commits are two independent readings, and either looks up
+      their own repository or copies a chart into a README.
+      FIRST VIEWPORT: The star trace spans the full sheet and inks in along its
+      own length. The lookup sits in the title block at the right. The headline
+      is lettered as the drawing's title, upper left. No panel floats beside it.
+      FORM: Dimensioned engineering drawing; candidate 4 of 7 on the resonance
+      list; seed key ca82095e.
+      FINISH: unreviewed and undocumented is unfinished; this build ends with
+      the finish review, the verdict, and DESIGN.md
+    -->
+    <div class="flex min-h-dvh flex-col">
+      <SiteHeader />
+      <main id="main-content" class:list={["flex-1", mainClass]}>
+        <slot />
+      </main>
+      <SiteFooter />
+    </div>
+  </body>
+</html>

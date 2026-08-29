@@ -2,16 +2,27 @@
 
 import { useEffect, useRef } from "react";
 
-import { BRAND } from "@/lib/dither";
-import { useDitherSurface } from "@/components/ui/dither-surface";
+/**
+ * gitdebt's own star count, lettered in the header the way a drawing states a
+ * measured field: the field name, then the value.
+ *
+ * Two things about it are load-bearing and survive from the previous version.
+ *
+ * The number is server-rendered at its final value and every frame of the
+ * count-up is written through a ref, so the markup a crawler — or a reader with
+ * no JavaScript — receives is the true count, never a `0` waiting to be
+ * corrected. And the value's box is reserved in `ch` against tabular figures
+ * before the first frame, so counting cannot reflow the header around it.
+ *
+ * The count-up is the one authored motion here: a number arriving at its value.
+ * It runs once per session on a genuine arrival, and reduced motion prints the
+ * figure instead.
+ */
 
 /**
- * Session-scoped decision, shared by every ticker on the page.
- *
- * The count-up is an entrance flourish, so it belongs to a genuine arrival: a
- * hard load or the first page of a session. Replaying it on every internal
- * navigation would animate the same unchanged number at someone reading, which
- * reads as a glitch rather than as life.
+ * Session-scoped decision, shared by every ticker on the page. Replaying the
+ * count on an internal navigation would animate an unchanged number at someone
+ * reading it, which reads as a glitch rather than as life.
  */
 const SESSION_FLAG = "gitdebt:navStarTicker";
 const WINDOW_KEY = "__gitdebtNavStarTicker";
@@ -35,16 +46,18 @@ function shouldAnimateOnce(): boolean {
   return scope[WINDOW_KEY];
 }
 
-const format = (value: number) => new Intl.NumberFormat("en-US").format(Math.round(value));
+const format = (value: number) =>
+  new Intl.NumberFormat("en-US").format(Math.round(value));
 
 /** "1 star", not "1 stars" — the badge shows a real count, including one. */
 const starLabel = (value: number) =>
-  `gitdebt on GitHub \u2014 ${format(value)} star${Math.round(value) === 1 ? "" : "s"}`;
+  `gitdebt on GitHub — ${format(value)} star${Math.round(value) === 1 ? "" : "s"}`;
 
 /**
- * `cubic-bezier(0.16, 1, 0.3, 1)` evaluated directly. The curve lands almost
- * all of its distance early, so the number is legible for most of the run
- * instead of blurring to the last frame.
+ * `cubic-bezier(0.16, 1, 0.3, 1)` evaluated directly — the same landing curve
+ * the rest of the site eases on. It lands almost all of its distance early, so
+ * the number is legible for most of the run instead of blurring to the last
+ * frame.
  */
 function easeOut(p: number): number {
   if (p <= 0) return 0;
@@ -68,29 +81,12 @@ export type NavStarCountProps = {
   repo: string;
 };
 
-/**
- * gitdebt's own star count, in the nav, on the product's dithered surface.
- *
- * The number is server-rendered at its final value and the animation only ever
- * writes through a ref, so the markup a crawler (or a reader with JS disabled)
- * receives is the true count rather than a `0` waiting to be corrected. Width
- * is reserved in `ch` against `tabular-nums`, so counting up cannot reflow the
- * header around it.
- */
 export function NavStarCount({ stars, href, apiBase, repo }: NavStarCountProps) {
   const ref = useRef<HTMLSpanElement>(null);
   const hostRef = useRef<HTMLAnchorElement>(null);
   // The value currently painted, so a refresh counts up from what the reader
   // is already looking at rather than restarting from zero.
   const shown = useRef<number | null>(stars);
-  const { surface, handlers } = useDitherSurface({
-    fill: BRAND,
-    variant: "gradient",
-    alpha: 0.32,
-    edge: 0.45,
-    animated: true,
-    pulse: true,
-  });
 
   useEffect(() => {
     const node = ref.current;
@@ -167,27 +163,20 @@ export function NavStarCount({ stars, href, apiBase, repo }: NavStarCountProps) 
       rel="noopener noreferrer"
       title={label}
       aria-label={label}
-      data-press="off"
       // Hidden only when the build had no number at all. The refresh above
       // reveals it; if that fails too, no badge is better than an empty one.
       hidden={stars === null}
-      className="dither-fallback relative isolate inline-flex min-h-10 items-center gap-1.5 overflow-hidden rounded-md border border-border/60 px-2.5 font-mono text-[12px] whitespace-nowrap text-foreground outline-none transition-[opacity,scale] duration-150 active:scale-[0.96] motion-reduce:transition-none focus-visible:ring-2 focus-visible:ring-accent/30 focus-visible:ring-offset-2 focus-visible:ring-offset-background"
-      {...handlers}
+      className="inline-flex min-h-10 items-center gap-2.5 border border-rule-strong px-3 whitespace-nowrap text-ink outline-none transition-colors duration-[--duration-ui] hover:bg-table focus-visible:outline-2 focus-visible:outline-offset-2 focus-visible:outline-signal"
     >
-      {surface}
-      <span className="relative inline-flex items-center gap-1.5">
-        <span aria-hidden="true" className="text-[13px] leading-none">
-          ★
-        </span>
-        <span
-          ref={ref}
-          // `1ch` is one digit under tabular-nums, so the box is already the
-          // width of the final number before the first frame is written.
-          style={{ minWidth: `${initial.length || 1}ch` }}
-          className="inline-block text-right tabular-nums"
-        >
-          {initial}
-        </span>
+      <span className="drafted">Stars</span>
+      <span
+        ref={ref}
+        // `1ch` is one digit under tabular-nums, so the box is already the
+        // width of the final number before the first frame is written.
+        style={{ minWidth: `${initial.length || 1}ch` }}
+        className="inline-block text-right font-mono text-[0.75rem] tabular-nums"
+      >
+        {initial}
       </span>
     </a>
   );

@@ -1,18 +1,29 @@
 //! Profile + repo stat cards (`/api/users/:login/card.svg`,
 //! `/api/repos/:owner/:repo/card.svg`, plus `.png` / `.webp` variants).
 //!
-//! The user card uses gitdebt's own maintainer-footprint composition. Legacy
-//! query parameters remain accepted for stable URLs, but the visual system is
-//! intentionally independent rather than imitating another stats-card project.
+//! ## What a card is
+//!
+//! A small drawing sheet. Paper, a 1px frame, the bottom-right corner cut at
+//! 10px, and the interior divided into fields by rules that terminate on the
+//! frame or on each other. Field labels are uppercase and tracked; values are
+//! tabular and right-aligned so a column of numbers lines up on its digits.
+//! The headline figure is the measured value of the sheet and it is the one
+//! thing that takes drafting red — together with the star trace on the repo
+//! sheet, which is the same measurement drawn as a line.
+//!
+//! Unlike a badge, a card paints its paper. A sheet is a sheet: a light card
+//! dropped into a dark README used to letter graphite onto whatever was
+//! behind it and disappear. `?theme=` picks which print you embed, and the
+//! `<picture>` pattern in `theme.rs` picks it per viewer.
 //!
 //! Every render function here is pure (`data + options + &Theme → SVG
 //! String`) and bytes-deterministic. Theme colors are baked hex — no CSS
-//! vars, no `prefers-color-scheme` (see `theme.rs` for the why; use the
-//! `<picture>` light/dark pattern for theme-aware embeds). Animation
+//! vars, no `prefers-color-scheme` (see `theme.rs` for the why). Animation
 //! follows the `badge.rs` SMIL discipline: `animate=0` (default) emits no
 //! `<animate>` tags at all; `animate=1` uses `<animate … fill="freeze">`
 //! so a SMIL-stripped embed (and `raster::freeze_svg_animations`) shows the
-//! correct final frame.
+//! correct final frame. Nothing is ever hidden behind a reveal: every group
+//! is authored at its resting state and the animation only plays it in.
 //!
 //! ## Deliberately-unsupported github-readme-stats params
 //!
@@ -20,15 +31,17 @@
 //! honored (product decisions, not gaps): `bg_color`, `title_color`,
 //! `text_color`, `icon_color`, `border_color`, `ring_color`,
 //! `border_radius` (two baked themes only — free hex would fragment the
-//! CDN cache and defeat the palette), `locale` (English-only v0),
-//! `cache_seconds` (fixed CDN policy), `line_height` / `text_bold` /
-//! `number_precision` (fixed typographic scale), and every per-user
-//! GitHub-API stat gitdebt does not observe: PRs, issues, reviews,
+//! CDN cache and defeat the palette; and the drawing has exactly one
+//! non-square corner, the 10px chamfer), `show_icons` (a drawing sheet
+//! letters its fields, it does not illustrate them), `locale`
+//! (English-only v0), `cache_seconds` (fixed CDN policy), `line_height` /
+//! `text_bold` / `number_precision` (fixed typographic scale), and every
+//! per-user GitHub-API stat gitdebt does not observe: PRs, issues, reviews,
 //! discussions, followers, streaks/contribution calendars,
 //! `include_all_commits` / `commits_year`, and the `repo=`/`owner=`/
 //! `role=` affiliation filters. Our stars/commits/contribs are **lower
 //! bounds over tracked repos**; the mandatory "N repos tracked" footer
-//! and the "Repos Tracked" label are the honesty framing that makes that
+//! and the "REPOS TRACKED" field are the honesty framing that makes that
 //! OK. Nothing here reads stargazer *profiles* — the user card consumes
 //! only `repo_author_stats` commit-authorship aggregates and `repos`
 //! ownership rows.
@@ -36,12 +49,13 @@
 use crate::badge::humanize;
 use crate::brand;
 use crate::chart::Point;
-use crate::theme::Theme;
+use crate::texture::{self, Dimension, Side};
+use crate::theme::{Theme, pens_for};
 
 // Shared option plumbing
 
-/// Maintainer cards need enough width for the mark, editorial header, and
-/// paired metrics without collapsing into a borrowed single-column layout.
+/// Maintainer cards need enough width for the headline field and the field
+/// stack beside it without either column collapsing.
 pub const USER_CARD_DEFAULT_WIDTH: u32 = 560;
 pub const USER_CARD_NORANK_WIDTH: u32 = 420;
 pub const REPO_CARD_DEFAULT_WIDTH: u32 = 400;
@@ -119,74 +133,69 @@ pub fn truncate_chars(s: &str, max: usize) -> String {
     }
 }
 
-fn escape_xml(s: &str) -> String {
-    s.replace('&', "&amp;")
-        .replace('<', "&lt;")
-        .replace('>', "&gt;")
-        .replace('"', "&quot;")
+/// Resolve the display title: a non-empty `custom_title`, or the entity
+/// default, cut to whatever the sheet actually has room for and never past
+/// the 64 chars GRS conventionally allows.
+///
+/// The default is fitted too, not just the custom one. A repository slug can
+/// be 140 characters, and lettering it unfitted ran it straight off the right
+/// edge of the sheet.
+fn display_title(custom: Option<&str>, default: &str, max_chars: usize) -> String {
+    let raw = custom
+        .map(str::trim)
+        .filter(|s| !s.is_empty())
+        .unwrap_or(default);
+    texture::escape_xml(&truncate_chars(raw, max_chars.min(64)))
 }
 
-/// Resolve the display title: a non-empty `custom_title` (escaped,
-/// truncated at 64 chars per the GRS convention) or the entity default.
-fn display_title(custom: Option<&str>, default: &str) -> String {
-    match custom.map(str::trim).filter(|s| !s.is_empty()) {
-        Some(t) => escape_xml(&truncate_chars(t, 64)),
-        None => escape_xml(default),
-    }
+/// How many characters of a face with `char_w` advance fit in `span`.
+fn fit_chars(span: f32, char_w: f32) -> usize {
+    ((span / char_w).floor() as i64).max(4) as usize
 }
 
-/// The single chromatic accent (the wave trio's leading stop), used
-/// sparingly: eyebrow, glyph ink, sparkline.
-fn accent_ink(theme: &Theme) -> &'static str {
-    crate::texture::wave_ink(theme)
+/// Characters of the profile sheet's title that fit beside its persona.
+fn user_title_budget(w: f32, persona: &str) -> usize {
+    let span =
+        (w - 2.0 * PAD - persona.chars().count() as f32 * LABEL_CHAR_W - FIELD_GAP).max(48.0);
+    fit_chars(span, TITLE_CHAR_W)
 }
 
-/// Card-scale Bayer grain: a low-density tier pattern def plus a quiet
-/// full-surface wash. One ink (theme fg), alpha-only — the dithered
-/// terminal signature at card scale.
-fn card_texture(w: f32, h: f32, rx: f32, theme: &Theme, animate: bool) -> String {
-    let mut signal_defs = crate::texture::defs_sized(theme, w, h);
-    if animate
-        && let Some(pattern) = signal_defs.find("<pattern id=\"gd-pixel-fill\"")
-        && let Some(relative_close) = signal_defs[pattern..].find("</pattern>")
-    {
-        let close = pattern + relative_close;
-        signal_defs.insert_str(
-            close,
-            "<animateTransform class=\"motion\" attributeName=\"patternTransform\" type=\"translate\" from=\"0.5 0.5\" to=\"8.5 0.5\" dur=\"0.8s\" repeatCount=\"indefinite\" />",
-        );
-    }
-    format!(
-        "{signal_defs}\n  <defs>{}</defs>\n  <rect x=\"1\" y=\"1\" width=\"{:.1}\" height=\"{:.1}\" rx=\"{:.1}\" fill=\"{}\" fill-opacity=\"0.09\" pointer-events=\"none\" />\n  <rect x=\"1\" y=\"1\" width=\"{:.1}\" height=\"5\" rx=\"{:.1}\" fill=\"url(#gd-pixel-fill)\" fill-opacity=\"0.9\" pointer-events=\"none\" />\n",
-        crate::texture::tier_pattern(theme.fg, 2.0, 2),
-        w - 2.0,
-        h - 2.0,
-        (rx - 1.0).max(0.0),
-        crate::texture::tier_fill(2),
-        w - 2.0,
-        (rx - 1.0).max(0.0),
-    )
-}
+// Sheet geometry
 
-/// Approx px/char at the 12px repo-card value font.
-const VALUE_CHAR_W: f32 = 7.0;
+/// Margin from the frame to any lettering. Nothing on the sheet arrives at
+/// an edge with less than this.
+const PAD: f32 = 24.0;
+/// Inset of a field label from the rule that opens its column.
+const COL_INSET: f32 = 16.0;
 
-/// One shared `<style>` block (fonts only — colors are always inline
-/// baked hex; classes carry no color so no CSS-variable leakage).
+/// Rendered advance of one uppercase character in the field-label style
+/// (8px sans plus 0.09em tracking), deliberately rounded UP: an
+/// over-estimate truncates a hair early, an under-estimate collides with
+/// the value.
+const LABEL_CHAR_W: f32 = 6.0;
+/// Mono advance at the 13px field-value size. Exact, not an estimate.
+const VALUE_CHAR_W: f32 = 7.8;
+/// Rendered advance of one character of the 16px sheet title, and of the
+/// 10px caption the compact header letters a login in. Both rounded up.
+const TITLE_CHAR_W: f32 = 8.0;
+const CAPTION_CHAR_W: f32 = 5.8;
+/// Ceiling and floor for the headline figure. It shrinks to fit its own
+/// box before it is ever allowed to run into the rule beside it.
+const HEADLINE_MAX: f32 = 28.0;
+const HEADLINE_MIN: f32 = 14.0;
+/// Clearance held between a field label and the value it names.
+const FIELD_GAP: f32 = 12.0;
+
+/// One shared `<style>` block. Five classes, one for each role a card has:
+/// sheet title, field label, field value, running note, caption. Colors are
+/// always inline baked hex; classes carry no color so nothing can leak a CSS
+/// variable into a README.
 const CARD_STYLE: &str = "  <style><![CDATA[ \
-.t { font: 600 18px ui-sans-serif, system-ui, sans-serif; } \
-.ey { font: 700 9px ui-monospace, SFMono-Regular, monospace; letter-spacing: 1.1px; } \
-.ml { font: 600 9px ui-monospace, SFMono-Regular, monospace; letter-spacing: 0.7px; } \
-.mv { font: 600 22px ui-sans-serif, system-ui, sans-serif; letter-spacing: -0.5px; } \
-.hv { font: 700 31px ui-sans-serif, system-ui, sans-serif; letter-spacing: -1.2px; } \
-.rt { font: 600 15px ui-sans-serif, system-ui, sans-serif; } \
-.l { font: 400 14px ui-sans-serif, system-ui, sans-serif; } \
-.v { font: 600 14px ui-sans-serif, system-ui, sans-serif; } \
-.rv { font: 600 12px ui-sans-serif, system-ui, sans-serif; } \
-.c { font: 500 12px ui-sans-serif, system-ui, sans-serif; } \
+.t { font: 600 16px ui-sans-serif, system-ui, sans-serif; } \
+.k { font: 500 8px ui-sans-serif, system-ui, sans-serif; letter-spacing: 0.09em; } \
+.v { font: 600 13px ui-monospace, SFMono-Regular, monospace; font-variant-numeric: tabular-nums; } \
+.n { font: 400 12px ui-sans-serif, system-ui, sans-serif; } \
 .m { font: 500 10px ui-sans-serif, system-ui, sans-serif; } \
-.g { font: 800 24px ui-sans-serif, system-ui, sans-serif; } \
-.p { font: 700 16px ui-sans-serif, system-ui, sans-serif; } \
 @media (prefers-reduced-motion: reduce) { .motion { display: none; } } \
 ]]></style>\n";
 
@@ -196,19 +205,138 @@ fn svg_open(w: f32, h: f32, label: &str) -> String {
     )
 }
 
-/// Card chrome: rounded rect, 1px border (opacity 0 when hidden — the
-/// geometry stays identical so `hide_border` never reflows anything).
-///
-/// The interior is unpainted so the card composites onto the README it is
-/// embedded in; the border, the Bayer wash, and the accent strip are what
-/// make it read as a card.
-fn chrome(w: f32, h: f32, theme: &Theme, hide_border: bool) -> String {
+/// The sheet: paper, a 1px frame, and the drawing's one chamfer on the
+/// bottom-right corner. `hide_border` drops the frame ink only — the
+/// geometry is identical either way, so the flag never reflows anything.
+fn sheet(w: f32, h: f32, theme: &Theme, hide_border: bool) -> String {
     format!(
-        "  <rect x=\"0.5\" y=\"0.5\" width=\"{:.1}\" height=\"{:.1}\" rx=\"4.5\" fill=\"none\" stroke=\"{}\" stroke-width=\"1\" stroke-opacity=\"{}\" />\n",
-        w - 1.0,
-        h - 1.0,
-        theme.border,
-        if hide_border { "0" } else { "1" },
+        "  <path d=\"{d}\" fill=\"{paper}\" stroke=\"{frame}\" stroke-width=\"{weight}\" stroke-opacity=\"{opacity}\" />\n",
+        d = texture::chamfered_rect_path(0.5, 0.5, w - 1.0, h - 1.0),
+        paper = theme.bg,
+        frame = theme.border,
+        weight = texture::W_OBJECT,
+        opacity = if hide_border { "0" } else { "1" },
+    )
+}
+
+/// A rule dividing the sheet across its full interior width. Both ends land
+/// on the frame; the y it is given is the boundary, and the line is snapped
+/// to sit crisply just above it.
+fn rule_h(x1: f32, x2: f32, boundary: f32, ink: &str) -> String {
+    format!(
+        "  <line x1=\"{:.1}\" y1=\"{y:.1}\" x2=\"{:.1}\" y2=\"{y:.1}\" stroke=\"{ink}\" stroke-width=\"{weight}\" />\n",
+        x1,
+        x2,
+        y = boundary.round() - 0.5,
+        weight = texture::W_OBJECT,
+    )
+}
+
+/// A rule dividing one band into two columns. It runs between two horizontal
+/// rules, so both of its ends terminate on something real.
+fn rule_v(boundary: f32, y1: f32, y2: f32, ink: &str) -> String {
+    format!(
+        "  <line x1=\"{x:.1}\" y1=\"{:.1}\" x2=\"{x:.1}\" y2=\"{:.1}\" stroke=\"{ink}\" stroke-width=\"{weight}\" />\n",
+        y1,
+        y2,
+        x = boundary.round() - 0.5,
+        weight = texture::W_OBJECT,
+    )
+}
+
+/// An uppercase, tracked field label.
+fn label_text(x: f32, baseline: f32, text: &str, ink: &str) -> String {
+    format!(
+        "  <text class=\"k\" x=\"{x:.1}\" y=\"{baseline:.1}\" fill=\"{ink}\">{}</text>\n",
+        texture::escape_xml(text),
+    )
+}
+
+/// One title-block field: the label on the left of its column, the value
+/// tabular and right-aligned, both sitting on the same optical centre. The
+/// value is fitted first, then the label is given whatever is left, so a
+/// long label can never run under its own number.
+fn field_row(
+    left: f32,
+    right: f32,
+    baseline: f32,
+    label: &str,
+    value: &str,
+    label_ink: &str,
+    value_ink: &str,
+) -> String {
+    let span = (right - left).max(0.0);
+    let value_budget = ((span - 24.0) / VALUE_CHAR_W).floor().max(3.0) as usize;
+    let value = truncate_chars(value, value_budget);
+    let value_w = value.chars().count() as f32 * VALUE_CHAR_W;
+    let label_budget = (((span - value_w - FIELD_GAP) / LABEL_CHAR_W).floor() as i64).max(1);
+    let label = truncate_chars(&label.to_uppercase(), label_budget as usize);
+    format!(
+        "{}  <text class=\"v\" x=\"{right:.1}\" y=\"{baseline:.1}\" text-anchor=\"end\" fill=\"{value_ink}\">{}</text>\n",
+        // 13px value against an 8px label: matching baselines would sit the
+        // label low, so it is raised onto the value's cap centre.
+        label_text(left, baseline - 1.8, &label, label_ink),
+        texture::escape_xml(&value),
+    )
+}
+
+/// A value is measured when it reads as a figure. `warming` is a state, not
+/// a measurement, and a state must never take drafting red.
+fn is_measured(value: &str) -> bool {
+    matches!(value.chars().next(), Some(c) if c.is_ascii_digit() || c == '+')
+}
+
+/// Fit the headline figure to its own box.
+///
+/// It shrinks before it collides: the size falls until the value fits the
+/// box, and only if the floor still will not hold it is the value cut.
+/// Returns the value as it will be lettered and the size it will take, both
+/// of which the caller needs to centre the field.
+fn headline_fit(value: &str, box_w: f32) -> (String, f32) {
+    let budget = (box_w / (HEADLINE_MIN * 0.6)).floor().max(2.0) as usize;
+    let value = truncate_chars(value, budget);
+    let chars = value.chars().count().max(1) as f32;
+    let size = (box_w / (chars * 0.6)).clamp(HEADLINE_MIN, HEADLINE_MAX);
+    (value, size)
+}
+
+/// Cap height of lettering at `size`, and the reach of its descenders. Both
+/// are what the field is centred on; guessing them lands the block low.
+const CAP_RATIO: f32 = 0.72;
+const DESCENT_RATIO: f32 = 0.22;
+/// Air between a field label's baseline and the cap line of the figure it
+/// names.
+const HEADLINE_LEAD: f32 = 10.0;
+
+/// The headline field — label over figure — centred inside the box
+/// `(x, top)`/`(box_w, box_h)`. A short field floating at the head of a tall
+/// box is the loudest kind of layout accident, so it is measured and placed,
+/// never pinned to the top and hoped for.
+fn headline_field(
+    at: (f32, f32),
+    size_of_box: (f32, f32),
+    label: &str,
+    value: &str,
+    inks: (&str, &str),
+) -> String {
+    let ((x, top), (box_w, box_h), (label_ink, value_ink)) = (at, size_of_box, inks);
+    let (value, size) = headline_fit(value, box_w);
+    let cap = size * CAP_RATIO;
+    let label_cap = 8.0 * CAP_RATIO;
+    let block = label_cap + HEADLINE_LEAD + cap + size * DESCENT_RATIO;
+    let label_baseline = top + ((box_h - block) / 2.0).max(0.0) + label_cap;
+    let value_baseline = label_baseline + HEADLINE_LEAD + cap;
+    let label_budget = (box_w / LABEL_CHAR_W).floor().max(1.0) as usize;
+    format!(
+        "{}  <text x=\"{x:.1}\" y=\"{value_baseline:.1}\" fill=\"{value_ink}\" font-family=\"{mono}\" font-size=\"{size:.1}\" font-weight=\"600\" font-variant-numeric=\"tabular-nums\">{}</text>\n",
+        label_text(
+            x,
+            label_baseline,
+            &truncate_chars(&label.to_uppercase(), label_budget),
+            label_ink,
+        ),
+        texture::escape_xml(&value),
+        mono = texture::MONO,
     )
 }
 
@@ -226,53 +354,8 @@ fn anim_group(animate: bool, index: usize) -> (String, &'static str) {
     }
 }
 
-// Glyphs (baked 16×16 path data; no external icon fetches)
-
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
-pub enum GlyphKind {
-    Star,
-    Fork,
-    Commit,
-    Branch,
-    Repo,
-    Clock,
-    Code,
-    Pulse,
-}
-
-/// A 16×16 glyph translated to (`x`, `y`), drawn in `color`. The inner
-/// path data is fixed, so bytes stay deterministic.
-fn glyph_svg(kind: GlyphKind, x: f32, y: f32, color: &str) -> String {
-    let inner = match kind {
-        GlyphKind::Star => format!(
-            "<path d=\"M8 1.5 L9.9 5.6 14.4 6.1 11.1 9.2 12 13.6 8 11.4 4 13.6 4.9 9.2 1.6 6.1 6.1 5.6 Z\" fill=\"{color}\" />"
-        ),
-        GlyphKind::Fork => format!(
-            "<g stroke=\"{color}\" stroke-width=\"1.6\" fill=\"none\"><circle cx=\"4\" cy=\"3.5\" r=\"1.8\" /><circle cx=\"12\" cy=\"3.5\" r=\"1.8\" /><circle cx=\"8\" cy=\"12.5\" r=\"1.8\" /><path d=\"M4 5.3 V7 H12 V5.3 M8 7 V10.7\" /></g>"
-        ),
-        GlyphKind::Commit => format!(
-            "<g stroke=\"{color}\" stroke-width=\"1.6\" fill=\"none\"><circle cx=\"8\" cy=\"8\" r=\"3\" /><path d=\"M0.5 8 H5 M11 8 H15.5\" /></g>"
-        ),
-        GlyphKind::Branch => format!(
-            "<g stroke=\"{color}\" stroke-width=\"1.6\" fill=\"none\"><circle cx=\"4\" cy=\"3\" r=\"1.8\" /><circle cx=\"4\" cy=\"13\" r=\"1.8\" /><circle cx=\"12\" cy=\"5\" r=\"1.8\" /><path d=\"M4 4.8 V11.2 M12 6.8 C12 9.5 8.5 9.3 5.8 10.5\" /></g>"
-        ),
-        GlyphKind::Repo => format!(
-            "<g stroke=\"{color}\" stroke-width=\"1.5\" fill=\"none\"><path d=\"M3 2.5 H11.5 A1.5 1.5 0 0 1 13 4 V13.5 H5 A2 2 0 0 1 3 11.5 Z\" /><path d=\"M3 11.5 A2 2 0 0 1 5 9.5 H13\" /></g>"
-        ),
-        GlyphKind::Clock => format!(
-            "<g stroke=\"{color}\" stroke-width=\"1.5\" fill=\"none\"><circle cx=\"8\" cy=\"8\" r=\"6\" /><path d=\"M8 4.5 V8 L10.8 9.8\" /></g>"
-        ),
-        GlyphKind::Code => format!(
-            "<g stroke=\"{color}\" stroke-width=\"1.6\" fill=\"none\" stroke-linecap=\"round\"><path d=\"M5.5 4.5 L2 8 L5.5 11.5 M10.5 4.5 L14 8 L10.5 11.5\" /></g>"
-        ),
-        GlyphKind::Pulse => format!(
-            "<path d=\"M1 8.5 H4.5 L6.5 3.5 9.5 12.5 11.5 8.5 H15\" stroke=\"{color}\" stroke-width=\"1.6\" fill=\"none\" stroke-linejoin=\"round\" />"
-        ),
-    };
-    format!("<g transform=\"translate({x:.1} {y:.1})\">{inner}</g>")
-}
-
-// Rank (the GRS signature ring, over gitdebt-observable inputs)
+// Rank (retained pure math; the ring it once drove is not part of the
+// drawing, and nothing on a sheet renders it)
 
 /// Fixed-CDF grade, GRS-style but over gitdebt-observable inputs (GRS
 /// weighs followers; we substitute forks — gitdebt never fetches
@@ -319,7 +402,7 @@ pub fn rank_level(percentile: f64) -> &'static str {
     "C"
 }
 
-/// Ring geometry: `r=40`, `stroke-width=6` — the GRS look.
+/// Ring geometry retained for the rank API surface. Nothing draws a ring.
 pub const RING_RADIUS: f32 = 40.0;
 
 pub fn ring_circumference() -> f32 {
@@ -439,6 +522,8 @@ pub struct UserCardOptions {
     /// `rank_icon=percentile` — numeric percentile instead of the grade.
     pub rank_icon_percentile: bool,
     pub custom_title: Option<String>,
+    /// Accepted for URL stability and ignored: a drawing sheet letters its
+    /// fields rather than illustrating them.
     pub show_icons: bool,
     pub number_format: NumberFormat,
     pub animate: bool,
@@ -461,14 +546,9 @@ impl Default for UserCardOptions {
     }
 }
 
-enum UserRow {
-    Stat {
-        glyph: GlyphKind,
-        label: &'static str,
-        value: String,
-        magnitude: u64,
-    },
-    Langs(Vec<String>),
+struct UserRow {
+    label: &'static str,
+    value: String,
 }
 
 fn user_rows(data: &UserCardData, opts: &UserCardOptions) -> Vec<UserRow> {
@@ -487,58 +567,51 @@ fn user_rows(data: &UserCardData, opts: &UserCardOptions) -> Vec<UserRow> {
     let mut rows = Vec::new();
     for m in &opts.metrics {
         match m {
-            UserMetric::Stars => rows.push(UserRow::Stat {
-                glyph: GlyphKind::Star,
+            UserMetric::Stars => rows.push(UserRow {
                 label: "Total Stars Earned",
                 value: fmt(data.stars),
-                magnitude: data.stars,
             }),
-            UserMetric::Commits => rows.push(UserRow::Stat {
-                glyph: GlyphKind::Commit,
+            UserMetric::Commits => rows.push(UserRow {
                 label: "Commits Found",
                 value: lower_bound(data.commits),
-                magnitude: data.commits,
             }),
-            UserMetric::Contribs => rows.push(UserRow::Stat {
-                glyph: GlyphKind::Branch,
+            UserMetric::Contribs => rows.push(UserRow {
                 label: "Contributed To",
                 value: lower_bound(data.contribs),
-                magnitude: data.contribs,
             }),
-            UserMetric::Repos => rows.push(UserRow::Stat {
-                glyph: GlyphKind::Repo,
+            UserMetric::Repos => rows.push(UserRow {
                 label: "Repos Tracked",
                 value: fmt(data.repos_tracked),
-                magnitude: data.repos_tracked,
             }),
-            UserMetric::Forks => rows.push(UserRow::Stat {
-                glyph: GlyphKind::Fork,
+            UserMetric::Forks => rows.push(UserRow {
                 label: "Total Forks",
                 value: fmt(data.forks),
-                magnitude: data.forks,
             }),
             UserMetric::Since => {
                 if let Some(year) = data.since_year {
-                    rows.push(UserRow::Stat {
-                        glyph: GlyphKind::Clock,
+                    rows.push(UserRow {
                         label: "Contributing Since",
                         value: year.to_string(),
-                        // The year is a label, not an activity volume; keep it
-                        // visible without pretending it is comparable to the
-                        // star/commit magnitude bars.
-                        magnitude: 1,
                     });
                 }
             }
             UserMetric::Langs => {
-                let names: Vec<String> = data
+                let names: Vec<&str> = data
                     .langs
                     .iter()
                     .filter(|(_, lines)| *lines > 0)
-                    .map(|(name, _)| name.clone())
+                    .map(|(name, _)| name.as_str())
                     .collect();
                 if !names.is_empty() {
-                    rows.push(UserRow::Langs(names));
+                    rows.push(UserRow {
+                        label: "Top Languages",
+                        value: names
+                            .iter()
+                            .take(3)
+                            .copied()
+                            .collect::<Vec<_>>()
+                            .join(" · "),
+                    });
                 }
             }
         }
@@ -546,18 +619,34 @@ fn user_rows(data: &UserCardData, opts: &UserCardOptions) -> Vec<UserRow> {
     rows
 }
 
-/// Card height for the maintainer-footprint composition. Metrics form a
-/// two-column grid. The legacy `hide_rank` parameter is layout-neutral now
-/// that the card no longer exposes an analysis-coverage rail.
+/// Band heights of the profile sheet: title strip, the body that carries the
+/// headline field beside the field stack, and the footer strip.
+const U_HEADER_H: u32 = 46;
+const U_HEADER_COMPACT_H: u32 = 34;
+const U_HEADLINE_BOX_H: u32 = 80;
+const U_ROW_H: u32 = 24;
+const U_BODY_PAD: u32 = 20;
+const U_FOOTER_H: u32 = 30;
+
+/// Height of the profile sheet. The body is the taller of the headline field
+/// and the stack of remaining fields beside it, so neither can be clipped by
+/// the other. The legacy `hide_rank` parameter is layout-neutral now that the
+/// sheet carries no coverage rail.
 pub fn user_card_height(rows: usize, hide_title: bool, hide_rank: bool) -> u32 {
     let _ = hide_rank;
-    let header: u32 = if hide_title { 58 } else { 74 };
-    let compact_rows = rows.saturating_sub(1).div_ceil(2) as u32;
-    (header + 76 + compact_rows * 50 + 40).max(196)
+    let header = if hide_title {
+        U_HEADER_COMPACT_H
+    } else {
+        U_HEADER_H
+    };
+    let stack = rows.saturating_sub(1) as u32 * U_ROW_H + U_BODY_PAD;
+    let body = std::cmp::max(U_HEADLINE_BOX_H, stack);
+    (header + body + U_FOOTER_H).max(140)
 }
 
 /// A deterministic, playful profile title derived only from the card's
-/// visible activity totals.
+/// visible activity totals. It is a classification field, not a
+/// measurement, so it letters in the field-label style and never in red.
 pub fn user_persona(data: &UserCardData) -> &'static str {
     if data.stars >= 100_000 {
         "OSS WIZARD"
@@ -587,217 +676,113 @@ pub fn render_user_card(
     }
     let w = opts.width as f32;
     let h = user_card_height(rows.len(), opts.hide_title, opts.hide_rank) as f32;
-    let pal0 = accent_ink(theme);
-    let login = escape_xml(&data.login);
-    let title = display_title(opts.custom_title.as_deref(), &format!("@{}", data.login));
+    let header = if opts.hide_title {
+        U_HEADER_COMPACT_H
+    } else {
+        U_HEADER_H
+    } as f32;
+    let stack_h = rows.len().saturating_sub(1) as f32 * U_ROW_H as f32;
+    let body_h = h - header - U_FOOTER_H as f32;
     let persona = user_persona(data);
+    // The title and the classification share one baseline, so the title's
+    // room is what the classification leaves it, never the whole width.
+    let title_span =
+        (w - 2.0 * PAD - persona.chars().count() as f32 * LABEL_CHAR_W - FIELD_GAP).max(48.0);
+    let title = display_title(
+        opts.custom_title.as_deref(),
+        &format!("@{}", data.login),
+        user_title_budget(w, persona),
+    );
+    let login = texture::escape_xml(&truncate_chars(
+        &data.login,
+        fit_chars(title_span - CAPTION_CHAR_W, CAPTION_CHAR_W),
+    ));
 
-    let mut body = String::new();
-    body.push_str(&format!(
-        "  <rect x=\"0.5\" y=\"0.5\" width=\"{rw:.1}\" height=\"{rh:.1}\" rx=\"12\" fill=\"none\" stroke=\"{border}\" stroke-width=\"1\" stroke-opacity=\"{stroke_opacity}\" />\n",
-        rw = w - 1.0,
-        rh = h - 1.0,
-        border = theme.border,
-        stroke_opacity = if opts.hide_border { "0" } else { "1" },
-    ));
-    body.push_str(&card_texture(w, h, 12.0, theme, opts.animate));
-    body.push_str(&format!(
-        "  <text class=\"ey\" x=\"24\" y=\"25\" fill=\"{pal0}\">:: {persona}</text>\n",
-    ));
-    if !opts.hide_title {
+    let mut body = sheet(w, h, theme, opts.hide_border);
+
+    // Title strip: the entity on the left, its classification on the right,
+    // both on one baseline, closed by a rule that lands on the frame.
+    let title_baseline = header - 17.0;
+    let strip_baseline = if opts.hide_title {
+        header - 12.0
+    } else {
+        title_baseline
+    };
+    if opts.hide_title {
         body.push_str(&format!(
-            "  <text class=\"t\" x=\"24\" y=\"52\" fill=\"{}\">{title}</text>\n",
-            theme.fg
+            "  <text class=\"m\" x=\"{PAD:.1}\" y=\"{strip_baseline:.1}\" fill=\"{ink}\">@{login}</text>\n",
+            ink = theme.muted,
         ));
     } else {
         body.push_str(&format!(
-            "  <text class=\"m\" x=\"24\" y=\"43\" fill=\"{}\">@{login}</text>\n",
-            theme.muted
+            "  <text class=\"t\" x=\"{PAD:.1}\" y=\"{title_baseline:.1}\" fill=\"{ink}\">{title}</text>\n",
+            ink = theme.fg,
         ));
     }
+    body.push_str(&format!(
+        "  <text class=\"k\" x=\"{x:.1}\" y=\"{strip_baseline:.1}\" text-anchor=\"end\" fill=\"{ink}\">{persona}</text>\n",
+        x = w - PAD,
+        ink = theme.ink_3,
+    ));
+    body.push_str(&rule_h(1.0, w - 1.0, header, theme.grid));
 
-    let grid_y = if opts.hide_title { 58.0 } else { 74.0 };
-    let gap = 10.0;
-    let cell_w = (w - 48.0 - gap) / 2.0;
-    let series_inks = if theme.dark {
-        ["#358ff3", "#966eff", "#f05abe", "#28d26e", "#ff9632"]
+    // Body: the headline field, then the stack of the rest beside it. With
+    // nothing to stack the sheet is not divided at all — a rule with an empty
+    // box behind it encloses nothing, and the headline takes the whole width.
+    let split = if rows.len() > 1 {
+        (w * 0.40).clamp(150.0, 260.0)
     } else {
-        ["#087fea", "#7c4dff", "#d729a9", "#0a8f55", "#d06a00"]
+        w - COL_INSET
     };
-    let magnitude = |row: &UserRow| match row {
-        UserRow::Stat { magnitude, .. } => *magnitude,
-        UserRow::Langs(_) => data
-            .langs
-            .iter()
-            .filter_map(|(_, lines)| u64::try_from(*lines).ok())
-            .sum(),
-    };
-    let max_log = rows
-        .iter()
-        .map(|row| (magnitude(row) as f64 + 1.0).ln())
-        .fold(1.0_f64, f64::max);
+    if rows.len() > 1 {
+        body.push_str(&rule_v(split, header, header + body_h, theme.grid));
+    }
 
-    // The first selected metric is the card's headline. Defaults make this
-    // total stars; custom selections still retain a real hierarchy instead
-    // of turning every number into an equally loud tile.
-    let hero_y = grid_y;
     let (hero_open, hero_close) = anim_group(opts.animate, 0);
     body.push_str(&hero_open);
-    body.push_str(&format!(
-        "    <rect x=\"24\" y=\"{hero_y:.1}\" width=\"{hero_w:.1}\" height=\"66\" rx=\"9\" fill=\"{track}\" opacity=\"0.28\" />\n    <rect x=\"24\" y=\"{hero_y:.1}\" width=\"{hero_w:.1}\" height=\"66\" rx=\"9\" fill=\"url(#gd-t2)\" fill-opacity=\"0.16\" />\n",
-        hero_w = w - 48.0,
-        track = theme.track,
+    body.push_str(&headline_field(
+        (PAD, header),
+        (split - PAD - COL_INSET, body_h),
+        rows[0].label,
+        &rows[0].value,
+        (
+            theme.ink_3,
+            if is_measured(&rows[0].value) {
+                theme.accent
+            } else {
+                theme.fg
+            },
+        ),
     ));
-    match &rows[0] {
-        UserRow::Stat {
-            glyph,
-            label,
-            value,
-            ..
-        } => {
-            if opts.show_icons {
-                body.push_str(&glyph_svg(*glyph, 36.0, hero_y + 12.0, series_inks[0]));
-            }
-            body.push_str(&format!(
-                "    <text class=\"ml\" x=\"{label_x:.1}\" y=\"{label_y:.1}\" fill=\"{muted}\">{label}</text>\n    <text class=\"hv\" x=\"36\" y=\"{value_y:.1}\" fill=\"{fg}\">{value}</text>\n",
-                label_x = if opts.show_icons { 58.0 } else { 36.0 },
-                label_y = hero_y + 23.0,
-                value_y = hero_y + 55.0,
-                muted = theme.muted,
-                fg = theme.fg,
-                value = escape_xml(value),
-            ));
-        }
-        UserRow::Langs(names) => {
-            let joined = truncate_chars(
-                &names
-                    .iter()
-                    .take(3)
-                    .cloned()
-                    .collect::<Vec<_>>()
-                    .join(" · "),
-                28,
-            );
-            body.push_str(&glyph_svg(
-                GlyphKind::Code,
-                36.0,
-                hero_y + 12.0,
-                series_inks[0],
-            ));
-            body.push_str(&format!(
-                "    <text class=\"ml\" x=\"58\" y=\"{label_y:.1}\" fill=\"{muted}\">TOP LANGUAGES</text>\n    <text class=\"rt\" x=\"36\" y=\"{value_y:.1}\" fill=\"{fg}\">{joined}</text>\n",
-                label_y = hero_y + 23.0,
-                value_y = hero_y + 53.0,
-                muted = theme.muted,
-                fg = theme.fg,
-                joined = escape_xml(&joined),
-            ));
-        }
-    }
-
-    // A compact, honest distribution chart: bar heights are log-normalized
-    // visible metric magnitudes (stars, commits, repos, forks). It adds useful
-    // shape without manufacturing a time series the database does not have.
-    let chart_x = (w * 0.49).max(224.0);
-    let chart_w = (w - chart_x - 38.0).max(120.0);
-    let bar_gap = 5.0;
-    let bar_w = ((chart_w - bar_gap * (rows.len().saturating_sub(1) as f32)) / rows.len() as f32)
-        .clamp(8.0, 34.0);
-    let used_w = bar_w * rows.len() as f32 + bar_gap * rows.len().saturating_sub(1) as f32;
-    let bars_x = chart_x + (chart_w - used_w).max(0.0);
-    body.push_str(&format!(
-        "    <text class=\"ey\" x=\"{chart_x:.1}\" y=\"{label_y:.1}\" fill=\"{muted}\">SIGNAL MIX</text>\n",
-        label_y = hero_y + 16.0,
-        muted = theme.muted,
-    ));
-    for (i, row) in rows.iter().enumerate() {
-        let frac = (((magnitude(row) as f64 + 1.0).ln() / max_log) as f32).clamp(0.08, 1.0);
-        let bar_h = 8.0 + 31.0 * frac;
-        let x = bars_x + i as f32 * (bar_w + bar_gap);
-        let y = hero_y + 56.0 - bar_h;
-        let ink = series_inks[i % series_inks.len()];
-        body.push_str(&format!(
-            "    <rect x=\"{x:.1}\" y=\"{base:.1}\" width=\"{bar_w:.1}\" height=\"39\" rx=\"2\" fill=\"{track}\" opacity=\"0.42\" />\n    <rect x=\"{x:.1}\" y=\"{y:.1}\" width=\"{bar_w:.1}\" height=\"{bar_h:.1}\" rx=\"2\" fill=\"{ink}\" opacity=\"0.84\" />\n    <rect x=\"{x:.1}\" y=\"{y:.1}\" width=\"{bar_w:.1}\" height=\"{bar_h:.1}\" rx=\"2\" fill=\"url(#gd-pixel-fill)\" opacity=\"0.48\" />\n",
-            base = hero_y + 17.0,
-            track = theme.track,
-        ));
-    }
     body.push_str(hero_close);
 
-    // Secondary metrics are deliberately smaller, with a real relative
-    // magnitude rail replacing the old equal-weight blocks.
-    for (compact_i, row) in rows.iter().skip(1).enumerate() {
-        let col = (compact_i % 2) as f32;
-        let row_index = (compact_i / 2) as f32;
-        let x = 24.0 + col * (cell_w + gap);
-        let y = grid_y + 76.0 + row_index * 50.0;
-        let (open, close) = anim_group(opts.animate, compact_i + 1);
-        let frac = (((magnitude(row) as f64 + 1.0).ln() / max_log) as f32).clamp(0.06, 1.0);
-        let ink = series_inks[(compact_i + 1) % series_inks.len()];
+    // The stack is centred in the body box: a short stack floating at the
+    // top of a tall box reads as a layout accident.
+    let stack_top = header + (body_h - stack_h) / 2.0;
+    for (index, row) in rows.iter().skip(1).enumerate() {
+        let (open, close) = anim_group(opts.animate, index + 1);
         body.push_str(&open);
-        body.push_str(&format!(
-            "    <rect x=\"{x:.1}\" y=\"{y:.1}\" width=\"{cell_w:.1}\" height=\"40\" rx=\"6\" fill=\"{track}\" opacity=\"0.18\" />\n    <rect x=\"{x:.1}\" y=\"{rail_y:.1}\" width=\"{rail_w:.1}\" height=\"3\" rx=\"1.5\" fill=\"{ink}\" opacity=\"0.9\" />\n",
-            track = theme.track,
-            rail_y = y + 37.0,
-            rail_w = (cell_w * frac).max(5.0),
+        body.push_str(&field_row(
+            split + COL_INSET,
+            w - PAD,
+            stack_top + index as f32 * U_ROW_H as f32 + 16.0,
+            row.label,
+            &row.value,
+            theme.ink_3,
+            theme.fg,
         ));
-        match row {
-            UserRow::Stat {
-                glyph,
-                label,
-                value,
-                ..
-            } => {
-                let mut label_x = x + 10.0;
-                if opts.show_icons {
-                    body.push_str(&glyph_svg(*glyph, label_x, y + 6.0, ink));
-                    label_x += 20.0;
-                }
-                body.push_str(&format!(
-                    "    <text class=\"ml\" x=\"{label_x:.1}\" y=\"{label_y:.1}\" fill=\"{muted}\">{label}</text><text class=\"mv\" x=\"{value_x:.1}\" y=\"{value_y:.1}\" text-anchor=\"end\" fill=\"{fg}\">{value}</text>\n",
-                    label_y = y + 17.0,
-                    value_x = x + cell_w - 10.0,
-                    value_y = y + 31.0,
-                    fg = theme.fg,
-                    muted = theme.muted,
-                    value = escape_xml(value),
-                ));
-            }
-            UserRow::Langs(names) => {
-                let joined = truncate_chars(
-                    &names
-                        .iter()
-                        .take(3)
-                        .cloned()
-                        .collect::<Vec<_>>()
-                        .join(" · "),
-                    24,
-                );
-                body.push_str(&glyph_svg(GlyphKind::Code, x + 10.0, y + 6.0, ink));
-                body.push_str(&format!(
-                    "    <text class=\"ml\" x=\"{label_x:.1}\" y=\"{label_y:.1}\" fill=\"{muted}\">TOP LANGUAGES</text><text class=\"rv\" x=\"{value_x:.1}\" y=\"{value_y:.1}\" text-anchor=\"end\" fill=\"{fg}\">{joined}</text>\n",
-                    label_x = x + 30.0,
-                    label_y = y + 17.0,
-                    value_x = x + cell_w - 10.0,
-                    value_y = y + 31.0,
-                    muted = theme.muted,
-                    fg = theme.fg,
-                    joined = escape_xml(&joined),
-                ));
-            }
-        }
         body.push_str(close);
     }
 
-    let compact_rows = rows.len().saturating_sub(1).div_ceil(2) as f32;
-    let footer_y = grid_y + 76.0 + compact_rows * 50.0;
-
+    // Footer strip.
+    let footer_top = header + body_h;
+    body.push_str(&rule_h(1.0, w - 1.0, footer_top, theme.grid));
     body.push_str(&format!(
-        "  <a href=\"https://gitdebt.com/{login}\" target=\"_blank\" rel=\"noopener\"><text class=\"m\" x=\"24\" y=\"{y:.1}\" fill=\"{muted}\">gitdebt.com/{login} ↗</text></a>\n",
-        y = footer_y + 20.0,
-        muted = theme.muted,
+        "  <a href=\"https://gitdebt.com/{login}\" target=\"_blank\" rel=\"noopener\"><text class=\"m\" x=\"{PAD:.1}\" y=\"{y:.1}\" fill=\"{ink}\">gitdebt.com/{login} ↗</text></a>\n",
+        y = h - 12.0,
+        ink = theme.muted,
     ));
-    body.push_str(&brand::footer_lockup(w - 24.0, footer_y + 20.0, theme));
+    body.push_str(&brand::footer_lockup(w - PAD, h - 12.0, theme));
 
     Ok(format!(
         "{open}{CARD_STYLE}{body}</svg>",
@@ -888,20 +873,20 @@ pub fn select_repo_metrics(hide: Option<&str>, show: Option<&str>) -> Vec<RepoMe
     out
 }
 
-/// One point of the 90-day cumulative star sparkline: unix seconds +
-/// cumulative total. Produced by [`spark_window`].
+/// One point of the cumulative star trace: unix seconds + cumulative
+/// total. Produced by [`spark_window`].
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub struct SparkPoint {
     pub t: i64,
     pub v: u64,
 }
 
-/// Windowed + downsampled sparkline points from a complete cumulative
+/// Windowed + downsampled trace points from a complete cumulative
 /// star series (ascending). Takes the trailing `window_days` relative to
 /// the series' **last** timestamp (not the wall clock — determinism), and
 /// downsamples to at most `max_points`. When fewer than 2 points fall in
 /// the window, the last pre-window point is prepended so a quiet repo
-/// still draws a flat line. Empty input → empty output (sparkline
+/// still draws a flat line. Empty input → empty output (trace
 /// omitted; the caller must never approximate from a partial series).
 pub fn spark_window(series: &[Point], window_days: i64, max_points: usize) -> Vec<SparkPoint> {
     let Some(last) = series.last() else {
@@ -937,9 +922,9 @@ pub fn lang_shares(langs: &[(String, i64)]) -> Vec<(String, f64)> {
         .collect()
 }
 
-/// Inputs for [`render_repo_card`]. `None` = unavailable → the cell is
+/// Inputs for [`render_repo_card`]. `None` = unavailable → the field is
 /// dropped (never rendered as a fake zero). `spark` empty = no complete
-/// star history → the sparkline is omitted entirely.
+/// star history → the trace is omitted entirely.
 #[derive(Debug, Clone, Default)]
 pub struct RepoCardData {
     /// Lowercased `owner/repo` slug (validated by the API layer).
@@ -965,6 +950,7 @@ pub struct RepoCardOptions {
     pub width: u32,
     pub hide_border: bool,
     pub custom_title: Option<String>,
+    /// Accepted for URL stability and ignored; see [`UserCardOptions`].
     pub show_icons: bool,
     pub number_format: NumberFormat,
     pub animate: bool,
@@ -985,7 +971,6 @@ impl Default for RepoCardOptions {
 }
 
 struct RepoCell {
-    glyph: GlyphKind,
     value: String,
     label: &'static str,
 }
@@ -996,42 +981,34 @@ fn repo_cells(data: &RepoCardData, opts: &RepoCardOptions) -> Vec<RepoCell> {
     for m in &opts.metrics {
         let cell = match m {
             RepoMetric::Stars => data.stars.map(|v| RepoCell {
-                glyph: GlyphKind::Star,
                 value: fmt(v),
                 label: "stars",
             }),
             RepoMetric::Forks => data.forks.map(|v| RepoCell {
-                glyph: GlyphKind::Fork,
                 value: fmt(v),
                 label: "forks",
             }),
             RepoMetric::Contributors => data.contributors.map(|v| RepoCell {
-                glyph: GlyphKind::Branch,
                 value: fmt(v),
                 label: "contributors",
             }),
             RepoMetric::Commits => data.commits.map(|v| RepoCell {
-                glyph: GlyphKind::Commit,
                 value: fmt(v),
-                label: "repository commits",
+                label: "commits",
             }),
             RepoMetric::Age => data.created_year.map(|y| RepoCell {
-                glyph: GlyphKind::Clock,
                 value: y.to_string(),
                 label: "since",
             }),
             RepoMetric::Lines => data.lines_total.map(|v| RepoCell {
-                glyph: GlyphKind::Code,
                 value: fmt(v),
                 label: "lines of code",
             }),
             RepoMetric::Commits30d => data.commits_30d.map(|v| RepoCell {
-                glyph: GlyphKind::Pulse,
                 value: fmt(v),
                 label: "commits · 30d",
             }),
             RepoMetric::Stars30d => data.stars_30d.map(|v| RepoCell {
-                glyph: GlyphKind::Star,
                 value: format!("+{}", fmt(v)),
                 label: "stars · 30d",
             }),
@@ -1043,20 +1020,29 @@ fn repo_cells(data: &RepoCardData, opts: &RepoCardOptions) -> Vec<RepoCell> {
     cells
 }
 
-/// Repo-card height: header + the taller of (metric grid, sparkline) +
-/// optional language strip + footer. Grows 24px per grid row.
+/// Band heights of the repository sheet.
+const R_HEADER_H: u32 = 40;
+const R_HEADLINE_BOX_H: u32 = 74;
+const R_ROW_H: u32 = 20;
+const R_BODY_PAD: u32 = 18;
+const R_TRACE_H: u32 = 64;
+const R_LANG_H: u32 = 38;
+const R_FOOTER_H: u32 = 26;
+
+/// Repo-sheet height: title strip + the body (headline field beside the
+/// field stack) + the optional trace and language bands + footer strip.
+/// `grid_rows` is the number of fields BESIDE the headline.
 pub fn repo_card_height(grid_rows: usize, has_spark: bool, has_langs: bool) -> u32 {
-    let content = std::cmp::max(grid_rows as u32 * 24, if has_spark { 52 } else { 0 });
-    let mut h = 44 + content + 22;
-    if has_langs {
-        h += 38;
-    }
-    h.max(110)
+    let stack = grid_rows as u32 * R_ROW_H + R_BODY_PAD;
+    let body = std::cmp::max(R_HEADLINE_BOX_H, stack);
+    let trace = if has_spark { R_TRACE_H } else { 0 };
+    let langs = if has_langs { R_LANG_H } else { 0 };
+    (R_HEADER_H + body + trace + langs + R_FOOTER_H).max(150)
 }
 
 /// Render the repo stats card. Pure + deterministic. `Err` only when the
 /// `hide=` selection removed every metric key (→ 400 upstream);
-/// data-unavailable cells are silently dropped instead.
+/// data-unavailable fields are silently dropped instead.
 pub fn render_repo_card(
     data: &RepoCardData,
     opts: &RepoCardOptions,
@@ -1069,69 +1055,140 @@ pub fn render_repo_card(
     let has_spark = data.spark.len() >= 2;
     let shares = lang_shares(&data.langs);
     let has_langs = !shares.is_empty();
-    let grid_rows = cells.len().div_ceil(2);
+    let grid_rows = cells.len().saturating_sub(1);
     let w = opts.width as f32;
     let h = repo_card_height(grid_rows, has_spark, has_langs) as f32;
-    let pal0 = accent_ink(theme);
-    let slug = escape_xml(&data.slug);
-    let title = display_title(opts.custom_title.as_deref(), &data.slug);
+    let slug = texture::escape_xml(&data.slug);
+    let title = display_title(
+        opts.custom_title.as_deref(),
+        &data.slug,
+        fit_chars(w - 2.0 * PAD, TITLE_CHAR_W),
+    );
 
-    let mut body = String::new();
-    body.push_str(&chrome(w, h, theme, opts.hide_border));
-    body.push_str(&card_texture(w, h, 4.5, theme, opts.animate));
+    let header = R_HEADER_H as f32;
+    let footer_top = h - R_FOOTER_H as f32;
+    let lang_top = footer_top - if has_langs { R_LANG_H as f32 } else { 0.0 };
+    let trace_top = lang_top - if has_spark { R_TRACE_H as f32 } else { 0.0 };
+    let body_h = trace_top - header;
+    let stack_h = grid_rows as f32 * R_ROW_H as f32;
 
-    // Header: repo glyph + full slug, linked to GitHub.
+    let mut body = sheet(w, h, theme, opts.hide_border);
+
+    // Title strip: the full slug, linked to GitHub, closed by a rule.
     body.push_str(&format!(
-        "  <a href=\"https://github.com/{slug}\" target=\"_blank\" rel=\"noopener\">{glyph}<text class=\"rt\" x=\"47\" y=\"28\" fill=\"{fg}\">{title}</text></a>\n",
-        glyph = glyph_svg(GlyphKind::Repo, 25.0, 14.0, pal0),
-        fg = theme.fg,
+        "  <a href=\"https://github.com/{slug}\" target=\"_blank\" rel=\"noopener\"><text class=\"t\" x=\"{PAD:.1}\" y=\"{y:.1}\" fill=\"{ink}\">{title}</text></a>\n",
+        y = header - 14.0,
+        ink = theme.fg,
     ));
+    body.push_str(&rule_h(1.0, w - 1.0, header, theme.grid));
 
-    // Metric grid (2 columns, left zone).
-    let grid_w = if has_spark { w - 190.0 } else { w - 50.0 };
-    let col_w = grid_w / 2.0;
-    // Approx px/char at the 10px label font.
-    const LABEL_CHAR_W: f32 = 5.5;
-    for (i, cell) in cells.iter().enumerate() {
-        let col = (i % 2) as f32;
-        let row = (i / 2) as f32;
-        let x = 25.0 + col * col_w;
-        let y = 64.0 + row * 24.0;
-        let (open, close) = anim_group(opts.animate, i);
+    // Body: headline field, then the remaining fields stacked beside it.
+    // With nothing to stack beside it the headline takes the whole width; a
+    // rule with an empty box behind it encloses nothing.
+    let split = if grid_rows > 0 {
+        (w * 0.40).clamp(140.0, 260.0)
+    } else {
+        w - COL_INSET
+    };
+    if grid_rows > 0 {
+        body.push_str(&rule_v(split, header, header + body_h, theme.grid));
+    }
+
+    if let Some(hero) = cells.first() {
+        let (open, close) = anim_group(opts.animate, 0);
         body.push_str(&open);
-        let mut tx = x;
-        if opts.show_icons {
-            body.push_str(&glyph_svg(cell.glyph, x, y - 12.0, pal0));
-            tx += 22.0;
-        }
-        let label_x = tx + cell.value.chars().count() as f32 * VALUE_CHAR_W + 6.0;
-        // Keep the label inside its own column so it can never run under
-        // the neighbouring value or the sparkline zone.
-        let label_budget = (((x + col_w - 6.0 - label_x) / LABEL_CHAR_W).floor() as i64).max(1);
-        let label = truncate_chars(cell.label, label_budget as usize);
-        body.push_str(&format!(
-            "<text class=\"rv\" x=\"{tx:.1}\" y=\"{y:.1}\" fill=\"{fg}\">{value}</text><text class=\"m\" x=\"{label_x:.1}\" y=\"{y:.1}\" fill=\"{muted}\">{label}</text>",
-            fg = theme.fg,
-            muted = theme.muted,
-            value = escape_xml(&cell.value),
-            label = escape_xml(&label),
+        body.push_str(&headline_field(
+            (PAD, header),
+            (split - PAD - COL_INSET, body_h),
+            hero.label,
+            &hero.value,
+            (
+                theme.ink_3,
+                if is_measured(&hero.value) {
+                    theme.accent
+                } else {
+                    theme.fg
+                },
+            ),
         ));
         body.push_str(close);
     }
 
-    // 90-day star sparkline (right zone; only when history is complete).
+    let stack_top = header + (body_h - stack_h) / 2.0;
+    for (index, cell) in cells.iter().skip(1).enumerate() {
+        let (open, close) = anim_group(opts.animate, index + 1);
+        body.push_str(&open);
+        body.push_str(&field_row(
+            split + COL_INSET,
+            w - PAD,
+            stack_top + index as f32 * R_ROW_H as f32 + 14.0,
+            cell.label,
+            &cell.value,
+            theme.ink_3,
+            theme.fg,
+        ));
+        body.push_str(close);
+    }
+
+    // Trace band: the star history is the live measurement of this sheet,
+    // so it draws in drafting red, and the window it covers is dimensioned
+    // from the trace's own timestamps rather than assumed.
     if has_spark {
-        body.push_str(&spark_svg(&data.spark, w - 155.0, 48.0, 130.0, 42.0, pal0));
+        body.push_str(&rule_h(1.0, w - 1.0, trace_top, theme.grid));
+        body.push_str(&label_text(
+            PAD,
+            trace_top + 15.0,
+            "STAR HISTORY",
+            theme.ink_3,
+        ));
+        let (tx, tw) = (PAD, w - 2.0 * PAD);
+        let (ty, th) = (trace_top + 20.0, 22.0);
+        body.push_str(&spark_svg(&data.spark, tx, ty, tw, th, theme.accent));
+        let days = trace_span_days(&data.spark);
+        body.push_str(&texture::extension_tick(
+            tx,
+            ty + th,
+            Side::Down,
+            texture::TICK_LEN,
+            theme.ink_3,
+        ));
+        body.push_str(&texture::extension_tick(
+            tx + tw,
+            ty + th,
+            Side::Down,
+            texture::TICK_LEN,
+            theme.ink_3,
+        ));
+        body.push_str(&texture::dimension_h(
+            tx,
+            tx + tw,
+            ty + th + 12.0,
+            &Dimension {
+                value: &format!("{days}D"),
+                ink: theme.ink_3,
+                ground: theme.bg,
+                size: 8.0,
+            },
+        ));
+        body.push('\n');
     }
 
-    // Language strip: stacked bar + up to 3 legend chips.
+    // Language band: one bar of plotter pens, each segment closed by an ink
+    // hairline at its measured edge, and each named in its own pen so hue is
+    // never the only thing telling two of them apart.
     if has_langs {
-        let content = std::cmp::max(grid_rows as u32 * 24, if has_spark { 52 } else { 0 }) as f32;
-        let bar_y = 44.0 + content + 6.0;
-        body.push_str(&lang_strip(&shares, 25.0, bar_y, w - 50.0, theme));
+        body.push_str(&rule_h(1.0, w - 1.0, lang_top, theme.grid));
+        body.push_str(&lang_strip(
+            &shares,
+            PAD,
+            lang_top + 10.0,
+            w - 2.0 * PAD,
+            theme,
+        ));
     }
 
-    body.push_str(&brand::footer_lockup(w - 25.0, h - 10.0, theme));
+    body.push_str(&rule_h(1.0, w - 1.0, footer_top, theme.grid));
+    body.push_str(&brand::footer_lockup(w - PAD, h - 10.0, theme));
 
     Ok(format!(
         "{open}{CARD_STYLE}{body}</svg>",
@@ -1139,9 +1196,18 @@ pub fn render_repo_card(
     ))
 }
 
-/// Cumulative-star sparkline: line + 12%-opacity area fill inside the
-/// (`x`, `y`, `w`, `h`) box. Requires ≥2 points (callers gate on that).
-fn spark_svg(points: &[SparkPoint], x: f32, y: f32, w: f32, h: f32, color: &str) -> String {
+/// Whole days the trace actually spans, from its own timestamps. Never the
+/// wall clock, and never a number the renderer assumed.
+fn trace_span_days(points: &[SparkPoint]) -> i64 {
+    match (points.first(), points.last()) {
+        (Some(a), Some(b)) => ((b.t - a.t) / 86_400).max(1),
+        _ => 1,
+    }
+}
+
+/// Cumulative-star trace inside the (`x`, `y`, `w`, `h`) box: one line, no
+/// fill, no wash. Requires ≥2 points (callers gate on that).
+fn spark_svg(points: &[SparkPoint], x: f32, y: f32, w: f32, h: f32, ink: &str) -> String {
     let t0 = points.first().map(|p| p.t).unwrap_or(0);
     let t1 = points.last().map(|p| p.t).unwrap_or(0);
     let span = (t1 - t0).max(1) as f64;
@@ -1158,46 +1224,54 @@ fn spark_svg(points: &[SparkPoint], x: f32, y: f32, w: f32, h: f32, color: &str)
             y + h - ((p.v - vmin) as f64 / vspan) as f32 * h
         };
         line.push_str(if i == 0 { "M" } else { " L" });
-        line.push_str(&format!("{px:.1} {py:.1}"));
+        line.push_str(&format!("{} {}", texture::coord(px), texture::coord(py)));
     }
-    let last_x = x + w;
     format!(
-        "  <g class=\"spark\"><path d=\"{line} L{last_x:.1} {bottom:.1} L{x:.1} {bottom:.1} Z\" fill=\"{color}\" opacity=\"0.12\" stroke=\"none\" /><path d=\"{line}\" fill=\"none\" stroke=\"{color}\" stroke-width=\"1.6\" stroke-linejoin=\"round\" /></g>\n",
-        bottom = y + h,
+        "  <g class=\"spark\"><path d=\"{line}\" fill=\"none\" stroke=\"{ink}\" stroke-width=\"{weight}\" stroke-linejoin=\"round\" stroke-linecap=\"round\" /></g>\n",
+        weight = texture::W_OBJECT,
     )
 }
 
-/// Full-width 8px stacked language bar + up to 3 `name pct%` chips.
+/// The language bar and its legend.
 ///
-/// Segment and chip colors come from the shared per-language map, not from
-/// the card palette by index: the same language must be the same color on
-/// every surface, and two adjacent languages must never collide.
+/// Segments are plotter pens assigned by language name, so the same set of
+/// languages is the same set of pens on every render and no series can claim
+/// drafting red. Each segment carries the ink hairline `series_bar` puts on
+/// its measured edge, which is what tells two adjacent pens apart at 8px.
 fn lang_strip(shares: &[(String, f64)], x: f32, y: f32, w: f32, theme: &Theme) -> String {
+    let names: Vec<&str> = shares.iter().map(|(n, _)| n.as_str()).collect();
+    let pens = pens_for(theme, &names);
     let mut out = String::from("  <g class=\"langs\">");
     let mut sx = x;
-    for (name, share) in shares.iter() {
+    for ((_, share), pen) in shares.iter().zip(&pens) {
         let seg_w = (*share as f32) * w;
-        out.push_str(&format!(
-            "<rect x=\"{sx:.1}\" y=\"{y:.1}\" width=\"{seg_w:.1}\" height=\"8\" rx=\"2\" fill=\"{color}\" />",
-            color = crate::repo_charts::language_color(name, theme),
+        out.push_str(&texture::series_bar(
+            sx,
+            y,
+            seg_w,
+            8.0,
+            pen,
+            theme.fg,
+            Side::Right,
         ));
         sx += seg_w;
     }
-    let legend_y = y + 21.0;
+    let legend_y = y + 20.0;
     let mut lx = x;
-    for (name, share) in shares.iter().take(3) {
+    for ((name, share), pen) in shares.iter().zip(&pens).take(3) {
         let text = format!("{name} {:.1}%", share * 100.0);
+        // Approximate advance at the 10px caption size. A name that would
+        // carry the row past the sheet's own margin is dropped rather than
+        // lettered into the edge.
+        let advance = text.chars().count() as f32 * 5.4;
+        if lx + advance > x + w {
+            break;
+        }
         out.push_str(&format!(
-            "<circle cx=\"{cx:.1}\" cy=\"{cy:.1}\" r=\"3.5\" fill=\"{color}\" /><text class=\"m\" x=\"{tx:.1}\" y=\"{ty:.1}\" fill=\"{muted}\">{text}</text>",
-            cx = lx + 3.5,
-            cy = legend_y - 3.5,
-            color = crate::repo_charts::language_color(name, theme),
-            tx = lx + 11.0,
-            ty = legend_y,
-            muted = theme.muted,
-            text = escape_xml(&text),
+            "<text class=\"m\" x=\"{lx:.1}\" y=\"{legend_y:.1}\" fill=\"{pen}\">{}</text>",
+            texture::escape_xml(&text),
         ));
-        lx += 11.0 + text.chars().count() as f32 * 5.4 + 12.0;
+        lx += advance + 14.0;
     }
     out.push_str("</g>\n");
     out
@@ -1220,22 +1294,26 @@ pub fn render_repo_pending_card(slug: &str, stars: Option<u64>, theme: &Theme) -
     notice_card(slug, &msg, theme)
 }
 
-/// Shared minimal notice card (400×100): title line + muted message, on
-/// the same quiet dithered surface as the full cards.
+/// Shared minimal notice sheet (400×108): the same three bands every card
+/// has — title strip, body, footer strip — with one line of running text in
+/// place of the fields. Nothing here was measured, so nothing here is red.
+/// The title is cut to what the 16px face fits between the two margins.
 fn notice_card(title: &str, message: &str, theme: &Theme) -> String {
-    let (w, h) = (400.0_f32, 100.0_f32);
+    let (w, h) = (400.0_f32, 108.0_f32);
     format!(
-        "{open}{CARD_STYLE}{chrome}{texture}  <rect x=\"0\" y=\"8\" width=\"3\" height=\"{strip_h:.0}\" rx=\"1.5\" fill=\"{accent}\" />\n  <text class=\"rt\" x=\"25\" y=\"42\" fill=\"{fg}\">{title}</text>\n  <text class=\"c\" x=\"25\" y=\"66\" fill=\"{muted}\">{message}</text>\n{footer}</svg>",
+        "{open}{CARD_STYLE}{sheet}{head}  <text class=\"t\" x=\"{PAD:.1}\" y=\"26\" fill=\"{ink}\">{title}</text>\n  <text class=\"n\" x=\"{PAD:.1}\" y=\"62\" fill=\"{muted}\">{message}</text>\n{foot}{footer}</svg>",
         open = svg_open(w, h, "gitdebt"),
-        chrome = chrome(w, h, theme, false),
-        texture = card_texture(w, h, 4.5, theme, false),
-        strip_h = h - 16.0,
-        accent = accent_ink(theme),
-        fg = theme.fg,
+        sheet = sheet(w, h, theme, false),
+        head = rule_h(1.0, w - 1.0, 40.0, theme.grid),
+        foot = rule_h(1.0, w - 1.0, 78.0, theme.grid),
+        ink = theme.fg,
         muted = theme.muted,
-        title = escape_xml(&truncate_chars(title, 48)),
-        message = escape_xml(message),
-        footer = brand::footer_lockup(w - 25.0, h - 12.0, theme),
+        title = texture::escape_xml(&truncate_chars(
+            title,
+            fit_chars(w - 2.0 * PAD, TITLE_CHAR_W)
+        )),
+        message = texture::escape_xml(message),
+        footer = brand::footer_lockup(w - PAD, h - 12.0, theme),
     )
 }
 
@@ -1452,10 +1530,38 @@ mod tests {
         data.contribs = 0;
         data.repos_analyzed = 0;
         let svg = render_user_card(&data, &UserCardOptions::default(), &LIGHT).unwrap();
-        assert!(svg.contains("Commits Found"));
+        assert!(svg.contains("COMMITS FOUND"));
         assert!(svg.contains(">warming</text>"));
         assert!(!svg.contains("ANALYSIS COVERAGE"));
         assert!(!svg.contains(">0</text>"));
+    }
+
+    /// A state is not a measurement, so a headline that reads `warming`
+    /// letters in ink while a real figure takes drafting red.
+    #[test]
+    fn only_a_measured_headline_takes_drafting_red() {
+        assert!(is_measured("12.3k") && is_measured("+1.2k") && is_measured("2015"));
+        assert!(!is_measured("warming") && !is_measured("") && !is_measured("Rust · Go"));
+
+        let measured = render_user_card(&sample_user(), &UserCardOptions::default(), &LIGHT)
+            .expect("card renders");
+        assert!(measured.contains(&format!("fill=\"{}\"", LIGHT.accent)));
+
+        // Commits are a lower bound over tracked repos, so a profile still
+        // warming has no figure to letter at all.
+        let mut pending = sample_user();
+        pending.commits = 0;
+        pending.repos_analyzed = 0;
+        let opts = UserCardOptions {
+            metrics: select_user_metrics(Some("stars,contribs,repos,forks"), None),
+            ..UserCardOptions::default()
+        };
+        let stateful = render_user_card(&pending, &opts, &LIGHT).expect("card renders");
+        assert!(stateful.contains(">warming</text>"));
+        assert!(
+            !stateful.contains(&format!("fill=\"{}\"", LIGHT.accent)),
+            "a state must never spend the signal"
+        );
     }
 
     #[test]
@@ -1469,14 +1575,14 @@ mod tests {
     fn theme_colors_are_baked() {
         let light = render_user_card(&sample_user(), &UserCardOptions::default(), &LIGHT).unwrap();
         let dark = render_user_card(&sample_user(), &UserCardOptions::default(), &DARK).unwrap();
-        assert!(light.contains("#0a0a0a"));
-        assert!(dark.contains("#fafafa"));
+        assert!(light.contains("#111417"));
+        assert!(dark.contains("#e6e8ea"));
         assert!(!light.contains("var(--"));
         assert!(!dark.contains("var(--"));
         let rlight = render_repo_card(&sample_repo(), &full_repo_opts(false), &LIGHT).unwrap();
         let rdark = render_repo_card(&sample_repo(), &full_repo_opts(false), &DARK).unwrap();
-        assert!(rlight.contains("#0a0a0a"));
-        assert!(rdark.contains("#fafafa"));
+        assert!(rlight.contains("#111417"));
+        assert!(rdark.contains("#e6e8ea"));
         assert!(!rlight.contains("var(--"));
         assert!(!rdark.contains("var(--"));
     }
@@ -1484,14 +1590,14 @@ mod tests {
     #[test]
     fn hide_removes_row_from_svg() {
         let all = render_user_card(&sample_user(), &UserCardOptions::default(), &LIGHT).unwrap();
-        assert!(all.contains("Total Forks"));
+        assert!(all.contains("TOTAL FORKS"));
         let opts = UserCardOptions {
             metrics: select_user_metrics(Some("forks"), None),
             ..UserCardOptions::default()
         };
         let hidden = render_user_card(&sample_user(), &opts, &LIGHT).unwrap();
-        assert!(!hidden.contains("Total Forks"));
-        assert!(hidden.contains("Total Stars Earned"));
+        assert!(!hidden.contains("TOTAL FORKS"));
+        assert!(hidden.contains("TOTAL STARS EARNED"));
     }
 
     #[test]
@@ -1524,7 +1630,33 @@ mod tests {
         assert!(user_card_height(3, true, false) < user_card_height(3, false, false));
         assert!(repo_card_height(4, false, false) > repo_card_height(1, false, false));
         assert!(repo_card_height(1, false, true) > repo_card_height(1, false, false));
-        assert_eq!(user_card_height(0, false, false), 196);
+        // Header + the headline box + the footer strip, with no fields beside
+        // the headline at all.
+        assert_eq!(user_card_height(0, false, false), 156);
+    }
+
+    /// Every band the sheet reserves is a band the renderer actually fills,
+    /// and the sum is exactly the sheet's own height.
+    #[test]
+    fn the_sheet_bands_add_up_to_its_height() {
+        for (spark, langs) in [(true, true), (true, false), (false, true), (false, false)] {
+            let mut data = sample_repo();
+            if !spark {
+                data.spark = Vec::new();
+                data.stars_30d = None;
+            }
+            if !langs {
+                data.langs = Vec::new();
+            }
+            let opts = full_repo_opts(false);
+            let svg = render_repo_card(&data, &opts, &LIGHT).unwrap();
+            let cells = repo_cells(&data, &opts).len();
+            let h = repo_card_height(cells - 1, spark, langs);
+            assert!(
+                svg.contains(&format!("height=\"{h}\"")),
+                "spark={spark} langs={langs} sheet height drifted from its bands"
+            );
+        }
     }
 
     #[test]
@@ -1590,6 +1722,32 @@ mod tests {
         assert!(!svg.contains("class=\"g\""));
     }
 
+    /// `show_icons` is accepted for URL stability and changes nothing: a
+    /// drawing sheet letters its fields rather than illustrating them.
+    #[test]
+    fn show_icons_is_accepted_and_ignored() {
+        let with = UserCardOptions {
+            show_icons: true,
+            ..UserCardOptions::default()
+        };
+        let without = UserCardOptions {
+            show_icons: false,
+            ..UserCardOptions::default()
+        };
+        assert_eq!(
+            render_user_card(&sample_user(), &with, &LIGHT).unwrap(),
+            render_user_card(&sample_user(), &without, &LIGHT).unwrap()
+        );
+        let ropts = |show_icons| RepoCardOptions {
+            show_icons,
+            ..full_repo_opts(false)
+        };
+        assert_eq!(
+            render_repo_card(&sample_repo(), &ropts(true), &LIGHT).unwrap(),
+            render_repo_card(&sample_repo(), &ropts(false), &LIGHT).unwrap()
+        );
+    }
+
     #[test]
     fn profile_personas_follow_visible_activity() {
         let mut data = sample_user();
@@ -1614,8 +1772,14 @@ mod tests {
             ..UserCardOptions::default()
         };
         let svg = render_user_card(&sample_user(), &long, &LIGHT).unwrap();
-        assert!(svg.contains(&format!("{}…", "x".repeat(63))));
-        assert!(!svg.contains(&"x".repeat(65)));
+        // Cut to what the strip leaves it beside the persona, with a real
+        // ellipsis — never the flat 64 the GRS convention allows, which would
+        // have run under the classification on the same baseline.
+        let budget =
+            user_title_budget(USER_CARD_DEFAULT_WIDTH as f32, user_persona(&sample_user()));
+        assert!(budget < 64);
+        assert!(svg.contains(&format!("{}…", "x".repeat(budget - 1))));
+        assert!(!svg.contains(&"x".repeat(budget + 1)));
         // Repo card path too.
         let ropts = RepoCardOptions {
             custom_title: Some("\"><script>".into()),
@@ -1625,16 +1789,71 @@ mod tests {
         assert!(!svg.contains("<script"));
     }
 
+    /// The regression this guards: a repository slug can be 140 characters
+    /// and the sheet lettered it in full, straight off its own right edge.
+    /// Every title is now cut to what fits between the two margins.
     #[test]
-    fn sparkline_omitted_without_complete_history() {
+    fn a_long_title_is_cut_to_the_sheet_it_is_lettered_on() {
+        let long_slug = "extremely-long-owner-name/an-extremely-long-repository-name";
+        for width in [320u32, 400, 800] {
+            let data = RepoCardData {
+                slug: long_slug.into(),
+                ..sample_repo()
+            };
+            let opts = RepoCardOptions {
+                width,
+                ..RepoCardOptions::default()
+            };
+            let svg = render_repo_card(&data, &opts, &LIGHT).unwrap();
+            let budget = fit_chars(width as f32 - 2.0 * PAD, TITLE_CHAR_W).min(64);
+            let lettered = svg
+                .split("class=\"t\"")
+                .nth(1)
+                .and_then(|f| f.split_once('>'))
+                .and_then(|(_, rest)| rest.split_once('<'))
+                .map(|(text, _)| text.chars().count())
+                .expect("the sheet letters a title");
+            assert!(
+                lettered <= budget,
+                "{width}-wide sheet lettered {lettered} characters into a {budget}-character strip"
+            );
+            assert!(
+                lettered as f32 * TITLE_CHAR_W <= width as f32 - 2.0 * PAD,
+                "the title runs past the margin on a {width}-wide sheet"
+            );
+        }
+        // The notice sheet is fitted the same way.
+        let notice = render_repo_missing_card(long_slug, &LIGHT);
+        assert!(notice.contains('…'));
+        assert!(!notice.contains(long_slug));
+    }
+
+    #[test]
+    fn trace_omitted_without_complete_history() {
         let mut data = sample_repo();
         data.spark = Vec::new();
         data.stars_30d = None;
         let svg = render_repo_card(&data, &full_repo_opts(false), &LIGHT).unwrap();
         assert!(!svg.contains("class=\"spark\""));
-        assert!(!svg.contains("stars · 30d"));
+        assert!(!svg.contains("STARS · 30D"));
+        assert!(!svg.contains("STAR HISTORY"));
         let with = render_repo_card(&sample_repo(), &full_repo_opts(false), &LIGHT).unwrap();
         assert!(with.contains("class=\"spark\""));
+        assert!(with.contains("STAR HISTORY"));
+    }
+
+    /// The window under the trace is dimensioned from the trace's own
+    /// timestamps. Assuming 90 would letter a wrong number the moment a
+    /// caller passed a different window.
+    #[test]
+    fn the_trace_window_is_measured_not_assumed() {
+        assert_eq!(trace_span_days(&spark_pts(30)), 29);
+        assert_eq!(trace_span_days(&spark_pts(1)), 1);
+        assert_eq!(trace_span_days(&[]), 1);
+        let svg = render_repo_card(&sample_repo(), &full_repo_opts(false), &LIGHT).unwrap();
+        assert!(svg.contains(">29D</text>"), "{svg}");
+        // A dimension is a rule between two terminators, cut for its value.
+        assert!(svg.contains("paint-order=\"stroke\""));
     }
 
     #[test]
@@ -1645,9 +1864,9 @@ mod tests {
             ..RepoCardData::default()
         };
         let svg = render_repo_card(&data, &RepoCardOptions::default(), &LIGHT).unwrap();
-        assert!(svg.contains(">stars<"));
-        assert!(!svg.contains(">forks<"));
-        assert!(!svg.contains(">contributors<"));
+        assert!(svg.contains(">STARS<"));
+        assert!(!svg.contains(">FORKS<"));
+        assert!(!svg.contains(">CONTRIBUTORS<"));
     }
 
     fn pt(day: i64, stars: u32) -> Point {
@@ -1692,6 +1911,31 @@ mod tests {
         assert!(lang_shares(&[]).is_empty());
     }
 
+    /// Languages are plotter pens, assigned by name so the set is stable,
+    /// and no category can ever claim the reserved signal pen.
+    #[test]
+    fn language_segments_are_plotter_pens_and_never_drafting_red() {
+        for theme in [&LIGHT, &DARK] {
+            let mut data = sample_repo();
+            data.langs = vec![
+                ("Rust".into(), 500),
+                ("TypeScript".into(), 300),
+                ("Python".into(), 200),
+            ];
+            let svg = render_repo_card(&data, &full_repo_opts(false), theme).unwrap();
+            let shares = lang_shares(&data.langs);
+            let names: Vec<&str> = shares.iter().map(|(n, _)| n.as_str()).collect();
+            let pens = pens_for(theme, &names);
+            for pen in &pens {
+                assert_ne!(*pen, theme.accent, "a language claimed drafting red");
+                assert!(svg.contains(pen), "{pen} missing from the bar");
+            }
+            // Each language is named in its own pen, so hue is never the only
+            // thing separating two segments.
+            assert!(svg.contains(&format!("fill=\"{}\">Rust 50.0%<", pens[0])));
+        }
+    }
+
     #[test]
     fn notice_cards_render_expected_messages() {
         let empty = render_user_empty_card("ghost", &LIGHT);
@@ -1704,11 +1948,58 @@ mod tests {
         assert!(pending.contains("analysis pending"));
         let pending_cold = render_repo_pending_card("a/b", None, &LIGHT);
         assert!(pending_cold.contains("analysis pending"));
-        // All are static + escaped.
+        // All are static, escaped, and spend no signal on an unmeasured state.
         for svg in [empty, missing, pending, pending_cold] {
             assert!(!svg.contains("<animate"));
             assert!(svg.starts_with("<svg"));
+            assert!(!svg.contains(LIGHT.accent) && !svg.contains(DARK.accent));
         }
+    }
+
+    /// Every card is a sheet: paper, one 1px frame, one chamfer, and no
+    /// texture, gradient, glow or rounded corner anywhere.
+    #[test]
+    fn every_card_is_a_drawing_sheet() {
+        let user = render_user_card(&sample_user(), &UserCardOptions::default(), &DARK).unwrap();
+        let repo = render_repo_card(&sample_repo(), &full_repo_opts(true), &DARK).unwrap();
+        let notice = render_repo_pending_card("a/b", None, &DARK);
+        for svg in [&user, &repo, &notice] {
+            for banned in [
+                "rx=",
+                "ry=",
+                "<pattern",
+                "Gradient",
+                "url(#",
+                "gd-t",
+                "gd-pixel",
+                "gd-dither",
+                "filter=",
+                "fill-opacity",
+                "var(--",
+            ] {
+                assert!(!svg.contains(banned), "{banned} survived: {svg}");
+            }
+            // The one chamfer, on the sheet's bottom-right corner.
+            assert_eq!(svg.matches("  <path d=\"M0.50 0.50H").count(), 1);
+            assert!(svg.contains(&format!("fill=\"{}\"", DARK.bg)), "paper");
+            assert!(
+                svg.contains(&format!("stroke=\"{}\"", DARK.border)),
+                "frame"
+            );
+        }
+    }
+
+    /// Drafting red is rationed. On a whole sheet it lands on the headline
+    /// figure and, on the repo sheet, on the star trace — the same
+    /// measurement drawn as a line — and nowhere else.
+    #[test]
+    fn the_signal_is_spent_only_on_the_measurement() {
+        let user = render_user_card(&sample_user(), &UserCardOptions::default(), &LIGHT).unwrap();
+        assert_eq!(user.matches(LIGHT.accent).count(), 1);
+        let repo = render_repo_card(&sample_repo(), &full_repo_opts(false), &LIGHT).unwrap();
+        assert_eq!(repo.matches(LIGHT.accent).count(), 2);
+        // The trace is the line, not a filled wash under it.
+        assert!(repo.contains("fill=\"none\""));
     }
 
     #[test]
@@ -1720,15 +2011,13 @@ mod tests {
         // text lights a few percent, runaway glyphs light most of it.
         let svg = render_user_card(&sample_user(), &UserCardOptions::default(), &DARK).unwrap();
         let (rgba, w, h) = crate::raster::rasterize_rgba(&svg, 1.0).expect("raster");
-        // The card paints no canvas, so the grain wash demultiplies to
-        // straight #fafafa at single-digit alpha. Composite onto the tone the
-        // card is designed against first, or a barely-there dot counts as
-        // brightly as a glyph and the measurement stops meaning anything.
+        // The sheet paints its own paper, so the dark print's ground is
+        // #0c0f11 and only lettering clears this threshold.
         let lit = rgba
             .chunks_exact(4)
             .filter(|px| {
                 let a = px[3] as u32;
-                (px[0] as u32 * a + 0x0a * (255 - a)) / 255 > 160
+                (px[0] as u32 * a + 0x0c * (255 - a)) / 255 > 160
             })
             .count();
         let share = lit as f64 / (w * h) as f64;
@@ -1737,28 +2026,6 @@ mod tests {
             "bright-pixel share {share:.3} — text is rendering far larger than authored"
         );
         assert!(share > 0.001, "text must actually render");
-    }
-
-    #[test]
-    fn cards_carry_bayer_texture_and_wave_accent() {
-        let user = render_user_card(&sample_user(), &UserCardOptions::default(), &DARK).unwrap();
-        let repo = render_repo_card(&sample_repo(), &full_repo_opts(false), &DARK).unwrap();
-        let notice = render_repo_pending_card("a/b", None, &DARK);
-        for svg in [&user, &repo, &notice] {
-            // Bayer tier wash: one ink, alpha carried by the consumer.
-            assert!(svg.contains("id=\"gd-t2\""), "tier pattern def present");
-            assert!(svg.contains("fill=\"url(#gd-t2)\""));
-            assert!(svg.contains("fill-opacity=\"0.09\""));
-            assert!(
-                svg.contains("fill=\"url(#gd-pixel-fill)\""),
-                "card edge and metric rails use the shared signal dither"
-            );
-            // Wave accent (dark trio lead) is the only chroma.
-            assert!(svg.contains("#9b7bff"));
-            assert!(!svg.contains("var(--"));
-        }
-        let light = render_user_card(&sample_user(), &UserCardOptions::default(), &LIGHT).unwrap();
-        assert!(light.contains("#5b2cff"));
     }
 
     #[test]
@@ -1817,5 +2084,51 @@ mod tests {
         let empty = render_user_empty_card("ghost", &LIGHT);
         let png = crate::raster::rasterize(&empty, crate::raster::RasterFormat::Png, 2.0).unwrap();
         assert_eq!(&png[..8], &PNG_MAGIC);
+    }
+
+    /// Clear the cut. The chamfer removes the sheet's bottom-right corner,
+    /// so the margin every right-anchored string is set against has to be
+    /// wider than the cut, at every width the sheet can be asked for.
+    #[test]
+    fn nothing_is_lettered_into_the_chamfer() {
+        const { assert!(PAD >= texture::CHAMFER) };
+        for width in [320u32, 400, 800] {
+            let ropts = RepoCardOptions {
+                width,
+                ..full_repo_opts(false)
+            };
+            let uopts = UserCardOptions {
+                width: width.max(420),
+                metrics: select_user_metrics(None, Some("since,langs")),
+                ..UserCardOptions::default()
+            };
+            for (svg, w) in [
+                (
+                    render_repo_card(&sample_repo(), &ropts, &LIGHT).unwrap(),
+                    width as f32,
+                ),
+                (
+                    render_user_card(&sample_user(), &uopts, &LIGHT).unwrap(),
+                    width.max(420) as f32,
+                ),
+            ] {
+                for frag in svg.split("<text").skip(1) {
+                    let head = &frag[..frag.find('>').unwrap_or(frag.len())];
+                    if !head.contains("text-anchor=\"end\"") {
+                        continue;
+                    }
+                    let x: f32 = head
+                        .split(" x=\"")
+                        .nth(1)
+                        .and_then(|rest| rest.split('"').next())
+                        .and_then(|v| v.parse().ok())
+                        .expect("a right-anchored string carries an x");
+                    assert!(
+                        x <= w - texture::CHAMFER,
+                        "a string ends at {x} on a {w}-wide sheet, inside the cut"
+                    );
+                }
+            }
+        }
     }
 }

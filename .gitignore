@@ -32,6 +32,13 @@ dist
 .env.local
 .env.*.local
 
+# Claude Code session-recovery / scheduled-task state
+HANDOFF.md
+.claude/design-rework-brief.md
+.claude/quota-blocked.json
+.claude/stop-failure-events.jsonl
+.claude/rate-limit-state.json
+
 # Editors / OS
 .vscode/*
 !.vscode/extensions.json

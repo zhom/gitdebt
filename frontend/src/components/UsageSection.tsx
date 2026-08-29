@@ -1,20 +1,24 @@
-import { type ReactNode, useEffect, useMemo, useState } from "react";
-import { AnimatePresence, motion, useReducedMotion } from "motion/react";
-import { ChevronDown, Loader2 } from "lucide-react";
+import { useEffect, useMemo, useState, type ReactNode } from "react";
 
 import { EmbedSnippet } from "@/components/EmbedSnippet";
-import { BODY, EYEBROW, KPI, PANEL, ROW } from "@/components/style-tokens";
-import { DitherSegmented } from "@/components/ui/dither-segmented";
-import { CONTROL } from "@/components/ui/dither-surface";
+import { StatStrip } from "@/components/StatStrip";
+import { BODY, CAPTION, FIELD, MEASURE } from "@/components/style-tokens";
+import { Segmented } from "@/components/ui/controls";
+import { Leader } from "@/components/ui/marks";
 import type { ChartType } from "@/components/ChartViewer";
 import { MEDIA_RENDER_REVISION } from "@/lib/media";
-import {
-  DURATION,
-  EASE_OUT,
-  REDUCED_MOTION_DURATION,
-} from "@/lib/motion";
 import { useRenderedTheme } from "@/lib/rendered-theme";
 import { cn } from "@/lib/utils";
+
+/**
+ * Attention against use: the star curve laid over download volume.
+ *
+ * Every state of this section renders something a reader can act on, and it
+ * renders it as markup. Nothing fades in, nothing starts transparent, and
+ * nothing is swapped behind an exit animation — the previous version wrapped
+ * all three states in an `initial={{ opacity: 0 }}` presence, so a stalled
+ * hydration or a throttled tab left an empty rectangle where the section is.
+ */
 
 type DownloadSeriesPoint = { date: string; downloads: number };
 type RegistryDownloads = { total: number; series: DownloadSeriesPoint[] };
@@ -90,6 +94,25 @@ function registryUrl(source: string, name: string): string {
   }
 }
 
+/** The section's own frame: a drawn panel with the cut corner it shares with
+ *  every other panel on the sheet, and a head that names what is measured. */
+function UsageFrame({
+  head,
+  children,
+}: {
+  head: ReactNode;
+  children: ReactNode;
+}) {
+  return (
+    <figure className="m-0 cut-edge p-4 [--pad-x:1rem] [--pad-y:1rem]">
+      <figcaption className="flex min-h-11 flex-wrap items-center justify-between gap-x-6 gap-y-3 border-b border-rule pb-3">
+        {head}
+      </figcaption>
+      {children}
+    </figure>
+  );
+}
+
 export function UsageSection({
   owner,
   repo,
@@ -146,8 +169,7 @@ export function UsageSection({
   );
 
   const hasDownloadSeries = Boolean(
-    data &&
-      (data.resolved.npm || data.resolved.crate || data.resolved.pypi),
+    data && (data.resolved.npm || data.resolved.crate || data.resolved.pypi),
   );
 
   const chartPath = `/api/repos/${owner}/${repo}/usage.svg?type=${type}&source=${source}`;
@@ -176,36 +198,23 @@ export function UsageSection({
 
   if (loading) {
     return (
-      <AsyncSwap state="loading">
-        <div className={cn(PANEL, "p-3.5")}>
-          <p className={cn(EYEBROW, "inline-flex items-center gap-2")}>
-            <Loader2
-              className="size-3.5 shrink-0 motion-safe:animate-spin"
-              aria-hidden="true"
-            />
-            Resolving packages
-          </p>
-        </div>
-      </AsyncSwap>
+      <UsageFrame head={<h3 className={FIELD}>Stars against usage</h3>}>
+        <p className={cn(BODY, MEASURE, "pt-4")}>
+          Resolving the packages this repository publishes.
+        </p>
+      </UsageFrame>
     );
   }
 
   if (errored || !data || !hasPackage) {
     return (
-      <AsyncSwap state="empty">
-        <figure className={cn(PANEL, "overflow-hidden")}>
-          <figcaption className={cn(EYEBROW, "border-b border-border/40 px-4 py-3")}>
-            Stars vs. usage
-          </figcaption>
-          <div className="px-4 py-6">
-            <p className={BODY}>
-              {errored
-                ? "Couldn't load usage data right now."
-                : "No published package detected for this repo — nothing to overlay against star growth."}
-            </p>
-          </div>
-        </figure>
-      </AsyncSwap>
+      <UsageFrame head={<h3 className={FIELD}>Stars against usage</h3>}>
+        <p className={cn(BODY, MEASURE, "pt-4")}>
+          {errored
+            ? "Usage data could not be read right now."
+            : "No published package was detected for this repository, so there is nothing to lay over star growth."}
+        </p>
+      </UsageFrame>
     );
   }
 
@@ -219,43 +228,24 @@ export function UsageSection({
   ];
 
   return (
-    <AsyncSwap state="ready">
-      <section className="space-y-6">
-        <figure className={cn(PANEL, "overflow-hidden")}>
-          <figcaption className="flex flex-wrap items-center justify-between gap-3 border-b border-border/40 px-4 py-3">
-            <div className={EYEBROW}>Stars vs. usage</div>
-            <div className="flex flex-wrap items-center gap-2">
+    <section className="space-y-5">
+      <UsageFrame
+        head={
+          <>
+            <h3 className={FIELD}>Stars against usage</h3>
+            <div className="flex flex-wrap items-center gap-3">
               {sources.length > 1 && (
-                <div className="inline-flex items-center gap-2">
-                  <label htmlFor="usage-source" className={EYEBROW}>
-                    Source
-                  </label>
-                  <span className="relative grid grid-cols-1 items-center">
-                    <select
-                      id="usage-source"
-                      name="source"
-                      value={source}
-                      onChange={(e) => setSource(e.target.value as UsageSource)}
-                      className={cn(
-                        CONTROL,
-                        "col-start-1 row-start-1 w-auto appearance-none pr-9 text-foreground",
-                      )}
-                    >
-                      {sources.map((s) => (
-                        <option key={s} value={s}>
-                          {SOURCE_LABEL[s]}
-                        </option>
-                      ))}
-                    </select>
-                    <ChevronDown
-                      className="pointer-events-none col-start-1 row-start-1 mr-3 size-3.5 justify-self-end text-muted-foreground"
-                      strokeWidth={2}
-                      aria-hidden="true"
-                    />
-                  </span>
-                </div>
+                <Segmented
+                  aria-label="Download source"
+                  value={source}
+                  options={sources.map((s) => ({
+                    value: s,
+                    label: SOURCE_LABEL[s],
+                  }))}
+                  onValueChange={setSource}
+                />
               )}
-              <DitherSegmented
+              <Segmented
                 role="radiogroup"
                 aria-label="Chart axis"
                 value={type}
@@ -263,103 +253,82 @@ export function UsageSection({
                 onValueChange={setType}
               />
             </div>
-          </figcaption>
-
-          <div className="grid gap-4 border-b border-border/40 p-3.5 sm:grid-cols-2">
-            <dl>
-              <dt className={EYEBROW}>Resolved packages</dt>
-              <dd className="mt-2 flex flex-col">
-                {resolvedRows.map((row) => (
+          </>
+        }
+      >
+        <div className="grid gap-x-8 gap-y-6 border-b border-rule py-4 sm:grid-cols-2">
+          <div>
+            <p className={FIELD}>Resolved packages</p>
+            <ul role="list" className="mt-2.5 space-y-1">
+              {resolvedRows.map((row) => (
+                // The rule belongs to the row, not to the link inside it: a
+                // `last:` on the link matches every link, because each one is
+                // the only child of its own item.
+                <li key={row.label} className="border-b border-rule last:border-b-0">
                   <a
-                    key={row.label}
                     href={row.href}
                     target="_blank"
                     rel="noreferrer"
-                    className={cn(ROW, "-mx-2.5 justify-between")}
+                    className="group flex min-h-11 items-baseline justify-between gap-4 text-ink-2 outline-none transition-colors duration-[--duration-ui] hover:text-ink focus-visible:outline-2 focus-visible:outline-offset-2 focus-visible:outline-signal"
                   >
-                    <span>{row.label}</span>
-                    <span className="truncate text-foreground/90">
-                      {row.value} ↗
+                    <span className={FIELD}>{row.label}</span>
+                    <span className="flex min-w-0 items-baseline gap-1.5 font-mono text-[0.75rem]">
+                      <span className="truncate">{row.value}</span>
+                      <Leader
+                        size={12}
+                        className="shrink-0 self-center transition-transform duration-[--duration-ui] group-hover:-translate-y-px group-hover:translate-x-px motion-reduce:transition-none"
+                      />
                     </span>
                   </a>
-                ))}
-              </dd>
-            </dl>
-            <dl className="grid grid-cols-3 divide-x divide-border/40">
-              {totals.map((t) => (
-                <div key={t.label} className="min-w-0 px-3.5 first:pl-0 last:pr-0">
-                  <dt className={EYEBROW}>{t.label}</dt>
-                  <dd className={cn("mt-2", KPI)}>{t.value}</dd>
-                </div>
+                </li>
               ))}
-            </dl>
+            </ul>
           </div>
 
-          {hasDownloadSeries ? (
-            <img
-              src={`${apiBase}${chartPath}&theme=${theme}&render=${MEDIA_RENDER_REVISION}`}
-              alt={`Star growth versus download volume for ${owner}/${repo}`}
-              loading={priority ? "eager" : "lazy"}
-              fetchPriority={priority ? "high" : "auto"}
-              decoding="async"
-              className="block w-full"
-            />
-          ) : (
-            <div className="px-4 py-6">
-              <p className={BODY}>
-                A package is published, but no download history is available
-                to chart against star growth.
-              </p>
-            </div>
-          )}
-        </figure>
-
-        {hasDownloadSeries && showEmbed && (
-          <EmbedSnippet
-            apiBase={apiBase}
-            chartPath={`/api/repos/${owner}/${repo}/usage.svg?source=${source}`}
-            state={{ type }}
-            linkHref={`https://gitdebt.com/${owner}/${repo}`}
-            label={`${owner}/${repo} stars vs. usage`}
+          {/* Three readings on one strip, each label on one baseline and each
+              figure on another, whatever the figures happen to say. */}
+          <StatStrip
+            columns={3}
+            aria-label={`Reach for ${owner}/${repo}`}
+            items={totals}
+            className="self-start"
           />
-        )}
-      </section>
-    </AsyncSwap>
-  );
-}
+        </div>
 
-function AsyncSwap({
-  state,
-  children,
-}: {
-  state: "loading" | "empty" | "ready";
-  children: ReactNode;
-}) {
-  const reduceMotion = useReducedMotion();
-  return (
-    <div className="relative">
-      <AnimatePresence initial={false} mode="wait">
-        <motion.div
-          key={state}
-          initial={{
-            opacity: 0,
-            y: reduceMotion ? 0 : 4,
-          }}
-          animate={{ opacity: 1, y: 0 }}
-          exit={{
-            opacity: 0,
-            transition: { duration: 0.1, ease: EASE_OUT },
-          }}
-          transition={{
-            duration: reduceMotion
-              ? REDUCED_MOTION_DURATION
-              : DURATION.enter,
-            ease: EASE_OUT,
-          }}
-        >
-          {children}
-        </motion.div>
-      </AnimatePresence>
-    </div>
+        {hasDownloadSeries ? (
+          <img
+            src={`${apiBase}${chartPath}&theme=${theme}&render=${MEDIA_RENDER_REVISION}`}
+            alt={`Star growth versus download volume for ${owner}/${repo}`}
+            loading={priority ? "eager" : "lazy"}
+            fetchPriority={priority ? "high" : "auto"}
+            decoding="async"
+            className="mt-4 block w-full"
+          />
+        ) : (
+          <p className={cn(BODY, MEASURE, "pt-4")}>
+            A package is published, but no download history is available to
+            chart against star growth.
+          </p>
+        )}
+      </UsageFrame>
+
+      {hasDownloadSeries && (
+        <p className={cn(CAPTION, MEASURE)}>
+          Downloads are a registry's own count of installs, not a count of
+          people. Read the two curves as attention against use, never as one
+          measuring the other.
+        </p>
+      )}
+
+      {hasDownloadSeries && showEmbed && (
+        <EmbedSnippet
+          apiBase={apiBase}
+          chartPath={`/api/repos/${owner}/${repo}/usage.svg?source=${source}`}
+          state={{ type }}
+          linkHref={`https://gitdebt.com/${owner}/${repo}`}
+          label={`${owner}/${repo} stars vs. usage`}
+        />
+      )}
+    </section>
   );
 }

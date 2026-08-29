@@ -1,13 +1,8 @@
 ---
-import "@/styles/globals.css";
-import BaseHead from "@/components/BaseHead.astro";
-import Seo from "@/components/Seo.astro";
-import SiteFooter from "@/components/SiteFooter.astro";
-import SiteHeader from "@/components/SiteHeader.astro";
-import { DitherField } from "@/components/DitherField";
+import Sheet from "@/layouts/Sheet.astro";
 import { LiveRepoReport } from "@/components/LiveRepoReport";
 import { SeriesProvenance } from "@/components/SeriesProvenance";
-import { BODY, MEASURE, PANEL_PADDED } from "@/components/style-tokens";
+import { BODY, CAPTION, MEASURE, PANEL, TITLE } from "@/components/style-tokens";
 import { staticApiBase } from "@/lib/static-api-base";
 
 const apiBase = staticApiBase();
@@ -16,64 +11,67 @@ const apiBase = staticApiBase();
 // `{owner}/{repo}` is a placeholder to substitute: the site prerenders none of
 // these, so the API answers for any public repository.
 const agentMarkdown = `${apiBase}/api/md/{owner}/{repo}`;
+
+/**
+ * The served title names the route, not a repository.
+ *
+ * `/report?repo=owner/name` draws a real report for a real repository, and the
+ * tab used to say "Live GitHub repository report" over it no matter which one.
+ * The correction belongs to the island, which is the only thing that knows what
+ * it resolved; this title is what the server can honestly say about every
+ * request to this path, and it is what `restoreServedTitle()` puts back when a
+ * lookup is cleared.
+ */
+const title = "GitHub repository report · gitdebt";
+const description =
+  "Open a live star-history and code-health report for any public GitHub repository.";
 ---
 
-<!doctype html>
-<html lang="en">
-  <head>
-    <BaseHead />
-    <Seo
-      title="Live GitHub repository report · gitdebt"
-      description="Open a live star-history and code-health report for any public GitHub repository."
-      canonicalPath="/report"
-      ogImage={`${apiBase}/api/og.png`}
-      noindex={true}
-    />
-  </head>
-  <body>
-    <div class="isolate flex min-h-dvh flex-col">
-      <SiteHeader />
-      {
-        /*
-         * `main` keeps real layout height and owns the field's box: `DitherField`
-         * measures its own canvas, which is stretched to `inset-0` here. The
-         * field is depth only — once a repository resolves, the island's own
-         * data-bound motion is what carries meaning on this page.
-         */
-      }
-      <main id="main-content" class="relative isolate flex-1 overflow-hidden">
-        <DitherField
-          client:idle
-          opacity={0.12}
-          vignette={0.7}
-          colors={["#12161f", "#1d2b45"]}
-        />
-        <div class="mx-auto w-full max-w-6xl px-6 py-12">
-          <LiveRepoReport client:only="react" apiBase={apiBase} />
-          <noscript>
-            <div class:list={[PANEL_PADDED, BODY, MEASURE]}>
-              JavaScript is required to look up a repository that has no static
-              page yet. Without it, {agentMarkdown} returns the same report as Markdown
-              for any public repository, and queues the analysis when there is none
-              yet.
-            </div>
-          </noscript>
-          {
-            /*
-             * /report is the live discovery route, so the reader arriving here
-             * has not named a repository yet. What they need before they do is
-             * which of the two sources their chart will come from — stated with
-             * no claim about any repository, which is what the explainer is.
-             */
-          }
-          <SeriesProvenance
-            client:visible
-            variant="explainer"
-            className="mt-16 scroll-mt-24 border-t border-border/60 pt-12"
-          />
+<Sheet
+  title={title}
+  description={description}
+  canonicalPath="/report"
+  ogImage={`${apiBase}/api/og.png`}
+  noindex={true}
+>
+  <section class="border-b border-rule bg-paper">
+    <div class="mx-auto w-full max-w-6xl px-6 py-12">
+      <LiveRepoReport client:only="react" apiBase={apiBase} />
+      {/*
+        The one state the server can render. With scripting on, the island owns
+        the page's heading and this never appears; with scripting off, this is
+        the whole document body, so it carries the `<h1>` itself rather than
+        leaving the page headingless. Two headings can never both be present.
+      */}
+      <noscript>
+        <h1 class={TITLE}>Repository report</h1>
+        <div class:list={["mt-6 max-w-2xl", PANEL]}>
+          <p class:list={[BODY, MEASURE]}>
+            Looking up a repository that has no prerendered page needs
+            JavaScript. Without it, <span class="font-mono text-[0.8125rem] text-ink"
+              >{agentMarkdown}</span
+            > returns the same report as Markdown for any public repository, and
+            queues the analysis when there is none yet.
+          </p>
         </div>
-      </main>
-      <SiteFooter />
+      </noscript>
     </div>
-  </body>
-</html>
+  </section>
+
+  {/*
+    /report is the live discovery route, so the reader arriving here has not
+    named a repository yet. What they need before they do is which of the two
+    sources their chart will come from — stated with no claim about any
+    repository, which is what the explainer is.
+  */}
+  <section class="bg-table">
+    <div class="mx-auto w-full max-w-6xl px-6 py-16">
+      <SeriesProvenance client:visible variant="explainer" />
+      <p class:list={["mt-8", CAPTION, MEASURE]}>
+        A repository with a prerendered page lives at
+        <span class="font-mono">gitdebt.com/owner/name</span>; this route reads
+        every other public repository live.
+      </p>
+    </div>
+  </section>
+</Sheet>

@@ -1,17 +1,38 @@
-import { useEffect, useId, useMemo, useState } from "react";
+import { useEffect, useMemo, useState } from "react";
 
-import { DitherAreaChart } from "@/components/DitherAreaChart";
+import { ChartFrame, DATE_RE, type ChartAxis } from "@/components/ChartFrame";
 import { EmbedSnippet } from "@/components/EmbedSnippet";
-import { EYEBROW, PANEL } from "@/components/style-tokens";
-import { Button } from "@/components/ui/button";
-import { DitherSegmented } from "@/components/ui/dither-segmented";
-import { CONTROL } from "@/components/ui/dither-surface";
+import { TraceChart } from "@/components/TraceChart";
 import { MEDIA_RENDER_REVISION } from "@/lib/media";
 import { useRenderedTheme } from "@/lib/rendered-theme";
-import { cn } from "@/lib/utils";
 
-export type ChartType = "date" | "timeline";
+/**
+ * One repository's star history, on a sheet with its controls.
+ *
+ * The chrome, the range fields, the scale and axis switches, the embed menu and
+ * the inverted-range note all live in `ChartFrame`, which the comparison sheet
+ * uses too — those two components carried the same caption row twice, down to
+ * the same sentence about an inverted range.
+ *
+ * What stays here is everything only this component knows: the live listeners
+ * that pick up a finished analysis, the cache-busting revision, the flag that
+ * stops the server renderer from replaying its animation once a control has
+ * been touched, and the fallback to the server-rendered SVG when there are
+ * fewer than two readings to plot.
+ */
+
+export type ChartType = ChartAxis;
 export type StarPoint = { date: string; stars: number };
+
+/**
+ * One shared empty series, not a fresh `[]` per render.
+ *
+ * The default used to be written inline, so every render of a caller that
+ * passes no points produced a new array, which changed the effect's dependency,
+ * which set state, which rendered again — a loop that started the moment any
+ * control was touched on the pages that let the live listeners supply the data.
+ */
+const NO_POINTS: StarPoint[] = [];
 
 type Props = {
   apiBase: string;
@@ -26,15 +47,6 @@ type Props = {
   points?: StarPoint[];
 };
 
-const DATE_RE = /^\d{4}-\d{2}-\d{2}$/;
-
-const AXIS_OPTIONS = [
-  { value: "date" as const, label: "Date" },
-  { value: "timeline" as const, label: "Timeline" },
-];
-
-const DATE_FIELD = "w-[8.5rem] tabular-nums scheme-dark";
-
 export function ChartViewer({
   apiBase,
   path,
@@ -44,7 +56,7 @@ export function ChartViewer({
   label,
   priority = false,
   liveRepo,
-  points = [],
+  points = NO_POINTS,
 }: Props) {
   const [type, setType] = useState<ChartType>("date");
   const [logScale, setLogScale] = useState(false);
@@ -54,7 +66,6 @@ export function ChartViewer({
   const [revision, setRevision] = useState(0);
   const [series, setSeries] = useState<StarPoint[]>(points);
   const theme = useRenderedTheme();
-  const id = useId();
 
   useEffect(() => {
     setSeries(points);
@@ -126,108 +137,56 @@ export function ChartViewer({
 
   const src = `${apiBase}${path}`;
   const sep = path.includes("?") ? "&" : "?";
-  const withParams = (theme: "light" | "dark") =>
-    `${src}${sep}${params.join("&")}&theme=${theme}`;
+  const withParams = (renderedTheme: "light" | "dark") =>
+    `${src}${sep}${params.join("&")}&theme=${renderedTheme}`;
 
-  const hasRange = Boolean(from || to);
-
-  const figure = (
-    <figure className={cn(PANEL, "relative overflow-hidden")}>
-      <figcaption className="flex flex-wrap items-center justify-between gap-3 border-b border-border/40 px-4 py-3">
-        {caption && <div className={EYEBROW}>{caption}</div>}
-        <div className="flex w-full flex-wrap items-center gap-2 sm:w-auto">
-          <div className="flex flex-wrap items-center gap-2">
-            <label htmlFor={`${id}-from`} className={EYEBROW}>
-              From
-              <span className="sr-only"> date (YYYY-MM-DD)</span>
-            </label>
-            <input
-              id={`${id}-from`}
-              name="from"
-              type="date"
-              value={from}
-              onChange={(e) => {
-                setControlsChanged(true);
-                setFrom(e.target.value);
-              }}
-              className={cn(CONTROL, DATE_FIELD)}
-            />
-            <label htmlFor={`${id}-to`} className={EYEBROW}>
-              To
-              <span className="sr-only"> date (YYYY-MM-DD)</span>
-            </label>
-            <input
-              id={`${id}-to`}
-              name="to"
-              type="date"
-              value={to}
-              onChange={(e) => {
-                setControlsChanged(true);
-                setTo(e.target.value);
-              }}
-              className={cn(CONTROL, DATE_FIELD)}
-            />
-            {hasRange && (
-              <Button
-                variant="ghost"
-                size="sm"
-                onClick={() => {
-                  setControlsChanged(true);
-                  setFrom("");
-                  setTo("");
-                }}
-              >
-                Reset
-              </Button>
-            )}
-          </div>
-          <Button
-            variant={logScale ? "primary" : "outline"}
-            size="sm"
-            pulse={false}
-            aria-pressed={logScale}
-            onClick={() => {
-              setControlsChanged(true);
-              setLogScale((v) => !v);
+  return (
+    <ChartFrame
+      title={caption}
+      axis={type}
+      onAxisChange={(next) => {
+        setControlsChanged(true);
+        setType(next);
+      }}
+      logScale={logScale}
+      onLogScaleChange={(next) => {
+        setControlsChanged(true);
+        setLogScale(next);
+      }}
+      from={from}
+      to={to}
+      onFromChange={(value) => {
+        setControlsChanged(true);
+        setFrom(value);
+      }}
+      onToChange={(value) => {
+        setControlsChanged(true);
+        setTo(value);
+      }}
+      onReset={() => {
+        setControlsChanged(true);
+        setFrom("");
+        setTo("");
+      }}
+      inverted={invertedRange}
+      embed={
+        embedLink && label ? (
+          <EmbedSnippet
+            apiBase={apiBase}
+            chartPath={path}
+            linkHref={embedLink}
+            label={label}
+            state={{
+              type,
+              log: logScale,
+              from: appliedFrom,
+              to: appliedTo,
             }}
-          >
-            Log
-          </Button>
-          <DitherSegmented
-            role="radiogroup"
-            aria-label="Chart axis"
-            value={type}
-            options={AXIS_OPTIONS}
-            onValueChange={(next) => {
-              setControlsChanged(true);
-              setType(next);
-            }}
+            variant="menu"
           />
-          {embedLink && label && (
-            <EmbedSnippet
-              apiBase={apiBase}
-              chartPath={path}
-              linkHref={embedLink}
-              label={label}
-              state={{
-                type,
-                log: logScale,
-                from: appliedFrom,
-                to: appliedTo,
-              }}
-              variant="menu"
-            />
-          )}
-        </div>
-      </figcaption>
-      {invertedRange && (
-        <p
-          role="alert"
-          className="border-b border-border/40 px-4 py-2 text-[11px] text-[var(--swatch-red)]"
-        >
-          The end date is before the start date. Showing the full range.
-        </p>
-      )}
+        ) : undefined
+      }
+    >
       <InteractiveChart
         src={withParams(theme)}
         alt={alt}
@@ -235,14 +194,16 @@ export function ChartViewer({
         logScale={logScale}
         axis={type}
         priority={priority}
-        seed={liveRepo ?? label ?? path}
       />
-    </figure>
+    </ChartFrame>
   );
-
-  return figure;
 }
 
+/**
+ * Two readings are the minimum a trace can be drawn from. Below that the sheet
+ * shows the server-rendered SVG, which is the same drawing produced by the
+ * renderer that also serves README embeds.
+ */
 function InteractiveChart({
   src,
   alt,
@@ -250,7 +211,6 @@ function InteractiveChart({
   logScale,
   axis,
   priority,
-  seed,
 }: {
   src: string;
   alt: string;
@@ -258,7 +218,6 @@ function InteractiveChart({
   logScale: boolean;
   axis: ChartType;
   priority: boolean;
-  seed: string;
 }) {
   const parsed = useMemo(
     () =>
@@ -271,32 +230,28 @@ function InteractiveChart({
 
   if (parsed.length >= 2) {
     return (
-      <DitherAreaChart
+      <TraceChart
         points={parsed.map((point) => ({
           date: point.date,
           value: point.stars,
         }))}
         axis={axis}
         logScale={logScale}
-        height={500}
+        height={440}
         valueLabel="stars"
-        seed={seed}
-        className="rounded-b-[inherit]"
       />
     );
   }
 
   return (
-    <div className="relative overflow-hidden rounded-b-[inherit]">
-      <img
-        src={src}
-        alt={alt}
-        loading={priority ? "eager" : "lazy"}
-        fetchPriority={priority ? "high" : "auto"}
-        decoding="async"
-        className="block w-full select-none"
-        draggable={false}
-      />
-    </div>
+    <img
+      src={src}
+      alt={alt}
+      loading={priority ? "eager" : "lazy"}
+      fetchPriority={priority ? "high" : "auto"}
+      decoding="async"
+      className="block w-full select-none"
+      draggable={false}
+    />
   );
 }

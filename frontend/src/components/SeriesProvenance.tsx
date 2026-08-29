@@ -1,26 +1,18 @@
-"use client";
+import { type JSX } from "react";
 
-import { useId, type JSX } from "react";
-import { motion, useReducedMotion } from "motion/react";
-
-import { DitherCellPattern } from "@/components/DitherCellPattern";
 import {
   BODY,
   CAPTION,
-  EYEBROW,
   HEADING,
   MEASURE,
-  PANEL,
 } from "@/components/style-tokens";
-import { useInView } from "@/components/ui/use-in-view";
-import { SWATCH, type RGB } from "@/lib/dither";
 import {
   coverageLabel,
   historyFreshness,
   seriesOpen,
-  sourceDensity,
   sourceDetail,
   sourceLabel,
+  sourceStroke,
   stateLabel,
   type HistoryFreshness,
   type HistorySnapshot,
@@ -28,8 +20,8 @@ import {
 import { cn } from "@/lib/utils";
 
 /**
- * Where a star series came from, said in the only three terms gitdebt can
- * actually observe: SOURCE, COVERAGE DATE, STATE.
+ * The drawing's title block: where this star series came from, said in the only
+ * three terms gitdebt can actually observe — SOURCE, COVERAGE DATE, STATE.
  *
  * It is not a verification badge and it must never become one. gitdebt stores
  * star timestamps and an opaque event id — no actors, no stargazer profiles —
@@ -40,25 +32,36 @@ import { cn } from "@/lib/utils";
  * unstars, so it can exceed the repository's own star total; a "shows N of M"
  * gap would therefore be confidently wrong on exactly the repositories where it
  * would be most eye-catching. That reasoning belongs to `history-freshness.ts`,
- * which is where every user-facing string in this component comes from.
+ * which is where every user-facing string in this component comes from. This
+ * file letters them and writes none of its own.
  *
- * The mark carries three readings at once:
- *   - DENSITY  = which source (a fixed constant per state, never derived from
- *                data, because a density read off coverage would be a
- *                completeness score wearing a texture),
- *   - HUE      = which series, on a multi-series surface (`fill`), falling back
- *                to a source-keyed categorical swatch when there is only one,
- *   - APERTURE = the state. A series that still receives points spans the full
- *                band and dissolves at its trailing edge under a slow scan; a
- *                series that stopped ends early against a hard rule and does
- *                not move at all.
+ * The specimen line beside the block is the drawing's own way of saying how
+ * certain an edge is, and it carries two readings:
  *
- * Under `prefers-reduced-motion` the scan is dropped and the aperture still
- * reads, so nothing is lost — the MomentumBoard rule. The svg is decoration:
- * it is `aria-hidden`, and every fact it encodes is also present as text.
+ *   PATTERN  = which source. Solid is an object line — an edge that was
+ *              measured. Dashed is a construction line — real, derived. Fine
+ *              dots are a line whose subject could not be measured at all. The
+ *              patterns are fixed per state (`sourceStroke`), never scaled by
+ *              anything the series measures, because a dash gap read off
+ *              coverage would be the completeness score this module refuses to
+ *              publish.
+ *   INK      = which series, on a multi-series surface (`fill`). Hue never
+ *              carries source; the pattern does, and the text says both.
+ *
+ * A stopped series terminates on a drawn end tick; an open one simply runs on.
+ * The svg is `aria-hidden`, and every fact it encodes is also present as text,
+ * so nothing on this block depends on it being seen — or on script running at
+ * all. There is no animation that content waits for.
  */
 
 export type ProvenanceVariant = "panel" | "inline" | "explainer";
+
+/**
+ * A series ink, as the comparison surfaces hand it over. Declared structurally
+ * rather than imported so this module stays free of the multi-series chart's
+ * own dependencies; any `[r, g, b]` satisfies it.
+ */
+export type SeriesInk = readonly [number, number, number];
 
 export type SeriesProvenanceProps = {
   /** Subset of GET /api/repos/{owner}/{repo}/analyze. Null, undefined, or a
@@ -69,41 +72,14 @@ export type SeriesProvenanceProps = {
   slug?: string;
   /** Default "panel". */
   variant?: ProvenanceVariant;
-  /** Series hue on multi-series surfaces (pass comparisonColors()[slug]).
-   *  When omitted the source-keyed swatch is used. Hue never encodes source on
-   *  a multi-series surface: hue = which series, density = which source. */
-  fill?: RGB;
+  /** Series ink on multi-series surfaces (pass comparisonColors()[slug]).
+   *  When omitted the line is drawn in graphite. Ink never encodes source on a
+   *  multi-series surface: ink = which series, pattern = which source. */
+  fill?: SeriesInk;
   /** aria-labelledby target for variant="panel"; default "series-provenance". */
   headingId?: string;
   className?: string;
 };
-
-/**
- * Categorical, source-keyed, and stable — assigned by source, never cycled by
- * index. `grey` is the documented "no data" fill, which is what a restricted or
- * unestablished series honestly is. `--accent` is reserved for focus and
- * selection and is not spent here.
- */
-const SOURCE_FILL: Record<HistoryFreshness["state"], RGB> = {
-  exact_current: SWATCH.blue,
-  exact_frozen: SWATCH.blue,
-  archive: SWATCH.purple,
-  // A spliced series keeps the stargazer-list hue: it *is* that series, kept
-  // whole and continued, and most of its curve is still those points. One hue
-  // cannot say "two sources" — density and the text do that — so it says which
-  // lineage the line belongs to, which is the fact hue is for.
-  spliced: SWATCH.blue,
-  restricted: SWATCH.grey,
-  unknown: SWATCH.grey,
-};
-
-/** Band geometry, in svg user units. */
-const BAND = { width: 160, height: 24, stop: 115, fade: 24, scan: 18 };
-
-/** Seconds for one pass of the scan. */
-const SCAN_SECONDS = 3.6;
-
-const rgbCss = ([r, g, b]: RGB) => `rgb(${r} ${g} ${b})`;
 
 export function SeriesProvenance({
   snapshot,
@@ -118,13 +94,12 @@ export function SeriesProvenance({
   }
 
   const freshness = historyFreshness(snapshot);
-  const resolved = fill ?? SOURCE_FILL[freshness.state];
 
   if (variant === "inline") {
     return (
       <ProvenanceInline
         freshness={freshness}
-        fill={resolved}
+        fill={fill}
         slug={slug}
         className={className}
       />
@@ -132,9 +107,9 @@ export function SeriesProvenance({
   }
 
   return (
-    <ProvenancePanel
+    <ProvenanceTitleBlock
       freshness={freshness}
-      fill={resolved}
+      fill={fill}
       slug={slug}
       headingId={headingId}
       className={className}
@@ -143,125 +118,112 @@ export function SeriesProvenance({
 }
 
 /* -------------------------------------------------------------------------- *
- * The mark
+ * The specimen line
  * -------------------------------------------------------------------------- */
 
-type BandProps = {
+/** Where a spliced specimen changes hand, as a fraction of its drawn length. */
+const SPLICE_AT = 0.62;
+
+type SpecimenProps = {
   freshness: HistoryFreshness;
-  fill: RGB;
-  /** Rendered CSS width. The viewBox is fixed, so geometry never changes. */
-  width: number;
-  height: number;
+  fill?: SeriesInk;
+  /** Drawn length in svg user units; the element scales to its CSS width. */
+  length: number;
+  className?: string;
 };
 
 /**
- * One fixed-viewBox svg, so it reserves its own height and no caller needs a
- * `min-h` guard. It owns its own IntersectionObserver through `useInView`,
- * which is what stops it painting off-screen and in a hidden tab.
+ * How a draughtsman would letter this series' line.
+ *
+ * One fixed viewBox, so the element reserves its own height and no caller
+ * needs a min-height guard. Geometry is computed here and emitted complete —
+ * the only thing that ever moves is a dash offset along a length this function
+ * already knows, so a tab that never animates still shows the finished line.
  */
-function ProvenanceBand({ freshness, fill, width, height }: BandProps) {
-  const reduceMotion = useReducedMotion();
-  const [ref, inView] = useInView<SVGSVGElement>();
-  const raw = useId();
-  const id = raw.replaceAll(":", "");
-
+function SeriesSpecimen({ freshness, fill, length, className }: SpecimenProps) {
+  const dash = sourceStroke(freshness);
   const open = seriesOpen(freshness);
-  const density = sourceDensity(freshness);
-  const known = freshness.state !== "unknown";
-  const color = rgbCss(fill);
-  // Reduced motion drops the scan entirely; off-screen parks it at its start.
-  // Both settle to one deterministic frame, and the aperture still reads.
-  const scanning = open && !reduceMotion;
-  const running = scanning && inView;
+  const measured = freshness.state !== "restricted" && freshness.state !== "unknown";
+  const ink = fill
+    ? `rgb(${fill[0]} ${fill[1]} ${fill[2]})`
+    : measured
+      ? "var(--ink)"
+      : "var(--ink-3)";
+  const mid = Math.round(length * SPLICE_AT);
+  const spliced = freshness.state === "spliced";
+  const solidTo = spliced ? mid : dash === "" ? length : 0;
 
   return (
     <svg
-      ref={ref}
-      viewBox={`0 0 ${BAND.width} ${BAND.height}`}
-      width={width}
-      height={height}
-      className="pointer-events-none block shrink-0"
+      viewBox={`0 0 ${length} 12`}
+      width={length}
+      height="12"
+      className={cn("block h-3 shrink-0 overflow-visible", className)}
       aria-hidden="true"
       focusable="false"
     >
-      <defs>
-        <DitherCellPattern id={`${id}-cells`} density={density} fill={color} />
-        <linearGradient
-          id={`${id}-fade`}
+      {/* The measured half. It inks in along its own length; the geometry is
+          final before the animation runs, so nothing here waits to exist. */}
+      {solidTo > 0 && (
+        <line
           x1="0"
-          x2={BAND.width}
-          gradientUnits="userSpaceOnUse"
-        >
-          <stop offset="0" stopColor="#fff" />
-          <stop
-            offset={(BAND.width - BAND.fade) / BAND.width}
-            stopColor="#fff"
-          />
-          <stop offset="1" stopColor="#fff" stopOpacity="0" />
-        </linearGradient>
-        <mask id={`${id}-mask`}>
-          <rect
-            width={BAND.width}
-            height={BAND.height}
-            fill={`url(#${id}-fade)`}
-          />
-        </mask>
-      </defs>
-
-      {/* Empty track. On its own — no dither at all — this is what "no source
-          established" looks like, which is the whole of the unknown state. */}
-      <rect
-        width={BAND.width}
-        height={BAND.height}
-        fill="var(--muted)"
-        opacity="0.35"
-      />
-      <rect
-        x="0.5"
-        y="0.5"
-        width={BAND.width - 1}
-        height={BAND.height - 1}
-        fill="none"
-        stroke="var(--border)"
-      />
-
-      {known && (
-        <g mask={open ? `url(#${id}-mask)` : undefined}>
-          <rect
-            width={open ? BAND.width : BAND.stop}
-            height={BAND.height}
-            fill={`url(#${id}-cells)`}
-          />
-          {scanning && (
-            <motion.rect
-              width={BAND.scan}
-              height={BAND.height}
-              fill={color}
-              opacity="0.22"
-              initial={{ x: -BAND.scan }}
-              animate={running ? { x: [-BAND.scan, BAND.width] } : { x: -BAND.scan }}
-              transition={
-                running
-                  ? {
-                      duration: SCAN_SECONDS,
-                      ease: "easeInOut",
-                      repeat: Infinity,
-                    }
-                  : { duration: 0 }
-              }
-            />
-          )}
-        </g>
+          y1="6"
+          x2={solidTo}
+          y2="6"
+          stroke={ink}
+          strokeWidth="1.5"
+          strokeLinecap="round"
+          className="inks-in"
+          style={{ ["--draw-length" as string]: String(solidTo) }}
+          vectorEffect="non-scaling-stroke"
+        />
       )}
 
-      {/* The hard end rule. A stopped series must look stopped. */}
-      {known && !open && (
-        <rect
-          x={BAND.stop}
-          width="1.5"
-          height={BAND.height}
-          fill={color}
-          opacity="0.9"
+      {/* The derived half, drawn as the construction line it is. A derived
+          line is square-ended, the way a drafted dash is; the line for a
+          series that could not be measured at all is dotted, so its caps are
+          round and each mark reads as a point rather than a short dash. */}
+      {dash !== "" && (
+        <line
+          x1={solidTo}
+          y1="6"
+          x2={length}
+          y2="6"
+          stroke={ink}
+          strokeWidth="1.5"
+          strokeDasharray={dash}
+          strokeLinecap={measured ? "butt" : "round"}
+          vectorEffect="non-scaling-stroke"
+        />
+      )}
+
+      {/* The join. A spliced line changes method at a real point, and the
+          drawing marks that point rather than leaving it to be inferred. */}
+      {spliced && (
+        <line
+          x1={mid}
+          y1="1"
+          x2={mid}
+          y2="11"
+          stroke={ink}
+          strokeWidth="1"
+          strokeLinecap="round"
+          vectorEffect="non-scaling-stroke"
+        />
+      )}
+
+      {/* The end tick. A series that stopped terminates on a drawn edge; one
+          that is still receiving points simply runs on. */}
+      {!open && measured && (
+        <line
+          x1={length - 0.75}
+          y1="1"
+          x2={length - 0.75}
+          y2="11"
+          stroke={ink}
+          strokeWidth="1.5"
+          strokeLinecap="round"
+          vectorEffect="non-scaling-stroke"
         />
       )}
     </svg>
@@ -272,7 +234,16 @@ function ProvenanceBand({ freshness, fill, width, height }: BandProps) {
  * Variants
  * -------------------------------------------------------------------------- */
 
-function ProvenancePanel({
+/** The three fields, in the order a title block states them. */
+function fields(freshness: HistoryFreshness): [string, string][] {
+  return [
+    ["Source", sourceLabel(freshness)],
+    ["Coverage", coverageLabel(freshness)],
+    ["State", stateLabel(freshness)],
+  ];
+}
+
+function ProvenanceTitleBlock({
   freshness,
   fill,
   slug,
@@ -280,44 +251,63 @@ function ProvenancePanel({
   className,
 }: {
   freshness: HistoryFreshness;
-  fill: RGB;
+  fill?: SeriesInk;
   slug?: string;
   headingId: string;
   className?: string;
 }) {
-  const facts: [string, string][] = [
-    ["Source", sourceLabel(freshness)],
-    ["Coverage", coverageLabel(freshness)],
-    ["State", stateLabel(freshness)],
-  ];
-
   return (
-    <aside className={cn(PANEL, "p-3.5", className)} aria-labelledby={headingId}>
-      <h2 id={headingId} className={HEADING}>
-        How this series was read
-        {slug ? <span className="sr-only"> for {slug}</span> : null}
-      </h2>
-
-      <div className="mt-3">
-        <ProvenanceBand
-          freshness={freshness}
-          fill={fill}
-          width={BAND.width}
-          height={BAND.height}
-        />
+    <aside
+      className={cn(
+        "cut-edge p-5 [--pad-x:1.25rem] [--pad-y:1.25rem]",
+        className,
+      )}
+      aria-labelledby={headingId}
+    >
+      {/* The block's own head. The rule under it separates two real regions of
+          the block — the title from the fields — which is the only reason a
+          rule is allowed to exist here. */}
+      <div className="flex flex-wrap items-center justify-between gap-x-6 gap-y-3 border-b border-rule pb-3.5">
+        <h2 id={headingId} className={HEADING}>
+          How this series was read
+          {slug ? <span className="sr-only"> for {slug}</span> : null}
+        </h2>
+        <SeriesSpecimen freshness={freshness} fill={fill} length={120} />
       </div>
 
-      <p className={cn(BODY, MEASURE, "mt-3")}>{sourceDetail(freshness)}</p>
-
-      <dl className="mt-4 grid gap-x-12 gap-y-3 sm:grid-cols-3">
-        {facts.map(([term, value]) => (
-          <div key={term} className="space-y-1">
-            <dt className={EYEBROW}>{term}</dt>
-            <dd className="text-[13px]">{value}</dd>
+      {/* The fields. Every row lands on the same two columns regardless of how
+          long its value runs, which is what makes it read as a block and not
+          as three stacked pairs.
+          The cells stretch rather than align on a baseline: a baseline-aligned
+          row lets the two boxes start at different heights, and the dividing
+          rule then arrives at the label in one place and at the value in
+          another — a rule drawn in two pieces, which is worse than no rule.
+          The label's extra half-step is what sets its cap line level with the
+          value's first line, since the two are lettered at different leading. */}
+      <dl className="grid grid-cols-[minmax(4.5rem,auto)_1fr] gap-x-6 pt-2">
+        {fields(freshness).map(([term, value], index) => (
+          <div key={term} className="contents">
+            <dt
+              className={cn(
+                "drafted pt-2.5 pb-2",
+                index > 0 && "border-t border-rule",
+              )}
+            >
+              {term}
+            </dt>
+            <dd
+              className={cn(
+                "py-2 font-mono text-[0.75rem] leading-[1.5] text-ink-2",
+                index > 0 && "border-t border-rule",
+              )}
+            >
+              {value}
+            </dd>
           </div>
         ))}
       </dl>
 
+      <p className={cn(BODY, MEASURE, "mt-4")}>{sourceDetail(freshness)}</p>
     </aside>
   );
 }
@@ -329,7 +319,7 @@ function ProvenanceInline({
   className,
 }: {
   freshness: HistoryFreshness;
-  fill: RGB;
+  fill?: SeriesInk;
   slug?: string;
   className?: string;
 }) {
@@ -346,7 +336,7 @@ function ProvenanceInline({
 
   return (
     <div className={cn("flex items-center gap-2.5", className)}>
-      <ProvenanceBand freshness={freshness} fill={fill} width={96} height={14} />
+      <SeriesSpecimen freshness={freshness} fill={fill} length={64} />
       <span className={CAPTION}>
         {slug ? <span className="sr-only">{slug}: </span> : null}
         {text}
@@ -364,8 +354,6 @@ function ProvenanceInline({
  * wrong about a repository, because it makes no claim about one at all.
  */
 function ProvenanceExplainer({ className }: { className?: string }) {
-  const raw = useId();
-  const id = `${raw.replaceAll(":", "")}-provenance`;
   const exact = historyFreshness({
     history_complete: true,
     history_kind: "current_stargazers",
@@ -384,53 +372,57 @@ function ProvenanceExplainer({ className }: { className?: string }) {
 
   // Terms come from `sourceLabel`, so the key and the chart caption cannot drift
   // apart: one wording, one module, exactly as the fact rows use.
-  const rows: { freshness: HistoryFreshness; fill: RGB; definition: string }[] = [
+  const rows: { freshness: HistoryFreshness; definition: string }[] = [
     {
       freshness: exact,
-      fill: SWATCH.blue,
       // Says what the restriction does to gitdebt, not who it exempts. The key
       // is read by owners too, and "served to admins" reads to an owner as a
-      // capability they have; they do not, because gitdebt reads with its own
-      // application credentials no matter who is signed in.
+      // capability they have; they do not, because gitdebt reads GitHub with
+      // its own application credentials no matter who is signed in.
       definition:
         "Exact — one point per star, with its own timestamp. Since July 2026 GitHub serves this list only to applications that administer the repository, and gitdebt is not one of them, so a series read this way stops on a fixed date and no sign-in restarts it.",
     },
     {
       freshness: archive,
-      fill: SWATCH.purple,
       definition:
         "Rebuilt from historical star data. Star actions are recorded and unstars are not, so it reads as an attention signal rather than a net star count. It keeps flowing for every public repository.",
     },
     {
       freshness: spliced,
-      fill: SWATCH.blue,
       definition:
         "One line, two methods, joined on a fixed date. The exact list runs up to the join and star activity continues after it, so the tail counts actions rather than current stargazers and does not record every star. Every chart built this way names the date it changes method.",
     },
   ];
 
   return (
-    <section className={className} aria-labelledby={id}>
-      <h2 id={id} className={HEADING}>
+    <section className={className} aria-labelledby="series-provenance-key">
+      <h2 id="series-provenance-key" className={HEADING}>
         Where a star series comes from
       </h2>
-      <dl className="mt-6 grid gap-x-12 gap-y-8 sm:grid-cols-2">
+
+      {/* Three parallel columns on one grid. The specimen-and-name row is a
+          shared row across all three, so the column whose source name runs to
+          two lines cannot push its neighbours' definitions out of step —
+          whatever the copy happens to be, every definition starts on the same
+          line. */}
+      <dl className="mt-6 grid gap-x-10 gap-y-8 md:grid-cols-3 md:grid-rows-[auto_1fr]">
         {rows.map((row) => (
-          <div key={row.freshness.state} className="space-y-2">
-            <dt className="space-y-2">
-              <ProvenanceBand
-                freshness={row.freshness}
-                fill={row.fill}
-                width={BAND.width}
-                height={BAND.height}
-              />
-              <span className="block text-[13px]">{sourceLabel(row.freshness)}</span>
+          <div
+            key={row.freshness.state}
+            className="grid gap-y-3 md:row-span-2 md:grid-rows-subgrid"
+          >
+            <dt className="flex flex-col justify-end gap-2.5">
+              <SeriesSpecimen freshness={row.freshness} length={120} />
+              <span className="font-mono text-[0.75rem] leading-[1.5] text-ink">
+                {sourceLabel(row.freshness)}
+              </span>
             </dt>
-            <dd className={cn(BODY, MEASURE)}>{row.definition}</dd>
+            <dd className={cn(BODY, "m-0")}>{row.definition}</dd>
           </div>
         ))}
       </dl>
-      <p className={cn(CAPTION, MEASURE, "mt-6")}>
+
+      <p className={cn(CAPTION, MEASURE, "mt-8")}>
         Every chart names its source and its coverage date. None of them states
         how much of a history is missing: an archive series counts re-stars and
         can exceed a repository's own star total, so that figure would be wrong

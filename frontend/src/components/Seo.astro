@@ -130,6 +130,16 @@ if (Astro.csp) {
 
 <title>{metaTitle}</title>
 <meta name="description" content={metaDescription} />
+{/*
+  The served title, kept verbatim so a live route can put it back.
+
+  Routes like /report and /compare retitle the document once they resolve what
+  they are actually showing (see `lib/live-title.ts`). When that subject is
+  cleared again — a search emptied, a lookup that failed — the page has to
+  restore what the server sent rather than keep a stale slug in the tab, and
+  `document.title` has already been overwritten by then.
+*/}
+<meta name="gitdebt-served-title" content={metaTitle} />
 <link rel="canonical" href={canonical} />
 <link rel="alternate" type="text/markdown" href={markdownUrl} title="Markdown representation" />
 <meta name="robots" content={robots} />

@@ -19,12 +19,6 @@ pub(crate) const INK_Y: f32 = 108.392;
 pub(crate) const INK_W: f32 = 429.115;
 pub(crate) const INK_H: f32 = 299.305;
 
-/// Rendered mark width below which the artwork's 32-unit dither cell samples
-/// under one device pixel: the pattern stops resolving and the silhouette
-/// dissolves into noise. Narrower marks take a solid single-ink fill of the
-/// same path, so every surface still shows the genuine logo.
-pub(crate) const DITHER_MIN_WIDTH: f32 = 96.0;
-
 /// Height of a mark drawn at `width`, from the artwork's ink aspect.
 pub fn mark_height(width: f32) -> f32 {
     width * INK_H / INK_W
@@ -36,45 +30,19 @@ fn logo_body() -> &'static str {
     &LOGO_SVG[start..end]
 }
 
-/// The robot path alone, with the pattern reference swapped for a flat ink.
+/// The robot path alone, re-inked from the artwork's authored black.
 fn solid_body(ink: &str) -> String {
-    let body = logo_body();
-    let defs_start = body.find("<defs>").expect("logo defs");
-    let defs_end = body.find("</defs>").expect("logo defs close") + "</defs>".len();
-    let mut out = String::with_capacity(body.len());
-    out.push_str(&body[..defs_start]);
-    out.push_str(&body[defs_end..]);
-    out.replace("fill=\"url(#gitdebt-dither)\"", &format!("fill=\"{ink}\""))
-}
-
-/// The artwork verbatim, with the dither pattern re-inked and its id made
-/// document-unique so two marks in one SVG cannot collide.
-fn dithered_body(ink: &str, id: &str) -> String {
-    logo_body()
-        .replace("fill=\"#000\"", &format!("fill=\"{ink}\""))
-        .replace("id=\"gitdebt-dither\"", &format!("id=\"{id}\""))
-        .replace("url(#gitdebt-dither)", &format!("url(#{id})"))
+    logo_body().replace("fill=\"#000\"", &format!("fill=\"{ink}\""))
 }
 
 /// Render the canonical robot with its ink bounds placed at
 /// (`x`, `y`, `width`, [`mark_height`]`(width)`).
 ///
-/// Above [`DITHER_MIN_WIDTH`] the mark keeps the artwork's dither pattern;
-/// below it the same path is filled solid, because that is the only
-/// treatment that survives a 14–24px embed.
+/// The mark is one path in one flat ink at every size, so the same
+/// silhouette survives a 14px README embed and a full-page lockup alike.
 pub fn logo_mark(x: f32, y: f32, width: f32, ink: &str) -> String {
     let scale = width / INK_W;
-    let body = if width >= DITHER_MIN_WIDTH {
-        let id = format!(
-            "gd-mark-{}-{}-{}",
-            (x * 10.0).round() as i64,
-            (y * 10.0).round() as i64,
-            (width * 10.0).round() as i64,
-        );
-        dithered_body(ink, &id)
-    } else {
-        solid_body(ink)
-    };
+    let body = solid_body(ink);
     format!(
         "  <g data-gitdebt-logo=\"true\" aria-label=\"gitdebt\" transform=\"translate({x:.2} {y:.2}) scale({scale:.5}) translate({tx:.3} {ty:.3})\">{body}</g>\n",
         tx = -INK_X,
@@ -308,8 +276,8 @@ mod tests {
 
         assert_eq!(light, themed_logo_mark(10.0, 20.0, 120.0, &LIGHT));
         assert!(light.contains("data-gitdebt-logo=\"true\""));
-        assert!(light.contains("fill=\"#0a0a0a\""));
-        assert!(dark.contains("fill=\"#fafafa\""));
+        assert!(light.contains("fill=\"#111417\""));
+        assert!(dark.contains("fill=\"#e6e8ea\""));
         assert!(!light.contains("<image"));
         assert!(!dark.contains("<image"));
         // The canonical path travels with every mark, at every size.
@@ -319,26 +287,24 @@ mod tests {
     }
 
     #[test]
-    fn large_marks_keep_the_dither_pattern_and_scope_its_id() {
-        let big = logo_mark(0.0, 0.0, 140.0, "#fafafa");
-        assert!(big.contains("<pattern"));
-        assert!(!big.contains("id=\"gitdebt-dither\""));
-        assert!(big.contains("id=\"gd-mark-0-0-1400\""));
-        assert!(big.contains("url(#gd-mark-0-0-1400)"));
-
-        let two = format!("{big}{}", logo_mark(200.0, 0.0, 140.0, "#fafafa"));
-        assert!(two.contains("id=\"gd-mark-2000-0-1400\""));
-        assert_eq!(two.matches("id=\"gd-mark-0-0-1400\"").count(), 1);
-    }
-
-    #[test]
-    fn small_marks_drop_the_pattern_for_a_solid_ink() {
-        let small = logo_mark(4.0, 4.0, 18.0, "#fafafa");
-        assert!(!small.contains("<pattern"));
-        assert!(!small.contains("gitdebt-dither"));
-        assert_eq!(small.matches("fill=").count(), 1);
-        assert!(small.contains("fill=\"#fafafa\""));
-        assert_eq!(small, logo_mark(4.0, 4.0, 18.0, "#fafafa"));
+    fn every_mark_is_one_path_in_one_solid_ink() {
+        for width in [14.0, 18.0, 64.0, 140.0] {
+            let mark = logo_mark(4.0, 4.0, width, "#fafafa");
+            assert!(!mark.contains("<pattern"), "width {width} kept a pattern");
+            assert!(!mark.contains("<defs"), "width {width} kept a defs block");
+            assert!(
+                !mark.contains("gitdebt-dither"),
+                "width {width} kept the id"
+            );
+            assert!(!mark.contains("url(#"), "width {width} kept a paint server");
+            assert_eq!(
+                mark.matches("fill=").count(),
+                1,
+                "width {width} carries more than one fill"
+            );
+            assert!(mark.contains("fill=\"#fafafa\""));
+            assert_eq!(mark, logo_mark(4.0, 4.0, width, "#fafafa"));
+        }
     }
 
     /// The regression this guards: compact surfaces once shipped a

@@ -9,8 +9,8 @@
   "display": "standalone",
   "orientation": "any",
   "categories": ["developer tools", "productivity"],
-  "theme_color": "#08090c",
-  "background_color": "#08090c",
+  "theme_color": "#ffffff",
+  "background_color": "#ffffff",
   "icons": [
     {
       "src": "/favicon.svg",

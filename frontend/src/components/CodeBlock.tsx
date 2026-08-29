@@ -1,17 +1,27 @@
-"use client";
-
 import { useMemo, type ReactNode } from "react";
 
 import { CopyButton } from "@/components/CopyButton";
-import { EYEBROW } from "@/components/style-tokens";
-import { DitherSurface } from "@/components/ui/dither-surface";
-import { BRAND } from "@/lib/dither";
+import { DATUM } from "@/components/style-tokens";
 import { cn } from "@/lib/utils";
 
 /**
- * Snippet surfaces highlight in the browser rather than through a build-time
- * grammar engine: the product ships four snippet dialects, all of them short,
- * and a full highlighter would cost more bytes than every snippet combined.
+ * A snippet, on paper, inside a frame.
+ *
+ * The snippet is genuinely data, so it stays in the mono face — that is what
+ * the mono face is for on this site, and the one place it is not a costume.
+ * Everything around it is drawing: a frame rule encloses the block, a header
+ * rule separates the file it belongs to from the bytes themselves, and the copy
+ * action confirms by ink rather than by lifting off the page.
+ *
+ * Highlighting is graphite, not a rainbow. The sheet has three steps of ink and
+ * exactly one saturated colour, and that colour is spent on measured values —
+ * never on a punctuation mark. So structure reads through weight of ink, a URL
+ * reads through its rule, and a comment reads through its slant. Three real
+ * distinctions beat eight arbitrary hues.
+ *
+ * Highlighting happens in the browser rather than through a build-time grammar
+ * engine: the product ships five short snippet dialects, and a full highlighter
+ * would cost more bytes than every snippet on the site combined.
  */
 export type CodeLanguage = "markdown" | "html" | "bash" | "json" | "text";
 
@@ -30,15 +40,15 @@ export type Token = { text: string; kind: TokenKind };
 
 /** Concrete classes so Tailwind emits them; the map is never built at runtime. */
 export const TOKEN_CLASS: Record<TokenKind, string> = {
-  plain: "text-foreground/90",
-  tag: "text-[var(--swatch-purple)]",
-  attr: "text-[var(--swatch-blue)]",
-  string: "text-[var(--swatch-green)]",
-  comment: "text-muted-foreground/70 italic",
-  punct: "text-muted-foreground",
-  keyword: "text-[var(--swatch-pink)]",
-  number: "text-[var(--swatch-orange)]",
-  url: "text-[var(--swatch-blue)] underline decoration-border underline-offset-2",
+  plain: "text-ink-2",
+  tag: "text-ink",
+  attr: "text-ink-2",
+  string: "text-ink-2",
+  comment: "text-ink-3 italic",
+  punct: "text-ink-3",
+  keyword: "text-ink",
+  number: "text-ink tabular-nums",
+  url: "text-ink-2 underline decoration-rule-strong underline-offset-[3px]",
 };
 
 /**
@@ -127,7 +137,9 @@ export function tokenize(source: string, language: CodeLanguage): Token[] {
 export type CodeBlockProps = {
   code: string;
   language?: CodeLanguage;
-  /** Eyebrow above the code, e.g. `README.md · SVG · dark`. */
+  /** What the snippet IS, e.g. `README.md · facebook/react`. A filename and a
+   *  slug are data, so this is lettered in the mono face and never uppercased —
+   *  a repository slug is case-sensitive and a label may not rewrite it. */
   label?: ReactNode;
   copyLabel?: string;
   copyAriaLabel?: string;
@@ -136,10 +148,6 @@ export type CodeBlockProps = {
   maxHeightClass?: string;
 };
 
-/**
- * Snippet surface: a dithered bed, highlighted code, and the copy action that
- * every snippet in the product shares.
- */
 export function CodeBlock({
   code,
   language = "text",
@@ -150,27 +158,28 @@ export function CodeBlock({
   maxHeightClass = "max-h-56",
 }: CodeBlockProps) {
   const tokens = useMemo(() => tokenize(code, language), [code, language]);
+
   return (
-    <div
-      className={cn(
-        "dither-fallback relative isolate overflow-hidden rounded-lg border border-border/60",
-        className,
+    <div className={cn("border border-rule-strong bg-paper", className)}>
+      {(label || copyLabel) && (
+        <div className="flex min-h-11 items-center justify-between gap-4 border-b border-rule px-3">
+          <span className={cn(DATUM, "min-w-0 truncate text-ink-3")}>
+            {label}
+          </span>
+          <CopyButton
+            value={code}
+            idleLabel={copyLabel}
+            ariaLabel={copyAriaLabel ?? copyLabel}
+            variant="link"
+            /* The row is the touch target: full height, and padded out to a
+               real width while staying optically flush with the frame. */
+            className="-mr-2 min-h-11 shrink-0 px-2"
+          />
+        </div>
       )}
-    >
-      <DitherSurface fill={BRAND} variant="gradient" edge={null} alpha={0.16} />
-      <div className="relative flex items-center justify-between gap-3 border-b border-border/40 px-3 py-2">
-        <span className={cn(EYEBROW, "min-w-0 truncate")}>{label}</span>
-        <CopyButton
-          value={code}
-          idleLabel={copyLabel}
-          ariaLabel={copyAriaLabel ?? copyLabel}
-          size="sm"
-          className="shrink-0"
-        />
-      </div>
       <pre
         className={cn(
-          "relative overflow-auto px-3 py-3 font-mono text-[12px] leading-relaxed",
+          "overflow-auto px-3 py-3 font-mono text-[0.75rem] leading-[1.7] text-ink",
           maxHeightClass,
         )}
       >

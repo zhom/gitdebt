@@ -310,31 +310,48 @@ const UNESTABLISHED =
   "gitdebt has not established a source for this series yet. The chart appears once one is.";
 
 /**
- * Dither coverage for the provenance mark, 0..1.
+ * The line weight a drawing would give this series, as an SVG dash array.
+ *
+ * A technical drawing already has a vocabulary for "how certain is this edge",
+ * and it is the dash pattern, not a tint or a texture. A solid line is an
+ * object line: an edge that was measured. A dashed line is a construction
+ * line: real, drawn, load-bearing, and derived rather than observed. A fine
+ * dotted line is a line whose subject could not be measured at all.
+ *
+ * So:
+ *
+ *   exact              solid       — one point per star, each with a timestamp
+ *   spliced            long dash   — the pattern its TAIL is drawn with; the
+ *                                    head is the exact line and stays solid,
+ *                                    which is the whole disclosure
+ *   archive            short dash  — a construction line, derived from records
+ *                                    of star actions rather than read directly
+ *   restricted/unknown fine dots   — nothing was measured
  *
  * A fixed constant per state, and deliberately not a function of anything the
- * series measures. A density derived from coverage would be a completeness
- * score wearing a texture, and the counts rule forbids publishing one: an
- * archive series counts re-stars and can exceed the repository's own star
- * total, so any "how much of it do we have" figure is wrong exactly where it
- * looks most precise. Density here says *which source*, nothing more.
+ * series measures. A dash gap scaled by coverage would be a completeness score
+ * wearing a line style, and the counts rule forbids publishing one: an archive
+ * series counts re-stars and can exceed the repository's own star total, so any
+ * "how much of it do we have" figure is wrong exactly where it looks most
+ * precise. The pattern says *which source*, nothing more — which is why this
+ * takes a freshness and no magnitude.
  */
-export function sourceDensity(freshness: HistoryFreshness): number {
+export function sourceStroke(freshness: HistoryFreshness): string {
   switch (freshness.state) {
     case "exact_current":
     case "exact_frozen":
-      return 0.85;
-    // Its own constant between the two it is made of, because it is made of
-    // both — not because anything was measured. Nothing here is a ratio of
-    // exact to approximate points; if it were, it would be the completeness
-    // score this whole module refuses to publish.
+      return "";
+    // One pattern, applied to the tail only. It is longer than the archive
+    // dash because it is not a different measurement from the head so much as
+    // the same line continued by another method, and the drawing should read
+    // as one line changing hand rather than two lines butted together.
     case "spliced":
-      return 0.65;
+      return "9 4";
     case "archive":
-      return 0.45;
+      return "5 4";
     case "restricted":
     case "unknown":
-      return 0.12;
+      return "1 3";
   }
 }
 

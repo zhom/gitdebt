@@ -1,10 +1,9 @@
 import { useEffect, useMemo, useState } from "react";
-import { AnimatePresence, motion, useReducedMotion } from "motion/react";
-import { ChevronDown, Sparkles } from "lucide-react";
 
 import { CodeBlock } from "@/components/CodeBlock";
 import { CopyButton } from "@/components/CopyButton";
-import { BODY, CAPTION } from "@/components/style-tokens";
+import { BODY, MEASURE } from "@/components/style-tokens";
+import { Terminator } from "@/components/ui/marks";
 import {
   PLACEHOLDER_SLUG,
   profileAgentPrompt,
@@ -12,11 +11,6 @@ import {
   starFacts,
   type StarFacts,
 } from "@/lib/agent-prompt";
-import {
-  DURATION,
-  EASE_OUT,
-  REDUCED_MOTION_DURATION,
-} from "@/lib/motion";
 import { cn } from "@/lib/utils";
 
 type RepoTarget = { kind: "repo"; slug: string; stars?: StarFacts | null };
@@ -58,11 +52,15 @@ type RepoDataEvent = {
  * Star facts arrive prerendered and are refreshed from the report's own
  * `gitdebt:repo-data` broadcast — this component never issues a request of its
  * own.
+ *
+ * The prompt itself is behind a disclosure the reader opens, which is a
+ * different thing from content hidden until a timeline runs: the button states
+ * plainly what it reveals, it works on the first paint, and nothing on this
+ * surface is transparent waiting for an animation to make it visible.
  */
 export function AgentReadmePrompt({ apiBase, siteOrigin, target }: Props) {
   const [live, setLive] = useState<StarFacts | null>(null);
   const [open, setOpen] = useState(false);
-  const reduceMotion = useReducedMotion();
 
   const slug = target.kind === "repo" ? target.slug : null;
 
@@ -109,14 +107,21 @@ export function AgentReadmePrompt({ apiBase, siteOrigin, target }: Props) {
       : "Ask agent to add this to my repo";
 
   return (
-    <div className="space-y-4">
-      <div className="flex flex-wrap items-center gap-3">
+    <div>
+      <p className={cn(BODY, MEASURE)}>
+        Paste it into Claude Code, Cursor, Codex, or any coding agent with your
+        checkout open. It carries the measured numbers, the exact snippets, and
+        the rules — including replacing an existing star-history widget in place
+        rather than stacking a second chart under it.
+      </p>
+
+      <div className="mt-5 flex flex-wrap items-center gap-x-6 gap-y-3">
         <CopyButton
           value={prompt}
           ariaLabel="Copy an agent prompt that adds these embeds to a README"
           idleLabel={action}
           successLabel="Prompt copied"
-          idleIcon={<Sparkles className="size-3.5" strokeWidth={2} />}
+          idleIcon={<Terminator size={14} />}
           variant="primary"
           size="default"
         />
@@ -124,51 +129,25 @@ export function AgentReadmePrompt({ apiBase, siteOrigin, target }: Props) {
           type="button"
           onClick={() => setOpen((value) => !value)}
           aria-expanded={open}
-          className={cn(
-            CAPTION,
-            "inline-flex items-center gap-1.5 rounded outline-none transition-colors duration-150 hover:text-foreground focus-visible:ring-2 focus-visible:ring-accent/30",
-          )}
+          aria-controls="agent-prompt-body"
+          className="inline-flex min-h-11 items-center text-[0.875rem] text-ink-2 outline-none transition-colors duration-[--duration-ui] hover:text-signal focus-visible:outline-2 focus-visible:outline-offset-2 focus-visible:outline-signal"
         >
           {open ? "Hide the prompt" : "Read the prompt first"}
-          <ChevronDown
-            className={cn(
-              "size-3.5 transition-transform duration-200 motion-reduce:transition-none",
-              open && "rotate-180",
-            )}
-            aria-hidden="true"
-          />
         </button>
       </div>
 
-      <p className={cn(BODY, "max-w-[68ch]")}>
-        Paste it into Claude Code, Cursor, Codex, or any coding agent with your
-        checkout open. It carries the measured numbers, the exact snippets, and
-        the rules — including replacing an existing star-history widget in place
-        rather than stacking a second chart under it.
-      </p>
-
-      <AnimatePresence initial={false}>
-        {open && (
-          <motion.div
-            initial={{ opacity: 0, y: reduceMotion ? 0 : -4 }}
-            animate={{ opacity: 1, y: 0 }}
-            exit={{ opacity: 0, y: reduceMotion ? 0 : -3 }}
-            transition={{
-              duration: reduceMotion ? REDUCED_MOTION_DURATION : DURATION.enter,
-              ease: EASE_OUT,
-            }}
-          >
-            <CodeBlock
-              code={prompt}
-              language="markdown"
-              label="Agent prompt"
-              copyLabel="Copy prompt"
-              copyAriaLabel="Copy the agent prompt"
-              maxHeightClass="max-h-96"
-            />
-          </motion.div>
-        )}
-      </AnimatePresence>
+      {open && (
+        <div id="agent-prompt-body" className="mt-5">
+          <CodeBlock
+            code={prompt}
+            language="markdown"
+            label="Agent prompt"
+            copyLabel="Copy prompt"
+            copyAriaLabel="Copy the agent prompt"
+            maxHeightClass="max-h-96"
+          />
+        </div>
+      )}
     </div>
   );
 }

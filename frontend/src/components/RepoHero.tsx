@@ -1,24 +1,29 @@
-import { useEffect, useMemo, useRef, useState } from "react";
-import {
-  animate,
-  motion,
-  useMotionValue,
-  useReducedMotion,
-  useTransform,
-} from "motion/react";
-import { ExternalLink, Loader2 } from "lucide-react";
+import { useEffect, useMemo, useState } from "react";
+import { animate, motion, useMotionValue, useReducedMotion, useTransform } from "motion/react";
 
-import { BalancedText } from "@/components/BalancedText";
 import { ButtonLink } from "@/components/ButtonLink";
-import { DitherMeter } from "@/components/DitherMeter";
 import { SeriesProvenance } from "@/components/SeriesProvenance";
 import { StatStrip } from "@/components/StatStrip";
-import { BODY, CAPTION, PANEL, TITLE } from "@/components/style-tokens";
-import { BRAND } from "@/lib/dither";
+import { BODY, LEAD, MEASURE, PANEL, TITLE } from "@/components/style-tokens";
 import { historyFreshness, noticeText } from "@/lib/history-freshness";
-import { DURATION, EASE_OUT } from "@/lib/motion";
 import { formatCountdown, useLiveCountdown } from "@/lib/live-eta";
+import { DURATION, EASE_DRAW } from "@/lib/motion";
 import { cn } from "@/lib/utils";
+
+/**
+ * The sheet's title: which repository this drawing is of, and the three
+ * quantities that dimension it.
+ *
+ * The slug is the subject, so it is lettered in the drawing's own hand at title
+ * scale. The three figures below it are drawn fields — a label naming the
+ * measured quantity and the value under it — sitting on one enclosed strip with
+ * extension ticks between them, so they read across as one measurement rather
+ * than as three cards.
+ *
+ * Nothing here is invisible until script runs. The figures render from whatever
+ * snapshot the build had; the live read replaces them in place, and the counting
+ * animation starts from the value already on screen.
+ */
 
 export type StarPoint = { date: string; stars: number };
 export type HistoryKind =
@@ -29,10 +34,10 @@ export type HistoryKind =
   | "unavailable";
 /**
  * `restricted` is a real terminal value the analyzer emits: GitHub serves the
- * repository's stargazer list only to its own admins and collaborators, so
- * there is nothing left to attempt. It was missing from this union, which is
- * why the report used to poll a no-store endpoint forever and offer a retry
- * that was never scheduled.
+ * repository's stargazer list only to applications that administer it, so there
+ * is nothing left to attempt. It was missing from this union, which is why the
+ * report used to poll a no-store endpoint forever and offer a retry that was
+ * never scheduled.
  */
 const HISTORY_STATUSES = [
   "ready",
@@ -133,7 +138,7 @@ type Props = {
 const POLL_MS = 20_000;
 const PROGRESS_POLL_MS = 4_000;
 
-/** The hero's standing description. The actual star curve belongs below. */
+/** The sheet's standing description. The actual star curve belongs below. */
 const HERO_BLURB =
   "Star momentum, maintenance concentration, contributor health, and codebase change — one report built from public repository data.";
 
@@ -164,14 +169,18 @@ function firstStarYear(data: AnalyzeResponse): string | null {
   return Number.isNaN(d.getTime()) ? null : String(d.getUTCFullYear());
 }
 
-function formatDate(value: string | null | undefined): string {
+/**
+ * A field value is short by construction, because three of them share one strip
+ * and a long one would knock the others out of alignment. The exact coverage
+ * date is stated in full one block down, in the title block that owns it.
+ */
+function formatMonth(value: string | null | undefined): string {
   if (!value) return "—";
   const d = new Date(value);
   if (Number.isNaN(d.getTime())) return "—";
   return d.toLocaleDateString("en-US", {
     year: "numeric",
     month: "short",
-    day: "numeric",
     timeZone: "UTC",
   });
 }
@@ -239,7 +248,7 @@ export function RepoHero({ owner, repo, apiBase, initialData }: Props) {
           },
         );
       } catch {
-        // Progress polling and the stat cards remain useful if this enqueue
+        // Progress polling and the field strip remain useful if this enqueue
         // attempt is interrupted; a later visit can safely retry it.
       }
     }
@@ -375,30 +384,21 @@ export function RepoHero({ owner, repo, apiBase, initialData }: Props) {
 
   if (data?.not_found || data?.history_status === "not_public") {
     return (
-      <section className="space-y-6">
-        <div className="space-y-2">
-          <BalancedText as="h1" className={TITLE}>
-            Repository not public or not found
-          </BalancedText>
-          <p className={cn(BODY, "max-w-[62ch]")}>
-            GitHub did not expose {slug} as a public repository. Check the owner
-            and repository name, or open it on GitHub if you have private
-            access. gitdebt does not ingest private repository data.
-          </p>
-        </div>
+      <section>
+        <h1 className={TITLE}>Repository not public or not found</h1>
+        <p className={cn(LEAD, MEASURE, "mt-4")}>
+          GitHub did not expose {slug} as a public repository. Check the owner
+          and repository name, or open it on GitHub if you have private access.
+          gitdebt does not ingest private repository data.
+        </p>
         <ButtonLink
           href={`https://github.com/${owner}/${repo}`}
           target="_blank"
           rel="noreferrer"
-          variant="outline"
-          pulse
+          variant="link"
+          className="mt-6 min-h-11"
         >
-          Check on GitHub
-          <ExternalLink
-            className="size-3.5"
-            strokeWidth={1.8}
-            aria-hidden="true"
-          />
+          Check {slug} on GitHub
         </ButtonLink>
       </section>
     );
@@ -406,16 +406,16 @@ export function RepoHero({ owner, repo, apiBase, initialData }: Props) {
 
   const stats = [
     {
-      label: archiveHistory ? "Current GitHub stars" : "GitHub stars",
-      value: data ? data.total_stars.toLocaleString() : "—",
+      label: archiveHistory ? "Current stars" : "Stars",
+      value: data ? <CountingFigure value={data.total_stars} /> : "—",
     },
     {
       label: archiveHistory ? "Activity since" : "History since",
-      value: year ?? formatDate(data?.history[0]?.date),
+      value: year ?? formatMonth(data?.history[0]?.date),
     },
     {
       label: archiveHistory ? "Latest activity" : "Latest star",
-      value: formatDate(latest),
+      value: formatMonth(latest),
     },
   ];
   const starsWork: ProgressWork = progress?.stars ?? {
@@ -427,9 +427,9 @@ export function RepoHero({ owner, repo, apiBase, initialData }: Props) {
     phase: "idle",
     complete: false,
   };
-  // The strip is a working indicator, not a checklist. `idle` is terminal
-  // backend state, not a synonym for "still loading"; treating it as active
-  // left the analysis panel pinned to already-finished reports forever.
+  // The bar is a working indicator, not a checklist. `idle` is terminal backend
+  // state, not a synonym for "still loading"; treating it as active left the
+  // analysis reading pinned to already-finished reports forever.
   const showProgress =
     (!data && loading) ||
     isActive(starsWork) ||
@@ -437,52 +437,42 @@ export function RepoHero({ owner, repo, apiBase, initialData }: Props) {
     (data !== null && needsPolling(data));
 
   return (
-    <section className="space-y-6">
-      <header className="flex flex-col gap-4 sm:flex-row sm:items-end sm:justify-between">
-        <div className="min-w-0 space-y-3">
-          <BalancedText as="h1" className={TITLE}>
-            {slug}
-          </BalancedText>
-          <p className={cn(BODY, "max-w-[62ch]")}>{HERO_BLURB}</p>
+    <section className="space-y-8">
+      <header className="flex flex-col gap-5 sm:flex-row sm:items-end sm:justify-between">
+        <div className="min-w-0">
+          {/* The subject of the drawing, lettered in the drawing's own hand at
+              title scale. A slug is set in mono everywhere it appears as a
+              value in a column; here it is not a value, it is the title of the
+              sheet, and the title block is lettered. */}
+          <h1 className={cn(TITLE, "break-words")}>{slug}</h1>
+          <p className={cn(BODY, MEASURE, "mt-3")}>{HERO_BLURB}</p>
         </div>
         <ButtonLink
           href={`https://github.com/${owner}/${repo}`}
           target="_blank"
           rel="noreferrer"
-          variant="outline"
-          pulse
-          className="shrink-0 self-start sm:self-auto"
+          variant="link"
+          className="min-h-11 shrink-0"
         >
           Open on GitHub
-          <ExternalLink
-            className="size-3.5"
-            strokeWidth={1.8}
-            aria-hidden="true"
-          />
         </ButtonLink>
       </header>
 
+      {/* The field strip. Three measured quantities enclosed by one drawn
+          frame and divided by rules that each separate two real cells. Every
+          label lands on one baseline and every figure on another, whatever the
+          values happen to say. */}
       <StatStrip
         columns={3}
-        items={stats.map((stat, index) => ({
-          label: stat.label,
-          value:
-            index === 0 && data ? (
-              <AnimatedNumber
-                value={data.total_stars}
-                format={(n) => Math.round(n).toLocaleString()}
-              />
-            ) : (
-              stat.value
-            ),
-        }))}
+        aria-label={`Measured summary for ${slug}`}
+        items={stats}
       />
 
-      {/* Every state, not just the archive one. An owner arriving at their
-          own frozen repository previously saw nothing at all here. The panel
+      {/* Every state, not just the archive one. An owner arriving at their own
+          frozen repository previously saw nothing at all here. The block
           carries no sign-in action: for the two states that used to offer one,
-          the copy beside it says signing in changes nothing gitdebt can read,
-          and a button under that sentence only reads as a contradiction. */}
+          the copy inside says signing in changes nothing gitdebt can read, and
+          a button under that sentence only reads as a contradiction. */}
       {data && (
         <SeriesProvenance
           snapshot={data}
@@ -501,12 +491,8 @@ export function RepoHero({ owner, repo, apiBase, initialData }: Props) {
       )}
 
       {data?.backfilling && (
-        <div className={cn(PANEL, "flex items-start gap-3 p-3.5", BODY)}>
-          <Loader2
-            className="mt-0.5 size-3.5 shrink-0 motion-safe:animate-spin"
-            aria-hidden="true"
-          />
-          <p>
+        <div className={PANEL}>
+          <p className={cn(BODY, MEASURE)}>
             This is a large repository. Historical windows are being collected
             in the background; the chart appears after a complete snapshot is
             committed.
@@ -529,11 +515,13 @@ function starPhaseFromAnalyze(data: AnalyzeResponse | null): ProgressPhase {
 }
 
 /**
- * Working indicator for a report that is still being built.
+ * How far along a report that is still being built is, drawn as a dimension.
  *
- * One dithered rail carrying the overall fraction plus the phase actually
- * running right now — the point is "what is happening and how far along",
- * not a checklist of finished parts.
+ * A track enclosed by two extension ticks, the measured span in drafting red
+ * running from the left tick to a filled terminator, and the value lettered
+ * beside it. It measures one real thing — the fraction of the report that
+ * exists — and it says which phase is producing it. The bar is a picture of a
+ * number that is also printed as text, so nothing depends on seeing it.
  */
 function ReportProgress({
   stars,
@@ -560,25 +548,43 @@ function ReportProgress({
   const detail = progressDetail(active, remaining);
   const done = [stars, analysis].filter(isSettled).length;
   const partial = active.percent !== undefined ? active.percent / 100 : 0;
-  const ratio = Math.max(0.02, (done + partial) / 2);
+  const ratio = Math.min(1, Math.max(0.02, (done + partial) / 2));
+  const percent = Math.round(ratio * 100);
 
   return (
-    <div className={cn(PANEL, "p-3.5")} role="status" aria-live="polite">
-      <div className="flex flex-wrap items-baseline justify-between gap-x-4 gap-y-1">
-        <p className="text-[13px]">{label}</p>
-        <p className={cn(CAPTION, "tabular-nums")}>
-          {detail}
-          {active.priority === "interactive" ? " · priority" : ""}
-        </p>
+    <div className={PANEL} role="status" aria-live="polite">
+      <div className="flex flex-wrap items-baseline justify-between gap-x-6 gap-y-1">
+        <p className="text-[0.875rem] text-ink">{label}</p>
+        <p className="measured text-[0.8125rem]">{percent}%</p>
       </div>
-      <DitherMeter
-        className="mt-3"
-        ratio={ratio}
-        percent={Math.round(ratio * 100)}
-        fill={BRAND}
-        label="Report progress"
-      />
-      <p className={cn(CAPTION, "mt-2")}>
+
+      {/* The dimension. Two extension ticks enclose the track; the span grows
+          from the left tick and its terminator lands on the reading. */}
+      <div className="relative mt-3 h-3" aria-hidden="true">
+        <span className="absolute inset-x-0 top-1/2 h-px -translate-y-1/2 bg-rule-strong" />
+        <span className="absolute inset-y-0 left-0 w-px bg-rule-strong" />
+        <span className="absolute inset-y-0 right-0 w-px bg-rule-strong" />
+        <span
+          className="absolute top-1/2 left-0 h-[2px] -translate-y-1/2 bg-signal transition-[width] duration-[--duration-measure] ease-[--ease-draw] motion-reduce:transition-none"
+          style={{ width: `${percent}%` }}
+        />
+        <svg
+          viewBox="0 0 8 12"
+          width="8"
+          height="12"
+          className="absolute top-0 -translate-x-full transition-[left] duration-[--duration-measure] ease-[--ease-draw] motion-reduce:transition-none"
+          style={{ left: `${percent}%` }}
+          focusable="false"
+        >
+          <path d="M8 6 2.4 3.1v5.8z" fill="var(--signal)" />
+        </svg>
+      </div>
+
+      <p className={cn(BODY, MEASURE, "mt-3 text-[0.8125rem]")}>
+        {detail}
+        {active.priority === "interactive" ? " · priority" : ""}
+      </p>
+      <p className="mt-1 text-[0.75rem] leading-[1.5] text-ink-3">
         {live
           ? "Streaming from the backend — sections appear as they land."
           : "Checking progress…"}
@@ -686,41 +692,30 @@ function progressDetail(
   return "Measuring work and wait";
 }
 
-function AnimatedNumber({
-  value,
-  format,
-}: {
-  value: number;
-  format: (n: number) => string;
-}) {
-  const ref = useRef<HTMLSpanElement>(null);
-  const previousValue = useRef(value);
+/**
+ * A figure that counts to a new reading.
+ *
+ * The motion value is seeded with the value it already has, so the first paint
+ * is the finished number — the count only ever runs between two real readings,
+ * when the live fetch lands on a different total than the build did. There is
+ * no frame in which this element is empty.
+ */
+function CountingFigure({ value }: { value: number }) {
   const mv = useMotionValue(value);
-  const display = useTransform(mv, (n) => format(n));
+  const display = useTransform(mv, (n) => Math.round(n).toLocaleString());
   const reduceMotion = useReducedMotion();
 
   useEffect(() => {
-    const previous = previousValue.current;
-    previousValue.current = value;
-    if (reduceMotion) {
+    if (reduceMotion || mv.get() === value) {
       mv.set(value);
       return;
     }
-    if (previous === value) {
-      mv.set(value);
-      return;
-    }
-    mv.set(previous);
     const controls = animate(mv, value, {
-      duration: DURATION.chart,
-      ease: EASE_OUT,
+      duration: DURATION.draw,
+      ease: EASE_DRAW,
     });
     return () => controls.stop();
   }, [value, mv, reduceMotion]);
 
-  return (
-    <motion.span ref={ref} className="inline-block">
-      {display}
-    </motion.span>
-  );
+  return <motion.span>{display}</motion.span>;
 }

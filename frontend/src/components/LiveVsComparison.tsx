@@ -1,19 +1,22 @@
 import { useEffect, useMemo, useState } from "react";
 
-import { DitherComparisonChart } from "@/components/DitherComparisonChart";
+import { ComparisonSheet } from "@/components/ComparisonSheet";
 import {
   RepoComparisonMatrix,
   type ComparisonInitialRepo,
 } from "@/components/RepoComparisonMatrix";
 import {
   BODY,
-  EYEBROW,
+  CAPTION,
+  FIELD,
   HEADING,
-  PANEL_PADDED,
+  MEASURE,
   SECTION_ACTION,
-  SECTION_HEADER,
 } from "@/components/style-tokens";
 import { VsHero } from "@/components/VsHero";
+import { publishLiveSubject } from "@/lib/live-subject";
+import { restoreServedTitle } from "@/lib/live-title";
+import { cn } from "@/lib/utils";
 
 type AnalyzeResponse = {
   repo: string;
@@ -43,12 +46,16 @@ function firstStarYear(data: AnalyzeResponse): string | null {
 }
 
 function settled(data: AnalyzeResponse | null): boolean {
-  return Boolean(
-    data &&
-      !data.not_found &&
-      !data.pending &&
-      !data.backfilling,
-  );
+  return Boolean(data && !data.not_found && !data.pending && !data.backfilling);
+}
+
+/** The pathname the comparison would live at, taken from its own canonical. */
+function canonicalPath(canonical: string): string | undefined {
+  try {
+    return new URL(canonical).pathname;
+  } catch {
+    return undefined;
+  }
 }
 
 export function LiveVsComparison({
@@ -78,7 +85,13 @@ export function LiveVsComparison({
         signal: AbortSignal.timeout(8_000),
       });
       if (response.status === 404) {
-        return { repo: slug, total_stars: 0, created_at: null, not_found: true, history: [] };
+        return {
+          repo: slug,
+          total_stars: 0,
+          created_at: null,
+          not_found: true,
+          history: [],
+        };
       }
       if (!response.ok) return null;
       return (await response.json()) as AnalyzeResponse;
@@ -133,48 +146,77 @@ export function LiveVsComparison({
         : null,
     [right, slug2],
   );
-  const ready = Boolean(
-    left?.history.length && right?.history.length,
-  );
+
+  /*
+   * The tab, once both sides are real.
+   *
+   * `publishLiveSubject` defers to the served canonical, so on the prerendered
+   * `/vs/a/b/c/d` page — the only route that mounts this island today, and one
+   * whose title the build already wrote for these exact two repositories — this
+   * is deliberately a no-op. It fires when the island is mounted anywhere the
+   * server could not name the pair, and it un-does itself the moment a side
+   * turns out not to be public: a tab that still promises a comparison of a
+   * repository nobody can read is the same defect pointed the other way.
+   */
+  useEffect(() => {
+    if (unavailable) {
+      restoreServedTitle();
+      return;
+    }
+    if (!heroLeft || !heroRight) return;
+    publishLiveSubject({
+      subject: `${slug1} vs ${slug2}`,
+      description: `${slug1} and ${slug2} compared: star growth on shared axes, plus commit cadence, ownership concentration and codebase size for each.`,
+      path: canonicalPath(canonical),
+      image: `${apiBase}/api/og.png?repos=${encodeURIComponent(`${slug1},${slug2}`)}`,
+    });
+  }, [apiBase, canonical, heroLeft, heroRight, slug1, slug2, unavailable]);
+
+  const ready = Boolean(left?.history.length && right?.history.length);
   const initializing = Boolean(
     left?.pending || left?.backfilling || right?.pending || right?.backfilling,
   );
   const comparisonInitial = useMemo<ComparisonInitialRepo[]>(
-    () =>
-      [
-        ...(left
-          ? [{
+    () => [
+      ...(left
+        ? [
+            {
               slug: slug1,
               total_stars: left.total_stars,
               created_at: left.created_at,
               history: left.history,
               pending: left.pending,
               backfilling: left.backfilling,
-            }]
-          : []),
-        ...(right
-          ? [{
+            },
+          ]
+        : []),
+      ...(right
+        ? [
+            {
               slug: slug2,
               total_stars: right.total_stars,
               created_at: right.created_at,
               history: right.history,
               pending: right.pending,
               backfilling: right.backfilling,
-            }]
-          : []),
-      ],
+            },
+          ]
+        : []),
+    ],
     [left, right, slug1, slug2],
   );
 
   if (unavailable) {
     return (
-      <section className={`${PANEL_PADDED} mt-8`} role="alert">
-        <p className="font-mono text-[10px] tracking-[0.25em] text-[var(--swatch-red)] uppercase">
-          Comparison unavailable
-        </p>
-        <h1 className={`mt-2 ${HEADING}`}>A repository is not public</h1>
-        <p className={`mt-2 ${BODY}`}>
-          Check both repository names and confirm that they are public.
+      <section className="mt-10 border border-rule-strong bg-paper p-6" role="alert">
+        <p className={FIELD}>Comparison unavailable</p>
+        <h1 className={cn(HEADING, "mt-3")}>
+          One of these repositories is not public
+        </h1>
+        <p className={cn(BODY, MEASURE, "mt-3")}>
+          GitHub did not expose {slug1} or {slug2} as a public repository. Check
+          both names, or open them on GitHub if you have private access. gitdebt
+          never ingests private repository data.
         </p>
       </section>
     );
@@ -182,12 +224,15 @@ export function LiveVsComparison({
 
   if (!heroLeft || !heroRight) {
     return (
-      <section className={`${PANEL_PADDED} mt-8`} aria-live="polite">
-        <p className={EYEBROW}>Initializing comparison</p>
-        <h1 className={`mt-2 ${HEADING}`}>Loading both repositories</h1>
-        <p className={`mt-2 ${BODY}`}>
-          This deployment is fetching the public metadata and star history now.
-          The comparison updates here automatically.
+      <section
+        className="mt-10 border border-rule-strong bg-paper p-6"
+        aria-live="polite"
+      >
+        <p className={FIELD}>Reading both repositories</p>
+        <h1 className={cn(HEADING, "mt-3")}>The comparison is being drawn</h1>
+        <p className={cn(BODY, MEASURE, "mt-3")}>
+          Public metadata and the two star series are being read now. This sheet
+          fills in as each one lands; nothing here waits on you.
         </p>
       </section>
     );
@@ -195,13 +240,13 @@ export function LiveVsComparison({
 
   return (
     <>
-      <div className="mt-8">
+      <div className="mt-10">
         <VsHero left={heroLeft} right={heroRight} />
       </div>
 
       {ready ? (
-        <div className="mt-12">
-          <DitherComparisonChart
+        <div className="mt-14">
+          <ComparisonSheet
             apiBase={apiBase}
             path={overlayPath}
             caption="Star history overlay"
@@ -214,32 +259,40 @@ export function LiveVsComparison({
           />
         </div>
       ) : (
-        <section className={`${PANEL_PADDED} mt-12`} aria-live="polite">
-          <p className={EYEBROW}>Current totals ready</p>
-          <p className={`mt-2 max-w-[70ch] ${BODY}`}>
+        <section
+          className="mt-14 border border-rule-strong bg-paper p-6"
+          aria-live="polite"
+        >
+          <p className={FIELD}>Overlay pending</p>
+          <p className={cn(BODY, MEASURE, "mt-3")}>
             {initializing
-              ? "Historical timestamps are still being initialized. This chart appears automatically when both durable jobs complete."
-              : "A historical overlay needs recorded star events for both repositories. Current totals remain available above."}
+              ? "Both current totals are above. The two curves are drawn as soon as the durable jobs recording their star events finish."
+              : "An overlay needs recorded star events on both sides. The current totals above stand on their own until then."}
           </p>
         </section>
       )}
 
-      <section className="mt-12 flex justify-end">
-        <div className={SECTION_HEADER}>
-          <a
-            href={`/compare?repos=${encodeURIComponent(`${slug1},${slug2}`)}`}
-            className={SECTION_ACTION}
-          >
-            add a third repo <span aria-hidden="true">→</span>
-          </a>
-        </div>
-      </section>
+      <div className="mt-10 flex justify-end">
+        <a
+          href={`/compare?repos=${encodeURIComponent(`${slug1},${slug2}`)}`}
+          className={SECTION_ACTION}
+        >
+          add a third repository
+        </a>
+      </div>
 
-      <RepoComparisonMatrix
-        apiBase={apiBase}
-        repos={[slug1, slug2]}
-        initial={comparisonInitial}
-      />
+      <div className="mt-14">
+        <RepoComparisonMatrix
+          apiBase={apiBase}
+          repos={[slug1, slug2]}
+          initial={comparisonInitial}
+        />
+      </div>
+
+      <p className={cn(CAPTION, MEASURE, "mt-4")}>
+        Both curves are drawn on shared axes. They are not drawn from a shared
+        source: each series names its own below.
+      </p>
     </>
   );
 }

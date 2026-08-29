@@ -1,9 +1,23 @@
 import { useEffect, useRef, useState, type ReactNode } from "react";
-import { motion, useReducedMotion } from "motion/react";
-import { Check, Copy } from "lucide-react";
 
 import { Button, type ButtonProps } from "@/components/ui/button";
-import { SPRING } from "@/lib/motion";
+import { Leader, Tick } from "@/components/ui/marks";
+import { cn } from "@/lib/utils";
+
+/**
+ * The copy action.
+ *
+ * It confirms by INK, not by movement: nothing lifts, nothing scales, no glyph
+ * springs in from a smaller copy of itself. The label steps from `ink-2` to
+ * full graphite and the draughtsman's tick strikes itself along its own length.
+ * That is a state change you can see in a still frame, which is the only kind
+ * this site ships.
+ *
+ * The idle mark is the leader arrow, up and out: this action takes the snippet
+ * off the page and into somebody's README. There is no clipboard glyph in
+ * `ui/marks.tsx` and one was not invented for this — the house set has five
+ * marks and the leader is the one that means "out to there".
+ */
 
 type Props = {
   value: string;
@@ -11,14 +25,24 @@ type Props = {
   className?: string;
   idleLabel?: string;
   successLabel?: string;
-  /** Replaces the clipboard glyph when the copy means something more specific. */
+  /** Replaces the leader when the copy means something more specific. */
   idleIcon?: ReactNode;
   variant?: ButtonProps["variant"];
   size?: ButtonProps["size"];
 };
 
-/** How long the confirmation holds before the glyph springs back. */
+/** How long the confirmation holds before the label returns to its idle ink. */
 const REVERT_MS = 2000;
+
+/**
+ * Measured length of the `Tick` path — `M3 8.5 6.5 12 13 4.5` — summed here
+ * rather than read from the DOM, so the stroke draws to its true end on the
+ * first frame instead of stopping short of it.
+ */
+const TICK_LENGTH = Math.ceil(Math.hypot(3.5, 3.5) + Math.hypot(6.5, 7.5));
+
+/** A confirmation strikes; it does not travel across the sheet. */
+const TICK_DURATION = "260ms";
 
 export function CopyButton({
   value,
@@ -26,13 +50,12 @@ export function CopyButton({
   className,
   idleLabel = "Copy",
   successLabel = "Copied",
-  idleIcon = <Copy className="size-3.5" strokeWidth={2} />,
-  variant = "soft",
-  size = "sm",
+  idleIcon,
+  variant = "quiet",
+  size = "default",
 }: Props) {
   const [copied, setCopied] = useState(false);
   const timerRef = useRef<ReturnType<typeof setTimeout> | null>(null);
-  const reduceMotion = useReducedMotion();
 
   useEffect(
     () => () => {
@@ -52,69 +75,51 @@ export function CopyButton({
     }
   }
 
-  // Both glyphs stay mounted, so a second copy mid-flight retargets the spring
-  // from wherever the icons currently sit instead of restarting from scratch.
-  const transition = reduceMotion ? { duration: 0 } : SPRING.snappy;
-  const glyph = (active: boolean) => ({
-    scale: reduceMotion ? 1 : active ? 1 : 0.4,
-    opacity: active ? 1 : 0,
-  });
-
   return (
     <Button
       variant={variant}
       size={size}
       onClick={copy}
       aria-label={ariaLabel}
-      className={className}
+      className={cn(
+        // The confirmation, in ink. `primary` is already at full contrast, so
+        // it keeps its own treatment and confirms with the tick alone.
+        copied && variant !== "primary" && "text-ink",
+        copied && variant === "quiet" && "border-ink-3",
+        className,
+      )}
     >
       <span className="grid size-3.5 shrink-0 place-items-center">
-        <motion.span
-          className="col-start-1 row-start-1 inline-flex"
-          initial={false}
-          animate={glyph(!copied)}
-          transition={transition}
-          aria-hidden="true"
-        >
-          {idleIcon}
-        </motion.span>
-        <motion.span
-          className="col-start-1 row-start-1 inline-flex"
-          initial={false}
-          animate={glyph(copied)}
-          transition={transition}
-          aria-hidden="true"
-        >
-          <Check className="size-3.5" strokeWidth={2} />
-        </motion.span>
+        {copied ? (
+          <Tick
+            size={14}
+            className="col-start-1 row-start-1 inks-in"
+            style={{
+              ["--draw-length" as string]: String(TICK_LENGTH),
+              ["--duration-draw" as string]: TICK_DURATION,
+            }}
+          />
+        ) : (
+          <span className="col-start-1 row-start-1 inline-flex">
+            {idleIcon ?? <Leader size={14} />}
+          </span>
+        )}
       </span>
+
       <span className="grid">
-        {/* Sized by the wider label, so the button never jumps mid-swap. */}
+        {/* Sized by the wider of the two labels, so the row never reflows when
+            the word changes under the pointer. */}
         <span className="invisible col-start-1 row-start-1" aria-hidden="true">
           {idleLabel}
         </span>
         <span className="invisible col-start-1 row-start-1" aria-hidden="true">
           {successLabel}
         </span>
-        <motion.span
-          className="col-start-1 row-start-1 text-left"
-          initial={false}
-          animate={{ opacity: copied ? 0 : 1 }}
-          transition={transition}
-          aria-hidden="true"
-        >
-          {idleLabel}
-        </motion.span>
-        <motion.span
-          className="col-start-1 row-start-1 text-left"
-          initial={false}
-          animate={{ opacity: copied ? 1 : 0 }}
-          transition={transition}
-          aria-hidden="true"
-        >
-          {successLabel}
-        </motion.span>
+        <span className="col-start-1 row-start-1 text-left" aria-hidden="true">
+          {copied ? successLabel : idleLabel}
+        </span>
       </span>
+
       <span className="sr-only" aria-live="polite">
         {copied ? successLabel : ""}
       </span>

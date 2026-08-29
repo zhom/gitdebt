@@ -1,22 +1,19 @@
 ---
 export const prerender = true;
 
-import "@/styles/globals.css";
-import BaseHead from "@/components/BaseHead.astro";
-import Seo from "@/components/Seo.astro";
-import SiteHeader from "@/components/SiteHeader.astro";
-import SiteFooter from "@/components/SiteFooter.astro";
-import { DitherField } from "@/components/DitherField";
+import Sheet from "@/layouts/Sheet.astro";
 import { ReportLayerGraphic } from "@/components/ReportLayerGraphic";
 import { SeriesProvenance } from "@/components/SeriesProvenance";
 import {
   BODY,
+  BREADCRUMB,
   CAPTION,
-  EYEBROW,
+  CRUMB,
+  FIELD,
   HEADING,
   LEAD,
   MEASURE,
-  SECTION_HEADER,
+  PROSE_LINK,
   TITLE,
 } from "@/components/style-tokens";
 import { CATEGORIES } from "@/data/categories";
@@ -174,8 +171,21 @@ const jsonLd: Record<string, unknown>[] = [
   },
 ];
 
-const linkClass =
-  "rounded font-mono text-[11px] text-muted-foreground underline decoration-border underline-offset-4 outline-none transition-colors duration-150 hover:text-foreground hover:decoration-foreground/60 focus-visible:ring-2 focus-visible:ring-accent/30";
+/**
+ * The column count follows the group's own size.
+ *
+ * A fixed four-column track is what turns a one-signal group into one cell and
+ * three empty ones — and because the internal rules here are 1px gaps showing
+ * the ground through, an empty cell is not empty space, it is a solid block of
+ * rule colour. The grid never has a hole in it because it is never wider than
+ * what it holds.
+ */
+function groupColumns(count: number): string {
+  if (count >= 4) return "sm:grid-cols-2 lg:grid-cols-4";
+  if (count === 3) return "sm:grid-cols-3";
+  if (count === 2) return "sm:grid-cols-2";
+  return "";
+}
 
 const access = [
   {
@@ -193,114 +203,113 @@ const access = [
 ];
 ---
 
-<!doctype html>
-<html lang="en">
-  <head>
-    <BaseHead />
-    <Seo
-      title={title}
-      description={description}
-      canonicalPath="/about"
-      ogImage={ogImage}
-      jsonLd={jsonLd}
-    />
-  </head>
-  <body>
-    <div class="isolate flex min-h-dvh flex-col">
-      <SiteHeader />
+<Sheet
+  title={title}
+  description={description}
+  canonicalPath="/about"
+  ogImage={ogImage}
+  jsonLd={jsonLd}
+>
+  {/* ── The title block ──────────────────────────────────────────────────── */}
+  <section class="registered border-b border-rule bg-paper">
+    <div class="mx-auto w-full max-w-6xl px-6 pt-8 pb-14">
+      <nav aria-label="Breadcrumb" class={BREADCRUMB}>
+        <a href="/" class={CRUMB}>gitdebt</a>
+        <span class="px-1.5 text-rule-strong" aria-hidden="true">/</span>
+        <span class="text-ink">about</span>
+      </nav>
 
-      <main id="main-content" class="mx-auto w-full max-w-3xl flex-1 px-6 py-12">
-        <nav aria-label="Breadcrumb" class="font-mono text-[11px] text-muted-foreground">
-          <a
-            href="/"
-            class="rounded outline-none transition-colors duration-150 hover:text-foreground focus-visible:ring-2 focus-visible:ring-accent/30"
-            >gitdebt</a
-          >
-          <span class="px-1.5 text-border" aria-hidden="true">/</span>
-          <span class="text-foreground">about</span>
-        </nav>
-
-        <header class="relative isolate -mx-6 mt-6 overflow-hidden px-6 py-6">
-          <DitherField
-            client:idle
-            render="static"
-            opacity={0.14}
-            vignette={0.7}
-            colors={["#12161f", "#1d2b45"]}
-          />
-          <h1 class={TITLE}>How gitdebt works</h1>
-          <p class:list={["mt-3", LEAD, BODY]}>
-            gitdebt charts the star history of any public GitHub repository and
-            pairs it with health signals read from the git history itself:
-            commit cadence, change frequency, ownership concentration, and
-            recent TODO/FIXME movement.
-          </p>
-        </header>
-
-        <section class="mt-16 scroll-mt-24 border-t border-border/60 pt-12">
-          <div class={SECTION_HEADER}>
-            <h2 class={HEADING}>What we compute</h2>
-          </div>
-          <p class:list={["mt-6", MEASURE, BODY]}>
-            The health signals come from a shallow git clone analyzed on our
-            side, and each one is a pure, unit-tested function over that data.
-            Star history is different: it is read either from GitHub's
-            stargazer list or rebuilt from historical star data, and
-            every report names the source that produced its chart.
-          </p>
-
-          {
-            signalGroups.map((group, index) => (
-              <div
-                class:list={[
-                  "mt-8",
-                  index > 0 && "border-t border-border/40 pt-8",
-                ]}
-              >
-                <h3 class={EYEBROW}>{group.label}</h3>
-                <div class="mt-6 flex h-24 items-center overflow-hidden opacity-80">
-                  <ReportLayerGraphic client:visible kind={group.graphic} />
-                </div>
-                <p class={CAPTION}>Illustrative — no repository values</p>
-                <dl class="mt-8 grid gap-x-12 gap-y-8 sm:grid-cols-2">
-                  {group.signals.map((signal) => (
-                    <div>
-                      <dt class="text-[13px] text-foreground/90">
-                        {signal.term}
-                      </dt>
-                      <dd class:list={["mt-1.5", MEASURE, BODY]}>
-                        {signal.desc}{" "}
-                        <a href={signal.href} class={linkClass}>
-                          See it on {signal.slug}
-                        </a>
-                      </dd>
-                    </div>
-                  ))}
-                </dl>
-              </div>
-            ))
-          }
-        </section>
-
-        <section class="mt-16 scroll-mt-24 border-t border-border/60 pt-12">
-          <div class={SECTION_HEADER}>
-            <h2 class={HEADING}>Freshness, limits, and access</h2>
-          </div>
-          <dl class="mt-8 grid gap-x-12 gap-y-8 sm:grid-cols-2">
-            {
-              access.map((item) => (
-                <div>
-                  <dt class="text-[13px] text-foreground/90">{item.term}</dt>
-                  <dd class:list={["mt-1.5", MEASURE, BODY]}>{item.desc}</dd>
-                </div>
-              ))
-            }
-          </dl>
-          <SeriesProvenance client:visible variant="explainer" className="mt-8" />
-        </section>
-      </main>
-
-      <SiteFooter />
+      <h1 class:list={["mt-6", TITLE]}>How gitdebt works</h1>
+      <p class:list={["mt-5", LEAD, MEASURE]}>
+        gitdebt charts the star history of any public GitHub repository and
+        pairs it with health signals read from the git history itself: commit
+        cadence, change frequency, ownership concentration, and recent
+        TODO/FIXME movement.
+      </p>
     </div>
-  </body>
-</html>
+  </section>
+
+  {/* ── What we compute ──────────────────────────────────────────────────── */}
+  <section class="border-b border-rule bg-table">
+    <div class="mx-auto w-full max-w-6xl px-6 py-16">
+      <h2 class={HEADING}>What we compute</h2>
+      <p class:list={["mt-4", BODY, MEASURE]}>
+        The health signals come from a shallow git clone analyzed on our side,
+        and each one is a pure, unit-tested function over that data. Star
+        history is different: it is read either from GitHub's stargazer list or
+        rebuilt from historical star data, and every report names the source
+        that produced its chart.
+      </p>
+
+      {
+        signalGroups.map((group, index) => (
+          <div class:list={[index === 0 ? "mt-12" : "mt-16"]}>
+            {/*
+              The group's own drawing sits beside its name rather than above a
+              wall of terms: the notation is what the group IS, so it reads as
+              the subject of the heading, not as an illustration parked near it.
+            */}
+            <div class="flex flex-wrap items-end justify-between gap-x-8 gap-y-4 border-b border-rule pb-4">
+              <h3 class="min-h-[2.55rem] font-draft text-[1.0625rem] leading-[1.2] text-ink">
+                {group.label}
+              </h3>
+              <figure class="shrink-0">
+                <ReportLayerGraphic client:visible kind={group.graphic} />
+                <figcaption class:list={["mt-1.5 text-right", CAPTION]}>
+                  Illustrative — no repository values
+                </figcaption>
+              </figure>
+            </div>
+
+            <dl
+              class:list={[
+                "mt-6 grid grid-cols-1 gap-px border border-rule-strong bg-rule",
+                groupColumns(group.signals.length),
+              ]}
+            >
+              {group.signals.map((signal) => (
+                <div class="bg-paper p-5">
+                  <dt class:list={[FIELD, "min-h-[1.5rem]"]}>{signal.term}</dt>
+                  <dd class:list={["mt-2.5", CAPTION]}>{signal.desc}</dd>
+                  <dd class="mt-2.5">
+                    <a
+                      href={signal.href}
+                      class:list={["font-mono text-[0.75rem] text-ink-3", PROSE_LINK]}
+                    >
+                      See it on {signal.slug}
+                    </a>
+                  </dd>
+                </div>
+              ))}
+            </dl>
+          </div>
+        ))
+      }
+    </div>
+  </section>
+
+  {/* ── Freshness, limits, and access ────────────────────────────────────── */}
+  <section class="bg-paper">
+    <div class="mx-auto w-full max-w-6xl px-6 py-16">
+      <h2 class={HEADING}>Freshness, limits, and access</h2>
+      <dl
+        class="mt-8 grid grid-cols-1 gap-px border border-rule-strong bg-rule sm:grid-cols-3"
+      >
+        {
+          access.map((item) => (
+            <div class="bg-paper p-5">
+              <dt class="min-h-[2.55rem] font-draft text-[1.0625rem] leading-[1.2] text-ink">
+                {item.term}
+              </dt>
+              <dd class:list={["mt-2.5", CAPTION]}>{item.desc}</dd>
+            </div>
+          ))
+        }
+      </dl>
+
+      <div class="mt-10">
+        <SeriesProvenance client:visible variant="explainer" />
+      </div>
+    </div>
+  </section>
+</Sheet>

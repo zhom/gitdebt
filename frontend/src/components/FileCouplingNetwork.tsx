@@ -1,38 +1,42 @@
-"use client";
+import { useId, useMemo, useState } from "react";
 
-import { useEffect, useMemo, useRef, useState } from "react";
-
-import {
-  BAYER4,
-  INK,
-  SWATCH,
-  hashSeed,
-  type RGB,
-} from "@/lib/dither";
+import { CAPTION, DATUM, FIELD } from "@/components/style-tokens";
+import { FIELD_CELL, FIELD_ROWS } from "@/components/StatStrip";
 import {
   layoutFileCouplings,
   type CouplingEdge,
-  type CouplingLayout,
   type FileCoupling,
 } from "@/lib/repo-signal-visuals";
 import { cn } from "@/lib/utils";
 
+/**
+ * Files that change together, drawn as an assembly.
+ *
+ * Nodes are files, edges are the commits that changed two of them at once, and
+ * the relationship being read is dimensioned: extension lines spring from both
+ * files, a dimension line spans them, and it carries the number of co-changes.
+ * Only one relationship is dimensioned at a time, because a drawing that
+ * dimensions everything at once measures nothing.
+ *
+ * The positions are `layoutFileCouplings()`'s, unchanged, so a repository keeps
+ * the same assembly between renders. What changed is the drawing: this was a
+ * canvas painting textured nodes, travelling packets and a shimmer at sixty
+ * frames a second, with a hand-rolled nearest-node search standing in for hit
+ * testing, and it rendered nothing at all without JavaScript. Nodes and edges
+ * are now real shapes with real pointer targets, present in the markup.
+ */
+
 export type FileCouplingNetworkProps = {
   couplings: readonly FileCoupling[];
-  seed: string;
+  /** Retained for call-site compatibility; the drawing is deterministic. */
+  seed?: string;
   className?: string;
 };
 
-const FRAME_MS = 50;
-const CYCLE_MS = 3_200;
-const CLUSTER_COLORS: readonly RGB[] = [
-  SWATCH.blue,
-  SWATCH.pink,
-  SWATCH.green,
-  SWATCH.orange,
-  SWATCH.purple,
-  SWATCH.red,
-];
+const VIEW_W = 640;
+const VIEW_H = 340;
+const PAD_X = 56;
+const PAD_Y = 34;
 
 const compact = (value: number) =>
   new Intl.NumberFormat("en", {
@@ -40,343 +44,391 @@ const compact = (value: number) =>
     maximumFractionDigits: 1,
   }).format(value);
 
-const rgba = (color: RGB, alpha: number) =>
-  `rgba(${color[0]}, ${color[1]}, ${color[2]}, ${alpha})`;
-
-function edgeLabel(edge: CouplingEdge): string {
-  const source = edge.source.split("/").at(-1) || edge.source;
-  const target = edge.target.split("/").at(-1) || edge.target;
-  return `${source} ↔ ${target}`;
+function tail(path: string): string {
+  return path.split("/").at(-1) || path;
 }
 
-function clusterColor(layout: CouplingLayout, cluster: string): RGB {
-  const index = Math.max(
-    0,
-    layout.clusters.findIndex((item) => item.id === cluster),
-  );
-  return CLUSTER_COLORS[index % CLUSTER_COLORS.length];
+function edgeLabel(edge: CouplingEdge): string {
+  return `${tail(edge.source)} ↔ ${tail(edge.target)}`;
 }
 
 export function FileCouplingNetwork({
   couplings,
-  seed,
   className,
 }: FileCouplingNetworkProps) {
+  const uid = useId();
   const layout = useMemo(() => layoutFileCouplings(couplings), [couplings]);
-  const [autoIndex, setAutoIndex] = useState(0);
-  const [manualIndex, setManualIndex] = useState<number | null>(null);
-  const [hoveredNode, setHoveredNode] = useState<string | null>(null);
-  const canvasRef = useRef<HTMLCanvasElement>(null);
-  const autoRef = useRef(autoIndex);
-  const manualRef = useRef(manualIndex);
-  const hoveredRef = useRef(hoveredNode);
-  autoRef.current = autoIndex;
-  manualRef.current = manualIndex;
-  hoveredRef.current = hoveredNode;
-  const activeIndex =
-    layout.edges.length > 0
-      ? (manualIndex ?? autoIndex) % layout.edges.length
-      : 0;
-  const active = layout.edges[activeIndex] ?? null;
+  // Edges arrive sorted by fix pressure then strength, so index 0 is the
+  // relationship the drawing should be dimensioning when nobody has touched it.
+  // Nothing cycles: an automatic highlight that moves on its own is a drawing
+  // that changes its mind while you are reading it.
+  const [activeIndex, setActiveIndex] = useState(0);
 
-  useEffect(() => {
-    if (autoIndex >= layout.edges.length) setAutoIndex(0);
-    if (manualIndex !== null && manualIndex >= layout.edges.length) {
-      setManualIndex(null);
-    }
-  }, [autoIndex, layout.edges.length, manualIndex]);
+  const placed = useMemo(() => {
+    const maxWeight = Math.max(1, ...layout.nodes.map((node) => node.weight));
+    const points = new Map<string, { x: number; y: number; size: number }>();
+    if (layout.nodes.length === 0) return points;
 
-  useEffect(() => {
-    const canvas = canvasRef.current;
-    if (!canvas || layout.edges.length === 0) return;
-    const context = canvas.getContext("2d");
-    if (!context) return;
+    // The layout works in 0..1 but only ever uses the part of it its clusters
+    // need — a repository whose couplings all live in one directory occupies a
+    // patch in the middle. The assembly is fitted to the sheet so it is drawn
+    // at a readable size, scaled equally on both axes so the shape the layout
+    // computed is the shape that gets drawn.
+    const xs = layout.nodes.map((node) => node.x);
+    const ys = layout.nodes.map((node) => node.y);
+    const minX = Math.min(...xs);
+    const minY = Math.min(...ys);
+    const spanX = Math.max(0.02, Math.max(...xs) - minX);
+    const spanY = Math.max(0.02, Math.max(...ys) - minY);
+    const plotW = VIEW_W - PAD_X * 2;
+    const plotH = VIEW_H - PAD_Y * 2;
+    const scale = Math.min(plotW / spanX, plotH / spanY);
+    const offsetX = PAD_X + (plotW - spanX * scale) / 2;
+    const offsetY = PAD_Y + (plotH - spanY * scale) / 2;
 
-    let width = 1;
-    let height = 1;
-    let frame = 0;
-    let visible = true;
-    let reduced = window.matchMedia("(prefers-reduced-motion: reduce)").matches;
-    let lastPaint = 0;
-    let lastCycle = -1;
-    const started = performance.now();
-    const seedPhase = (hashSeed(seed) & 2047) / 2047;
-    const motion = window.matchMedia("(prefers-reduced-motion: reduce)");
-
-    const resizeCanvas = () => {
-      const box = canvas.getBoundingClientRect();
-      const nextWidth = Math.max(1, Math.round(box.width));
-      const nextHeight = Math.max(1, Math.round(box.height));
-      if (nextWidth === width && nextHeight === height) return;
-      width = nextWidth;
-      height = nextHeight;
-      const dpr = Math.min(1.5, window.devicePixelRatio || 1);
-      canvas.width = Math.round(width * dpr);
-      canvas.height = Math.round(height * dpr);
-      context.setTransform(dpr, 0, 0, dpr, 0, 0);
-    };
-    const position = (id: string) => {
-      const node = layout.nodes.find((item) => item.id === id);
-      if (!node) return null;
-      const insetX = Math.min(48, width * 0.1);
-      const insetY = 30;
-      return {
-        node,
-        x: insetX + node.x * Math.max(1, width - insetX * 2),
-        y: insetY + node.y * Math.max(1, height - insetY * 2),
-      };
-    };
-
-    const paintBackground = (phase: number) => {
-      context.clearRect(0, 0, width, height);
-      context.fillStyle = "rgba(237, 237, 237, 0.035)";
-      const shift = reduced
-        ? Math.floor(seedPhase * 4)
-        : Math.floor(phase * 2 + seedPhase * 4) & 3;
-      for (let y = 3; y < height; y += 6) {
-        for (let x = 3; x < width; x += 6) {
-          if (BAYER4[(Math.floor(y / 6) + shift) & 3][Math.floor(x / 6) & 3] < 0.3) {
-            context.fillRect(x, y, 1, 1);
-          }
-        }
-      }
-    };
-
-    const paintEdge = (
-      edge: CouplingEdge,
-      index: number,
-      phase: number,
-      activeEdge: number,
-    ) => {
-      const source = position(edge.source);
-      const target = position(edge.target);
-      if (!source || !target) return;
-      const isActive =
-        index === activeEdge ||
-        hoveredRef.current === edge.source ||
-        hoveredRef.current === edge.target;
-      const color = isActive
-        ? clusterColor(layout, edge.cluster)
-        : INK;
-      const dx = target.x - source.x;
-      const dy = target.y - source.y;
-      const distance = Math.max(1, Math.hypot(dx, dy));
-      const steps = Math.max(4, Math.floor(distance / 4));
-      const density = Math.min(0.94, 0.2 + edge.strength * 0.62);
-      context.fillStyle = rgba(color, isActive ? 0.88 : 0.18 + edge.strength * 0.3);
-      for (let step = 0; step <= steps; step += 1) {
-        if (density <= BAYER4[(step + index) & 3][(step >> 2) & 3]) continue;
-        const t = step / steps;
-        context.fillRect(
-          Math.round(source.x + dx * t) - 1,
-          Math.round(source.y + dy * t) - 1,
-          isActive ? 3 : 2,
-          isActive ? 3 : 2,
-        );
-      }
-      if (!isActive || reduced) return;
-      context.fillStyle = rgba(color, 0.98);
-      for (let packet = 0; packet < 3; packet += 1) {
-        const t = (phase * 0.16 + seedPhase + packet / 3) % 1;
-        context.fillRect(
-          Math.round(source.x + dx * t) - 2,
-          Math.round(source.y + dy * t) - 2,
-          5,
-          5,
-        );
-      }
-    };
-
-    const paintNode = (
-      id: string,
-      phase: number,
-      activeEdge: CouplingEdge | null,
-    ) => {
-      const point = position(id);
-      if (!point) return;
-      const connected =
-        activeEdge?.source === id ||
-        activeEdge?.target === id ||
-        hoveredRef.current === id;
-      const maxWeight = Math.max(1, ...layout.nodes.map((node) => node.weight));
-      const radius = 5 + Math.sqrt(point.node.weight / maxWeight) * 7;
-      const color = clusterColor(layout, point.node.cluster);
-      const shimmer = reduced ? 0 : Math.floor(phase * 2) & 3;
-      for (let y = -radius; y <= radius; y += 2) {
-        for (let x = -radius; x <= radius; x += 2) {
-          if (x * x + y * y > radius * radius) continue;
-          const density = connected ? 0.9 : 0.42;
-          if (
-            density <=
-            BAYER4[(Math.round(y / 2) + shimmer) & 3][Math.round(x / 2) & 3]
-          ) {
-            continue;
-          }
-          context.fillStyle = rgba(color, connected ? 0.96 : 0.54);
-          context.fillRect(
-            Math.round(point.x + x),
-            Math.round(point.y + y),
-            connected ? 3 : 2,
-            connected ? 3 : 2,
-          );
-        }
-      }
-      if (!connected) return;
-      context.font =
-        '11px "Geist Mono Variable", ui-monospace, monospace';
-      context.textBaseline = "middle";
-      const metrics = context.measureText(point.node.label);
-      const labelX = Math.max(
-        metrics.width / 2 + 4,
-        Math.min(width - metrics.width / 2 - 4, point.x),
-      );
-      const labelY =
-        point.y < height * 0.25 ? point.y + radius + 13 : point.y - radius - 10;
-      context.fillStyle = "rgba(8, 9, 12, 0.86)";
-      context.fillRect(
-        labelX - metrics.width / 2 - 4,
-        labelY - 8,
-        metrics.width + 8,
-        16,
-      );
-      context.textAlign = "center";
-      context.fillStyle = "rgba(237, 237, 237, 0.92)";
-      context.fillText(point.node.label, labelX, labelY);
-    };
-
-    const paint = (now: number) => {
-      resizeCanvas();
-      const phase = reduced ? 0 : (now - started) / 1_000;
-      if (!reduced && manualRef.current === null) {
-        const cycle = Math.floor((now - started) / CYCLE_MS);
-        if (cycle !== lastCycle) {
-          lastCycle = cycle;
-          const next = cycle % layout.edges.length;
-          if (next !== autoRef.current) {
-            autoRef.current = next;
-            setAutoIndex(next);
-          }
-        }
-      }
-      const edgeIndex =
-        (manualRef.current ?? autoRef.current) % layout.edges.length;
-      const activeEdge = layout.edges[edgeIndex] ?? null;
-      paintBackground(phase);
-      layout.edges.forEach((edge, index) =>
-        paintEdge(edge, index, phase, edgeIndex),
-      );
-      layout.nodes.forEach((node) => paintNode(node.id, phase, activeEdge));
-    };
-
-    const tick = (now: number) => {
-      frame = 0;
-      if (!visible) return;
-      if (now - lastPaint >= FRAME_MS) {
-        lastPaint = now;
-        paint(now);
-      }
-      if (!reduced) frame = requestAnimationFrame(tick);
-    };
-    const start = () => {
-      if (reduced) paint(performance.now());
-      else if (!frame && visible) frame = requestAnimationFrame(tick);
-    };
-    const stop = () => {
-      if (frame) cancelAnimationFrame(frame);
-      frame = 0;
-    };
-    const intersection = new IntersectionObserver(([entry]) => {
-      visible = entry?.isIntersecting ?? true;
-      if (visible) start();
-      else stop();
-    });
-    intersection.observe(canvas);
-    const resize = new ResizeObserver(() => paint(performance.now()));
-    resize.observe(canvas);
-    const updateMotion = () => {
-      reduced = motion.matches;
-      stop();
-      start();
-    };
-    motion.addEventListener("change", updateMotion);
-    start();
-
-    return () => {
-      stop();
-      intersection.disconnect();
-      resize.disconnect();
-      motion.removeEventListener("change", updateMotion);
-    };
-  }, [layout, seed]);
-
-  const nearestNode = (clientX: number, clientY: number) => {
-    const canvas = canvasRef.current;
-    if (!canvas) return null;
-    const box = canvas.getBoundingClientRect();
-    const insetX = Math.min(48, box.width * 0.1);
-    const insetY = 30;
-    let nearest: { id: string; distance: number } | null = null;
     for (const node of layout.nodes) {
-      const x = insetX + node.x * Math.max(1, box.width - insetX * 2);
-      const y = insetY + node.y * Math.max(1, box.height - insetY * 2);
-      const distance = Math.hypot(clientX - box.left - x, clientY - box.top - y);
-      if (!nearest || distance < nearest.distance) {
-        nearest = { id: node.id, distance };
-      }
+      points.set(node.id, {
+        x: offsetX + (node.x - minX) * scale,
+        y: offsetY + (node.y - minY) * scale,
+        size: 5 + Math.sqrt(node.weight / maxWeight) * 5,
+      });
     }
-    return nearest && nearest.distance <= 22 ? nearest.id : null;
-  };
+    return points;
+  }, [layout]);
+
+  /** The strongest relationship a given file takes part in. */
+  const strongestFor = useMemo(() => {
+    const byFile = new Map<string, number>();
+    layout.edges.forEach((edge, index) => {
+      if (!byFile.has(edge.source)) byFile.set(edge.source, index);
+      if (!byFile.has(edge.target)) byFile.set(edge.target, index);
+    });
+    return byFile;
+  }, [layout]);
 
   if (layout.edges.length === 0) {
     return (
-      <p
-        className={cn(
-          "p-3.5 text-pretty text-base text-muted-foreground sm:text-sm",
-          className,
-        )}
-      >
-        No repeated file relationships were strong enough to visualize.
+      <p className={cn(CAPTION, "p-4", className)}>
+        No repeated file relationships were strong enough to draw.
       </p>
     );
   }
 
-  return (
-    <figure className={cn("min-w-0 p-3.5", className)}>
-      <canvas
-        ref={canvasRef}
-        aria-hidden="true"
-        className="h-72 w-full max-w-full touch-pan-y overflow-hidden rounded-md bg-background/35"
-        onPointerMove={(event) =>
-          setHoveredNode(nearestNode(event.clientX, event.clientY))
-        }
-        onPointerLeave={() => setHoveredNode(null)}
-      />
+  const index = Math.min(activeIndex, layout.edges.length - 1);
+  const active = layout.edges[index];
+  const a = placed.get(active.source);
+  const b = placed.get(active.target);
 
-      <figcaption className="mt-3 grid gap-2 sm:grid-cols-2">
-        {layout.edges.slice(0, 4).map((edge, index) => (
+  /** The dimension across the relationship being read. */
+  const dimension = (() => {
+    if (!a || !b) return null;
+    const dx = b.x - a.x;
+    const dy = b.y - a.y;
+    const length = Math.hypot(dx, dy) || 1;
+    const ux = dx / length;
+    const uy = dy / length;
+    // Normal, always chosen to point up the sheet, so the value never lands
+    // underneath its own dimension line.
+    let nx = -uy;
+    let ny = ux;
+    if (ny > 0) {
+      nx = -nx;
+      ny = -ny;
+    }
+    const off = 17;
+    const from = { x: a.x + nx * off, y: a.y + ny * off };
+    const to = { x: b.x + nx * off, y: b.y + ny * off };
+    const mid = { x: (from.x + to.x) / 2, y: (from.y + to.y) / 2 };
+    const head = (at: { x: number; y: number }, sx: number, sy: number) =>
+      `M${at.x.toFixed(2)} ${at.y.toFixed(2)} L${(at.x + sx * 8 - nx * 2.6).toFixed(2)} ${(at.y + sy * 8 - ny * 2.6).toFixed(2)} L${(at.x + sx * 8 + nx * 2.6).toFixed(2)} ${(at.y + sy * 8 + ny * 2.6).toFixed(2)} z`;
+    // Where the value is lettered. A dimension offset upward carries it
+    // centred above the line; one offset sideways — which is what a near
+    // vertical relationship gives — carries it beside the line instead, so the
+    // lettering never sits on top of the line it belongs to.
+    // Past 0.72 the relationship is within about 45° of vertical, which is
+    // where a centred value starts to sit on its own dimension line.
+    const sideways = Math.abs(nx) > 0.72;
+    const anchor: "start" | "middle" | "end" = sideways
+      ? nx < 0
+        ? "end"
+        : "start"
+      : "middle";
+    const reach = sideways ? 8 : 11;
+    const rawX = mid.x + nx * reach;
+    const label = {
+      x:
+        anchor === "middle"
+          ? Math.min(VIEW_W - 110, Math.max(110, rawX))
+          : anchor === "end"
+            ? Math.min(VIEW_W - 8, Math.max(132, rawX))
+            : Math.min(VIEW_W - 132, Math.max(8, rawX)),
+      y: mid.y + ny * reach,
+      anchor,
+    };
+    return {
+      from,
+      to,
+      mid,
+      nx,
+      ny,
+      label,
+      // Arrowheads point inward along the dimension line, the way a short
+      // dimension is terminated when the value will not fit between them.
+      heads: [head(from, ux, uy), head(to, -ux, -uy)],
+    };
+  })();
+
+  return (
+    <figure className={cn("min-w-0", className)}>
+      <div className="overflow-x-auto p-4">
+        <svg
+          viewBox={`0 0 ${VIEW_W} ${VIEW_H}`}
+          width="100%"
+          height={VIEW_H}
+          preserveAspectRatio="xMidYMid meet"
+          role="img"
+          aria-labelledby={`${uid}-title`}
+          className="block min-w-[460px] touch-pan-y select-none"
+        >
+          <title id={`${uid}-title`}>
+            {`${layout.nodes.length} files joined by ${layout.edges.length} repeated co-change relationships.`}
+          </title>
+
+          {/* The relationship being read is drawn last, so no quiet edge is
+              ever laid across it. */}
+          {layout.edges
+            .map((edge, edgeIndex) => ({ edge, edgeIndex }))
+            .sort(
+              (a, b) =>
+                Number(a.edgeIndex === index) - Number(b.edgeIndex === index),
+            )
+            .map(({ edge, edgeIndex }) => {
+              const from = placed.get(edge.source);
+              const to = placed.get(edge.target);
+              if (!from || !to) return null;
+              const selected = edgeIndex === index;
+              const span = Math.ceil(Math.hypot(to.x - from.x, to.y - from.y));
+              return (
+                <line
+                  key={`${edge.source}\0${edge.target}`}
+                  x1={from.x}
+                  y1={from.y}
+                  x2={to.x}
+                  y2={to.y}
+                  stroke={selected ? "var(--signal)" : "var(--rule-strong)"}
+                  strokeWidth={selected ? 1.75 : 0.75 + edge.strength * 0.85}
+                  strokeLinecap="round"
+                  className="inks-in"
+                  style={{
+                    ["--draw-length" as string]: String(span),
+                    ["--draw-delay" as string]: `${Math.min(edgeIndex, 8) * 45}ms`,
+                  }}
+                />
+              );
+            })}
+
+          {/* The measured relationship. Extension lines spring from both files,
+              the dimension line spans them, and it carries the count. */}
+          {dimension && a && b && (
+            <g>
+              <line
+                x1={a.x}
+                y1={a.y}
+                x2={dimension.from.x + dimension.nx * 5}
+                y2={dimension.from.y + dimension.ny * 5}
+                stroke="var(--signal)"
+                strokeWidth="1"
+              />
+              <line
+                x1={b.x}
+                y1={b.y}
+                x2={dimension.to.x + dimension.nx * 5}
+                y2={dimension.to.y + dimension.ny * 5}
+                stroke="var(--signal)"
+                strokeWidth="1"
+              />
+              <line
+                x1={dimension.from.x}
+                y1={dimension.from.y}
+                x2={dimension.to.x}
+                y2={dimension.to.y}
+                stroke="var(--signal)"
+                strokeWidth="1"
+              />
+              {dimension.heads.map((head) => (
+                <path key={head} d={head} fill="var(--signal)" />
+              ))}
+              <text
+                x={dimension.label.x}
+                y={dimension.label.y}
+                textAnchor={dimension.label.anchor}
+                className="font-draft"
+                fontSize="17"
+                fill="var(--signal)"
+                style={{ fontVariantNumeric: "tabular-nums" }}
+              >
+                <tspan
+                  stroke="var(--paper)"
+                  strokeWidth="6"
+                  paintOrder="stroke"
+                  strokeLinejoin="round"
+                >
+                  {`${compact(active.cochanges)} CO-CHANGES`}
+                </tspan>
+              </text>
+              <text
+                x={dimension.label.x}
+                y={dimension.label.y + 15}
+                textAnchor={dimension.label.anchor}
+                className="font-draft"
+                fontSize="11"
+                letterSpacing="0.06em"
+                fill="var(--ink-3)"
+                style={{ fontVariantNumeric: "tabular-nums" }}
+              >
+                <tspan
+                  stroke="var(--paper)"
+                  strokeWidth="5"
+                  paintOrder="stroke"
+                  strokeLinejoin="round"
+                >
+                  {`${compact(active.fixCommits)} FIX-LABELLED`}
+                </tspan>
+              </text>
+            </g>
+          )}
+
+          {layout.nodes.map((node) => {
+            const point = placed.get(node.id);
+            if (!point) return null;
+            const selected =
+              node.id === active.source || node.id === active.target;
+            return (
+              <rect
+                key={node.id}
+                x={point.x - point.size / 2}
+                y={point.y - point.size / 2}
+                width={point.size}
+                height={point.size}
+                fill={selected ? "var(--signal)" : "var(--ink-2)"}
+              />
+            );
+          })}
+
+          {/* Only the two files being measured are named. Naming all fourteen
+              at once is how a drawing turns into a word cloud. */}
+          {[active.source, active.target].map((id) => {
+            const point = placed.get(id);
+            if (!point) return null;
+            const node = layout.nodes.find((item) => item.id === id);
+            if (!node) return null;
+            // Clear of both sheet edges by half a full-length filename, so a
+            // long name at an extreme node cannot run off the drawing.
+            const x = Math.min(VIEW_W - 80, Math.max(80, point.x));
+            // Under the file wherever there is room, because the dimension is
+            // carried above or beside its line and never below it.
+            const below = point.y < VIEW_H - 26;
+            return (
+              <text
+                key={`${id}-label`}
+                x={x}
+                y={below ? point.y + point.size / 2 + 17 : point.y - point.size / 2 - 9}
+                textAnchor="middle"
+                className="font-mono"
+                fontSize="11.5"
+                fill="var(--ink)"
+              >
+                <tspan
+                  stroke="var(--paper)"
+                  strokeWidth="5"
+                  paintOrder="stroke"
+                  strokeLinejoin="round"
+                >
+                  {node.label}
+                </tspan>
+              </text>
+            );
+          })}
+
+          {/* Hit targets, over the drawing. An edge is a line the pointer can
+              land on and a file is a square it can land on; neither needs a
+              nearest-point search written by hand. */}
+          {layout.edges.map((edge, edgeIndex) => {
+            const from = placed.get(edge.source);
+            const to = placed.get(edge.target);
+            if (!from || !to) return null;
+            return (
+              <line
+                key={`${edge.source}\0${edge.target}-hit`}
+                x1={from.x}
+                y1={from.y}
+                x2={to.x}
+                y2={to.y}
+                stroke="transparent"
+                strokeWidth="14"
+                pointerEvents="stroke"
+                onPointerEnter={() => setActiveIndex(edgeIndex)}
+              />
+            );
+          })}
+          {layout.nodes.map((node) => {
+            const point = placed.get(node.id);
+            const target = strongestFor.get(node.id);
+            if (!point || target === undefined) return null;
+            return (
+              <circle
+                key={`${node.id}-hit`}
+                cx={point.x}
+                cy={point.y}
+                r="15"
+                fill="transparent"
+                onPointerEnter={() => setActiveIndex(target)}
+              />
+            );
+          })}
+        </svg>
+      </div>
+
+      {/* The four strongest relationships, on one grid. Each cell is the same
+          three rows, so the pair, the count and the fix share line up across
+          all four however long a filename runs. */}
+      <figcaption
+        className={cn("grid border-t border-rule sm:grid-cols-2", FIELD_ROWS)}
+      >
+        {layout.edges.slice(0, 4).map((edge, cellIndex) => (
           <button
             key={`${edge.source}\0${edge.target}`}
             type="button"
             aria-label={`${edge.source} and ${edge.target}: ${edge.cochanges} co-changes and ${edge.fixCommits} fix commits`}
-            aria-pressed={index === activeIndex}
+            aria-pressed={cellIndex === index}
             title={`${edge.source} ↔ ${edge.target}`}
-            onClick={() => setManualIndex(index)}
-            onPointerEnter={() => setManualIndex(index)}
-            onPointerLeave={() => setManualIndex(null)}
-            onFocus={() => setManualIndex(index)}
-            onBlur={() => setManualIndex(null)}
-            className="min-w-0 rounded-md border border-border/60 p-2.5 text-left outline-none transition-transform duration-200 hover:-translate-y-0.5 focus-visible:ring-2 focus-visible:ring-accent/30 aria-pressed:border-foreground/30 aria-pressed:bg-card/70 motion-reduce:transition-none"
+            onClick={() => setActiveIndex(cellIndex)}
+            onPointerEnter={() => setActiveIndex(cellIndex)}
+            onFocus={() => setActiveIndex(cellIndex)}
+            className={cn(
+              FIELD_CELL,
+              "min-h-11 p-4 text-left outline-none transition-colors duration-[--duration-ui] hover:bg-table focus-visible:outline-2 focus-visible:-outline-offset-2 focus-visible:outline-signal aria-pressed:bg-table",
+              cellIndex > 0 && "border-t border-rule",
+              cellIndex === 1 && "sm:border-t-0",
+              cellIndex % 2 === 1 && "sm:border-l sm:border-rule",
+            )}
           >
-            <p className="truncate font-mono text-base text-foreground/90 sm:text-[0.6875rem]">
+            <span className={FIELD}>Co-change</span>
+            {/* The cell being read is marked by its ground stepping to the
+                table, not by red ink: a pair of filenames is the subject of a
+                measurement, never the measurement itself. */}
+            <span className={cn(DATUM, "mt-2.5 block truncate text-[0.875rem] text-ink")}>
               {edgeLabel(edge)}
-            </p>
-            <div className="mt-1 flex items-center justify-between gap-2 font-mono text-sm text-muted-foreground tabular-nums sm:text-[0.625rem]">
-              <p>{compact(edge.cochanges)} co-changes</p>
-              <p>{compact(edge.fixCommits)} fixes</p>
-            </div>
+            </span>
+            <span className={cn(CAPTION, "mt-2")}>
+              {`${compact(edge.cochanges)} co-changes · ${compact(edge.fixCommits)} fix-labelled`}
+            </span>
           </button>
         ))}
       </figcaption>
+
+      {/* Every relationship in the drawing, as text. A picture of a graph is
+          unreadable to a screen reader and to an agent; these are not. */}
       <ul role="list" className="sr-only">
         {layout.edges.map((edge) => (
           <li key={`${edge.source}\0${edge.target}-accessible`}>
@@ -385,13 +437,9 @@ export function FileCouplingNetwork({
           </li>
         ))}
       </ul>
-      <p
-        className="mt-3 text-pretty text-base text-muted-foreground sm:text-sm"
-        aria-live="polite"
-      >
-        {active
-          ? `${active.source} and ${active.target} changed together ${active.cochanges.toLocaleString()} times; ${active.fixCommits.toLocaleString()} of the coupled changes were fix commits.`
-          : "Strongest file relationships are unavailable."}
+
+      <p className={cn(CAPTION, "px-4 pt-3 pb-4")} aria-live="polite">
+        {`${active.source} and ${active.target} changed together ${active.cochanges.toLocaleString()} times; ${active.fixCommits.toLocaleString()} of the coupled changes were fix commits.`}
       </p>
     </figure>
   );

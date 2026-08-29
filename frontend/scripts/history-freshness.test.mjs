@@ -8,8 +8,8 @@ import {
   needsNotice,
   noticeText,
   seriesOpen,
-  sourceDensity,
   sourceDetail,
+  sourceStroke,
   sourceLabel,
   stateLabel,
 } from "../src/lib/history-freshness.ts";
@@ -226,14 +226,15 @@ test("sourceDetail delegates the July 2026 sentences instead of retyping them", 
   }
 });
 
-test("sourceDensity depends only on the state, never on the data", () => {
-  // If density tracked coverage or event volume it would be a completeness
-  // score wearing a texture, which is the one figure that must never ship.
+test("sourceStroke depends only on the state, never on the data", () => {
+  // If the dash pattern tracked coverage or event volume it would be a
+  // completeness score wearing a line style, which is the one figure that must
+  // never ship.
   const early = historyFreshness(exact("2026-07-02T00:00:00Z"));
   const late = historyFreshness(exact("2026-08-09T00:00:00Z"));
   assert.equal(early.state, "exact_frozen");
   assert.equal(late.state, "exact_frozen");
-  assert.equal(sourceDensity(early), sourceDensity(late));
+  assert.equal(sourceStroke(early), sourceStroke(late));
 
   const thinArchive = historyFreshness({
     history_complete: true,
@@ -249,22 +250,38 @@ test("sourceDensity depends only on the state, never on the data", () => {
     history_coverage_end: "2026-08-09T00:00:00Z",
     history_event_count: 480_000,
   });
-  assert.equal(sourceDensity(thinArchive), sourceDensity(fatArchive));
+  assert.equal(sourceStroke(thinArchive), sourceStroke(fatArchive));
 
-  // A spliced series is two sources, not a measured blend of them: its density
-  // is one constant, and two spliced series with wildly different exact halves
-  // must be indistinguishable in the mark.
+  // A spliced series is two sources, not a measured blend of them: its tail
+  // pattern is one constant, and two spliced series with wildly different exact
+  // halves must be drawn with the same line.
   const earlySplice = historyFreshness(spliced("2026-08-15T00:00:00Z", "2019-04-01T00:00:00Z"));
   const lateSplice = historyFreshness(spliced("2026-08-15T00:00:00Z", "2026-07-20T00:00:00Z"));
-  assert.equal(sourceDensity(earlySplice), sourceDensity(lateSplice));
+  assert.equal(sourceStroke(earlySplice), sourceStroke(lateSplice));
 
-  assert.equal(sourceDensity(STATES.exact_current), 0.85);
-  assert.equal(sourceDensity(STATES.exact_frozen), 0.85);
-  assert.equal(sourceDensity(STATES.spliced), 0.65);
-  assert.equal(sourceDensity(STATES.archive), 0.45);
-  assert.equal(sourceDensity(STATES.restricted), 0.12);
-  assert.equal(sourceDensity(STATES.unknown), 0.12);
-  assert.equal(sourceDensity.length, 1, "density must never take a magnitude argument");
+  // An exact series is an object line: measured, so it is drawn solid.
+  assert.equal(sourceStroke(STATES.exact_current), "");
+  assert.equal(sourceStroke(STATES.exact_frozen), "");
+  // Spliced carries the pattern its tail is drawn with; the head stays solid.
+  assert.equal(sourceStroke(STATES.spliced), "9 4");
+  // Archive is a construction line: real and derived rather than observed.
+  assert.equal(sourceStroke(STATES.archive), "5 4");
+  // Nothing was measured, so the line is drawn as one that was never taken.
+  assert.equal(sourceStroke(STATES.restricted), "1 3");
+  assert.equal(sourceStroke(STATES.unknown), "1 3");
+
+  // Every pattern is a legal SVG dash array, and every dashed state is
+  // distinguishable from every other at a glance.
+  const patterns = new Set();
+  for (const freshness of Object.values(STATES)) {
+    const dash = sourceStroke(freshness);
+    assert.equal(typeof dash, "string");
+    if (dash !== "") assert.match(dash, /^\d+(?:\.\d+)? \d+(?:\.\d+)?$/);
+    patterns.add(dash);
+  }
+  assert.equal(patterns.size, 4, "one pattern per source, not one per state");
+
+  assert.equal(sourceStroke.length, 1, "the stroke must never take a magnitude argument");
 });
 
 test("seriesOpen is true only where points are still arriving", () => {

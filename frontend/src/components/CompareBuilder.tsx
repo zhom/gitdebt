@@ -1,24 +1,30 @@
 import { useEffect, useId, useRef, useState } from "react";
-import { AnimatePresence, motion, useReducedMotion } from "motion/react";
-import { ArrowRight, Plus, X } from "lucide-react";
 
 import { ButtonLink } from "@/components/ButtonLink";
 import { Button } from "@/components/ui/button";
-import { DitherComparisonChart } from "@/components/DitherComparisonChart";
+import { Cut } from "@/components/ui/marks";
+import { ComparisonSheet } from "@/components/ComparisonSheet";
 import {
   RepoComparisonMatrix,
   type ComparisonInitialRepo,
 } from "@/components/RepoComparisonMatrix";
-import { BODY, EYEBROW, PANEL, PANEL_PADDED } from "@/components/style-tokens";
+import { BODY, CAPTION, FIELD, MEASURE, PANEL } from "@/components/style-tokens";
 import { warmRepos } from "@/components/WarmRepos";
 import { CATEGORIES } from "@/data/categories";
-import {
-  DURATION,
-  EASE_IN_OUT,
-  EASE_OUT,
-  REDUCED_MOTION_DURATION,
-} from "@/lib/motion";
 import { cn } from "@/lib/utils";
+
+/**
+ * The overlay builder: a list of subjects, and one action that draws them.
+ *
+ * The rows are a schedule, not a form: each one is numbered, the origin
+ * `github.com/` is lettered into the field rather than repeated as a hint, and
+ * the field is a drawn box that takes ink under the pointer. Nothing slides in
+ * or fades up — a row that exists is on the page from the first paint, and a
+ * row that is removed is simply gone.
+ *
+ * There is one action, and it is the primary one. `Add repository` is a text
+ * action beside it rather than the outlined half of a filled/outlined pair.
+ */
 
 type Props = {
   apiBase: string;
@@ -31,9 +37,7 @@ const MAX_REPOS = 8;
 const STATIC_PAIRS = new Set(
   CATEGORIES.flatMap((category) =>
     category.repos.flatMap((first, i) =>
-      category.repos.slice(i + 1).map((second) =>
-        [first, second].sort().join("/"),
-      ),
+      category.repos.slice(i + 1).map((second) => [first, second].sort().join("/")),
     ),
   ),
 );
@@ -43,10 +47,7 @@ type CompareRow = { id: string; value: string };
 function seedRows(initial: string[], prefix: string): CompareRow[] {
   const values = initial.slice(0, MAX_REPOS).map((s) => s.toLowerCase());
   while (values.length < MIN_ROWS) values.push("");
-  return values.map((value, index) => ({
-    id: `${prefix}-${index}`,
-    value,
-  }));
+  return values.map((value, index) => ({ id: `${prefix}-${index}`, value }));
 }
 
 function resolveSeed(initialRepos: string[]): string[] {
@@ -64,9 +65,7 @@ export function CompareBuilder({ apiBase, initialRepos = [] }: Props) {
   const seed = resolveSeed(initialRepos);
   const idPrefix = useId().replaceAll(":", "");
   const nextRowId = useRef(Math.max(seed.length, MIN_ROWS));
-  const [rows, setRows] = useState<CompareRow[]>(() =>
-    seedRows(seed, idPrefix),
-  );
+  const [rows, setRows] = useState<CompareRow[]>(() => seedRows(seed, idPrefix));
   const [error, setError] = useState<string | null>(null);
   const [active, setActive] = useState<string[] | null>(() => {
     const valid = seed
@@ -76,12 +75,9 @@ export function CompareBuilder({ apiBase, initialRepos = [] }: Props) {
   });
   const pendingFocusId = useRef<string | null>(null);
   const inputRefs = useRef(new Map<string, HTMLInputElement>());
-  const reduceMotion = useReducedMotion();
 
   function setRow(i: number, value: string) {
-    setRows((prev) =>
-      prev.map((row, idx) => (idx === i ? { ...row, value } : row)),
-    );
+    setRows((prev) => prev.map((row, idx) => (idx === i ? { ...row, value } : row)));
   }
 
   function addRow() {
@@ -106,9 +102,7 @@ export function CompareBuilder({ apiBase, initialRepos = [] }: Props) {
   function compare(e: React.SubmitEvent<HTMLFormElement>) {
     e.preventDefault();
     setError(null);
-    const cleaned = rows
-      .map((row) => row.value.trim().toLowerCase())
-      .filter(Boolean);
+    const cleaned = rows.map((row) => row.value.trim().toLowerCase()).filter(Boolean);
     if (cleaned.length < MIN_ROWS) {
       setError(`Add at least ${MIN_ROWS} repositories.`);
       return;
@@ -137,139 +131,93 @@ export function CompareBuilder({ apiBase, initialRepos = [] }: Props) {
   const compareHref = active
     ? `/compare?repos=${encodeURIComponent(active.join(","))}`
     : "/compare";
-  const pairKey =
-    active && active.length === 2 ? [...active].sort().join("/") : null;
+  const pairKey = active && active.length === 2 ? [...active].sort().join("/") : null;
   const vsHref =
     active && pairKey && STATIC_PAIRS.has(pairKey)
       ? `/vs/${[...active].sort().join("/")}`
       : null;
   const embedHref = vsHref ?? compareHref;
+  const errorId = `${idPrefix}-error`;
 
   return (
-    <div className="space-y-8">
-      <form onSubmit={compare} className={cn(PANEL, "p-3.5")}>
-        <p className={EYEBROW}>Repos to overlay</p>
-        <div className="mt-3 space-y-2">
-          <AnimatePresence initial={false}>
-            {rows.map((row, i) => (
-              <motion.div
-                key={row.id}
-                layout={reduceMotion ? false : "position"}
-                initial={{
-                  opacity: 0,
-                  y: reduceMotion ? 0 : -4,
-                  scale: reduceMotion ? 1 : 0.98,
-                }}
-                animate={{ opacity: 1, y: 0, scale: 1 }}
-                exit={{
-                  opacity: 0,
-                  scale: reduceMotion ? 1 : 0.98,
-                  transition: {
-                    duration: reduceMotion
-                      ? REDUCED_MOTION_DURATION
-                      : DURATION.feedback,
-                    ease: EASE_OUT,
-                  },
-                }}
-                transition={{
-                  duration: reduceMotion
-                    ? REDUCED_MOTION_DURATION
-                    : DURATION.enter,
-                  ease: EASE_OUT,
-                  layout: {
-                    duration: DURATION.move,
-                    ease: EASE_IN_OUT,
-                  },
-                }}
-                className="flex items-center gap-2"
-              >
-                <div className="flex min-h-10 flex-1 items-center rounded-md border border-border/60 bg-background/60 font-mono text-[13px] transition-[border-color] duration-150 hover:border-foreground/25 focus-within:border-accent/70">
-                  <label
-                    htmlFor={`compare-repo-${row.id}`}
-                    className="pl-3 text-muted-foreground select-none"
-                  >
-                    github.com/
-                  </label>
-                  <input
-                    ref={(node) => {
-                      if (node) inputRefs.current.set(row.id, node);
-                      else inputRefs.current.delete(row.id);
-                    }}
-                    id={`compare-repo-${row.id}`}
-                    name={`repo-${i + 1}`}
-                    value={row.value}
-                    onChange={(e) => setRow(i, e.target.value)}
-                    placeholder="owner/repo"
-                    autoCapitalize="off"
-                    autoCorrect="off"
-                    spellCheck={false}
-                    aria-label={`Repository ${i + 1}, as owner/repo`}
-                    className="w-full flex-1 bg-transparent py-2 pr-3 pl-1 text-foreground placeholder:text-muted-foreground/50 outline-none"
-                  />
-                </div>
-                <Button
-                  variant="ghost"
-                  size="icon"
-                  onClick={() => removeRow(i)}
-                  disabled={rows.length <= MIN_ROWS}
-                  aria-label={`Remove repository ${i + 1}`}
-                  className="shrink-0"
-                >
-                  <X className="size-4" strokeWidth={1.75} aria-hidden="true" />
-                </Button>
-              </motion.div>
-            ))}
-          </AnimatePresence>
-        </div>
+    <div className="space-y-10">
+      <form onSubmit={compare} className={cn(PANEL, "space-y-4")}>
+        <p className={FIELD}>Repositories to overlay</p>
 
-        <div className="mt-4 flex flex-col gap-3 sm:flex-row sm:items-center sm:justify-between">
+        <ul role="list" className="space-y-2">
+          {rows.map((row, i) => (
+            <li key={row.id} className="flex items-center gap-2">
+              {/* The row number is the drawing's item mark: it says which
+                  subject this is, and it is the only lettering the row needs. */}
+              <span className="w-5 shrink-0 text-right font-mono text-[0.75rem] tabular-nums text-ink-3">
+                {i + 1}
+              </span>
+              <div className="flex min-h-11 flex-1 items-center border border-rule-strong bg-paper font-mono text-[0.8125rem] transition-colors duration-[--duration-ui] focus-within:border-ink-3 hover:border-ink-3">
+                <label
+                  htmlFor={`compare-repo-${row.id}`}
+                  className="pl-3 text-ink-3 select-none"
+                >
+                  github.com/
+                </label>
+                <input
+                  ref={(node) => {
+                    if (node) inputRefs.current.set(row.id, node);
+                    else inputRefs.current.delete(row.id);
+                  }}
+                  id={`compare-repo-${row.id}`}
+                  name={`repo-${i + 1}`}
+                  value={row.value}
+                  onChange={(e) => setRow(i, e.target.value)}
+                  placeholder="owner/repo"
+                  autoCapitalize="off"
+                  autoCorrect="off"
+                  spellCheck={false}
+                  aria-label={`Repository ${i + 1}, as owner/repo`}
+                  aria-invalid={error ? true : undefined}
+                  aria-describedby={error ? errorId : undefined}
+                  className="w-full min-w-0 flex-1 bg-transparent py-2 pr-3 pl-1 text-ink outline-none placeholder:text-ink-3"
+                />
+              </div>
+              <Button
+                variant="quiet"
+                size="icon"
+                onClick={() => removeRow(i)}
+                disabled={rows.length <= MIN_ROWS}
+                aria-label={`Remove repository ${i + 1}`}
+                className="shrink-0 border-0 hover:bg-table"
+              >
+                <Cut size={15} />
+              </Button>
+            </li>
+          ))}
+        </ul>
+
+        {error && (
+          <p id={errorId} role="alert" className="text-[0.8125rem] text-signal">
+            {error}
+          </p>
+        )}
+
+        <div className="flex flex-wrap items-center justify-between gap-4">
           <Button
-            variant="outline"
+            variant="link"
             onClick={addRow}
             disabled={rows.length >= MAX_REPOS}
           >
-            <Plus className="size-4 shrink-0" strokeWidth={2} aria-hidden="true" />
-            Add repo
+            Add repository
           </Button>
-          <Button type="submit" size="lg" className="w-full sm:w-auto">
-            Compare
+          <Button type="submit" variant="primary">
+            Draw the overlay
           </Button>
         </div>
-
-        <AnimatePresence initial={false}>
-          {error && (
-            <motion.p
-              key={error}
-              initial={{
-                opacity: 0,
-                y: reduceMotion ? 0 : -4,
-              }}
-              animate={{ opacity: 1, y: 0 }}
-              exit={{ opacity: 0, transition: { duration: 0.12 } }}
-              transition={{
-                duration: reduceMotion
-                  ? REDUCED_MOTION_DURATION
-                  : DURATION.enter,
-                ease: EASE_OUT,
-              }}
-              className="mt-3 text-[11px] text-[var(--swatch-red)]"
-              role="alert"
-            >
-              {error}
-            </motion.p>
-          )}
-        </AnimatePresence>
       </form>
 
       {active && chartPath && (
-        <div className="space-y-6">
+        <div className="space-y-8">
           {vsHref && (
-            <div>
-              <ButtonLink href={vsHref} variant="outline" pulse>
-                Open the {active[0]} vs {active[1]} head-to-head page
-                <ArrowRight className="size-4 shrink-0" strokeWidth={2} aria-hidden="true" />
-              </ButtonLink>
-            </div>
+            <ButtonLink href={vsHref} variant="link">
+              Open the {active[0]} vs {active[1]} head-to-head sheet
+            </ButtonLink>
           )}
 
           <BuilderComparisonResults
@@ -310,6 +258,7 @@ function BuilderComparisonResults({
 }) {
   const [data, setData] = useState<ComparisonInitialRepo[]>([]);
   const [settled, setSettled] = useState(false);
+
   useEffect(() => {
     let cancelled = false;
     setData([]);
@@ -335,9 +284,7 @@ function BuilderComparisonResults({
       }),
     ).then((rows) => {
       if (cancelled) return;
-      setData(
-        rows.filter((row): row is ComparisonInitialRepo => row !== null),
-      );
+      setData(rows.filter((row): row is ComparisonInitialRepo => row !== null));
       setSettled(true);
     });
     return () => {
@@ -352,7 +299,7 @@ function BuilderComparisonResults({
   return (
     <>
       {chartSeries.length >= 2 ? (
-        <DitherComparisonChart
+        <ComparisonSheet
           apiBase={apiBase}
           path={path}
           caption="Star history overlay"
@@ -361,15 +308,20 @@ function BuilderComparisonResults({
           series={chartSeries}
         />
       ) : (
-        <section className={PANEL_PADDED} aria-live="polite">
-          <p className={EYEBROW}>
-            {settled ? "Historical coverage incomplete" : "Loading comparison"}
+        <section className={cn(PANEL, "space-y-2")} aria-live="polite">
+          <p className="font-draft text-[1.0625rem] leading-[1.2] text-ink">
+            {settled ? "Coverage incomplete" : "Reading the series"}
           </p>
-          <p className={`mt-2 max-w-[70ch] ${BODY}`}>
+          <p className={cn(BODY, MEASURE)}>
             {settled
-              ? "At least two complete star series are needed for the interactive overlay. Current metadata and available health analysis remain visible below."
-              : "Reading the completed star series for every repository. The animated overlay appears here automatically."}
+              ? "Two complete star series are needed to draw the overlay. The metadata and the health readings below are unaffected."
+              : "Reading the completed star series for every repository. The overlay is drawn here as soon as they land."}
           </p>
+          {!settled && (
+            <p className={CAPTION}>
+              {repos.length} repositories requested.
+            </p>
+          )}
         </section>
       )}
       <RepoComparisonMatrix apiBase={apiBase} repos={repos} initial={data} />

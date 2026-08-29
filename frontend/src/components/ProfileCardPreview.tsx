@@ -1,11 +1,24 @@
 import { useEffect, useState } from "react";
-import { motion, useReducedMotion } from "motion/react";
 
-import { useDitherSurface } from "@/components/ui/dither-surface";
-import { INK } from "@/lib/dither";
 import { MEDIA_RENDER_REVISION } from "@/lib/media";
-import { SPRING } from "@/lib/motion";
 import { useRenderedTheme } from "@/lib/rendered-theme";
+
+/**
+ * The rendered profile card, linked to the profile it measures.
+ *
+ * It polls only while gitdebt still has repositories to read for this account,
+ * and each answer changes the `v=` revision so the browser fetches the newer
+ * card. That is real product behaviour and it stays.
+ *
+ * What went is the chrome: the card no longer lifts off the page under the
+ * pointer, no longer scales when pressed, and no longer sits on a textured
+ * pad. It is a drawing pinned to the sheet — the ground steps to paper and the
+ * frame takes ink, and nothing moves.
+ *
+ * The image is a plain `<img>` with a real `src` in the served markup, so the
+ * card is present before any script runs; the poll only ever replaces it with
+ * a newer render of the same thing.
+ */
 
 type ProfileProgress = {
   total_stars?: number;
@@ -30,14 +43,6 @@ export function ProfileCardPreview({
 }) {
   const [revision, setRevision] = useState(initialRevision);
   const theme = useRenderedTheme();
-  const reduceMotion = useReducedMotion();
-  const { surface, handlers } = useDitherSurface({
-    fill: INK,
-    variant: "gradient",
-    edge: 0.5,
-    alpha: 0.2,
-    pulse: true,
-  });
 
   useEffect(() => {
     let cancelled = false;
@@ -49,13 +54,13 @@ export function ProfileCardPreview({
         let response: Response | null = null;
         if (warm && !warmAttempted) {
           warmAttempted = true;
-          const warm = await fetch(`${apiBase}/api/users/${login}/warm`, {
+          const warmed = await fetch(`${apiBase}/api/users/${login}/warm`, {
             method: "POST",
             credentials: "include",
             cache: "no-store",
             headers: { accept: "application/json" },
           });
-          if (warm.ok) response = warm;
+          if (warmed.ok) response = warmed;
         }
         response ??= await fetch(`${apiBase}/api/users/${login}/analyze`, {
           cache: "no-store",
@@ -90,22 +95,17 @@ export function ProfileCardPreview({
   }, [apiBase, login, warm]);
 
   return (
-    <motion.a
+    <a
       href={`/${login}`}
-      className="dither-fallback relative isolate block max-w-full overflow-hidden rounded-lg p-1.5 outline-none focus-visible:ring-2 focus-visible:ring-accent/30 focus-visible:ring-offset-2 focus-visible:ring-offset-background"
-      whileHover={reduceMotion ? undefined : { y: -2, scale: 1.006 }}
-      whileTap={reduceMotion ? undefined : { scale: 0.992 }}
-      transition={SPRING.snappy}
-      {...handlers}
+      className="block max-w-full border border-rule-strong bg-paper p-1.5 outline-none transition-colors duration-[--duration-ui] hover:border-ink-3 focus-visible:outline-2 focus-visible:outline-offset-2 focus-visible:outline-signal"
     >
-      {surface}
       <img
         src={`${apiBase}/api/users/${login}/card.svg?theme=${theme}&animate=1&v=${revision}&render=${MEDIA_RENDER_REVISION}`}
         alt={`gitdebt profile statistics for ${login}`}
         loading="lazy"
         decoding="async"
-        className="relative block h-auto max-w-full"
+        className="block h-auto max-w-full"
       />
-    </motion.a>
+    </a>
   );
 }

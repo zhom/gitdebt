@@ -1,20 +1,14 @@
 ---
 import logoSource from "../../../assets/gitdebt-logo.svg?raw";
+import { MARK_VIEWBOX, robotPath } from "@/lib/robot-path";
 
 /**
- * The repository artwork fills its silhouette with a rotated 32-unit dither
- * pattern. That pattern samples below one device pixel under ~96px, where the
- * glyph collapses into noise, so on-site lockups draw the same path with a
- * solid ink instead.
+ * The lockup: the robot drawn solid, beside the wordmark in the drawing's own
+ * hand. The mark is placed by its ink bounds rather than its artboard, because
+ * the artwork leaves ~40% of the square empty and a small mark should spend
+ * every pixel on the glyph.
  */
-const robot = logoSource.match(/fill="url\(#gitdebt-dither\)"\s+d="([^"]+)"/);
-if (!robot) {
-  throw new Error("assets/gitdebt-logo.svg no longer exposes the robot path");
-}
-const ROBOT_PATH = robot[1];
-
-/** Ink bounds of that path inside its 512x512 artboard. */
-const MARK_VIEWBOX = "41.436 108.392 429.115 299.305";
+const ROBOT_PATH = robotPath(logoSource);
 
 interface Props {
   markClass?: string;
@@ -23,15 +17,15 @@ interface Props {
 }
 
 const {
-  markClass = "size-8",
-  wordmarkClass = "font-mono text-[0.9375rem] font-medium tracking-[-0.01em]",
+  markClass = "h-6",
+  wordmarkClass = "font-draft text-[1.0625rem] tracking-[0.02em] lowercase",
   showWordmark = true,
 } = Astro.props;
 ---
 
-<span class="inline-flex min-w-0 items-center gap-2">
+<span class="inline-flex min-w-0 items-center gap-2.5">
   <svg
-    class:list={[markClass, "block shrink-0 text-foreground"]}
+    class:list={[markClass, "block w-auto shrink-0 text-ink"]}
     viewBox={MARK_VIEWBOX}
     fill="currentColor"
     aria-hidden="true"

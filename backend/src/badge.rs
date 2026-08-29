@@ -1,24 +1,36 @@
 //! Compact, configurable badge SVG renderer.
 //!
 //! Renders a small embeddable badge showing any subset of `stars`, `forks`,
-//! and `downloads` for a repo, plus the evidence-backed signal badge. One
-//! visual style ships: the dithered panel. Pure + deterministic (same input →
-//! same
-//! bytes) so the badge endpoint is upstream-cacheable; theme colors are
-//! baked as concrete hex (no CSS vars) so the badge renders correctly as a
-//! README `<img>` regardless of the viewer's OS/page theme — same rationale
-//! as `chart.rs` / `theme.rs`.
+//! and `downloads` for a repo, plus the evidence-backed signal badge. Pure +
+//! deterministic (same input → same bytes) so the badge endpoint is
+//! upstream-cacheable; theme colors are baked as concrete hex (no CSS vars) so
+//! the badge renders correctly as a README `<img>` regardless of the viewer's
+//! OS/page theme — same rationale as `chart.rs` / `theme.rs`.
+//!
+//! ## What a badge is
+//!
+//! One field of the drawing, at the smallest size the drawing is ever printed:
+//! a 1px frame, an uppercase field label in ink, and the measured value in
+//! drafting red. Nothing else. There is no texture, no gradient, no glow and
+//! no accent strip, and — unlike a card or a title block — **no chamfer**: a
+//! badge is 28 units tall and often rendered at 20, and a 10px cut off one
+//! corner of that is not a drafting detail, it is a broken frame.
+//!
+//! The value carries the red because the value is the point. The label says
+//! what was measured, so the number never has to be guessed from a glyph.
 //!
 //! ## Layout discipline
 //!
 //! Badge text uses a mono stack with a fixed per-character advance
 //! (`0.6em`), and every `<text>` is pinned with `textLength` +
-//! `lengthAdjust="spacingAndGlyphs"` so browsers and the resvg raster path
-//! produce identical geometry (verified by a raster unit test). Character
-//! counts happen **before** XML escaping. After the width clamp, label and
-//! detail are truncated with a real ellipsis and every x position is
-//! recomputed from the final text widths, so content can never underlap
-//! the trailing brand mark.
+//! `lengthAdjust` so browsers and the resvg raster path produce identical
+//! geometry (verified by a raster unit test). Field labels are pinned with
+//! `lengthAdjust="spacing"` to a width that carries exactly the drawing's
+//! 0.09em label tracking; values are pinned with `spacingAndGlyphs`.
+//! Character counts happen **before** XML escaping. After the width clamp,
+//! label and detail are truncated with a real ellipsis and every x position is
+//! recomputed from the final text widths, so content can never underlap the
+//! trailing brand mark.
 //!
 //! ## Animation + the static-frame guarantee
 //!
@@ -33,7 +45,7 @@
 //! (default) emits no `<animate>` tags at all.
 
 use crate::brand;
-use crate::texture;
+use crate::texture::{self, Side};
 use crate::theme::Theme;
 
 /// Which metrics to show, in display order. Honors include/exclude: a
@@ -78,6 +90,7 @@ impl Metric {
         vec![Metric::Stars, Metric::Forks, Metric::Downloads]
     }
 
+    /// Lowercase name, for the accessible label.
     fn label(self) -> &'static str {
         match self {
             Metric::Stars => "stars",
@@ -85,28 +98,38 @@ impl Metric {
             Metric::Downloads => "downloads",
         }
     }
+
+    /// The uppercase field label lettered on the badge itself.
+    fn field(self) -> &'static str {
+        match self {
+            Metric::Stars => "STARS",
+            Metric::Forks => "FORKS",
+            Metric::Downloads => "DOWNLOADS",
+        }
+    }
 }
 
 /// Visual style. Auto-sized width; per-theme baked hex.
 ///
-/// gitdebt ships exactly one badge look. `flat`, `modern`, `glass`, and
-/// `terminal` were four near-identical variants of it; they remain accepted
-/// `?style=` values so README embeds published against them keep rendering.
+/// gitdebt ships exactly one badge look. `flat`, `modern`, `glass`,
+/// `terminal` and `dither` were near-identical variants of it; they remain
+/// accepted `?style=` values so README embeds published against them keep
+/// rendering.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
 pub enum BadgeStyle {
     #[default]
-    Dither,
+    Sheet,
 }
 
 impl BadgeStyle {
     /// Parse `?style=`. Every value — legacy, unknown, or absent — resolves
     /// to the single shipped style.
     pub fn parse(_s: Option<&str>) -> Self {
-        BadgeStyle::Dither
+        BadgeStyle::Sheet
     }
 }
 
-/// A resolved metric segment: glyph kind + humanized value string.
+/// A resolved metric segment: which metric, and its humanized value.
 #[derive(Debug, Clone)]
 pub struct Segment {
     pub metric: Metric,
@@ -164,7 +187,7 @@ pub fn humanize(n: u64) -> String {
 
 // Layout math
 
-/// Uniform badge height across the whole family (metric styles + signal +
+/// Uniform badge height across the whole family (metric badges + signal +
 /// empty) so side-by-side README embeds align.
 pub const HEIGHT: f32 = 28.0;
 /// Reserved trailing zone for the brand mark: 5px gap + [`MARK_W`] + 5px
@@ -174,25 +197,45 @@ const BRAND_W: f32 = 28.0;
 /// 12.6px of height inside the 28px badge — the narrowest the head, screen
 /// cutout, and both eyes still resolve at 1× in a README.
 const MARK_W: f32 = 18.0;
-/// Horizontal padding inside each segment.
-const SEG_PAD_X: f32 = 9.0;
-/// Width reserved for a metric glyph (icon).
-const GLYPH_W: f32 = 14.0;
-/// Gap between glyph and value text.
-const GLYPH_GAP: f32 = 5.0;
+/// Horizontal padding inside each field.
+const SEG_PAD_X: f32 = 8.0;
+/// Gap between a field label and the value it names.
+const LABEL_GAP: f32 = 5.0;
 /// Mono advance at 12px (0.6em) — pinned via `textLength`, so this is the
 /// rendered width, not an estimate.
 const CHAR_W: f32 = 7.2;
 /// Mono advance at the signal badge's 11px text.
 const SIGNAL_CHAR_W: f32 = 6.6;
+/// Field lettering: 8px, its 0.6em mono advance, and the drawing's 0.09em
+/// label tracking expressed in px at that size.
+const LABEL_SIZE: f32 = 8.0;
+const LABEL_CHAR_W: f32 = LABEL_SIZE * 0.6;
+const LABEL_TRACK: f32 = LABEL_SIZE * 0.09;
+/// Value baseline, and the label baseline that puts the label's capitals on
+/// the same optical centre as the value's. Guessing this misses by ~1.5px,
+/// which at badge scale reads as a label sitting low in its field.
+const VALUE_BASELINE: f32 = HEIGHT / 2.0 + 4.0;
+const LABEL_BASELINE: f32 = VALUE_BASELINE - (12.0 - LABEL_SIZE) * 0.72 / 2.0;
 const REVEAL_SECONDS: f32 = 0.2;
 const STAGGER_SECONDS: f32 = 0.04;
 const MAX_STAGGER_SECONDS: f32 = 0.08;
 const MOTION_CSS: &str = "@media (prefers-reduced-motion: reduce) { .motion { display: none; } }";
 /// The shared badge type stack. `raster.rs` maps the generic `monospace`
 /// keyword onto the bundled font so PNG/WebP geometry matches the pinned
-/// `textLength` advance.
+/// `textLength` advance. A badge letters entirely in mono: at this size the
+/// exact 0.6em advance is what keeps label, value and frame in register.
 const FONT_MONO: &str = "ui-monospace, SFMono-Regular, Menlo, Consolas, monospace";
+
+/// Pinned width of an uppercase field label: the glyph advances plus one
+/// tracking step in each gap. `lengthAdjust="spacing"` then distributes
+/// exactly that surplus between the letters, so the tracking is the
+/// drawing's 0.09em rather than whatever the renderer felt like.
+fn label_width(chars: usize) -> f32 {
+    if chars == 0 {
+        return 0.0;
+    }
+    chars as f32 * LABEL_CHAR_W + (chars - 1) as f32 * LABEL_TRACK
+}
 
 fn reveal_delay(index: usize) -> f32 {
     (index as f32 * STAGGER_SECONDS).min(MAX_STAGGER_SECONDS)
@@ -201,30 +244,54 @@ fn reveal_delay(index: usize) -> f32 {
 /// A pinned `<text>` element: mono, fixed advance, `textLength` +
 /// `lengthAdjust` so client and raster geometry agree. `chars` is counted
 /// by the caller BEFORE escaping.
-fn pinned_text(x: f32, y: f32, fill: &str, class: &str, text: &str, advance: f32) -> String {
+fn pinned_text(
+    x: f32,
+    y: f32,
+    fill: &str,
+    class: &str,
+    text: &str,
+    advance: f32,
+    adjust: &str,
+) -> String {
     let class_attr = if class.is_empty() {
         String::new()
     } else {
         format!(" class=\"{class}\"")
     };
     format!(
-        "<text{class_attr} x=\"{x:.1}\" y=\"{y:.1}\" fill=\"{fill}\" textLength=\"{advance:.1}\" lengthAdjust=\"spacingAndGlyphs\">{}</text>",
-        escape_xml(text),
+        "<text{class_attr} x=\"{x:.1}\" y=\"{y:.1}\" fill=\"{fill}\" textLength=\"{advance:.1}\" lengthAdjust=\"{adjust}\">{}</text>",
+        texture::escape_xml(text),
     )
 }
 
-/// One laid-out segment at its x offset.
+/// A value: tabular, pinned glyph-for-glyph.
+fn value_text(x: f32, y: f32, fill: &str, class: &str, text: &str) -> String {
+    let advance = text.chars().count() as f32 * CHAR_W;
+    pinned_text(x, y, fill, class, text, advance, "spacingAndGlyphs")
+}
+
+/// A field label: uppercase, tracked, pinned by spacing alone.
+fn field_text(x: f32, y: f32, fill: &str, text: &str) -> String {
+    let advance = label_width(text.chars().count());
+    pinned_text(x, y, fill, "k", text, advance, "spacing")
+}
+
+/// One laid-out field at its x offset.
 struct Placed {
     seg: Segment,
     x: f32,
 }
 
-/// Rendered width of one segment: padding, glyph, gap, pinned text, padding.
+/// Rendered width of one field: padding, label, gap, pinned value, padding.
 fn segment_width(seg: &Segment) -> f32 {
-    SEG_PAD_X + GLYPH_W + GLYPH_GAP + seg.value.chars().count() as f32 * CHAR_W + SEG_PAD_X
+    SEG_PAD_X
+        + label_width(seg.metric.field().chars().count())
+        + LABEL_GAP
+        + seg.value.chars().count() as f32 * CHAR_W
+        + SEG_PAD_X
 }
 
-/// Compute per-segment widths + total content width for the given segments.
+/// Compute per-field widths + total content width for the given segments.
 /// Width auto-sizes to content. Returns `(total_width, placed)`.
 fn layout(segments: &[Segment]) -> (f32, Vec<Placed>) {
     let mut x = 0.0_f32;
@@ -240,86 +307,7 @@ fn layout(segments: &[Segment]) -> (f32, Vec<Placed>) {
     (x.max(1.0), placed)
 }
 
-// Glyphs (small inline metric icons, baked path data)
-
-/// Return an SVG `<path>`/`<polygon>` fragment for a metric glyph, drawn in
-/// `color`, positioned so its ~14×14 box sits at (`cx`, vertical center).
-/// `cx` is the left edge of the glyph box.
-fn glyph(metric: Metric, cx: f32, color: &str) -> String {
-    let cy = HEIGHT / 2.0;
-    match metric {
-        // Five-point star.
-        Metric::Stars => {
-            let r = 6.0;
-            let pts = star_points(cx + GLYPH_W / 2.0, cy, r, r * 0.42);
-            format!("<polygon points=\"{pts}\" fill=\"{color}\" />")
-        }
-        // Fork: two prongs + a stem (three circles + connecting lines).
-        Metric::Forks => {
-            let gx = cx + GLYPH_W / 2.0;
-            format!(
-                "<g stroke=\"{color}\" stroke-width=\"1.6\" fill=\"none\"><circle cx=\"{a:.1}\" cy=\"{top:.1}\" r=\"2\" fill=\"{color}\" /><circle cx=\"{b:.1}\" cy=\"{top:.1}\" r=\"2\" fill=\"{color}\" /><circle cx=\"{gx:.1}\" cy=\"{bot:.1}\" r=\"2\" fill=\"{color}\" /><path d=\"M{a:.1} {top:.1} V{midy:.1} M{b:.1} {top:.1} V{midy:.1} M{a:.1} {midy:.1} H{b:.1} M{gx:.1} {midy:.1} V{bot:.1}\" /></g>",
-                a = gx - 4.0,
-                b = gx + 4.0,
-                top = cy - 5.0,
-                midy = cy + 1.0,
-                bot = cy + 5.0,
-                gx = gx,
-            )
-        }
-        // Download: down-arrow into a tray.
-        Metric::Downloads => {
-            let gx = cx + GLYPH_W / 2.0;
-            format!(
-                "<g stroke=\"{color}\" stroke-width=\"1.6\" fill=\"none\" stroke-linecap=\"round\" stroke-linejoin=\"round\"><path d=\"M{gx:.1} {top:.1} V{arrowbot:.1} M{lx:.1} {midy:.1} L{gx:.1} {arrowbot:.1} L{rx:.1} {midy:.1}\" /><path d=\"M{lx:.1} {tray:.1} H{rx:.1}\" /></g>",
-                gx = gx,
-                top = cy - 6.0,
-                arrowbot = cy + 2.0,
-                midy = cy - 1.0,
-                lx = gx - 4.0,
-                rx = gx + 4.0,
-                tray = cy + 5.0,
-            )
-        }
-    }
-}
-
-/// Vertices of a five-point star centered at (cx, cy) with outer radius
-/// `outer` and inner radius `inner`. Deterministic (fixed angles).
-fn star_points(cx: f32, cy: f32, outer: f32, inner: f32) -> String {
-    let mut pts = String::new();
-    for i in 0..10 {
-        let r = if i % 2 == 0 { outer } else { inner };
-        // Start at top (-90°), step 36°.
-        let ang = std::f32::consts::PI * (-0.5 + i as f32 * 0.2);
-        let x = cx + r * ang.cos();
-        let y = cy + r * ang.sin();
-        if i > 0 {
-            pts.push(' ');
-        }
-        pts.push_str(&format!("{x:.1},{y:.1}"));
-    }
-    pts
-}
-
 // Shared chrome
-
-/// The Bayer wash defs a badge needs: the used density tier in the theme's
-/// fg ink (alpha carried by the consuming rect, one ink only).
-fn wash_defs(theme: &Theme, tier: usize) -> String {
-    format!(
-        "  <defs>{}</defs>\n",
-        texture::tier_pattern(theme.fg, 2.0, tier)
-    )
-}
-
-/// The Bayer wash rect covering the panel interior.
-fn wash_rect(x: f32, y: f32, w: f32, h: f32, rx: f32, tier: usize, opacity: &str) -> String {
-    format!(
-        "  <rect x=\"{x:.1}\" y=\"{y:.1}\" width=\"{w:.1}\" height=\"{h:.1}\" rx=\"{rx:.1}\" fill=\"{}\" fill-opacity=\"{opacity}\" />\n",
-        texture::tier_fill(tier),
-    )
-}
 
 /// Left edge of the mark inside the reserved [`BRAND_W`] zone.
 fn mark_x(total: f32) -> f32 {
@@ -333,25 +321,53 @@ fn mark_y() -> f32 {
 
 /// Trailing brand mark — the canonical gitdebt robot, right-aligned inside
 /// the reserved [`BRAND_W`] zone. The ink is the badge's foreground, never
-/// an accent: the logo must read as the logo, not as a colored chip.
+/// the signal: the logo must read as the logo, not as a measured value.
 fn brand_mark(total: f32, ink: &str) -> String {
     brand::logo_mark(mark_x(total), mark_y(), MARK_W, ink)
 }
 
-/// Shared SVG header. `defs` lets a style inject filters or other defs.
-fn svg_header(width: f32, label: &str, defs: &str) -> String {
+/// The badge frame. Square, 1px, in the frame ink. The interior is
+/// unpainted so the badge composites onto the README it sits in.
+fn frame(total: f32, theme: &Theme) -> String {
     format!(
-        r##"<svg xmlns="http://www.w3.org/2000/svg" width="{w:.0}" height="{h:.0}" viewBox="0 0 {w:.0} {h:.0}" role="img" aria-label="{label}">
-{defs}"##,
-        w = width,
-        h = HEIGHT,
-        label = label,
-        defs = defs,
+        "  <rect x=\"0.5\" y=\"0.5\" width=\"{w:.1}\" height=\"{h:.1}\" fill=\"none\" stroke=\"{border}\" stroke-width=\"{weight}\" />\n",
+        w = total - 1.0,
+        h = HEIGHT - 1.0,
+        border = theme.border,
+        weight = texture::W_OBJECT,
     )
 }
 
-fn badge_style_css() -> String {
-    format!("  <style><![CDATA[ text {{ font: 600 12px {FONT_MONO}; }} {MOTION_CSS} ]]></style>\n")
+/// A field division: a 1px rule that runs the full interior height, so it
+/// terminates on the frame at both ends. Snapped to a half-pixel so it
+/// stays one crisp line at 1×.
+fn field_rule(x: f32, theme: &Theme) -> String {
+    format!(
+        "  <line x1=\"{x:.1}\" y1=\"1\" x2=\"{x:.1}\" y2=\"{y2:.1}\" stroke=\"{rule}\" stroke-width=\"{weight}\" />\n",
+        x = x.round() + 0.5,
+        y2 = HEIGHT - 1.0,
+        rule = theme.grid,
+        weight = texture::W_OBJECT,
+    )
+}
+
+/// Shared SVG header.
+fn svg_header(width: f32, label: &str) -> String {
+    format!(
+        r##"<svg xmlns="http://www.w3.org/2000/svg" width="{w:.0}" height="{h:.0}" viewBox="0 0 {w:.0} {h:.0}" role="img" aria-label="{label}">
+"##,
+        w = width,
+        h = HEIGHT,
+        label = label,
+    )
+}
+
+/// Type for the whole family: one mono stack, two sizes, one label
+/// treatment. Colors are always baked inline, never carried by a class.
+fn badge_style_css(value_size: f32) -> String {
+    format!(
+        "  <style><![CDATA[ text {{ font: 600 {value_size:.0}px {FONT_MONO}; font-variant-numeric: tabular-nums; }} .k {{ font: 500 {LABEL_SIZE:.0}px {FONT_MONO}; }} {MOTION_CSS} ]]></style>\n"
+    )
 }
 
 /// Build the label string for accessibility (e.g. "stars: 12.3k, forks: 1.2k").
@@ -363,21 +379,20 @@ fn aria_label(placed: &[Placed]) -> String {
         .join(", ")
 }
 
-/// Value text + glyph for a segment, with an optional reveal animation.
-/// The static markup already shows the final state; the animate only
-/// fades/slides it in so the FROZEN frame on GitHub is correct.
+/// One field: its label in ink, its value in drafting red, with an optional
+/// reveal animation. The static markup already shows the final state; the
+/// animation only fades/slides it in so the FROZEN frame on GitHub is
+/// correct.
 fn segment_content(
     p: &Placed,
-    text_color: &str,
-    glyph_color: &str,
+    label_ink: &str,
+    value_ink: &str,
     animate: bool,
     index: usize,
 ) -> String {
-    let glyph_x = p.x + SEG_PAD_X;
-    let text_x = glyph_x + GLYPH_W + GLYPH_GAP;
-    let text_y = HEIGHT / 2.0 + 4.0;
-    let g = glyph(p.seg.metric, glyph_x, glyph_color);
-    let advance = p.seg.value.chars().count() as f32 * CHAR_W;
+    let label = p.seg.metric.field();
+    let label_x = p.x + SEG_PAD_X;
+    let value_x = label_x + label_width(label.chars().count()) + LABEL_GAP;
 
     // The animation is authored so the resting (post-freeze) state equals
     // the element's static attributes — required for the GitHub frozen
@@ -396,8 +411,9 @@ fn segment_content(
     };
 
     format!(
-        "  <g opacity=\"1\"{start_transform}>{g}{text}{anim_tag}</g>\n",
-        text = pinned_text(text_x, text_y, text_color, "", &p.seg.value, advance),
+        "  <g opacity=\"1\"{start_transform}>{label}{value}{anim_tag}</g>\n",
+        label = field_text(label_x, LABEL_BASELINE, label_ink, label),
+        value = value_text(value_x, VALUE_BASELINE, value_ink, "", &p.seg.value),
     )
 }
 
@@ -411,74 +427,41 @@ pub fn render_badge(input: &BadgeInput, theme: &Theme) -> String {
         return empty_badge(theme);
     }
     let (width, placed) = layout(&segments);
-    let BadgeStyle::Dither = input.style;
-    render_dither(&placed, width, theme, input.animate)
+    let BadgeStyle::Sheet = input.style;
+    render_fields(&placed, width, theme, input.animate)
 }
 
-fn render_dither(placed: &[Placed], width: f32, theme: &Theme, animate: bool) -> String {
-    let wave = texture::wave_ink(theme);
+fn render_fields(placed: &[Placed], width: f32, theme: &Theme, animate: bool) -> String {
     let label = aria_label(placed);
     let total = width + BRAND_W;
-    let mut body = String::new();
-    // Bordered chip + Bayer wash. The panel is unpainted so the badge sits
-    // directly on the README; the border is what keeps it reading as a chip.
-    body.push_str(&format!(
-        "  <rect x=\"0.5\" y=\"0.5\" width=\"{w:.1}\" height=\"{h:.1}\" rx=\"6\" fill=\"none\" stroke=\"{border}\" stroke-width=\"1\" />\n",
-        w = total - 1.0,
-        h = HEIGHT - 1.0,
-        border = theme.border,
-    ));
-    body.push_str(&wash_rect(
-        1.0,
-        1.0,
-        total - 2.0,
-        HEIGHT - 2.0,
-        5.0,
-        2,
-        "0.10",
-    ));
-    // Left accent strip — the single chromatic element.
-    body.push_str(&format!(
-        "  <rect x=\"0\" y=\"5\" width=\"3\" height=\"{h:.1}\" rx=\"1.5\" fill=\"{wave}\" />\n",
-        h = HEIGHT - 10.0,
-    ));
+    let mut body = frame(total, theme);
     for (i, p) in placed.iter().enumerate() {
         if i > 0 {
-            body.push_str(&format!(
-                "  <line x1=\"{x:.1}\" y1=\"6\" x2=\"{x:.1}\" y2=\"{y2:.1}\" stroke=\"{border}\" stroke-width=\"1\" opacity=\"0.5\" />\n",
-                x = p.x,
-                y2 = HEIGHT - 6.0,
-                border = theme.border,
-            ));
+            body.push_str(&field_rule(p.x, theme));
         }
-        body.push_str(&segment_content(p, theme.fg, wave, animate, i));
+        body.push_str(&segment_content(p, theme.fg, theme.accent, animate, i));
     }
     body.push_str(&brand_mark(total, theme.fg));
     format!(
         "{header}{css}{body}</svg>",
-        header = svg_header(total, &label, &wash_defs(theme, 2)),
-        css = badge_style_css(),
+        header = svg_header(total, &label),
+        css = badge_style_css(12.0),
     )
 }
 
+/// Nothing was measured, so nothing takes the signal: the badge states the
+/// fact in secondary ink and stops.
 fn empty_badge(theme: &Theme) -> String {
-    let (fg, mark_ink) = (theme.muted, theme.fg);
-    let text = "no metrics";
-    let advance = text.chars().count() as f32 * SIGNAL_CHAR_W;
-    let content_w = SEG_PAD_X + advance + SEG_PAD_X;
-    let total = content_w + BRAND_W;
+    let text = "NO METRICS";
+    let advance = label_width(text.chars().count());
+    let total = SEG_PAD_X + advance + SEG_PAD_X + BRAND_W;
     format!(
-        r##"<svg xmlns="http://www.w3.org/2000/svg" width="{total:.0}" height="{h:.0}" viewBox="0 0 {total:.0} {h:.0}" role="img" aria-label="no metrics">
-  <style><![CDATA[ text {{ font: 600 11px {FONT_MONO}; }} ]]></style>
-  <rect x="0.5" y="0.5" width="{rw:.1}" height="{rh:.1}" rx="6" fill="none" stroke="{border}" stroke-width="1" />
-  {text_el}
-{mark}</svg>"##,
-        h = HEIGHT,
-        rw = total - 1.0,
-        rh = HEIGHT - 1.0,
-        border = theme.border,
-        text_el = pinned_text(SEG_PAD_X, HEIGHT / 2.0 + 4.0, fg, "", text, advance),
-        mark = brand_mark(total, mark_ink),
+        "{header}{css}{frame}  {text_el}\n{mark}</svg>",
+        header = svg_header(total, "no metrics"),
+        css = badge_style_css(11.0),
+        frame = frame(total, theme),
+        text_el = field_text(SEG_PAD_X, VALUE_BASELINE, theme.muted, text),
+        mark = brand_mark(total, theme.fg),
     )
 }
 
@@ -500,14 +483,17 @@ pub(crate) struct SignalLayout {
     pub mark_x: f32,
 }
 
-/// Fixed lead-in before the label: strip + check zone.
+/// Fixed lead-in before the label: the terminator that points at the field.
 const SIGNAL_TEXT_X: f32 = 31.0;
-/// Gap on each side of the separator dot.
+/// Gap on each side of the field division.
 const SIGNAL_SEP_GAP: f32 = 8.0;
-/// Clearance between the detail text and the brand chip zone.
+/// Clearance between the detail text and the brand mark zone.
 const SIGNAL_TAIL_GAP: f32 = 8.0;
 const SIGNAL_MIN_W: f32 = 180.0;
 const SIGNAL_MAX_W: f32 = 420.0;
+/// Where the leader's terminator lands. The triangle's tip is the datum, so
+/// it sits clear of the lettering with the whole 5px head behind it.
+const SIGNAL_TERMINATOR_X: f32 = 23.0;
 
 /// Truncate to `max_chars` with a real ellipsis. Char-safe; counts happen
 /// on the raw string (before XML escaping).
@@ -568,6 +554,12 @@ pub(crate) fn signal_layout(label: &str, detail: &str) -> SignalLayout {
 /// The API owns the qualification rules; this function only renders the
 /// already-evaluated result. Keeping evaluation out of the renderer preserves
 /// deterministic bytes and makes the SVG independently testable.
+///
+/// The signal is drawn as one leader: a terminator landing on the field, the
+/// signal's name in ink, then the evidence that earned it. Earned spends the
+/// drafting red on the terminator and on the evidence — the measured value
+/// and its arrow, which is the one thing red is for. Unearned draws the same
+/// geometry in construction ink, so the two states never reflow.
 pub fn render_signal_badge(
     label: &str,
     detail: &str,
@@ -577,74 +569,57 @@ pub fn render_signal_badge(
 ) -> String {
     let l = signal_layout(label, detail);
     let status = if earned { "earned" } else { "not earned" };
-    let wave = texture::wave_ink(theme);
-    let signal = if earned { wave } else { theme.muted };
-    let text_y = HEIGHT / 2.0 + 4.0;
-    // `additive="sum"` keeps the static translate; the check scales in
-    // around the group's local origin and rests at the authored position.
+    let signal = if earned { theme.accent } else { theme.ink_3 };
+    let detail_ink = if earned { theme.accent } else { theme.muted };
+
+    // The head is drawn at its group's local origin and the group is
+    // translated onto the datum, so the scale grows the triangle OUT OF the
+    // point it lands on rather than sliding it in from the sheet corner.
+    // `additive="sum"` keeps that static translate, which SMIL's default
+    // replace semantics would otherwise discard.
     let motion = if animate {
-        r#"<animateTransform class="motion" attributeName="transform" type="scale" from="0.75" to="1" dur="0.22s" fill="freeze" additive="sum" calcMode="spline" keySplines="0.23 1 0.32 1" />"#
+        "<animateTransform class=\"motion\" attributeName=\"transform\" type=\"scale\" from=\"0.75\" to=\"1\" dur=\"0.22s\" fill=\"freeze\" additive=\"sum\" calcMode=\"spline\" keySplines=\"0.23 1 0.32 1\" />"
     } else {
         ""
     };
-    let check = if earned {
-        format!(
-            "  <g transform=\"translate(9.5 7.5)\" stroke=\"{signal}\" stroke-width=\"1.8\" fill=\"none\" stroke-linecap=\"round\" stroke-linejoin=\"round\"><circle cx=\"6.5\" cy=\"6.5\" r=\"6\" /><path d=\"M3.8 6.6 5.8 8.6 9.6 4.6\" />{motion}</g>\n"
-        )
-    } else {
-        format!(
-            "  <circle cx=\"16\" cy=\"14\" r=\"6\" fill=\"none\" stroke=\"{signal}\" stroke-width=\"1.5\" />\n"
-        )
-    };
+    let head = format!(
+        "  <g transform=\"translate({x:.1} {y:.1})\">{shape}{motion}</g>\n",
+        x = SIGNAL_TERMINATOR_X,
+        y = HEIGHT / 2.0,
+        shape = texture::terminator(0.0, 0.0, Side::Right, signal),
+    );
     let aria = format!(
         "{}: {}, {status}",
-        escape_xml(&l.label),
-        escape_xml(&l.detail)
+        texture::escape_xml(&l.label),
+        texture::escape_xml(&l.detail)
     );
 
     format!(
-        r##"<svg xmlns="http://www.w3.org/2000/svg" width="{width:.0}" height="{h:.0}" viewBox="0 0 {width:.0} {h:.0}" role="img" aria-label="{aria}">
-  <defs>{tier}</defs>
-  <style><![CDATA[
-    text {{ font: 600 11px {FONT_MONO}; }}
-    .detail {{ font-weight: 500; }}
-    {MOTION_CSS}
-  ]]></style>
-  <rect x="0.5" y="0.5" width="{panel_w:.1}" height="{panel_h:.1}" rx="7" fill="none" stroke="{border}" />
-{wash}  <rect x="0" y="5" width="3" height="{strip_h:.1}" rx="1.5" fill="{signal}" />
-{check}  {label_text}
-  <circle cx="{sep_x:.1}" cy="{sep_y:.1}" r="1.3" fill="{muted}" opacity="0.7" />
-  {detail_text}
-{mark}</svg>"##,
-        width = l.width,
-        h = HEIGHT,
-        tier = texture::tier_pattern(theme.fg, 2.0, 2),
-        panel_w = l.width - 1.0,
-        panel_h = HEIGHT - 1.0,
-        strip_h = HEIGHT - 10.0,
-        border = theme.border,
-        wash = wash_rect(1.0, 1.0, l.width - 2.0, HEIGHT - 2.0, 6.0, 2, "0.10"),
-        label_text = pinned_text(l.label_x, text_y, theme.fg, "", &l.label, l.label_w),
-        sep_x = l.sep_x,
-        sep_y = HEIGHT / 2.0,
-        muted = theme.muted,
+        "{header}{css}{frame}{head}  {label_text}\n{rule}  {detail_text}\n{mark}</svg>",
+        header = svg_header(l.width, &aria),
+        css = badge_style_css(11.0),
+        frame = frame(l.width, theme),
+        rule = field_rule(l.sep_x, theme),
+        label_text = pinned_text(
+            l.label_x,
+            VALUE_BASELINE,
+            theme.fg,
+            "",
+            &l.label,
+            l.label_w,
+            "spacingAndGlyphs"
+        ),
         detail_text = pinned_text(
             l.detail_x,
-            text_y,
-            theme.muted,
-            "detail",
+            VALUE_BASELINE,
+            detail_ink,
+            "",
             &l.detail,
-            l.detail_w
+            l.detail_w,
+            "spacingAndGlyphs"
         ),
         mark = brand::logo_mark(l.mark_x, mark_y(), MARK_W, theme.fg),
     )
-}
-
-fn escape_xml(s: &str) -> String {
-    s.replace('&', "&amp;")
-        .replace('<', "&lt;")
-        .replace('>', "&gt;")
-        .replace('"', "&quot;")
 }
 
 #[cfg(test)]
@@ -658,7 +633,7 @@ mod tests {
             forks: Some(1_234),
             downloads: Some(2_500_000),
             metrics: vec![Metric::Stars, Metric::Forks, Metric::Downloads],
-            style: BadgeStyle::Dither,
+            style: BadgeStyle::Sheet,
             animate,
         }
     }
@@ -669,7 +644,7 @@ mod tests {
             forks: None,
             downloads: None,
             metrics: vec![Metric::Stars],
-            style: BadgeStyle::Dither,
+            style: BadgeStyle::Sheet,
             animate: false,
         }
     }
@@ -682,6 +657,64 @@ mod tests {
         assert_eq!(humanize(12_345), "12.3k");
         assert_eq!(humanize(1_500_000), "1.5M");
         assert_eq!(humanize(2_000_000_000), "2.0B");
+    }
+
+    /// The value is the point, so the value is what carries drafting red —
+    /// and nothing else on the badge does.
+    #[test]
+    fn only_the_measured_value_takes_drafting_red() {
+        for theme in [&LIGHT, &DARK] {
+            let svg = render_badge(&full_input(false), theme);
+            // One red fill per field, and no more.
+            assert_eq!(
+                svg.matches(&format!("fill=\"{}\"", theme.accent)).count(),
+                3,
+                "three fields, three measured values: {svg}"
+            );
+            // The label that names it is ink, the frame is rule-strong.
+            let stars = svg
+                .split("<text")
+                .find(|frag| frag.contains(">STARS<"))
+                .expect("the stars field is lettered");
+            assert!(stars.contains(&format!("fill=\"{}\"", theme.fg)));
+            assert!(svg.contains(&format!("stroke=\"{}\"", theme.border)));
+        }
+    }
+
+    /// A badge is too small to survive the drawing's one chamfer, and it has
+    /// no texture, no strip and no rounded corner either.
+    #[test]
+    fn a_badge_is_a_square_frame_and_nothing_else() {
+        let svgs = [
+            render_badge(&full_input(true), &LIGHT),
+            render_badge(&no_metrics_input(), &DARK),
+            render_signal_badge(
+                "actively maintained",
+                "18 commits · 30d",
+                true,
+                &LIGHT,
+                false,
+            ),
+            render_signal_badge("community powered", "8 contributors", false, &DARK, true),
+        ];
+        for svg in svgs {
+            for banned in [
+                "rx=",
+                "ry=",
+                "<pattern",
+                "Gradient",
+                "url(#",
+                "gd-t",
+                "gd-pixel",
+                "filter=",
+                "opacity=\"0.",
+                "fill-opacity",
+            ] {
+                assert!(!svg.contains(banned), "{banned} survived: {svg}");
+            }
+            // No chamfer: the frame is a plain rect, never a cut path.
+            assert!(!svg.contains("<path d=\"M0.50 0.50"));
+        }
     }
 
     #[test]
@@ -705,8 +738,8 @@ mod tests {
         assert!(first.contains("18 commits · 30d"));
         assert!(first.contains("aria-label=\"actively maintained: 18 commits · 30d, earned\""));
         assert!(first.contains("data-gitdebt-logo=\"true\""));
-        // Earned ink is the wave accent, not plain fg.
-        assert!(first.contains("#5b2cff"));
+        // The evidence and the terminator pointing at it are the red.
+        assert!(first.contains(LIGHT.accent));
         assert!(first.contains("<animateTransform"));
         assert!(first.contains("additive=\"sum\""));
         assert!(!first.contains("var("));
@@ -715,13 +748,39 @@ mod tests {
         assert!(dark.contains("not earned"));
         assert!(!dark.contains("<animate"));
         assert!(dark.contains(DARK.fg));
+        // Unearned measured nothing, so it spends no signal.
+        assert!(!dark.contains(DARK.accent));
+    }
+
+    /// Earned and unearned draw the same geometry in different ink, so the
+    /// badge never reflows when a repository crosses the threshold.
+    #[test]
+    fn earned_and_unearned_share_one_geometry() {
+        let strip = |svg: String, theme: &Theme| {
+            svg.replace(theme.accent, "INK")
+                .replace(theme.ink_3, "INK")
+                .replace(theme.muted, "INK")
+        };
+        let on = strip(
+            render_signal_badge("star momentum", "+279 stars / 30d", true, &LIGHT, false),
+            &LIGHT,
+        );
+        let off = strip(
+            render_signal_badge("star momentum", "+279 stars / 30d", false, &LIGHT, false),
+            &LIGHT,
+        );
+        assert_eq!(
+            on.replace(", earned", ", STATE"),
+            off.replace(", not earned", ", STATE")
+        );
     }
 
     #[test]
     fn signal_badge_has_no_baked_middot_prefix() {
         let svg = render_signal_badge("star momentum", "+279 stars / 30d", true, &LIGHT, false);
-        // The separator is an explicit positioned element, never text.
+        // The field division is a rule that lands on the frame, never text.
         assert!(!svg.contains(">· "));
+        assert!(!svg.contains("<circle"));
         assert!(svg.contains("+279 stars / 30d"));
     }
 
@@ -735,10 +794,12 @@ mod tests {
         assert!(l.sep_x <= l.detail_x, "separator sits before the detail");
         assert!(
             l.detail_x + l.detail_w + SIGNAL_TAIL_GAP <= l.mark_x + 0.01,
-            "detail must clear the brand chip: {l:?}"
+            "detail must clear the brand mark: {l:?}"
         );
         assert!(l.mark_x + MARK_W <= l.width);
         assert!((SIGNAL_MIN_W..=SIGNAL_MAX_W).contains(&l.width));
+        // The leader's head sits clear of the lettering, tip and all.
+        const { assert!(SIGNAL_TERMINATOR_X + texture::TERMINATOR_LEN <= SIGNAL_TEXT_X) };
     }
 
     #[test]
@@ -753,7 +814,7 @@ mod tests {
         );
         assert!(
             l.detail_x + l.detail_w + SIGNAL_TAIL_GAP <= l.mark_x + 0.01,
-            "truncated content must still clear the chip: {l:?}"
+            "truncated content must still clear the mark: {l:?}"
         );
         // Extreme: even the label yields when both are enormous.
         let l2 = signal_layout(&"x".repeat(80), &"y".repeat(80));
@@ -783,6 +844,9 @@ mod tests {
             "every <text> must be pinned"
         );
         assert!(svg.contains("lengthAdjust=\"spacingAndGlyphs\""));
+        // A label is pinned by spacing alone: that is what carries the
+        // drawing's 0.09em tracking without fattening the glyphs.
+        assert!(svg.contains("lengthAdjust=\"spacing\""));
         assert!(svg.contains(FONT_MONO));
 
         let signal = render_signal_badge("star momentum", "+12 stars / 30d", true, &DARK, false);
@@ -797,9 +861,24 @@ mod tests {
         );
     }
 
+    /// The label's capitals have to sit on the same optical centre as the
+    /// value's, or the field reads as if the label slipped.
+    #[test]
+    fn the_field_label_is_optically_centred_on_its_value() {
+        let value_cap_centre = VALUE_BASELINE - 12.0 * 0.72 / 2.0;
+        let label_cap_centre = LABEL_BASELINE - LABEL_SIZE * 0.72 / 2.0;
+        assert!(
+            (value_cap_centre - label_cap_centre).abs() < 0.01,
+            "label centre {label_cap_centre} vs value centre {value_cap_centre}"
+        );
+        assert!(label_width(0).abs() < 1e-6);
+        assert!((label_width(1) - LABEL_CHAR_W).abs() < 1e-6);
+        assert!((label_width(5) - (5.0 * LABEL_CHAR_W + 4.0 * LABEL_TRACK)).abs() < 1e-6);
+    }
+
     #[test]
     fn all_badges_share_one_uniform_height() {
-        let expect = format!("height=\"{:.0}\"", HEIGHT);
+        let expect = format!("height=\"{HEIGHT:.0}\"");
         assert!(render_badge(&full_input(false), &DARK).contains(&expect));
         let signal = render_signal_badge("star momentum", "+9 stars / 30d", false, &DARK, false);
         assert!(
@@ -822,7 +901,7 @@ mod tests {
                 assert!(svg.contains("M320.5 110.5"));
                 // At badge scale the artwork's pattern would be sub-pixel.
                 assert!(!svg.contains("gitdebt-dither"), "mark leaks the pattern");
-                // Foreground ink, never an accent chip.
+                // Foreground ink, never the signal.
                 assert!(
                     svg.contains(&format!("fill=\"{}\"", theme.fg)),
                     "mark must be inked with the theme foreground"
@@ -852,8 +931,8 @@ mod tests {
                         width: MARK_W,
                         scale,
                         ink: theme.fg,
-                        // The chip paints no panel now, so the tone the mark
-                        // is designed against is the theme canvas itself.
+                        // The badge paints no ground, so the tone the mark is
+                        // designed against is the theme's own sheet.
                         canvas: theme.bg,
                     },
                 );
@@ -870,14 +949,14 @@ mod tests {
     }
 
     #[test]
-    fn metric_segments_end_before_the_brand_chip() {
+    fn metric_fields_end_before_the_brand_mark() {
         let (width, placed) = layout(
             &BadgeInput {
                 stars: Some(123_456),
                 forks: Some(9_999),
                 downloads: Some(123_456_789),
                 metrics: Metric::parse_list(None),
-                style: BadgeStyle::Dither,
+                style: BadgeStyle::Sheet,
                 animate: false,
             }
             .segments(),
@@ -887,10 +966,9 @@ mod tests {
         assert!(last.x + last_w <= width + 0.01);
         // Total = width + BRAND_W; the mark starts at total-BRAND_W+5.
         let total = width + BRAND_W;
-        let chip_x = total - BRAND_W + 5.0;
         assert!(
-            last.x + last_w <= chip_x,
-            "content must clear the chip zone"
+            last.x + last_w <= mark_x(total),
+            "content must clear the mark zone"
         );
     }
 
@@ -937,12 +1015,13 @@ mod tests {
             Some("modern"),
             Some("glass"),
             Some("terminal"),
+            Some("dither"),
             Some(" Terminal "),
             Some("garbage"),
             Some(""),
             None,
         ] {
-            assert_eq!(BadgeStyle::parse(value), BadgeStyle::Dither, "{value:?}");
+            assert_eq!(BadgeStyle::parse(value), BadgeStyle::Sheet, "{value:?}");
         }
         // And they all render identical bytes.
         let mut input = full_input(false);
@@ -960,7 +1039,7 @@ mod tests {
             forks: Some(20),
             downloads: Some(30),
             metrics: vec![Metric::Forks, Metric::Stars],
-            style: BadgeStyle::Dither,
+            style: BadgeStyle::Sheet,
             animate: false,
         };
         let segs = input.segments();
@@ -977,7 +1056,7 @@ mod tests {
             forks: None,
             downloads: None,
             metrics: vec![Metric::Stars, Metric::Forks, Metric::Downloads],
-            style: BadgeStyle::Dither,
+            style: BadgeStyle::Sheet,
             animate: false,
         };
         let segs = input.segments();
@@ -1076,17 +1155,19 @@ mod tests {
         assert!(svg.contains("12.3k")); // stars
         assert!(svg.contains("1.2k")); // forks
         assert!(svg.contains("2.5M")); // downloads
+        // And each one is named, so the number never has to be guessed.
+        assert!(svg.contains(">STARS<") && svg.contains(">FORKS<") && svg.contains(">DOWNLOADS<"));
     }
 
     #[test]
     fn per_theme_colors_baked() {
         let light = render_badge(&full_input(false), &LIGHT);
         let dark = render_badge(&full_input(false), &DARK);
-        // Ink + the theme's wave accent, no CSS variables.
-        assert!(light.contains("#0a0a0a"));
-        assert!(light.contains("#5b2cff"));
-        assert!(dark.contains("#fafafa"));
-        assert!(dark.contains("#9b7bff"));
+        // Ink + the theme's drafting red, no CSS variables.
+        assert!(light.contains("#111417"));
+        assert!(light.contains("#cc291f"));
+        assert!(dark.contains("#e6e8ea"));
+        assert!(dark.contains("#f0674e"));
         assert!(!light.contains("var(--"));
         assert!(!dark.contains("var(--"));
     }
@@ -1101,9 +1182,11 @@ mod tests {
     #[test]
     fn empty_when_no_metrics_available() {
         let svg = render_badge(&no_metrics_input(), &LIGHT);
-        assert!(svg.contains("no metrics"));
+        assert!(svg.contains("NO METRICS"));
         assert!(svg.contains("data-gitdebt-logo=\"true\""));
         assert!(svg.starts_with("<svg"));
+        // Nothing was measured, so nothing is red.
+        assert!(!svg.contains(LIGHT.accent));
     }
 
     #[test]

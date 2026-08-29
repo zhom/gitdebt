@@ -1,23 +1,40 @@
-//! Animated SVG renderers for the per-repo history stats. Pure functions
-//! from query-result rows + Theme → SVG string. Bytes-deterministic so
-//! edge caches collapse identical request bursts.
+//! The repository-health sheets.
 //!
-//! Theme handling: each renderer takes a `&Theme` and substitutes
-//! concrete hex colors directly into the output. No CSS variables, no
+//! Every renderer here is a pure function from query rows plus a `&Theme` to
+//! one SVG string, and every one of them draws the same dimensioned
+//! engineering drawing the site is: graphite on paper, square corners, and no
+//! texture, gradient, glow or shadow anywhere. The notation vocabulary lives
+//! in [`crate::texture`]; this module composes it into sheets.
+//!
+//! Three rules govern what is drawn:
+//!
+//! 1. **Every line terminates on something real.** A dimension line spans two
+//!    measured points and letters the value on itself. An extension tick
+//!    springs from a datum. A leader points at one. There is no background
+//!    grid and no rule that separates nothing.
+//! 2. **A plotted bar is a flat plotter ink with a 1px ink hairline standing
+//!    at its measured edge** ([`crate::texture::series_bar`]). Categories are
+//!    told apart by their pen and by their own label, never by a texture.
+//! 3. **Drafting red is spent only on something measured**: a dimension and
+//!    its terminators, or the primary trace. It is never a tag, a status dot
+//!    or a category colour.
+//!
+//! Theme handling: each renderer takes a `&Theme` and substitutes concrete
+//! hex colors directly into the output. No CSS variables, no
 //! `prefers-color-scheme` — that approach is fragile in `<img>`-embedded
 //! README contexts (see `theme.rs` for the why). Embedders combine a
-//! `?theme=light` + `?theme=dark` pair via `<picture>` for theme-aware
-//! README rendering.
+//! `?theme=light` + `?theme=dark` pair via `<picture>`.
 //!
-//! Static attributes always contain the finished chart because many
+//! Static attributes always contain the finished sheet, because many
 //! consumers render an SVG as a single frame — every rasterizer, and README
-//! renderers outside GitHub. Animation only enhances the ones that play it.
+//! renderers outside GitHub. The reveal only fades in what is already drawn.
 
 use chrono::{Datelike, NaiveDate};
 use serde::Serialize;
 
 use crate::brand;
-use crate::theme::{Theme, contrast_on};
+use crate::texture::{self, Dimension, Side, TitleField};
+use crate::theme::{Theme, contrast_on, pens_for};
 
 #[derive(Debug, Clone, Serialize)]
 pub struct FileRow {
@@ -63,207 +80,375 @@ pub struct ContributionProfile {
     pub visionary_count: i64,
 }
 
-/// Rendered diameter of a contributor's photo, and the dither ring's reach
-/// past it on every side. Shared by the grid and the single-avatar asset so a
-/// README that lays the standalone tiles out itself lands on the same geometry
-/// the chart draws.
+/// Rendered edge of a contributor's photo, and the margin the sheet holds
+/// around it for the frame line. Shared by the grid and the single-avatar
+/// asset so a README that lays the standalone tiles out itself lands on the
+/// same geometry the chart draws.
 pub const AVATAR_SIZE: u32 = 62;
-pub const AVATAR_RING_OVERHANG: u32 = 5;
+pub const AVATAR_MARGIN: u32 = 5;
 
-/// Edge of the square one standalone avatar occupies: the photo plus the ring
-/// overhang on both sides.
-pub const AVATAR_TILE: u32 = AVATAR_SIZE + AVATAR_RING_OVERHANG * 2;
+/// Edge of the square one standalone avatar occupies: the photo plus its
+/// margin on both sides.
+pub const AVATAR_TILE: u32 = AVATAR_SIZE + AVATAR_MARGIN * 2;
+
+/// Sheet margin. Every sheet letters its title at this inset and closes its
+/// title block flush to the mirrored one.
+const PAD: f32 = 56.0;
+
+/// Baselines of the two header lines every sheet opens with.
+const TITLE_Y: f32 = 36.0;
+const CAPTION_Y: f32 = 58.0;
+
+/// Width of the title block on a sheet that is 900 units or wider.
+const BLOCK_W: f32 = 236.0;
+
+/// Room under the title block for the colophon.
+const COLOPHON_BAND: f32 = 34.0;
 
 fn reveal_begin(index: usize) -> f32 {
     (index as f32 * 0.018).min(0.09)
 }
 
-fn moving_tier_pattern(ns: &str, color: &str, tier: usize, duration: f32, reverse: bool) -> String {
-    let pattern = crate::texture::tier_pattern_ns(ns, color, 2.0, tier).replacen(
-        " patternUnits=",
-        " patternTransform=\"translate(.5 .5)\" patternUnits=",
-        1,
-    );
-    let (from, to) = if reverse {
-        ("8.5 0.5", "0.5 0.5")
-    } else {
-        ("0.5 0.5", "8.5 0.5")
-    };
-    pattern.replacen(
-        "</pattern>",
-        &format!(
-            "<animateTransform class=\"motion\" attributeName=\"patternTransform\" type=\"translate\" from=\"{from}\" to=\"{to}\" dur=\"{duration:.2}s\" repeatCount=\"indefinite\" /></pattern>"
-        ),
-        1,
+/// The finished-frame reveal.
+///
+/// The element it sits on already carries `opacity="1"`, so a renderer that
+/// never plays the animation — every rasterizer, and the static default —
+/// still draws the whole sheet. Nothing on a sheet is gated on motion.
+fn motion_reveal(index: usize) -> String {
+    format!(
+        "<animate class=\"motion\" attributeName=\"opacity\" from=\"0\" to=\"1\" dur=\"0.2s\" begin=\"{:.2}s\" fill=\"freeze\" />",
+        reveal_begin(index),
     )
 }
 
-// Fix-labelled file changes
+/// The lettering roles every sheet shares, in this print's ink.
+///
+/// Roles, not decoration: `.title` names the sheet, `.caption` says what was
+/// measured, `.label` letters a plotted row, `.value` its measured figure
+/// (tabular, so a column lines up on its digits), `.meta` is the
+/// construction-line grey, and `.field` is the uppercase tracked-out field
+/// label a key uses.
+fn sheet_css(theme: &Theme) -> String {
+    format!(
+        r##"    .title {{ fill: {fg}; font: 600 17px {sans}; }}
+    .caption {{ fill: {ink3}; font: 12px {sans}; }}
+    .label {{ fill: {fg}; font: 12px {mono}; }}
+    .value {{ fill: {fg}; font: 11px {mono}; font-variant-numeric: tabular-nums; }}
+    .meta {{ fill: {ink3}; font: 11px {mono}; font-variant-numeric: tabular-nums; }}
+    .field {{ fill: {ink3}; font: 8px {sans}; letter-spacing: {tracking}; }}
+    .footer-link {{ fill: {muted}; font: 600 11px {sans}; text-decoration: none; letter-spacing: 0.02em; }}
+    .footer-link:hover {{ fill: {fg}; }}
+    @media (prefers-reduced-motion: reduce) {{
+      .motion {{ display: none; }}
+    }}"##,
+        fg = theme.fg,
+        ink3 = theme.ink_3,
+        muted = theme.muted,
+        sans = texture::SANS,
+        mono = texture::MONO,
+        tracking = texture::LABEL_TRACKING,
+    )
+}
+
+/// A measured value in drafting red, cut into its own dimension line.
+fn measured<'a>(value: &'a str, theme: &'a Theme, size: f32) -> Dimension<'a> {
+    Dimension {
+        value,
+        ink: theme.accent,
+        ground: theme.bg,
+        size,
+    }
+}
+
+/// A measured value in graphite. Used where a sheet already spends its red.
+fn plotted<'a>(value: &'a str, theme: &'a Theme, size: f32) -> Dimension<'a> {
+    Dimension {
+        value,
+        ink: theme.fg,
+        ground: theme.bg,
+        size,
+    }
+}
+
+/// How far a dimension line stands off the datum it measures.
+const DIM_STANDOFF: f32 = 16.0;
+
+/// How far an extension tick runs past the dimension line it serves. A tick
+/// that stops short of its own dimension leaves the measurement floating
+/// beside the drawing instead of attached to it.
+const TICK_OVERRUN: f32 = 3.0;
+
+/// Length of an extension tick that has to reach a dimension line standing
+/// `standoff` off the datum.
+fn extension_len(standoff: f32) -> f32 {
+    (standoff - texture::TICK_CLEARANCE + TICK_OVERRUN).max(texture::TICK_LEN)
+}
+
+/// A 1px object line. The only line this module draws by hand: everything
+/// else is a piece of notation from [`crate::texture`].
+fn object_line(x1: f32, y1: f32, x2: f32, y2: f32, ink: &str, weight: f32) -> String {
+    format!(
+        "<line x1=\"{}\" y1=\"{}\" x2=\"{}\" y2=\"{}\" stroke=\"{ink}\" stroke-width=\"{weight}\" />",
+        texture::coord(x1),
+        texture::coord(y1),
+        texture::coord(x2),
+        texture::coord(y2),
+    )
+}
+
+// ---------------------------------------------------------------------------
+// Fix-labelled file changes, and file change frequency
+// ---------------------------------------------------------------------------
 
 pub fn render_bug_magnets(repo: &str, rows: &[FileRow], theme: &Theme) -> String {
-    crate::texture::decorate(
-        horizontal_bar_chart(BarChartConfig {
-            repo,
-            title: "Fix-labelled changes",
-            subtitle: "Most fix-labelled commits in the analyzed commit window",
-            rows,
-            accent: theme.bug,
-            accent_dim: theme.bug_dim,
-            theme,
-        }),
+    horizontal_bar_chart(BarChartConfig {
+        repo,
+        title: "Fix-labelled changes",
+        caption: "Most fix-labelled commits in the analyzed commit window",
+        quantity: "fix commits",
+        empty: "no fix-labelled changes in the analyzed commit window",
+        rows,
         theme,
-    )
+    })
 }
 
-// File change frequency
-
 pub fn render_top_changed(repo: &str, rows: &[FileRow], theme: &Theme) -> String {
-    crate::texture::decorate(
-        horizontal_bar_chart(BarChartConfig {
-            repo,
-            title: "File change frequency",
-            subtitle: "Files touched most often in the analyzed commit window",
-            rows,
-            accent: theme.accent,
-            accent_dim: theme.accent_dim,
-            theme,
-        }),
+    horizontal_bar_chart(BarChartConfig {
+        repo,
+        title: "File change frequency",
+        caption: "Files touched most often in the analyzed commit window",
+        quantity: "commits",
+        empty: "no file changes in the analyzed commit window",
+        rows,
         theme,
-    )
+    })
 }
 
 struct BarChartConfig<'a> {
     repo: &'a str,
     title: &'a str,
-    subtitle: &'a str,
+    caption: &'a str,
+    /// What the plotted count measures. Lettered on the sheet's one dimension
+    /// so the value carries its unit, the way a drawing dimensions one.
+    quantity: &'a str,
+    /// What a sheet with no rows says instead of leaving its plot area blank.
+    empty: &'a str,
     rows: &'a [FileRow],
-    accent: &'a str,
-    accent_dim: &'a str,
     theme: &'a Theme,
 }
 
+/// A plotted bar per file, measured from one zero datum.
+///
+/// The bars carry a 1px graphite hairline at the leading edge — the measured
+/// end, where a terminator would land — and the sheet spends its red once, on
+/// the dimension that measures the peak across the full plot width.
 fn horizontal_bar_chart(cfg: BarChartConfig<'_>) -> String {
-    let width = 900u32;
-    let row_h = 32u32;
-    let header_h = 90u32;
-    let footer_h = 32u32;
-    let padding = 56u32;
-    let bar_h = 18u32;
-    let n = cfg.rows.len() as u32;
-    let height = header_h + n * row_h + footer_h;
-    let max_count = cfg.rows.iter().map(|r| r.count).max().unwrap_or(1).max(1);
-    let label_w = 380.0_f32;
-    let bar_max_w = (width as f32) - padding as f32 - label_w - padding as f32;
+    let theme = cfg.theme;
+    let width = 900.0_f32;
+    let label_w = 330.0_f32;
+    let value_gutter = 66.0_f32;
+    let plot_x = PAD + label_w;
+    let plot_w = width - PAD - plot_x - value_gutter;
+    let row_h = 30.0_f32;
+    let bar_h = 14.0_f32;
+    let header_h = 112.0_f32;
 
-    let mut bars = String::new();
-    for (i, row) in cfg.rows.iter().enumerate() {
-        let y = header_h as f32 + (i as f32) * row_h as f32 + (row_h - bar_h) as f32 / 2.0;
-        let bar_w = (row.count as f32 / max_count as f32) * bar_max_w;
-        let label = truncate_tail(&row.path, 50);
+    let max_count = cfg.rows.iter().map(|r| r.count).max().unwrap_or(0).max(0);
+    let scale = max_count.max(1) as f32;
+    // A sheet with no rows still holds a plot band, so its reason has room to
+    // sit in and the title block does not ride up under the caption.
+    let plot_bottom = header_h
+        + if cfg.rows.is_empty() {
+            60.0
+        } else {
+            cfg.rows.len() as f32 * row_h
+        };
+
+    let mut body = String::new();
+    for (index, row) in cfg.rows.iter().enumerate() {
+        let bar_y = header_h + index as f32 * row_h + (row_h - bar_h) / 2.0;
+        let center = bar_y + bar_h / 2.0;
+        let bar_w = (row.count.max(0) as f32 / scale) * plot_w;
+        let bar = if bar_w >= 0.5 {
+            texture::series_bar(
+                plot_x,
+                bar_y,
+                bar_w,
+                bar_h,
+                theme.ink_3,
+                theme.fg,
+                Side::Right,
+            )
+        } else {
+            String::new()
+        };
+        let value = row.count.to_string();
+        let (value_x, anchor, ink) = count_placement(plot_x, bar_w, &value, theme.ink_3, theme.fg);
         let href = format!(
             "https://github.com/{repo}/blob/HEAD/{path}",
             repo = cfg.repo,
             path = row.path,
         );
-        let count_str = row.count.to_string();
-        let (count_x, count_anchor, count_color) =
-            count_placement(label_w, bar_w, &count_str, cfg.accent, cfg.theme.muted);
-        bars.push_str(&format!(
-            r##"<g transform="translate({padding}, {y:.1})" opacity="1">
-  <animate class="motion" attributeName="opacity" from="0" to="1" dur="0.2s" begin="{begin:.2}s" fill="freeze" />
-  <a class="bar-link" href="{href}" target="_blank" rel="noopener">
-    <title>{full_path}</title>
-    <text class="bar-label" x="0" y="{label_y:.1}">{label}</text>
-  </a>
-  <rect class="bar-track" x="{label_w}" y="0" width="{bar_max_w:.1}" height="{bar_h}" rx="3" />
-  <rect class="bar-fill" x="{label_w}" y="0" width="{bar_w:.1}" height="{bar_h}" rx="3" />
-  <text class="bar-count" x="{count_x:.1}" y="{label_y:.1}" text-anchor="{count_anchor}" fill="{count_color}">
-    {count}
-  </text>
-</g>
+        body.push_str(&format!(
+            r##"  <g opacity="1">
+    {motion}
+    <a class="bar-link" href="{href}" target="_blank" rel="noopener"><title>{full}</title><text class="label" x="{lx}" y="{cy}" dominant-baseline="central">{label}</text></a>
+    {bar}
+    <text class="value" x="{vx}" y="{cy}" text-anchor="{anchor}" dominant-baseline="central" fill="{ink}">{value}</text>
+  </g>
 "##,
-            padding = padding,
-            y = y,
-            begin = reveal_begin(i),
+            motion = motion_reveal(index),
             href = escape_xml(&href),
-            full_path = escape_xml(&row.path),
-            label = escape_xml(&label),
-            label_w = label_w,
-            label_y = bar_h as f32 / 2.0 + 5.0,
-            bar_max_w = bar_max_w,
-            bar_h = bar_h,
-            bar_w = bar_w,
-            count = row.count,
-            count_x = count_x,
-            count_anchor = count_anchor,
-            count_color = count_color,
+            full = escape_xml(&row.path),
+            lx = texture::coord(PAD),
+            cy = texture::coord(center),
+            label = escape_xml(&truncate_tail(&row.path, 44)),
+            vx = texture::coord(value_x),
         ));
     }
 
-    let footer_y = (height - 12) as f32;
+    // The zero datum every bar is measured from, and the one dimension: the
+    // peak, spanning the whole plot because the peak sets the scale.
+    let (datum, dimension) = if max_count > 0 {
+        let bar_top = header_h + (row_h - bar_h) / 2.0;
+        let value = format!("{max_count} {}", cfg.quantity);
+        (
+            object_line(
+                plot_x,
+                header_h + 4.0,
+                plot_x,
+                plot_bottom - 4.0,
+                theme.border,
+                texture::W_OBJECT,
+            ),
+            format!(
+                "  {left}{right}{dim}\n",
+                left = texture::extension_tick(
+                    plot_x,
+                    bar_top,
+                    Side::Up,
+                    extension_len(DIM_STANDOFF),
+                    theme.border
+                ),
+                right = texture::extension_tick(
+                    plot_x + plot_w,
+                    bar_top,
+                    Side::Up,
+                    extension_len(DIM_STANDOFF),
+                    theme.border
+                ),
+                dim = texture::dimension_h(
+                    plot_x,
+                    plot_x + plot_w,
+                    bar_top - DIM_STANDOFF,
+                    &measured(&value, theme, 11.0)
+                ),
+            ),
+        )
+    } else {
+        // Nothing to measure, so nothing is drawn but the reason. A blank
+        // plot area reads as a rendering fault; a sentence does not.
+        (
+            format!(
+                "<text class=\"caption\" x=\"{x}\" y=\"{y}\" text-anchor=\"middle\">{message}</text>",
+                x = texture::coord(width / 2.0),
+                y = texture::coord(header_h + 34.0),
+                message = escape_xml(cfg.empty),
+            ),
+            String::new(),
+        )
+    };
+
+    let repo_field = truncate_tail(cfg.repo, 22);
+    let rows_field = cfg.rows.len().to_string();
+    let peak_field = max_count.to_string();
+    let fields = [
+        TitleField {
+            label: "repo",
+            value: &repo_field,
+        },
+        TitleField {
+            label: "rows",
+            value: &rows_field,
+        },
+        TitleField {
+            label: "peak",
+            value: &peak_field,
+        },
+    ];
+    let block_y = plot_bottom + 22.0;
+    let height = block_y + texture::title_block_height(fields.len()) + COLOPHON_BAND;
+
     format!(
-        r##"<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 {width} {height}" role="img" aria-label="{title} for {repo}">
+        r##"<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 {width:.0} {height:.0}" role="img" aria-label="{title} for {repo}">
   <style><![CDATA[
-    .title {{ fill: {fg}; font: 600 18px ui-sans-serif, system-ui, sans-serif; }}
-    .subtitle {{ fill: {muted}; font: 13px ui-sans-serif, system-ui, sans-serif; }}
-    .bar-label {{ fill: {fg}; font: 12px ui-monospace, SFMono-Regular, monospace; }}
+{css}
     .bar-link {{ cursor: pointer; }}
-    .bar-link:hover .bar-label {{ fill: {accent}; text-decoration: underline; }}
-    .bar-count {{ font: 600 12px ui-sans-serif, system-ui, sans-serif; }}
-    .bar-track {{ fill: {track}; }}
-    .bar-fill {{ fill: url(#gd-pixel-fill); stroke: {accent}; stroke-width: 1; shape-rendering: crispEdges; }}
-    .footer-link {{ fill: {muted}; font: 600 11px ui-sans-serif, system-ui, sans-serif; text-decoration: none; letter-spacing: 0.02em; }}
-    .footer-link:hover {{ fill: {fg}; }}
-    @media (prefers-reduced-motion: reduce) {{
-      .motion {{ display: none; }}
-    }}
-    g:hover .bar-fill {{ stroke: {accent_dim}; opacity: 0.72; }}
+    .bar-link:hover .label {{ text-decoration: underline; }}
   ]]></style>
-  <text class="title" x="{padding}" y="36">{title}</text>
-  <text class="subtitle" x="{padding}" y="58">{subtitle} · {repo}</text>
-{bars}
-{footer}
+  <text class="title" x="{pad}" y="{title_y}">{title}</text>
+  <text class="caption" x="{pad}" y="{caption_y}">{caption}</text>
+{dimension}  {datum}
+{body}{block}{footer}
 </svg>"##,
-        width = width,
-        height = height,
-        repo = escape_xml(cfg.repo),
         title = escape_xml(cfg.title),
-        subtitle = escape_xml(cfg.subtitle),
-        fg = cfg.theme.fg,
-        muted = cfg.theme.muted,
-        track = cfg.theme.track,
-        accent = cfg.accent,
-        accent_dim = cfg.accent_dim,
-        padding = padding,
-        bars = bars,
-        footer = brand::footer_lockup((width as f32) - padding as f32, footer_y, cfg.theme,),
+        repo = escape_xml(cfg.repo),
+        caption = escape_xml(cfg.caption),
+        css = sheet_css(theme),
+        pad = texture::coord(PAD),
+        title_y = texture::coord(TITLE_Y),
+        caption_y = texture::coord(CAPTION_Y),
+        block = texture::title_block(width - PAD - BLOCK_W, block_y, BLOCK_W, &fields, theme),
+        footer = brand::footer_lockup(width - PAD, height - 12.0, theme),
     )
 }
 
-/// Decide where to draw the count number relative to the bar:
-///   - if the bar is wide enough to swallow the text → render INSIDE the
-///     bar, right-anchored, with a contrasting (white/black) fill;
-///   - otherwise render OUTSIDE to the right of the bar, in the muted
-///     foreground color.
+/// Where the measured figure sits relative to its bar.
 ///
-/// Returns `(x, text-anchor, fill)` ready to drop into the `<text>` tag.
+/// A bar wide enough to swallow the value letters it INSIDE, right against
+/// the leading edge, in whichever of graphite or paper stays legible on the
+/// flat pen. A short bar letters it outside, in ink. Returns
+/// `(x, text-anchor, fill)`.
 fn count_placement<'a>(
-    label_w: f32,
+    plot_x: f32,
     bar_w: f32,
     text: &str,
-    bar_color: &str,
-    muted: &'a str,
+    bar_ink: &str,
+    outside_ink: &'a str,
 ) -> (f32, &'static str, &'a str) {
-    // 7.5 px/char is a reasonable estimate for a 12px sans-serif weight 600.
-    let estimated = (text.chars().count() as f32) * 7.5;
+    // ~6.6 px/char is the advance of an 11px monospace digit.
+    let estimated = (text.chars().count() as f32) * 6.6;
     if bar_w >= estimated + 16.0 {
-        (label_w + bar_w - 8.0, "end", contrast_on(bar_color))
+        (plot_x + bar_w - 8.0, "end", contrast_on(bar_ink))
     } else {
-        (label_w + bar_w + 8.0, "start", muted)
+        (plot_x + bar_w + 8.0, "start", outside_ink)
     }
 }
 
+// ---------------------------------------------------------------------------
 // Commit heatmap
+// ---------------------------------------------------------------------------
+
+/// One step of the commit-intensity ladder: how wide its mark is inside the
+/// day cell, and which of the drawing's inks it is drawn in.
+type HeatStep = (f32, fn(&Theme) -> &'static str);
+
+/// The four plotted steps of one day's commit count.
+///
+/// A stepped set of inks, and deliberately NOT the plotter pens. The pen set
+/// exists for several series drawn at once, and it sits in one narrow
+/// lightness band precisely so no series shouts over another — which is the
+/// opposite of what a magnitude needs. Intensity is one series in steps, so
+/// it steps through the drawing's own ink ladder instead, from the frame line
+/// up to graphite, and the mark grows with it. Two encodings, one direction:
+/// the ladder reads as more even where two of its inks sit close together,
+/// and the key letters the count range each step stands for.
+const HEAT_STEPS: [HeatStep; 4] = [
+    (8.0, |theme| theme.border),
+    (11.0, |theme| theme.ink_3),
+    (14.0, |theme| theme.muted),
+    (14.0, |theme| theme.fg),
+];
 
 /// Render the commit heatmap.
 ///
@@ -280,78 +465,47 @@ pub fn render_heatmap(
     analyzed_from: Option<NaiveDate>,
     theme: &Theme,
 ) -> String {
-    crate::texture::decorate(
-        render_heatmap_inner(repo, subtitle_label, start, end, days, analyzed_from, theme),
-        theme,
-    )
-}
-
-fn render_heatmap_inner(
-    repo: &str,
-    subtitle_label: &str,
-    start: NaiveDate,
-    end: NaiveDate,
-    days: &[DayCount],
-    analyzed_from: Option<NaiveDate>,
-    theme: &Theme,
-) -> String {
     use std::collections::BTreeMap;
     let counts: BTreeMap<NaiveDate, i64> = days.iter().map(|d| (d.day, d.commits)).collect();
     let mut sorted: Vec<i64> = counts.values().copied().filter(|c| *c > 0).collect();
-    sorted.sort();
-    let q = |p: f32| -> i64 {
+    sorted.sort_unstable();
+    let quantile = |p: f32| -> i64 {
         if sorted.is_empty() {
             return 0;
         }
-        let idx = ((sorted.len() as f32 - 1.0) * p).round() as usize;
-        sorted[idx]
+        let index = ((sorted.len() as f32 - 1.0) * p).round() as usize;
+        sorted[index]
     };
-    let q1 = q(0.25);
-    let q2 = q(0.5);
-    let q3 = q(0.75);
+    let steps = (quantile(0.25), quantile(0.5), quantile(0.75));
 
-    let cell = 14u32;
-    let gap = 3u32;
-    let pad_left = 32u32;
-    let pad_top = 70u32;
-    let pad_bottom = 50u32;
-    let rows = 7u32;
+    let cell = 14.0_f32;
+    let gap = 3.0_f32;
+    let step = cell + gap;
+    let pad_left = 44.0_f32;
+    let pad_top = 96.0_f32;
     let aligned_start = first_monday_on_or_before(start);
     let total_days = (end - aligned_start).num_days().max(0) as u32 + 1;
     let cols = total_days.div_ceil(7);
-    let plot_w = cols * (cell + gap);
-    let plot_h = rows * (cell + gap);
-    let width = plot_w + pad_left + 32;
-    let height = plot_h + pad_top + pad_bottom;
+    let plot_w = cols as f32 * step;
+    let plot_h = 7.0 * step;
+    let width = (pad_left + plot_w + 40.0).max(640.0);
 
     let mut cells = String::new();
     let mut total = 0i64;
     let mut max_seen = 0i64;
-    let mut peak_day: Option<NaiveDate> = None;
+    let mut peak: Option<(NaiveDate, f32, f32)> = None;
     let mut day_iter = start;
     while day_iter <= end {
         let weekday = day_iter.weekday().num_days_from_monday();
-        let days_from_aligned = (day_iter - aligned_start).num_days();
-        let col = (days_from_aligned / 7) as u32;
+        let col = ((day_iter - aligned_start).num_days() / 7) as f32;
         let count = counts.get(&day_iter).copied().unwrap_or(0);
         total = total.saturating_add(count);
+        let x = pad_left + col * step;
+        let y = pad_top + weekday as f32 * step;
         if count > max_seen {
             max_seen = count;
-            peak_day = Some(day_iter);
+            peak = Some((day_iter, x, y));
         }
-        let level = if count == 0 {
-            0
-        } else if count <= q1 {
-            1
-        } else if count <= q2 {
-            2
-        } else if count <= q3 {
-            3
-        } else {
-            4
-        };
-        let x = pad_left + col * (cell + gap);
-        let y = pad_top + weekday * (cell + gap);
         let href = format!(
             "https://github.com/{repo}/commits?since={day}T00%3A00%3A00Z&amp;until={day}T23%3A59%3A59Z",
             day = day_iter,
@@ -364,19 +518,15 @@ fn render_heatmap_inner(
         };
         cells.push_str(&format!(
             r##"<a class="day-link" href="{href}" target="_blank" rel="noopener" aria-label="Open commits from {day}">
-  <rect class="cell" x="{x}" y="{y}" width="{cell}" height="{cell}" rx="2" fill="{track}">
-    <title>{label}</title>
-  </rect>{ink}
-</a>
-"##,
-            href = href,
-            x = x,
-            y = y,
-            cell = cell,
-            track = theme.track,
-            ink = heat_ink(x as f32, y as f32, cell as f32, level),
+      <rect class="cell" x="{x}" y="{y}" width="{cell}" height="{cell}" fill="{ground}"><title>{label}</title></rect>{mark}
+    </a>
+    "##,
+            x = texture::coord(x),
+            y = texture::coord(y),
+            cell = texture::coord(cell),
+            ground = theme.track,
+            mark = heat_mark(x, y, cell, heat_level(count, steps), theme),
             day = day_iter,
-            label = label,
         ));
         let Some(next) = day_iter.succ_opt() else {
             break;
@@ -384,135 +534,164 @@ fn render_heatmap_inner(
         day_iter = next;
     }
 
-    let legend_y = (height - 30) as f32;
-    let legend_x = pad_left as f32;
-    let mut legend_cells = String::new();
-    for level in 0..HEAT_TIERS.len() {
-        let x = legend_x + 60.0 + (level as f32) * (cell as f32 + 2.0);
-        legend_cells.push_str(&format!(
-            r##"<rect class="cell" x="{x:.1}" y="{legend_y:.1}" width="{cell}" height="{cell}" rx="2" fill="{track}" />{ink}"##,
-            legend_y = legend_y,
-            cell = cell,
-            track = theme.track,
-            ink = heat_ink(x, legend_y, cell as f32, level),
+    // The key: the same five steps, at the same size and in the same ink as
+    // the calendar draws them, each lettered with the count range it stands
+    // for. A step whose mark is smaller than its cell is smaller here too.
+    let band_y = pad_top + plot_h + 26.0;
+    let mut key = format!(
+        "  <text class=\"field\" x=\"{x}\" y=\"{y}\">COMMITS PER DAY</text>\n",
+        x = texture::coord(pad_left),
+        y = texture::coord(band_y),
+    );
+    for (index, range) in heat_key_ranges(steps).iter().enumerate() {
+        let swatch_x = pad_left + index as f32 * 58.0;
+        let swatch_y = band_y + 10.0;
+        key.push_str(&format!(
+            "  <rect x=\"{x}\" y=\"{y}\" width=\"{cell}\" height=\"{cell}\" fill=\"{ground}\" shape-rendering=\"crispEdges\" />{mark}<text class=\"meta\" x=\"{tx}\" y=\"{ty}\" dominant-baseline=\"central\">{range}</text>\n",
+            x = texture::coord(swatch_x),
+            y = texture::coord(swatch_y),
+            cell = texture::coord(cell),
+            ground = theme.track,
+            mark = heat_mark(swatch_x, swatch_y, cell, index, theme),
+            tx = texture::coord(swatch_x + cell + 6.0),
+            ty = texture::coord(swatch_y + cell / 2.0),
+            range = escape_xml(range),
         ));
     }
 
-    let mut dow_labels = String::new();
-    for (idx, label) in ["Mon", "Wed", "Fri"].iter().enumerate() {
-        let row = match idx {
-            0 => 0u32,
-            1 => 2,
-            _ => 4,
+    let mut dow = String::new();
+    for (index, label) in ["Mon", "Wed", "Fri"].iter().enumerate() {
+        let row = index as f32 * 2.0;
+        dow.push_str(&format!(
+            "  <text class=\"meta\" x=\"{x}\" y=\"{y}\" text-anchor=\"end\" dominant-baseline=\"central\">{label}</text>\n",
+            x = texture::coord(pad_left - 8.0),
+            y = texture::coord(pad_top + row * step + cell / 2.0),
+        ));
+    }
+
+    // The peak is the sheet's measured datum, so it gets the red leader.
+    let leader = peak.map_or_else(String::new, |(day, x, y)| {
+        let datum = (x + cell / 2.0, y);
+        let label_x = if datum.0 < width / 2.0 {
+            datum.0 + 46.0
+        } else {
+            datum.0 - 46.0
         };
-        let y = pad_top + row * (cell + gap) + cell - 2;
-        dow_labels.push_str(&format!(
-            r##"<text class="dow" x="0" y="{y}">{label}</text>"##,
-            y = y,
-            label = label,
-        ));
-    }
+        format!(
+            "  {}\n",
+            texture::leader(
+                datum,
+                (label_x, pad_top - 22.0),
+                &format!("peak {max_seen} · {day}"),
+                11.0,
+                theme.accent,
+            )
+        )
+    });
 
-    let peak_text = peak_day
-        .map(|d| format!("Peak: {} ({} commits)", d, max_seen))
-        .unwrap_or_else(|| "No commits in this range".into());
     let window_label = analyzed_from.map_or_else(
         || subtitle_label.to_string(),
         |from| format!("{subtitle_label} · bounded analysis from {from}"),
     );
+    let repo_field = truncate_tail(repo, 22);
+    let days_field = ((end - start).num_days().max(0) + 1).to_string();
+    let total_field = humanize(total);
+    let peak_field = max_seen.to_string();
+    let fields = [
+        TitleField {
+            label: "repo",
+            value: &repo_field,
+        },
+        TitleField {
+            label: "days",
+            value: &days_field,
+        },
+        TitleField {
+            label: "commits",
+            value: &total_field,
+        },
+        TitleField {
+            label: "peak day",
+            value: &peak_field,
+        },
+    ];
+    let block_y = band_y - 8.0;
+    let height = block_y + texture::title_block_height(fields.len()) + COLOPHON_BAND;
 
     format!(
-        r##"<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 {width} {height}" role="img" aria-label="Commit activity for {repo}">
-  <defs data-gitdebt-heat-defs="true">{heat_defs}</defs>
+        r##"<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 {width:.0} {height:.0}" role="img" aria-label="Commit activity for {repo}">
   <style><![CDATA[
-    .title {{ fill: {fg}; font: 600 18px ui-sans-serif, system-ui, sans-serif; }}
-    .subtitle {{ fill: {muted}; font: 13px ui-sans-serif, system-ui, sans-serif; }}
-    .dow, .legend {{ fill: {muted}; font: 10px ui-sans-serif, system-ui, sans-serif; }}
-    .cell {{ stroke: {border}; stroke-width: 0.5; stroke-opacity: 0.4; }}
+{css}
+    .cell {{ shape-rendering: crispEdges; }}
     .day-link {{ cursor: pointer; }}
-    .footer-link {{ fill: {muted}; font: 600 11px ui-sans-serif, system-ui, sans-serif; text-decoration: none; letter-spacing: 0.02em; }}
-    .footer-link:hover {{ fill: {fg}; }}
-    .cell:hover {{ stroke: {fg}; stroke-width: 1.5; stroke-opacity: 1; }}
-    @media (prefers-reduced-motion: reduce) {{
-      .motion {{ display: none; }}
-    }}
+    .cell:hover {{ stroke: {fg}; stroke-width: 1; }}
   ]]></style>
-  <text class="title" x="{pad_left}" y="32">{repo}</text>
-  <text class="subtitle" x="{pad_left}" y="52">{window_label} · {total} total · {peak_text}</text>
-  {dow_labels}
-  <g class="heat-cells" opacity="1">
-    <animate class="motion" attributeName="opacity" from="0" to="1" dur="0.2s" begin="0s" fill="freeze" />
+  <text class="title" x="{pad}" y="{title_y}">{repo}</text>
+  <text class="caption" x="{pad}" y="{caption_y}">{window_label} · {total} commits</text>
+{dow}  <g class="heat-cells" opacity="1">
+    {motion}
     {cells}
   </g>
-  <text class="legend" x="{legend_x:.0}" y="{legend_label_y:.0}">Less</text>
-  {legend_cells}
-  <text class="legend" x="{legend_more_x:.0}" y="{legend_label_y:.0}">More</text>
-{footer}
+{leader}{key}{block}{footer}
 </svg>"##,
-        width = width,
-        height = height,
         repo = escape_xml(repo),
         window_label = escape_xml(&window_label),
+        css = sheet_css(theme),
         fg = theme.fg,
-        muted = theme.muted,
-        border = theme.border,
-        heat_defs = heat_defs(theme),
-        pad_left = pad_left,
-        total = total,
-        peak_text = escape_xml(&peak_text),
-        dow_labels = dow_labels,
-        cells = cells,
-        legend_x = legend_x,
-        legend_label_y = legend_y + cell as f32 - 2.0,
-        legend_cells = legend_cells,
-        legend_more_x = legend_x + 60.0 + 5.0 * (cell as f32 + 2.0) + 4.0,
-        footer = brand::footer_lockup((width as f32) - 16.0, (height - 10) as f32, theme,),
+        pad = texture::coord(pad_left),
+        title_y = texture::coord(TITLE_Y),
+        caption_y = texture::coord(CAPTION_Y),
+        motion = motion_reveal(0),
+        block = texture::title_block(width - 40.0 - BLOCK_W, block_y, BLOCK_W, &fields, theme),
+        footer = brand::footer_lockup(width - 24.0, height - 12.0, theme),
     )
 }
 
-// Commit-activity heat levels
-//
-// Each intensity level is a Bayer density tier: level 0 leaves the empty
-// track showing, levels 1–4 stack a denser lit-cell pattern on top.
-
-/// Bayer density tier per heat level (`0` = no commits, `4` = top
-/// quartile). The top tier stops at 13/16 so even the busiest day still
-/// shows grain instead of flattening back into a solid swatch.
-const HEAT_TIERS: [usize; 5] = [0, 2, 6, 10, 13];
-/// Lit-cell alpha per heat level, following `0.3 + 0.7 · density`.
-const HEAT_ALPHA: [&str; 5] = ["0", "0.48", "0.65", "0.83", "1"];
-/// Id namespace for the heat tier ladder.
-const HEAT_NS: &str = "gd-heat";
-
-/// The tier ladder the heatmap actually references, in the theme's ink.
-fn heat_defs(theme: &Theme) -> String {
-    let mut out = String::new();
-    let (violet, blue, pink) = crate::texture::wave_stops(theme);
-    let colors = [violet, blue, pink, theme.fg];
-    for (index, tier) in HEAT_TIERS.iter().skip(1).enumerate() {
-        out.push_str(&moving_tier_pattern(
-            HEAT_NS,
-            colors[index],
-            *tier,
-            0.58 + index as f32 * 0.08,
-            index % 2 == 1,
-        ));
+/// Which of the five steps a day's commit count falls in.
+fn heat_level(count: i64, steps: (i64, i64, i64)) -> usize {
+    if count <= 0 {
+        0
+    } else if count <= steps.0 {
+        1
+    } else if count <= steps.1 {
+        2
+    } else if count <= steps.2 {
+        3
+    } else {
+        4
     }
-    out
 }
 
-/// Dithered ink overlay for one heat cell. Level 0 renders nothing so the
-/// empty track shows through untouched.
-fn heat_ink(x: f32, y: f32, cell: f32, level: usize) -> String {
-    let level = level.min(HEAT_TIERS.len() - 1);
+/// The mark one step plots inside its cell, centred on it.
+///
+/// Step 0 draws nothing at all: a day with no commits keeps its place in the
+/// calendar, on the empty ground, and carries no ink. Every other step is a
+/// square of the step's own size and ink, centred so the ladder grows from
+/// the middle of the cell outward.
+fn heat_mark(x: f32, y: f32, cell: f32, level: usize, theme: &Theme) -> String {
     if level == 0 {
         return String::new();
     }
+    let (size, ink) = HEAT_STEPS[(level - 1).min(HEAT_STEPS.len() - 1)];
+    let inset = (cell - size) / 2.0;
     format!(
-        r##"<rect class="heat-ink" x="{x:.0}" y="{y:.0}" width="{cell:.0}" height="{cell:.0}" rx="2" fill="{fill}" fill-opacity="{alpha}" shape-rendering="crispEdges" pointer-events="none" />"##,
-        fill = crate::texture::tier_fill_ns(HEAT_NS, HEAT_TIERS[level]),
-        alpha = HEAT_ALPHA[level],
+        "<rect class=\"mark\" x=\"{x}\" y=\"{y}\" width=\"{size}\" height=\"{size}\" fill=\"{ink}\" shape-rendering=\"crispEdges\" pointer-events=\"none\" />",
+        x = texture::coord(x + inset),
+        y = texture::coord(y + inset),
+        size = texture::coord(size),
+        ink = ink(theme),
     )
+}
+
+/// What each step of the key measures, lettered.
+fn heat_key_ranges(steps: (i64, i64, i64)) -> [String; 5] {
+    [
+        "0".to_string(),
+        format!("≤{}", steps.0.max(1)),
+        format!("≤{}", steps.1.max(steps.0).max(1)),
+        format!("≤{}", steps.2.max(steps.1).max(1)),
+        format!(">{}", steps.2.max(steps.1).max(1)),
+    ]
 }
 
 fn first_monday_on_or_before(d: NaiveDate) -> NaiveDate {
@@ -520,158 +699,168 @@ fn first_monday_on_or_before(d: NaiveDate) -> NaiveDate {
     d - chrono::Duration::days(offset)
 }
 
+// ---------------------------------------------------------------------------
 // Contributors
+// ---------------------------------------------------------------------------
 
 pub fn render_contributors(repo: &str, contributors: &[ContributorRow], theme: &Theme) -> String {
-    crate::texture::decorate(render_contributors_inner(repo, contributors, theme), theme)
-}
-
-fn render_contributors_inner(repo: &str, contributors: &[ContributorRow], theme: &Theme) -> String {
     let width = 1100u32;
     let pad = 44u32;
     let avatar_y = 86u32;
-    let avatar_size = AVATAR_SIZE;
-    let avatar_ring_overhang = AVATAR_RING_OVERHANG;
-    let min_column_step = 76u32;
     let row_step = 82u32;
+    let min_column_step = 76u32;
     let content_width = width - pad * 2;
-    let avatar_outer_size = avatar_size + avatar_ring_overhang * 2;
-    let column_span = content_width.saturating_sub(avatar_outer_size);
+    let column_span = content_width.saturating_sub(AVATAR_TILE);
     let columns = (column_span / min_column_step + 1).max(1);
     // The endpoint already supplies a bounded, ordered author set. Rendering
     // every provided row avoids silently turning that set into a second,
     // undocumented top-16 sample.
-    let shown: Vec<&ContributorRow> = contributors.iter().collect();
-    let row_count = (shown.len() as u32).div_ceil(columns);
-    let height = if row_count == 0 {
-        176
-    } else {
-        avatar_y + row_count * row_step + 40
-    };
+    let row_count = (contributors.len() as u32).div_ceil(columns);
 
-    let mut rows = String::new();
-    for (i, c) in shown.iter().enumerate() {
-        let column = i as u32 % columns;
-        let row = i as u32 / columns;
-        // Distribute complete rows across the full padded content width. The
-        // avatar's dither ring extends past its image, so positioning by the
-        // image alone leaves a visibly larger gutter on the right.
+    let mut tiles = String::new();
+    for (index, person) in contributors.iter().enumerate() {
+        let column = index as u32 % columns;
+        let row = index as u32 / columns;
+        // Distribute complete rows across the full padded content width.
         let column_offset = if columns > 1 {
             column * column_span / (columns - 1)
         } else {
             0
         };
-        let x = pad + avatar_ring_overhang + column_offset;
+        let x = pad + AVATAR_MARGIN + column_offset;
         let y = avatar_y + row * row_step;
-        let label = c.login.clone().unwrap_or_else(|| c.name.clone());
-        let profile = c
-            .login
-            .as_ref()
-            .map(|login| format!("https://github.com/{login}"));
-        let avatar = c.avatar_url.as_ref().map_or_else(
-            || {
-                let initial = label
-                    .chars()
-                    .next()
-                    .unwrap_or('?')
-                    .to_uppercase()
-                    .to_string();
-                format!(
-                    r#"<circle class="avatar-fallback-bg" cx="{r}" cy="{r}" r="{r}" /><text class="avatar-fallback" x="{r}" y="{y}" text-anchor="middle">{initial}</text>"#,
-                    r = avatar_size / 2,
-                    y = avatar_size / 2 + 8,
-                    initial = escape_xml(&initial),
-                )
-            },
-            |url| {
-                format!(
-                    r#"<image href="{url}" x="0" y="0" width="{avatar_size}" height="{avatar_size}" clip-path="url(#contributor-clip-{i})" preserveAspectRatio="xMidYMid slice" />"#,
-                    url = escape_xml(url),
-                )
-            },
-        );
+        let label = person.login.clone().unwrap_or_else(|| person.name.clone());
         let content = format!(
             r##"<title>{label}</title>
-      <g class="avatar-pos">
-        <circle class="avatar-pixels" cx="{r}" cy="{r}" r="{ring_r}" />
-        <clipPath id="contributor-clip-{i}"><circle cx="{r}" cy="{r}" r="{r}" /></clipPath>
-        {avatar}
-        <circle class="avatar-outline" cx="{r}" cy="{r}" r="{r}" />
+      <g class="avatar-frame">
+        <clipPath id="contributor-clip-{index}"><rect width="{size}" height="{size}" /></clipPath>
+        {photo}
+        <rect class="avatar-edge" x="0" y="0" width="{size}" height="{size}" />
       </g>"##,
             label = escape_xml(&label),
-            r = avatar_size / 2,
-            ring_r = avatar_size / 2 + avatar_ring_overhang,
+            size = AVATAR_SIZE,
+            photo = avatar_photo(
+                person.avatar_url.as_deref(),
+                &label,
+                &format!("contributor-clip-{index}")
+            ),
         );
-        let linked = profile.map_or(content.clone(), |href| {
+        let linked = person.login.as_ref().map_or(content.clone(), |login| {
             format!(
                 r##"<a class="contributor-link" href="{href}" target="_blank" rel="noopener">{content}</a>"##,
-                href = escape_xml(&href),
+                href = escape_xml(&format!("https://github.com/{login}")),
             )
         });
-        rows.push_str(&format!(
-            r##"<g class="contributor-node" transform="translate({x}, {y})" opacity="1">
-    <animate class="motion" attributeName="opacity" from="0" to="1" dur="0.2s" begin="{begin:.2}s" fill="freeze" />
+        tiles.push_str(&format!(
+            r##"  <g class="contributor-node" transform="translate({x}, {y})" opacity="1">
+    {motion}
     {linked}
-</g>
+  </g>
 "##,
-            y = y,
-            x = x,
-            begin = reveal_begin(i),
-            linked = linked,
+            motion = motion_reveal(index),
         ));
     }
 
-    let footer_y = (height - 12) as f32;
-    // `.avatar-pixels` carries no stroke: it used to be inked with the canvas
-    // colour to knock a gap between the dither ring and the photo, which on a
-    // surface that paints no canvas is just an opaque halo. Without it the
-    // disc sits at exactly the 5px `avatar_ring_overhang` the layout above
-    // already reserves, and the ring's outer edge is dither, not paint.
+    let repo_field = truncate_tail(repo, 22);
+    let authors_field = contributors.len().to_string();
+    let fields = [
+        TitleField {
+            label: "repo",
+            value: &repo_field,
+        },
+        TitleField {
+            label: "authors",
+            value: &authors_field,
+        },
+    ];
+    let sheet_w = width as f32;
+    let grid_bottom = if row_count == 0 {
+        avatar_y as f32
+    } else {
+        (avatar_y + (row_count - 1) * row_step + AVATAR_SIZE) as f32
+    };
+    let block_y = grid_bottom + 26.0;
+    let height = block_y + texture::title_block_height(fields.len()) + COLOPHON_BAND;
+
     format!(
-        r##"<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 {width} {height}" role="img" aria-label="Contributors of {repo}">
+        r##"<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 {width} {height:.0}" role="img" aria-label="Contributors of {repo}">
   <style><![CDATA[
-    .title {{ fill: {fg}; font: 600 18px ui-sans-serif, system-ui, sans-serif; }}
-    .subtitle {{ fill: {muted}; font: 13px ui-sans-serif, system-ui, sans-serif; }}
-    .avatar-pixels {{ fill: url(#gd-pixel-fill); stroke: none; shape-rendering: crispEdges; }}
-    .avatar-outline {{ fill: none; stroke: {border}; stroke-width: 1.5; }}
-    .avatar-fallback-bg {{ fill: {track}; }}
-    .avatar-fallback {{ fill: {fg}; font: 700 22px ui-monospace, SFMono-Regular, monospace; }}
-    .avatar-pos {{ transform-box: fill-box; transform-origin: center; transition: transform 320ms cubic-bezier(0.2, 0.8, 0.2, 1); }}
+{css}
+{avatar_css}
     .contributor-link {{ cursor: pointer; }}
-    @media (hover: hover) and (pointer: fine) {{
-      .contributor-link:hover .avatar-pos {{ transform: translateY(-10px) scale(1.08); }}
-      .contributor-link:hover .avatar-outline {{ stroke: {fg}; stroke-width: 2; }}
-    }}
-    .footer-link {{ fill: {muted}; font: 600 11px ui-sans-serif, system-ui, sans-serif; text-decoration: none; letter-spacing: 0.02em; }}
-    .footer-link:hover {{ fill: {fg}; }}
-    @media (prefers-reduced-motion: reduce) {{
-      .motion {{ display: none; }}
-      .avatar-pos {{ transition: none; }}
-    }}
+    .contributor-link:hover .avatar-edge {{ stroke: {fg}; stroke-width: {emphasis}; }}
   ]]></style>
-  <text class="title" x="{pad}" y="36">Contributors</text>
-  <text class="subtitle" x="{pad}" y="58">{shown_count} public commit author{plural} · {repo}</text>
-{rows}
-{footer}
+  <text class="title" x="{pad}" y="{title_y}">Contributors</text>
+  <text class="caption" x="{pad}" y="{caption_y}">{count} public commit author{plural} · {repo}</text>
+{tiles}{block}{footer}
 </svg>"##,
-        width = width,
-        height = height,
         repo = escape_xml(repo),
+        css = sheet_css(theme),
+        avatar_css = avatar_css(theme),
         fg = theme.fg,
-        muted = theme.muted,
-        border = theme.border,
-        track = theme.track,
-        pad = pad,
-        shown_count = shown.len(),
-        plural = if shown.len() == 1 { "" } else { "s" },
-        rows = rows,
-        footer = brand::footer_lockup((width as f32) - pad as f32, footer_y, theme,),
+        emphasis = texture::W_EMPHASIS,
+        title_y = texture::coord(TITLE_Y),
+        caption_y = texture::coord(CAPTION_Y),
+        count = contributors.len(),
+        plural = if contributors.len() == 1 { "" } else { "s" },
+        block = texture::title_block(
+            sheet_w - pad as f32 - BLOCK_W,
+            block_y,
+            BLOCK_W,
+            &fields,
+            theme
+        ),
+        footer = brand::footer_lockup(sheet_w - pad as f32, height - 12.0, theme),
     )
 }
 
-/// One contributor's avatar as a standalone asset: dither ring, clipped photo
-/// (or an initial when there is none), outline. No title, no subtitle, no
-/// footer, no canvas.
+/// The lettering and line roles a placed photo needs.
+///
+/// A photo is an object on the sheet: it sits square, inside a 1px frame, and
+/// carries no ring, no glow and no rounded corner. When there is no photo the
+/// frame holds the person's initial on the second ground instead.
+fn avatar_css(theme: &Theme) -> String {
+    format!(
+        r##"    .avatar-edge {{ fill: none; stroke: {border}; stroke-width: {object}; }}
+    .avatar-fallback-bg {{ fill: {track}; }}
+    .avatar-fallback {{ fill: {fg}; font: 600 22px {mono}; }}"##,
+        border = theme.border,
+        object = texture::W_OBJECT,
+        track = theme.track,
+        fg = theme.fg,
+        mono = texture::MONO,
+    )
+}
+
+/// The photo itself, or the initial when a contributor has none.
+///
+/// Centred by `dominant-baseline`, not by a guessed offset: a glyph that sits
+/// high in its frame is the most repeated execution miss there is.
+fn avatar_photo(url: Option<&str>, label: &str, clip_id: &str) -> String {
+    let size = AVATAR_SIZE as f32;
+    match url {
+        Some(url) => format!(
+            r#"<image href="{url}" x="0" y="0" width="{size:.0}" height="{size:.0}" clip-path="url(#{clip_id})" preserveAspectRatio="xMidYMid slice" />"#,
+            url = escape_xml(url),
+        ),
+        None => {
+            let initial = label
+                .chars()
+                .next()
+                .unwrap_or('?')
+                .to_uppercase()
+                .to_string();
+            format!(
+                r#"<rect class="avatar-fallback-bg" x="0" y="0" width="{size:.0}" height="{size:.0}" /><text class="avatar-fallback" x="{c}" y="{c}" text-anchor="middle" dominant-baseline="central">{initial}</text>"#,
+                c = texture::coord(size / 2.0),
+                initial = escape_xml(&initial),
+            )
+        }
+    }
+}
+
+/// One contributor's photo as a standalone asset: the square, its frame, and
+/// nothing else. No title, no caption, no title block, no colophon.
 ///
 /// The grid's own `<a>` wrappers can never fire in a README. An SVG loaded
 /// through an HTML `<img>` renders in SVG2 secure animated mode, where
@@ -687,71 +876,32 @@ pub fn render_contributor_avatar(
     rank: usize,
     theme: &Theme,
 ) -> String {
-    crate::texture::decorate(
-        render_contributor_avatar_inner(contributor, rank, theme),
-        theme,
-    )
-}
-
-fn render_contributor_avatar_inner(
-    contributor: &ContributorRow,
-    rank: usize,
-    theme: &Theme,
-) -> String {
     let label = contributor
         .login
         .clone()
         .unwrap_or_else(|| contributor.name.clone());
-    let r = AVATAR_SIZE / 2;
-    let avatar = contributor.avatar_url.as_ref().map_or_else(
-        || {
-            let initial = label
-                .chars()
-                .next()
-                .unwrap_or('?')
-                .to_uppercase()
-                .to_string();
-            format!(
-                r#"<circle class="avatar-fallback-bg" cx="{r}" cy="{r}" r="{r}" /><text class="avatar-fallback" x="{r}" y="{y}" text-anchor="middle">{initial}</text>"#,
-                y = r + 8,
-                initial = escape_xml(&initial),
-            )
-        },
-        |url| {
-            format!(
-                r#"<image href="{url}" x="0" y="0" width="{AVATAR_SIZE}" height="{AVATAR_SIZE}" clip-path="url(#gd-avatar-clip)" preserveAspectRatio="xMidYMid slice" />"#,
-                url = escape_xml(url),
-            )
-        },
-    );
     // Intrinsic width/height as well as the viewBox: a README lays these out
     // as bare `<img>` tiles, and a sizeless SVG would be stretched to the
-    // viewer's default replaced-element box instead of staying a 72px avatar.
+    // viewer's default replaced-element box instead of staying a 72px tile.
     format!(
         r##"<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 {AVATAR_TILE} {AVATAR_TILE}" width="{AVATAR_TILE}" height="{AVATAR_TILE}" role="img" aria-label="{label}">
   <style><![CDATA[
-    .avatar-pixels {{ fill: url(#gd-pixel-fill); stroke: none; shape-rendering: crispEdges; }}
-    .avatar-outline {{ fill: none; stroke: {border}; stroke-width: 1.5; }}
-    .avatar-fallback-bg {{ fill: {track}; }}
-    .avatar-fallback {{ fill: {fg}; font: 700 22px ui-monospace, SFMono-Regular, monospace; }}
+{avatar_css}
     @media (prefers-reduced-motion: reduce) {{
       .motion {{ display: none; }}
     }}
   ]]></style>
-  <g transform="translate({AVATAR_RING_OVERHANG}, {AVATAR_RING_OVERHANG})" opacity="1">
-    <animate class="motion" attributeName="opacity" from="0" to="1" dur="0.2s" begin="{begin:.2}s" fill="freeze" />
-    <circle class="avatar-pixels" cx="{r}" cy="{r}" r="{ring_r}" />
-    <clipPath id="gd-avatar-clip"><circle cx="{r}" cy="{r}" r="{r}" /></clipPath>
-    {avatar}
-    <circle class="avatar-outline" cx="{r}" cy="{r}" r="{r}" />
+  <g transform="translate({AVATAR_MARGIN}, {AVATAR_MARGIN})" opacity="1">
+    {motion}
+    <clipPath id="gd-avatar-clip"><rect width="{AVATAR_SIZE}" height="{AVATAR_SIZE}" /></clipPath>
+    {photo}
+    <rect class="avatar-edge" x="0" y="0" width="{AVATAR_SIZE}" height="{AVATAR_SIZE}" />
   </g>
 </svg>"##,
         label = escape_xml(&label),
-        ring_r = r + AVATAR_RING_OVERHANG,
-        begin = reveal_begin(rank),
-        fg = theme.fg,
-        border = theme.border,
-        track = theme.track,
+        avatar_css = avatar_css(theme),
+        motion = motion_reveal(rank),
+        photo = avatar_photo(contributor.avatar_url.as_deref(), &label, "gd-avatar-clip"),
     )
 }
 
@@ -760,108 +910,138 @@ fn render_contributor_avatar_inner(
 /// A README grid is pasted with a fixed number of slots and the author set
 /// underneath it shrinks and grows, so the tail slots have to disappear rather
 /// than break: a 404 draws the broken-image glyph, and any visible placeholder
-/// would assert a contributor who does not exist. Deliberately undecorated —
-/// even the shared grain would be a visible square.
+/// would assert a contributor who does not exist.
 pub fn render_blank_avatar() -> String {
     r#"<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 1 1" width="1" height="1" role="presentation"></svg>"#
         .to_string()
 }
 
-// Lines of code by language
+// ---------------------------------------------------------------------------
+// Contribution footprint
+// ---------------------------------------------------------------------------
 
 pub fn render_contribution_profile(
     login: &str,
     profile: &ContributionProfile,
     theme: &Theme,
 ) -> String {
-    crate::texture::decorate(
-        render_contribution_profile_inner(login, profile, theme),
-        theme,
-    )
-}
+    let width = 1100.0_f32;
+    let plot_x = 300.0_f32;
+    let value_gutter = 110.0_f32;
+    let plot_w = width - plot_x - PAD - value_gutter;
+    let lane_h = 26.0_f32;
+    let owned_y = 132.0_f32;
+    let external_y = 208.0_f32;
 
-fn render_contribution_profile_inner(
-    login: &str,
-    profile: &ContributionProfile,
-    theme: &Theme,
-) -> String {
-    let width = 1100u32;
-    let height = 340u32;
-    let pad = 56.0_f32;
-    let plot_x = 280.0_f32;
-    let plot_w = 764.0_f32;
-    let lane_h = 28.0_f32;
-    let total_commits = (profile.owned_commits + profile.external_commits).max(0);
-    let lane_width = |commits: i64| {
+    let total_commits = profile
+        .owned_commits
+        .max(0)
+        .saturating_add(profile.external_commits.max(0));
+    let lane_w = |commits: i64| {
         if commits <= 0 || total_commits <= 0 {
             0.0
         } else {
-            ((commits as f32 / total_commits as f32) * plot_w)
-                .max(18.0)
-                .min(plot_w)
+            ((commits as f32 / total_commits as f32) * plot_w).clamp(18.0, plot_w)
         }
     };
-    let owned_w = lane_width(profile.owned_commits);
-    let external_w = lane_width(profile.external_commits);
-    let (own_color, external_color, visionary_color) = crate::texture::wave_stops(theme);
-    let own_pattern = moving_tier_pattern("gd-contrib-own", own_color, 11, 0.68, false);
-    let external_pattern =
-        moving_tier_pattern("gd-contrib-external", external_color, 8, 0.82, true);
-    let visionary_pattern =
-        moving_tier_pattern("gd-contrib-visionary", visionary_color, 10, 0.74, false);
-    let owned_fill = if owned_w > 0.0 {
-        format!(
-            r##"<rect x="{plot_x}" y="126" width="{owned_w:.1}" height="{lane_h}" rx="5" fill="url(#gd-contrib-own-t11)" fill-opacity="0.95" stroke="{own_color}" stroke-opacity="0.8" />"##
-        )
-    } else {
-        String::new()
-    };
-    let external_fill = if external_w > 0.0 {
-        format!(
-            r##"<rect x="{plot_x}" y="202" width="{external_w:.1}" height="{lane_h}" rx="5" fill="url(#gd-contrib-external-t8)" fill-opacity="0.95" stroke="{external_color}" stroke-opacity="0.8" />"##
-        )
-    } else {
-        String::new()
-    };
+    let owned_w = lane_w(profile.owned_commits);
+    let external_w = lane_w(profile.external_commits);
+    // Two series on one sheet, so the pens come from the shared allocator and
+    // each lane is labelled at its own end regardless.
+    let pens = pens_for(theme, &["owned", "external"]);
 
-    let markers = |repos: i64, y: f32, lane_w: f32, color: &str| {
+    let lane = |y: f32, w: f32, pen: &str, repos: i64, commits: i64, index: usize| -> String {
+        let track = format!(
+            "<rect x=\"{x}\" y=\"{y}\" width=\"{w}\" height=\"{h}\" fill=\"{fill}\" />",
+            x = texture::coord(plot_x),
+            y = texture::coord(y),
+            w = texture::coord(plot_w),
+            h = texture::coord(lane_h),
+            fill = theme.track,
+        );
+        let bar = if w > 0.0 {
+            texture::series_bar(plot_x, y, w, lane_h, pen, theme.fg, Side::Right)
+        } else {
+            String::new()
+        };
+        // One extension tick per repository, tallied along the lane it was
+        // measured on. Capped, because a tally that overruns its own lane
+        // stops being a count.
         let shown = repos.clamp(0, 18) as usize;
-        if shown == 0 || lane_w <= 0.0 {
-            return String::new();
+        let mut tally = String::new();
+        if shown > 0 && w > 0.0 {
+            for mark in 0..shown {
+                let at = plot_x + (mark as f32 + 0.5) / shown as f32 * w;
+                tally.push_str(&texture::extension_tick(
+                    at,
+                    y + lane_h,
+                    Side::Down,
+                    5.0,
+                    theme.ink_3,
+                ));
+            }
         }
-        let mut out = String::new();
-        for index in 0..shown {
-            let fraction = (index as f32 + 0.5) / shown as f32;
-            let x = plot_x + fraction * lane_w;
-            let offset = match index % 3 {
-                0 => -5.0,
-                1 => 0.0,
-                _ => 5.0,
-            };
-            out.push_str(&format!(
-                r##"<circle cx="{x:.1}" cy="{cy:.1}" r="2.5" fill="{color}" opacity="0.92">
-  <animate class="motion" attributeName="opacity" from="0.25" to="0.92" dur="0.14s" begin="{begin:.3}s" fill="freeze" />
-</circle>"##,
-                cy = y + lane_h / 2.0 + offset,
-                begin = reveal_begin(index),
-            ));
-        }
-        out
+        let value = format!("{} commits", humanize(commits.max(0)));
+        let (value_x, anchor, ink) = count_placement(plot_x, w, &value, pen, theme.fg);
+        format!(
+            r##"  <g opacity="1">
+    {motion}
+    {track}
+    {bar}
+    {tally}
+    <text class="value" x="{vx}" y="{cy}" text-anchor="{anchor}" dominant-baseline="central" fill="{ink}">{value}</text>
+  </g>
+"##,
+            motion = motion_reveal(index),
+            vx = texture::coord(value_x),
+            cy = texture::coord(y + lane_h / 2.0),
+            value = escape_xml(&value),
+        )
     };
 
-    let owned_y = 126.0_f32;
-    let external_y = 202.0_f32;
-    let owned_markers = markers(profile.owned_repos, owned_y, owned_w, own_color);
-    let external_markers = markers(
-        profile.external_repos,
-        external_y,
-        external_w,
-        external_color,
-    );
+    // The measured split is what this sheet is about, so the wider lane
+    // carries the one dimension, in red, above its own bar.
+    let dimension = {
+        let (y, w, commits) = if owned_w >= external_w {
+            (owned_y, owned_w, profile.owned_commits)
+        } else {
+            (external_y, external_w, profile.external_commits)
+        };
+        if w > 0.0 && total_commits > 0 {
+            let share = commits.max(0) as f32 / total_commits as f32 * 100.0;
+            let value = format!("{share:.0}% of commits");
+            format!(
+                "  {left}{right}{dim}\n",
+                left = texture::extension_tick(
+                    plot_x,
+                    y,
+                    Side::Up,
+                    extension_len(DIM_STANDOFF),
+                    theme.border
+                ),
+                right = texture::extension_tick(
+                    plot_x + w,
+                    y,
+                    Side::Up,
+                    extension_len(DIM_STANDOFF),
+                    theme.border
+                ),
+                dim = texture::dimension_h(
+                    plot_x,
+                    plot_x + w,
+                    y - DIM_STANDOFF,
+                    &measured(&value, theme, 11.0)
+                ),
+            )
+        } else {
+            String::new()
+        }
+    };
+
     let style = if total_commits == 0 {
         "No attributed commits yet"
     } else {
-        let external_share = profile.external_commits as f64 / total_commits as f64;
+        let external_share = profile.external_commits.max(0) as f64 / total_commits as f64;
         if external_share >= 0.68 {
             "Ecosystem-led contributor"
         } else if external_share <= 0.32 {
@@ -870,97 +1050,114 @@ fn render_contribution_profile_inner(
             "Balanced project footprint"
         }
     };
-    let visionary = if profile.visionary_count > 0 {
-        format!(
-            r##"<g transform="translate({pad:.0} 276)">
-  <rect width="310" height="34" rx="17" fill="url(#gd-contrib-visionary-t10)" fill-opacity="0.62" stroke="{visionary_color}" stroke-opacity="0.78" />
-  <circle cx="18" cy="17" r="5" fill="{visionary_color}">
-    <animate class="motion" attributeName="r" values="4;6.5;4" dur="0.72s" repeatCount="indefinite" />
-    <animate class="motion" attributeName="fill-opacity" values="0.65;1;0.65" dur="0.72s" repeatCount="indefinite" />
-  </circle>
-  <text class="visionary" x="32" y="21">[*] VISIONARY · {count} breakout {projects}</text>
-</g>"##,
-            count = profile.visionary_count,
-            projects = if profile.visionary_count == 1 {
-                "project"
-            } else {
-                "projects"
-            },
-        )
-    } else {
-        String::new()
-    };
+
+    let login_field = truncate_tail(login, 22);
+    let commits_field = humanize(total_commits);
+    let repos_field = format!(
+        "{} + {}",
+        profile.owned_repos.max(0),
+        profile.external_repos.max(0)
+    );
+    let breakout_field = format!(
+        "{} {}",
+        profile.visionary_count,
+        if profile.visionary_count == 1 {
+            "project"
+        } else {
+            "projects"
+        }
+    );
+    let mut fields = vec![
+        TitleField {
+            label: "login",
+            value: &login_field,
+        },
+        TitleField {
+            label: "commits",
+            value: &commits_field,
+        },
+        TitleField {
+            label: "repos",
+            value: &repos_field,
+        },
+    ];
+    if profile.visionary_count > 0 {
+        fields.push(TitleField {
+            label: "breakout",
+            value: &breakout_field,
+        });
+    }
+    let block_y = external_y + lane_h + 34.0;
+    let height = block_y + texture::title_block_height(fields.len()) + COLOPHON_BAND;
 
     format!(
-        r##"<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 {width} {height}" role="img" aria-label="Contribution footprint for {login}">
-  <defs>{own_pattern}{external_pattern}{visionary_pattern}</defs>
+        r##"<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 {width:.0} {height:.0}" role="img" aria-label="Contribution footprint for {login}">
   <style><![CDATA[
-    .title {{ fill: {fg}; font: 600 18px ui-sans-serif, system-ui, sans-serif; }}
-    .subtitle {{ fill: {muted}; font: 13px ui-sans-serif, system-ui, sans-serif; }}
-    .lane-label {{ fill: {fg}; font: 600 13px ui-sans-serif, system-ui, sans-serif; }}
-    .lane-meta {{ fill: {muted}; font: 11px ui-monospace, SFMono-Regular, monospace; }}
-    .lane-value {{ fill: {fg}; font: 600 13px ui-monospace, SFMono-Regular, monospace; }}
-    .visionary {{ fill: {fg}; font: 700 11px ui-monospace, SFMono-Regular, monospace; letter-spacing: 0.08em; }}
-    .footer-link {{ fill: {muted}; font: 600 11px ui-sans-serif, system-ui, sans-serif; text-decoration: none; letter-spacing: 0.02em; }}
-    .footer-link:hover {{ fill: {fg}; }}
-    @media (prefers-reduced-motion: reduce) {{
-      .motion {{ display: none; }}
-    }}
+{css}
+    .lane {{ fill: {fg}; font: 600 13px {sans}; }}
   ]]></style>
-  <text class="title" x="{pad}" y="36">Contribution footprint</text>
-  <text class="subtitle" x="{pad}" y="58">{login} · {style}</text>
-
-  <text class="lane-label" x="{pad}" y="132">Owned projects</text>
-  <text class="lane-meta" x="{pad}" y="151">{owned_repos} repos</text>
-  <rect x="{plot_x}" y="{owned_y}" width="{plot_w}" height="{lane_h}" rx="5" fill="{track}" />
-  {owned_fill}
-  {owned_markers}
-  <text class="lane-value" x="{right}" y="145" text-anchor="end">{owned_commits} commits</text>
-
-  <text class="lane-label" x="{pad}" y="208">Other people's projects</text>
-  <text class="lane-meta" x="{pad}" y="227">{external_repos} repos</text>
-  <rect x="{plot_x}" y="{external_y}" width="{plot_w}" height="{lane_h}" rx="5" fill="{track}" />
-  {external_fill}
-  {external_markers}
-  <text class="lane-value" x="{right}" y="221" text-anchor="end">{external_commits} commits</text>
-
-  {visionary}
-{footer}
+  <text class="title" x="{pad}" y="{title_y}">Contribution footprint</text>
+  <text class="caption" x="{pad}" y="{caption_y}">{login} · {style}</text>
+{dimension}  <text class="lane" x="{pad}" y="{owned_label_y}">Owned projects</text>
+  <text class="meta" x="{pad}" y="{owned_meta_y}">{owned_repos} repos</text>
+{owned}  <text class="lane" x="{pad}" y="{external_label_y}">Other people's projects</text>
+  <text class="meta" x="{pad}" y="{external_meta_y}">{external_repos} repos</text>
+{external}{block}{footer}
 </svg>"##,
         login = escape_xml(login),
+        css = sheet_css(theme),
         fg = theme.fg,
-        muted = theme.muted,
-        track = theme.track,
-        right = width as f32 - pad,
-        owned_repos = profile.owned_repos,
-        external_repos = profile.external_repos,
-        owned_commits = humanize(profile.owned_commits),
-        external_commits = humanize(profile.external_commits),
-        owned_fill = owned_fill,
-        external_fill = external_fill,
-        footer = brand::footer_lockup(width as f32 - pad, height as f32 - 12.0, theme),
+        sans = texture::SANS,
+        pad = texture::coord(PAD),
+        title_y = texture::coord(TITLE_Y),
+        caption_y = texture::coord(CAPTION_Y),
+        owned_label_y = texture::coord(owned_y + 6.0),
+        owned_meta_y = texture::coord(owned_y + 25.0),
+        external_label_y = texture::coord(external_y + 6.0),
+        external_meta_y = texture::coord(external_y + 25.0),
+        owned_repos = profile.owned_repos.max(0),
+        external_repos = profile.external_repos.max(0),
+        owned = lane(
+            owned_y,
+            owned_w,
+            pens[0],
+            profile.owned_repos,
+            profile.owned_commits,
+            0
+        ),
+        external = lane(
+            external_y,
+            external_w,
+            pens[1],
+            profile.external_repos,
+            profile.external_commits,
+            1
+        ),
+        block = texture::title_block(width - PAD - BLOCK_W, block_y, BLOCK_W, &fields, theme),
+        footer = brand::footer_lockup(width - PAD, height - 12.0, theme),
     )
 }
 
-pub fn render_languages(repo: &str, rows: &[LanguageBar], theme: &Theme) -> String {
-    crate::texture::decorate(render_languages_inner(repo, rows, theme), theme)
-}
+// ---------------------------------------------------------------------------
+// Language activity
+// ---------------------------------------------------------------------------
 
-fn render_languages_inner(repo: &str, rows: &[LanguageBar], theme: &Theme) -> String {
-    let width = 1100u32;
+pub fn render_languages(repo: &str, rows: &[LanguageBar], theme: &Theme) -> String {
+    let width = 1100.0_f32;
     if rows.is_empty() {
         // A repository whose whole tree is assets, data, or vendored content
         // has no classified source. Say so, rather than emitting a header
         // over an empty plot area that reads as a rendering failure.
-        return empty_chart(width, 200, "no recognized source files in HEAD", theme);
+        return empty_chart(width, 200.0, "no recognized source files in HEAD", theme);
     }
-    let row_h = 32u32;
-    let header_h = 96u32;
-    let footer_h = 32u32;
-    let padding = 56u32;
-    let bar_h = 18u32;
-    let n = rows.len() as u32;
-    let height = header_h + n * row_h + footer_h;
+    let label_w = 190.0_f32;
+    let plot_x = PAD + label_w;
+    let plot_w = 500.0_f32;
+    let value_gutter = 76.0_f32;
+    let meta_x = plot_x + plot_w + value_gutter;
+    let row_h = 30.0_f32;
+    let bar_h = 14.0_f32;
+    let header_h = 112.0_f32;
 
     let line_totals: Vec<i64> = rows
         .iter()
@@ -970,43 +1167,26 @@ fn render_languages_inner(repo: &str, rows: &[LanguageBar], theme: &Theme) -> St
     let totals: Vec<i64> = if file_census {
         rows.iter().map(|row| row.files).collect()
     } else {
-        line_totals.clone()
+        line_totals
     };
     let max_total = totals.iter().copied().max().unwrap_or(1).max(1);
-    let label_w = 220.0_f32;
-    let meta_col_w = 200.0_f32;
-    let bar_max_w = (width as f32) - padding as f32 - label_w - meta_col_w - padding as f32;
-
     let total_total: i64 = totals.iter().sum();
     let total_code: i64 = rows.iter().map(|r| r.lines_code).sum();
     let total_files: i64 = rows.iter().map(|r| r.files).sum();
 
     let mut bars = String::new();
-    let mut lang_defs = String::new();
-    for (i, row) in rows.iter().enumerate() {
-        let total = totals[i];
-        let y = header_h as f32 + (i as f32) * row_h as f32 + (row_h - bar_h) as f32 / 2.0;
-        let bar_w = (total as f32 / max_total as f32) * bar_max_w;
-        let color = language_color(&row.language, theme);
-        // One ordered-dither ladder per row, inked in that language's own
-        // color. The bar then varies ALPHA (unlit tier under lit tier),
-        // never shade, so the grain matches every other gitdebt surface.
-        let ns = format!("gd-lang{i}");
-        lang_defs.push_str(&moving_tier_pattern(
-            &ns,
-            &color,
-            LANGUAGE_TIER,
-            0.64 + (i % 4) as f32 * 0.08,
-            i % 2 == 1,
-        ));
-        let count_text = humanize(total);
-        // Contrast is judged against what the bar actually LOOKS like —
-        // the dither's average coverage over the track — not against the
-        // raw ink, or a count printed inside a light bar goes invisible.
-        let bar_tone = dithered_tone(&color, theme.track);
-        let (count_x, count_anchor, count_color) =
-            count_placement(label_w, bar_w, &count_text, &bar_tone, theme.muted);
-        let meta_text = if file_census {
+    for (index, row) in rows.iter().enumerate() {
+        let total = totals[index];
+        let bar_y = header_h + index as f32 * row_h + (row_h - bar_h) / 2.0;
+        let center = bar_y + bar_h / 2.0;
+        let bar_w = (total.max(0) as f32 / max_total as f32) * plot_w;
+        // Language colours are the conventional brand hues readers already
+        // expect, not pens: they are the one place a chart's ink is chosen
+        // by the world instead of by this palette.
+        let ink = language_color(&row.language, theme);
+        let value = humanize(total);
+        let (value_x, anchor, value_ink) = count_placement(plot_x, bar_w, &value, &ink, theme.fg);
+        let meta = if file_census {
             format!(
                 "{} file{}",
                 row.files,
@@ -1029,50 +1209,71 @@ fn render_languages_inner(repo: &str, rows: &[LanguageBar], theme: &Theme) -> St
             )
         };
         bars.push_str(&format!(
-            r##"<g transform="translate({padding}, {y:.1})" opacity="1">
-  <animate class="motion" attributeName="opacity" from="0" to="1" dur="0.2s" begin="{begin:.2}s" fill="freeze" />
-  <circle cx="6" cy="{dot_y:.1}" r="6" fill="{color}" />
-  <text class="bar-label" x="20" y="{label_y:.1}">{language}</text>
-  <rect class="bar-track" x="{label_w}" y="0" width="{bar_max_w:.1}" height="{bar_h}" rx="3" />
-  <rect x="{label_w}" y="0" width="{bar_w:.1}" height="{bar_h}" rx="3" fill="{color}" fill-opacity="{off_alpha}" />
-  <rect x="{label_w}" y="0" width="{bar_w:.1}" height="{bar_h}" rx="3" fill="{lang_fill}" fill-opacity="{lit_alpha}" shape-rendering="crispEdges" />
-  <rect x="{label_w}" y="0" width="{bar_w:.1}" height="{bar_h}" rx="3" fill="none" stroke="{color}" stroke-width="1" />
-  <text class="bar-count" x="{count_x:.1}" y="{label_y:.1}" text-anchor="{count_anchor}" fill="{count_color}">
+            r##"  <g opacity="1">
+    {motion}
     <title>{title}</title>
-    {count_text}
-  </text>
-  <text class="bar-meta" x="{meta_x:.1}" y="{label_y:.1}">
-    {meta_text}
-  </text>
-</g>
+    <text class="label" x="{lx}" y="{cy}" dominant-baseline="central">{language}</text>
+    {bar}
+    <text class="value" x="{vx}" y="{cy}" text-anchor="{anchor}" dominant-baseline="central" fill="{value_ink}">{value}</text>
+    <text class="meta" x="{mx}" y="{cy}" dominant-baseline="central">{meta}</text>
+  </g>
 "##,
-            padding = padding,
-            y = y,
-            begin = reveal_begin(i),
-            dot_y = bar_h as f32 / 2.0,
-            color = color,
-            lang_fill = crate::texture::tier_fill_ns(&ns, LANGUAGE_TIER),
-            off_alpha = LANGUAGE_OFF_ALPHA,
-            lit_alpha = LANGUAGE_LIT_ALPHA,
-            language = escape_xml(&row.language),
-            label_w = label_w,
-            label_y = bar_h as f32 / 2.0 + 5.0,
-            bar_max_w = bar_max_w,
-            bar_h = bar_h,
-            bar_w = bar_w,
+            motion = motion_reveal(index),
             title = escape_xml(&title),
-            count_x = count_x,
-            count_anchor = count_anchor,
-            count_color = count_color,
-            count_text = count_text,
-            meta_x = label_w + bar_max_w + 14.0,
-            meta_text = escape_xml(&meta_text),
+            lx = texture::coord(PAD),
+            cy = texture::coord(center),
+            language = escape_xml(&row.language),
+            bar = if bar_w >= 0.5 {
+                texture::series_bar(plot_x, bar_y, bar_w, bar_h, &ink, theme.fg, Side::Right)
+            } else {
+                String::new()
+            },
+            vx = texture::coord(value_x),
+            mx = texture::coord(meta_x),
+            meta = escape_xml(&meta),
         ));
     }
 
-    let footer_y = (height - 12) as f32;
-    let right_edge_x = (label_w + bar_max_w + meta_col_w) + padding as f32 - 4.0;
-    let subtitle = if file_census {
+    let bar_top = header_h + (row_h - bar_h) / 2.0;
+    let plot_bottom = header_h + rows.len() as f32 * row_h;
+    let peak_value = format!(
+        "{} {}",
+        humanize(max_total),
+        if file_census { "files" } else { "lines" }
+    );
+    let dimension = format!(
+        "  {left}{right}{dim}\n",
+        left = texture::extension_tick(
+            plot_x,
+            bar_top,
+            Side::Up,
+            extension_len(DIM_STANDOFF),
+            theme.border
+        ),
+        right = texture::extension_tick(
+            plot_x + plot_w,
+            bar_top,
+            Side::Up,
+            extension_len(DIM_STANDOFF),
+            theme.border
+        ),
+        dim = texture::dimension_h(
+            plot_x,
+            plot_x + plot_w,
+            bar_top - DIM_STANDOFF,
+            &measured(&peak_value, theme, 11.0)
+        ),
+    );
+    let datum = object_line(
+        plot_x,
+        header_h + 4.0,
+        plot_x,
+        plot_bottom - 4.0,
+        theme.border,
+        texture::W_OBJECT,
+    );
+
+    let caption = if file_census {
         format!(
             "{} · {} files in {} languages · current HEAD tree",
             repo,
@@ -1094,52 +1295,54 @@ fn render_languages_inner(repo: &str, rows: &[LanguageBar], theme: &Theme) -> St
     } else {
         format!("Lines of code in {repo}")
     };
+
+    let repo_field = truncate_tail(repo, 22);
+    let languages_field = rows.len().to_string();
+    let total_field = humanize(total_total);
+    let code_field = humanize(total_code);
+    let mut fields = vec![
+        TitleField {
+            label: "repo",
+            value: &repo_field,
+        },
+        TitleField {
+            label: "languages",
+            value: &languages_field,
+        },
+        TitleField {
+            label: if file_census { "files" } else { "lines" },
+            value: &total_field,
+        },
+    ];
+    if !file_census {
+        fields.push(TitleField {
+            label: "code",
+            value: &code_field,
+        });
+    }
+    let block_y = plot_bottom + 22.0;
+    let height = block_y + texture::title_block_height(fields.len()) + COLOPHON_BAND;
+
     format!(
-        r##"<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 {width} {height}" role="img" aria-label="{aria}">
-  <defs data-gitdebt-language-defs="true">{lang_defs}</defs>
+        r##"<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 {width:.0} {height:.0}" role="img" aria-label="{aria}">
   <style><![CDATA[
-    .title {{ fill: {fg}; font: 600 18px ui-sans-serif, system-ui, sans-serif; }}
-    .subtitle {{ fill: {muted}; font: 13px ui-sans-serif, system-ui, sans-serif; }}
-    .bar-label {{ fill: {fg}; font: 12px ui-sans-serif, system-ui, sans-serif; font-weight: 500; }}
-    .bar-count {{ font: 600 12px ui-sans-serif, system-ui, sans-serif; }}
-    .bar-meta {{ fill: {muted}; font: 11px ui-sans-serif, system-ui, sans-serif; }}
-    .bar-track {{ fill: {track}; }}
-    .footer-link {{ fill: {muted}; font: 600 11px ui-sans-serif, system-ui, sans-serif; text-decoration: none; letter-spacing: 0.02em; }}
-    .footer-link:hover {{ fill: {fg}; }}
-    @media (prefers-reduced-motion: reduce) {{
-      .motion {{ display: none; }}
-    }}
+{css}
   ]]></style>
-  <text class="title" x="{padding}" y="36">Language activity</text>
-  <text class="subtitle" x="{padding}" y="58">{subtitle}</text>
-{bars}
-{footer}
+  <text class="title" x="{pad}" y="{title_y}">Language activity</text>
+  <text class="caption" x="{pad}" y="{caption_y}">{caption}</text>
+{dimension}  {datum}
+{bars}{block}{footer}
 </svg>"##,
-        width = width,
-        height = height,
         aria = escape_xml(&aria),
-        fg = theme.fg,
-        muted = theme.muted,
-        track = theme.track,
-        padding = padding,
-        bars = bars,
-        lang_defs = lang_defs,
-        subtitle = escape_xml(&subtitle),
-        footer = brand::footer_lockup(right_edge_x, footer_y, theme),
+        css = sheet_css(theme),
+        pad = texture::coord(PAD),
+        title_y = texture::coord(TITLE_Y),
+        caption_y = texture::coord(CAPTION_Y),
+        caption = escape_xml(&caption),
+        block = texture::title_block(width - PAD - BLOCK_W, block_y, BLOCK_W, &fields, theme),
+        footer = brand::footer_lockup(width - PAD, height - 12.0, theme),
     )
 }
-
-/// Density tier used by the language bars: 12/16 cells lit, which reads
-/// as a solid-but-grainy fill at the 2px cell size.
-const LANGUAGE_TIER: usize = 11;
-/// Average ink coverage of a [`LANGUAGE_TIER`] bar: lit cells at
-/// [`LANGUAGE_LIT_ALPHA`] plus unlit cells at [`LANGUAGE_OFF_ALPHA`].
-const LANGUAGE_COVERAGE: f32 = 0.74;
-/// Alpha of the unlit cells (the ordered-dither "off" tier) and of the
-/// lit pattern above it. Alpha-only modulation: both layers carry the
-/// same ink, so the bar reads correctly on either theme's canvas.
-const LANGUAGE_OFF_ALPHA: &str = "0.2";
-const LANGUAGE_LIT_ALPHA: &str = "0.92";
 
 fn humanize(n: i64) -> String {
     if n >= 1_000_000 {
@@ -1151,7 +1354,9 @@ fn humanize(n: i64) -> String {
     }
 }
 
+// ---------------------------------------------------------------------------
 // Per-language ink
+// ---------------------------------------------------------------------------
 
 /// Achromatic gray for buckets that are not one language: the synthetic
 /// `Config` rollup and anything the census could not name. Documented
@@ -1163,10 +1368,15 @@ const NEUTRAL_LANGUAGE_COLOR: &str = "#8b8b8b";
 /// their parent language's color. `None` → no conventional color exists,
 /// so the caller derives a stable hue from the name instead.
 ///
-/// This map is the *source* hue only; [`language_color`] is what renders,
-/// because these values were picked against a white page and several of
-/// them (`#292929`, `#012456`, `#f1e05a`) are unreadable on one of our
-/// two themes untouched.
+/// These are the real language brand colours and they are deliberately
+/// outside the drawing's palette: a reader recognises Rust by its own colour
+/// and would not recognise it in a plotter pen, so the redraw left every hex
+/// here untouched. Any surface that shows a language mirrors this table
+/// exactly, so a bar is the same hue in the app and in an exported sheet.
+/// This map is the *source* hue
+/// only; [`language_color`] is what renders, because these values were picked
+/// against a white page and several of them (`#292929`, `#012456`,
+/// `#f1e05a`) are unreadable on one of our two prints untouched.
 fn conventional_language_color(name: &str) -> Option<&'static str> {
     Some(match name {
         "Rust" => "#dea584",
@@ -1230,9 +1440,9 @@ fn conventional_language_color(name: &str) -> Option<&'static str> {
 ///   1. hue is the language's conventional color when one exists, and a
 ///      deterministic name-derived hue otherwise — so two languages never
 ///      share a bar color just because they are adjacent in the list;
-///   2. the result is pushed into the theme's readable luminance band by
-///      blending toward white (dark theme) or black (light theme). Hue
-///      survives; only lightness moves. Same input → same bytes.
+///   2. the result is pushed into the print's readable luminance band by
+///      blending toward white (dark) or black (light). Hue survives; only
+///      lightness moves. Same input → same bytes.
 pub fn language_color(name: &str, theme: &Theme) -> String {
     let rgb = conventional_language_color(name)
         .and_then(parse_hex)
@@ -1243,20 +1453,6 @@ pub fn language_color(name: &str, theme: &Theme) -> String {
         (0.06_f32, 0.55_f32)
     };
     format_hex(clamp_luma(rgb, min, max))
-}
-
-/// The apparent color of a dithered bar: `ink` composited over `track` at
-/// the tier's average coverage. Contrast decisions must use this, not the
-/// raw ink, because only a fraction of the bar's cells are actually lit.
-fn dithered_tone(ink: &str, track: &str) -> String {
-    let (Some(ink), Some(track)) = (parse_hex(ink), parse_hex(track)) else {
-        return ink.to_string();
-    };
-    let mut out = [0.0_f32; 3];
-    for i in 0..3 {
-        out[i] = ink[i] * LANGUAGE_COVERAGE + track[i] * (1.0 - LANGUAGE_COVERAGE);
-    }
-    format_hex(out)
 }
 
 /// Relative luminance of an sRGB triple, in `0.0..=1.0`. Deliberately the
@@ -1326,323 +1522,226 @@ fn hsl_to_rgb(h: f32, s: f32, l: f32) -> [f32; 3] {
     [(r + m) * 255.0, (g + m) * 255.0, (b + m) * 255.0]
 }
 
-// Recent TODO/FIXME movement
+// ---------------------------------------------------------------------------
+// Plotted traces: TODO/FIXME movement, and commits per month
+// ---------------------------------------------------------------------------
 
-pub fn render_todo_trend(repo: &str, points: &[TodoPoint], theme: &Theme) -> String {
-    crate::texture::decorate(render_todo_trend_inner(repo, points, theme), theme)
+struct TrendSheet<'a> {
+    aria: &'a str,
+    title: &'a str,
+    caption: &'a str,
+    /// Each plotted point as (position across the axis in `0.0..=1.0`, value).
+    points: &'a [(f32, i64)],
+    from_label: &'a str,
+    to_label: &'a str,
+    /// Index of the peak, and the value lettered on the vertical dimension
+    /// that measures it from the baseline.
+    peak: usize,
+    peak_value: &'a str,
+    fields: &'a [TitleField<'a>],
+    theme: &'a Theme,
 }
 
-fn render_todo_trend_inner(repo: &str, points: &[TodoPoint], theme: &Theme) -> String {
-    let width = 1200u32;
-    let height = 360u32;
-    let pad_l = 56.0_f32;
-    let pad_r = 40.0_f32;
-    let pad_t = 70.0_f32;
-    let pad_b = 50.0_f32;
-    let plot_w = width as f32 - pad_l - pad_r;
-    let plot_h = height as f32 - pad_t - pad_b;
+/// One trace, measured against a lettered scale.
+///
+/// The trace is the sheet's primary data, so it is the one thing drawn in
+/// drafting red at the emphasis weight. The scale is construction lines that
+/// terminate on the axis and the plot edge, never a background grid, and the
+/// peak is measured by a vertical dimension that letters its value on itself.
+fn trend_sheet(sheet: TrendSheet<'_>) -> String {
+    let theme = sheet.theme;
+    let width = 1200.0_f32;
+    let pad_l = 64.0_f32;
+    let pad_r = 44.0_f32;
+    let pad_t = 100.0_f32;
+    let plot_h = 168.0_f32;
+    let plot_w = width - pad_l - pad_r;
+    let base_y = pad_t + plot_h;
 
+    let y_max = sheet
+        .points
+        .iter()
+        .map(|(_, v)| *v)
+        .max()
+        .unwrap_or(1)
+        .max(1) as f32;
+    let x_at = |fraction: f32| pad_l + fraction.clamp(0.0, 1.0) * plot_w;
+    let y_at = |value: f32| base_y - (value / y_max) * plot_h;
+
+    let mut scale = object_line(pad_l, pad_t, pad_l, base_y, theme.border, texture::W_OBJECT);
+    for step in 0..=4 {
+        let value = y_max * (step as f32 / 4.0);
+        let y = y_at(value);
+        scale.push_str(&if step == 0 {
+            object_line(pad_l, y, pad_l + plot_w, y, theme.border, texture::W_OBJECT)
+        } else {
+            object_line(
+                pad_l,
+                y,
+                pad_l + plot_w,
+                y,
+                theme.grid,
+                texture::W_CONSTRUCTION,
+            )
+        });
+        scale.push_str(&format!(
+            "<text class=\"meta\" x=\"{x}\" y=\"{y}\" text-anchor=\"end\" dominant-baseline=\"central\">{v}</text>",
+            x = texture::coord(pad_l - 10.0),
+            y = texture::coord(y),
+            v = value.round() as i64,
+        ));
+    }
+
+    let mut path = String::new();
+    for (index, (fraction, value)) in sheet.points.iter().enumerate() {
+        path.push_str(&format!(
+            "{}{} {}",
+            if index == 0 { "M" } else { " L" },
+            texture::coord(x_at(*fraction)),
+            texture::coord(y_at(*value as f32)),
+        ));
+    }
+    let mut area = path.clone();
+    if let (Some(first), Some(last)) = (sheet.points.first(), sheet.points.last()) {
+        area.push_str(&format!(
+            " L{} {} L{} {}Z",
+            texture::coord(x_at(last.0)),
+            texture::coord(base_y),
+            texture::coord(x_at(first.0)),
+            texture::coord(base_y),
+        ));
+    }
+
+    let peak_point = sheet.points.get(sheet.peak).copied().unwrap_or((0.0, 0));
+    let peak_x = x_at(peak_point.0);
+    let peak_y = y_at(peak_point.1 as f32);
+    let dimension = if peak_point.1 > 0 && base_y - peak_y > 26.0 {
+        format!(
+            "    {}\n",
+            texture::dimension_v(
+                peak_y,
+                base_y,
+                peak_x,
+                &plotted(sheet.peak_value, theme, 10.0)
+            )
+        )
+    } else {
+        String::new()
+    };
+
+    // The trace is labelled at its own end, the way every plotted series is.
+    let end_label = sheet.points.last().map_or_else(String::new, |(f, v)| {
+        format!(
+            "    <text class=\"value\" x=\"{x}\" y=\"{y}\" text-anchor=\"end\" dominant-baseline=\"central\">{v}</text>\n",
+            x = texture::coord(x_at(*f) - 8.0),
+            y = texture::coord((y_at(*v as f32) - 12.0).max(pad_t + 6.0)),
+        )
+    });
+
+    let block_y = base_y + 34.0;
+    let height = block_y + texture::title_block_height(sheet.fields.len()) + COLOPHON_BAND;
+
+    format!(
+        r##"<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 {width:.0} {height:.0}" role="img" aria-label="{aria}">
+  <style><![CDATA[
+{css}
+  ]]></style>
+  <text class="title" x="{pad_l}" y="{title_y}">{title}</text>
+  <text class="caption" x="{pad_l}" y="{caption_y}">{caption}</text>
+  <text class="meta" x="{pad_l}" y="{axis_y}">{from_label}</text>
+  <text class="meta" x="{right}" y="{axis_y}" text-anchor="end">{to_label}</text>
+  <g opacity="1">
+    {motion}
+    <path d="{area}" fill="{track}" />
+    {scale}
+    <path d="{path}" fill="none" stroke="{accent}" stroke-width="{emphasis}" stroke-linecap="round" stroke-linejoin="round" />
+{dimension}{end_label}  </g>
+{block}{footer}
+</svg>"##,
+        aria = escape_xml(sheet.aria),
+        css = sheet_css(theme),
+        title = escape_xml(sheet.title),
+        caption = escape_xml(sheet.caption),
+        pad_l = texture::coord(pad_l),
+        title_y = texture::coord(TITLE_Y),
+        caption_y = texture::coord(CAPTION_Y),
+        axis_y = texture::coord(base_y + 18.0),
+        right = texture::coord(pad_l + plot_w),
+        from_label = escape_xml(sheet.from_label),
+        to_label = escape_xml(sheet.to_label),
+        motion = motion_reveal(0),
+        track = theme.track,
+        accent = theme.accent,
+        emphasis = texture::W_EMPHASIS,
+        block = texture::title_block(
+            width - pad_r - BLOCK_W,
+            block_y,
+            BLOCK_W,
+            sheet.fields,
+            theme
+        ),
+        footer = brand::footer_lockup(width - 24.0, height - 12.0, theme),
+    )
+}
+
+pub fn render_todo_trend(repo: &str, points: &[TodoPoint], theme: &Theme) -> String {
     if points.is_empty() {
         return empty_chart(
-            width,
-            height,
+            1200.0,
+            360.0,
             "no TODO/FIXME movement in the analyzed commit window",
             theme,
         );
     }
-
-    let t_min = points.first().unwrap().day;
-    let t_max = points.last().unwrap().day;
-    let span_days = (t_max - t_min).num_days().max(1) as f32;
-    let y_max = points
+    let t_min = points[0].day;
+    let t_max = points[points.len() - 1].day;
+    let span = (t_max - t_min).num_days().max(1) as f32;
+    let plotted_points: Vec<(f32, i64)> = points
         .iter()
-        .map(|p| p.running_total)
-        .max()
-        .unwrap_or(1)
-        .max(1) as f32;
-
-    let x_at = |d: NaiveDate| -> f32 {
-        let dx = (d - t_min).num_days() as f32;
-        pad_l + (dx / span_days) * plot_w
-    };
-    let y_at = |v: f32| pad_t + plot_h - (v / y_max) * plot_h;
-
-    let mut path = String::new();
-    for (i, p) in points.iter().enumerate() {
-        let x = x_at(p.day);
-        let y = y_at(p.running_total as f32);
-        if i == 0 {
-            path.push_str(&format!("M {x:.1} {y:.1}"));
-        } else {
-            path.push_str(&format!(" L {x:.1} {y:.1}"));
-        }
-    }
-
-    let mut area = path.clone();
-    if let Some(last) = points.last() {
-        let last_x = x_at(last.day);
-        let baseline_y = y_at(0.0);
-        area.push_str(&format!(" L {last_x:.1} {baseline_y:.1}"));
-        let first_x = x_at(points[0].day);
-        area.push_str(&format!(" L {first_x:.1} {baseline_y:.1} Z"));
-    }
-
-    let last_total = points.last().unwrap().running_total;
-    let max_total = points.iter().map(|p| p.running_total).max().unwrap_or(0);
-    let max_day = points
-        .iter()
-        .max_by_key(|p| p.running_total)
-        .map(|p| p.day)
-        .unwrap_or(t_min);
-
-    let mut y_ticks = String::new();
-    for i in 0..=4 {
-        let v = y_max * (i as f32 / 4.0);
-        let y = y_at(v);
-        y_ticks.push_str(&format!(
-            r##"<line x1="{pad_l:.1}" y1="{y:.1}" x2="{x_end:.1}" y2="{y:.1}" stroke="{grid}" stroke-width="1" opacity="0.55" />
-<text class="axis" x="{ax:.1}" y="{ty:.1}" text-anchor="end">{v}</text>
-"##,
-            pad_l = pad_l,
-            y = y,
-            x_end = pad_l + plot_w,
-            ax = pad_l - 8.0,
-            ty = y + 4.0,
-            v = v.round() as i64,
-            grid = theme.grid,
-        ));
-    }
-
-    let footer_y = (height - 12) as f32;
-    format!(
-        r##"<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 {width} {height}" role="img" aria-label="Recent TODO/FIXME movement for {repo}">
-  <style><![CDATA[
-    .title {{ fill: {fg}; font: 600 18px ui-sans-serif, system-ui, sans-serif; }}
-    .subtitle {{ fill: {muted}; font: 13px ui-sans-serif, system-ui, sans-serif; }}
-    .axis {{ fill: {muted}; font: 11px ui-sans-serif, system-ui, sans-serif; }}
-    .footer-link {{ fill: {muted}; font: 600 11px ui-sans-serif, system-ui, sans-serif; text-decoration: none; letter-spacing: 0.02em; }}
-    .footer-link:hover {{ fill: {fg}; }}
-    @media (prefers-reduced-motion: reduce) {{
-      .motion {{ display: none; }}
-    }}
-  ]]></style>
-  <text class="title" x="{pad_l:.0}" y="34">{repo}</text>
-  <text class="subtitle" x="{pad_l:.0}" y="56">Recent TODO/FIXME movement · analyzed commit window · current {last_total} · peak {max_total} on {max_day}</text>
-  {y_ticks}
-  <g opacity="1">
-    <animate class="motion" attributeName="opacity" from="0" to="1" dur="0.2s" begin="0s" fill="freeze" />
-    <path d="{area}" fill="url(#gd-pixel-fill)" opacity="0.94" />
-    <path d="{path}" fill="none" stroke="{bug}" stroke-width="2.5" stroke-linecap="round" stroke-linejoin="round" />
-    <circle cx="{peak_x:.1}" cy="{peak_y:.1}" r="5" fill="{bug}" />
-  </g>
-{footer}
-</svg>"##,
-        width = width,
-        height = height,
-        repo = escape_xml(repo),
-        fg = theme.fg,
-        muted = theme.muted,
-        bug = theme.bug,
-        pad_l = pad_l,
-        last_total = last_total,
-        max_total = max_total,
-        max_day = max_day,
-        y_ticks = y_ticks,
-        area = area,
-        path = path,
-        peak_x = x_at(max_day),
-        peak_y = y_at(max_total as f32),
-        footer = brand::footer_lockup((width as f32) - 24.0, footer_y, theme),
-    )
-}
-
-// Bus factor
-
-#[derive(Debug, Clone, Serialize)]
-pub struct AuthorShare {
-    /// Display label — GitHub login when known, otherwise author name.
-    pub label: String,
-    pub login: Option<String>,
-    pub avatar_url: Option<String>,
-    pub commits: i64,
-}
-
-/// Minimum number of top contributors whose combined commits strictly
-/// exceed 50% of `total_commits` — i.e. how many people the project
-/// could lose before more than half of its authorship knowledge is gone.
-///
-/// `commits` need not be sorted (a descending copy is taken internally)
-/// and non-positive entries are ignored. Returns 0 when there are no
-/// commits at all. If `commits` is a truncated top-N prefix whose sum
-/// never crosses half of `total_commits`, the prefix length is returned
-/// as a lower bound — by definition the true bus factor is at least
-/// that large.
-pub fn compute_bus_factor(commits: &[i64], total_commits: i64) -> usize {
-    if total_commits <= 0 {
-        return 0;
-    }
-    let mut sorted: Vec<i64> = commits.iter().copied().filter(|c| *c > 0).collect();
-    if sorted.is_empty() {
-        return 0;
-    }
-    sorted.sort_unstable_by(|a, b| b.cmp(a));
-    let mut acc = 0i64;
-    for (i, c) in sorted.iter().enumerate() {
-        acc = acc.saturating_add(*c);
-        if acc.saturating_mul(2) > total_commits {
-            return i + 1;
-        }
-    }
-    sorted.len()
-}
-
-/// Contributor-concentration chart focused on the people carrying at least
-/// one percent of the analyzed commits. The bus factor still considers the
-/// full bot-filtered author population; the visual deliberately omits tiny
-/// shares so the ownership risk remains legible.
-pub fn render_bus_factor(
-    repo: &str,
-    authors: &[AuthorShare],
-    total_commits: i64,
-    theme: &Theme,
-) -> String {
-    crate::texture::decorate(
-        render_bus_factor_inner(repo, authors, total_commits, theme),
-        theme,
-    )
-}
-
-fn render_bus_factor_inner(
-    repo: &str,
-    authors: &[AuthorShare],
-    total_commits: i64,
-    theme: &Theme,
-) -> String {
-    let width = 900u32;
-    let padding = 56u32;
-
-    let mut sorted: Vec<&AuthorShare> = authors.iter().filter(|a| a.commits > 0).collect();
-    sorted.sort_by(|a, b| {
-        b.commits
-            .cmp(&a.commits)
-            .then_with(|| a.label.cmp(&b.label))
-    });
-
-    if sorted.is_empty() || total_commits <= 0 {
-        return empty_chart(width, 200, "no contributor data yet", theme);
-    }
-
-    let commit_counts: Vec<i64> = sorted.iter().map(|a| a.commits).collect();
-    let bus_factor = compute_bus_factor(&commit_counts, total_commits);
-    let risk = match bus_factor {
-        0 => "Unavailable",
-        1 => "Solo",
-        2 => "High",
-        3 => "Medium",
-        _ => "Low",
-    };
-    let shown: Vec<&AuthorShare> = sorted
-        .into_iter()
-        .filter(|author| author.commits.saturating_mul(100) >= total_commits)
-        .take(8)
+        .map(|p| ((p.day - t_min).num_days() as f32 / span, p.running_total))
         .collect();
-    let height = 230u32 + (shown.len().saturating_sub(1) / 4) as u32 * 100;
 
-    let mut people = String::new();
-    for (i, a) in shown.iter().enumerate() {
-        let column = i % 4;
-        let row = i / 4;
-        let x = padding + column as u32 * 198;
-        let y = 110 + row as u32 * 102;
-        let share = a.commits as f64 / total_commits as f64;
-        let label = truncate_tail(&a.label, 18);
-        let pct_text = format!("{:.1}%", share * 100.0);
-        let tooltip = format!("{} · {} commits · {}", a.label, a.commits, pct_text);
-        let avatar = a.avatar_url.as_ref().map_or_else(
-            || {
-                let initial = label.chars().next().unwrap_or('?').to_uppercase().to_string();
-                format!(r#"<rect width="58" height="58" rx="7" class="avatar-fallback-bg" /><text class="avatar-fallback" x="29" y="37" text-anchor="middle">{}</text>"#, escape_xml(&initial))
-            },
-            |url| format!(r#"<image href="{}" width="58" height="58" clip-path="url(#owner-clip-{i})" preserveAspectRatio="xMidYMid slice" />"#, escape_xml(url)),
-        );
-        let content = format!(
-            r##"<title>{tooltip}</title>
-    <rect class="avatar-pixels" x="-5" y="-5" width="68" height="68" rx="9" />
-    <clipPath id="owner-clip-{i}"><rect width="58" height="58" rx="7" /></clipPath>
-    <g class="avatar-pos">{avatar}</g>
-    <text class="person" x="70" y="23">{label}</text>
-    <text class="person-meta" x="70" y="43">{commits} commits</text>
-    <text class="person-share" x="70" y="61">{pct_text}</text>"##,
-            tooltip = escape_xml(&tooltip),
-            label = escape_xml(&label),
-            commits = a.commits,
-        );
-        let linked = a.login.as_ref().map_or(content.clone(), |login| {
-            format!(r##"<a class="person-link" href="https://github.com/{login}" target="_blank" rel="noopener">{content}</a>"##, login = escape_xml(login))
-        });
-        people.push_str(&format!(
-            r##"<g transform="translate({x}, {y})" opacity="1">
-  <animate class="motion" attributeName="opacity" from="0" to="1" dur="0.2s" begin="{begin:.2}s" fill="freeze" />
-  {linked}
-</g>
-"##,
-            x = x,
-            y = y,
-            begin = reveal_begin(i),
-            linked = linked,
-        ));
-    }
+    let last_total = points[points.len() - 1].running_total;
+    let peak = points
+        .iter()
+        .enumerate()
+        .max_by_key(|(_, p)| p.running_total)
+        .map(|(index, _)| index)
+        .unwrap_or(0);
+    let peak_total = points[peak].running_total;
+    let peak_day = points[peak].day;
 
-    let footer_y = (height - 12) as f32;
-    let right_x = (width - padding) as f32;
-    format!(
-        r##"<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 {width} {height}" role="img" aria-label="Bus factor for {repo}">
-  <style><![CDATA[
-    .title {{ fill: {fg}; font: 600 18px ui-sans-serif, system-ui, sans-serif; }}
-    .subtitle {{ fill: {muted}; font: 13px ui-sans-serif, system-ui, sans-serif; }}
-    .bf-caption {{ fill: {muted}; font: 600 11px ui-sans-serif, system-ui, sans-serif; letter-spacing: 0.08em; }}
-    .bf-number {{ fill: {accent}; font: 700 30px ui-sans-serif, system-ui, sans-serif; }}
-    .avatar-pixels {{ fill: url(#gd-pixel-fill); stroke: {border}; stroke-width: 1; shape-rendering: crispEdges; }}
-    .avatar-fallback-bg {{ fill: {track}; }}
-    .avatar-fallback {{ fill: {fg}; font: 700 18px ui-monospace, SFMono-Regular, monospace; }}
-    .person {{ fill: {fg}; font: 600 12px ui-sans-serif, system-ui, sans-serif; }}
-    .person-meta {{ fill: {fg}; font: 600 10px ui-monospace, SFMono-Regular, monospace; }}
-    .person-share {{ fill: {muted}; font: 10px ui-monospace, SFMono-Regular, monospace; }}
-    .avatar-pos {{ transform-box: fill-box; transform-origin: center; transition: transform 180ms cubic-bezier(0.23, 1, 0.32, 1); }}
-    .person-link:hover .avatar-pos {{ transform: scale(1.05); }}
-    .person-link:hover .person {{ text-decoration: underline; }}
-    .footer-link {{ fill: {muted}; font: 600 11px ui-sans-serif, system-ui, sans-serif; text-decoration: none; letter-spacing: 0.02em; }}
-    .footer-link:hover {{ fill: {fg}; }}
-    @media (prefers-reduced-motion: reduce) {{
-      .motion {{ display: none; }}
-      .avatar-pos {{ transition: none; }}
-    }}
-  ]]></style>
-  <text class="title" x="{padding}" y="36">Bus factor</text>
-  <text class="subtitle" x="{padding}" y="58">Contributors with at least 1% of attributed commits · {repo}</text>
-  <text class="bf-caption" x="{right_x:.0}" y="34" text-anchor="end">OWNERSHIP RISK · FACTOR {bus_factor}</text>
-  <text class="bf-number" x="{right_x:.0}" y="70" text-anchor="end">{risk}</text>
-{people}
-{footer}
-</svg>"##,
-        width = width,
-        height = height,
-        repo = escape_xml(repo),
-        fg = theme.fg,
-        muted = theme.muted,
-        border = theme.border,
-        track = theme.track,
-        accent = theme.accent,
-        padding = padding,
-        bus_factor = bus_factor,
-        risk = risk,
-        right_x = right_x,
-        people = people,
-        footer = brand::footer_lockup(right_x, footer_y, theme),
-    )
+    let repo_field = truncate_tail(repo, 22);
+    let current_field = last_total.to_string();
+    let peak_field = format!("{peak_total} · {peak_day}");
+    let fields = [
+        TitleField {
+            label: "repo",
+            value: &repo_field,
+        },
+        TitleField {
+            label: "current",
+            value: &current_field,
+        },
+        TitleField {
+            label: "peak",
+            value: &peak_field,
+        },
+    ];
+    let peak_value = format!("peak {peak_total}");
+    trend_sheet(TrendSheet {
+        aria: &format!("Recent TODO/FIXME movement for {repo}"),
+        title: repo,
+        caption: "Recent TODO/FIXME movement · running total across the analyzed commit window",
+        points: &plotted_points,
+        from_label: &t_min.to_string(),
+        to_label: &t_max.to_string(),
+        peak,
+        peak_value: &peak_value,
+        fields: &fields,
+        theme,
+    })
 }
-
-// Commit trend
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize)]
 pub struct MonthCount {
@@ -1698,150 +1797,417 @@ fn next_month(d: NaiveDate) -> NaiveDate {
     NaiveDate::from_ymd_opt(y, m, 1).unwrap_or(d)
 }
 
-/// Monthly commit counts as a line/area chart (all-time, month buckets)
-/// with the peak month annotated. Styling mirrors the TODO/FIXME trend
-/// chart, but in the accent color — commit volume is activity, not debt.
+/// Monthly commit counts as one plotted trace, with the peak month measured.
 pub fn render_commit_trend(repo: &str, days: &[DayCount], theme: &Theme) -> String {
-    crate::texture::decorate(render_commit_trend_inner(repo, days, theme), theme)
-}
-
-fn render_commit_trend_inner(repo: &str, days: &[DayCount], theme: &Theme) -> String {
     let months = bucket_months(days);
-    let width = 1200u32;
-    let height = 360u32;
-    let pad_l = 56.0_f32;
-    let pad_r = 40.0_f32;
-    let pad_t = 70.0_f32;
-    let pad_b = 50.0_f32;
-    let plot_w = width as f32 - pad_l - pad_r;
-    let plot_h = height as f32 - pad_t - pad_b;
-
     if months.is_empty() {
-        return empty_chart(width, height, "no commit data yet", theme);
+        return empty_chart(1200.0, 360.0, "no commit data yet", theme);
     }
-
-    let y_max = months.iter().map(|m| m.commits).max().unwrap_or(1).max(1) as f32;
     let denom = months.len().saturating_sub(1).max(1) as f32;
-    let x_at = |i: usize| -> f32 { pad_l + (i as f32 / denom) * plot_w };
-    let y_at = |v: f32| pad_t + plot_h - (v / y_max) * plot_h;
-
-    let mut path = String::new();
-    for (i, m) in months.iter().enumerate() {
-        let x = x_at(i);
-        let y = y_at(m.commits as f32);
-        if i == 0 {
-            path.push_str(&format!("M {x:.1} {y:.1}"));
-        } else {
-            path.push_str(&format!(" L {x:.1} {y:.1}"));
-        }
-    }
-
-    let baseline_y = y_at(0.0);
-    let first_x = x_at(0);
-    let last_x = x_at(months.len() - 1);
-    let mut area = path.clone();
-    area.push_str(&format!(
-        " L {last_x:.1} {baseline_y:.1} L {first_x:.1} {baseline_y:.1} Z"
-    ));
+    let plotted_points: Vec<(f32, i64)> = months
+        .iter()
+        .enumerate()
+        .map(|(index, m)| (index as f32 / denom, m.commits))
+        .collect();
 
     let total: i64 = months.iter().map(|m| m.commits).sum();
-    // `max_by_key` keeps the LAST max on ties — deterministic, and the
-    // most recent peak is the more interesting one to annotate anyway.
-    let (peak_idx, peak) = months
+    // `max_by_key` keeps the LAST max on ties — deterministic, and the most
+    // recent peak is the more interesting one to measure anyway.
+    let (peak, peak_month) = months
         .iter()
         .enumerate()
         .max_by_key(|(_, m)| m.commits)
         .expect("months is non-empty (checked above)");
-    let peak_x = x_at(peak_idx);
-    let peak_y = y_at(peak.commits as f32);
-    let (peak_label_x, peak_anchor) = if peak_x > pad_l + plot_w - 90.0 {
-        (peak_x - 10.0, "end")
-    } else {
-        (peak_x + 10.0, "start")
-    };
-    let peak_month = peak.month.format("%Y-%m").to_string();
+    let peak_label = peak_month.month.format("%Y-%m").to_string();
 
-    let mut y_ticks = String::new();
-    for i in 0..=4 {
-        let v = y_max * (i as f32 / 4.0);
-        let y = y_at(v);
-        y_ticks.push_str(&format!(
-            r##"<line x1="{pad_l:.1}" y1="{y:.1}" x2="{x_end:.1}" y2="{y:.1}" stroke="{grid}" stroke-width="1" opacity="0.55" />
-<text class="axis" x="{ax:.1}" y="{ty:.1}" text-anchor="end">{v}</text>
-"##,
-            pad_l = pad_l,
-            y = y,
-            x_end = pad_l + plot_w,
-            ax = pad_l - 8.0,
-            ty = y + 4.0,
-            v = v.round() as i64,
-            grid = theme.grid,
+    let repo_field = truncate_tail(repo, 22);
+    let months_field = months.len().to_string();
+    let total_field = humanize(total);
+    let peak_field = format!("{} · {}", peak_month.commits, peak_label);
+    let fields = [
+        TitleField {
+            label: "repo",
+            value: &repo_field,
+        },
+        TitleField {
+            label: "months",
+            value: &months_field,
+        },
+        TitleField {
+            label: "commits",
+            value: &total_field,
+        },
+        TitleField {
+            label: "peak",
+            value: &peak_field,
+        },
+    ];
+    let peak_value = format!("peak {}", peak_month.commits);
+    let caption = format!(
+        "Commits per month · {} total · peak {} in {}",
+        humanize(total),
+        peak_month.commits,
+        peak_label
+    );
+    let from = months[0].month.format("%Y-%m").to_string();
+    let to = months[months.len() - 1].month.format("%Y-%m").to_string();
+    trend_sheet(TrendSheet {
+        aria: &format!("Monthly commit trend for {repo}"),
+        title: repo,
+        caption: &caption,
+        points: &plotted_points,
+        from_label: &from,
+        to_label: &to,
+        peak,
+        peak_value: &peak_value,
+        fields: &fields,
+        theme,
+    })
+}
+
+// ---------------------------------------------------------------------------
+// Bus factor
+// ---------------------------------------------------------------------------
+
+#[derive(Debug, Clone, Serialize)]
+pub struct AuthorShare {
+    /// Display label — GitHub login when known, otherwise author name.
+    pub label: String,
+    pub login: Option<String>,
+    pub avatar_url: Option<String>,
+    pub commits: i64,
+}
+
+/// Minimum number of top contributors whose combined commits strictly
+/// exceed 50% of `total_commits` — i.e. how many people the project
+/// could lose before more than half of its authorship knowledge is gone.
+///
+/// `commits` need not be sorted (a descending copy is taken internally)
+/// and non-positive entries are ignored. Returns 0 when there are no
+/// commits at all. If `commits` is a truncated top-N prefix whose sum
+/// never crosses half of `total_commits`, the prefix length is returned
+/// as a lower bound — by definition the true bus factor is at least
+/// that large.
+pub fn compute_bus_factor(commits: &[i64], total_commits: i64) -> usize {
+    if total_commits <= 0 {
+        return 0;
+    }
+    let mut sorted: Vec<i64> = commits.iter().copied().filter(|c| *c > 0).collect();
+    if sorted.is_empty() {
+        return 0;
+    }
+    sorted.sort_unstable_by(|a, b| b.cmp(a));
+    let mut acc = 0i64;
+    for (i, c) in sorted.iter().enumerate() {
+        acc = acc.saturating_add(*c);
+        if acc.saturating_mul(2) > total_commits {
+            return i + 1;
+        }
+    }
+    sorted.len()
+}
+
+/// How many authors the share band plots before the rest is one remainder
+/// segment. Seven, because there are seven category pens: an eighth segment
+/// would have to repeat one, and a repeated pen in a single band is a chart
+/// that lies about how many people it is showing.
+const BUS_SEGMENTS: usize = 7;
+
+/// How far the bus-factor dimension stands below the band. Wider than the
+/// usual standoff because the band's own key sits under it.
+const BUS_DIM_STANDOFF: f32 = 22.0;
+
+/// Contributor concentration as one measured band.
+///
+/// Each author is a plotted segment of the whole, with a 1px graphite
+/// hairline standing at its leading edge, and the sheet spends its red on the
+/// dimension that measures where the bus factor actually falls.
+pub fn render_bus_factor(
+    repo: &str,
+    authors: &[AuthorShare],
+    total_commits: i64,
+    theme: &Theme,
+) -> String {
+    let width = 900.0_f32;
+
+    let mut sorted: Vec<&AuthorShare> = authors.iter().filter(|a| a.commits > 0).collect();
+    sorted.sort_by(|a, b| {
+        b.commits
+            .cmp(&a.commits)
+            .then_with(|| a.label.cmp(&b.label))
+    });
+    if sorted.is_empty() || total_commits <= 0 {
+        return empty_chart(width, 200.0, "no contributor data yet", theme);
+    }
+
+    let commit_counts: Vec<i64> = sorted.iter().map(|a| a.commits).collect();
+    let bus_factor = compute_bus_factor(&commit_counts, total_commits);
+    let risk = match bus_factor {
+        0 => "Unavailable",
+        1 => "Solo",
+        2 => "High",
+        3 => "Medium",
+        _ => "Low",
+    };
+    // The visual deliberately omits sub-percent shares so the ownership risk
+    // stays legible; the bus factor above still counts the whole population.
+    let shown: Vec<&AuthorShare> = sorted
+        .iter()
+        .copied()
+        .filter(|author| author.commits.saturating_mul(100) >= total_commits)
+        .take(BUS_SEGMENTS)
+        .collect();
+
+    let band_x = PAD;
+    let band_w = width - PAD * 2.0;
+    let band_y = 122.0_f32;
+    let band_h = 26.0_f32;
+    let keys: Vec<&str> = shown.iter().map(|a| a.label.as_str()).collect();
+    let pens = pens_for(theme, &keys);
+
+    let mut band = format!(
+        "  <rect x=\"{x}\" y=\"{y}\" width=\"{w}\" height=\"{h}\" fill=\"{track}\" />\n",
+        x = texture::coord(band_x),
+        y = texture::coord(band_y),
+        w = texture::coord(band_w),
+        h = texture::coord(band_h),
+        track = theme.track,
+    );
+    let mut edges: Vec<f32> = Vec::with_capacity(shown.len());
+    let mut cursor = band_x;
+    for (index, author) in shown.iter().enumerate() {
+        let share = author.commits as f32 / total_commits as f32;
+        // A segment can never run past the band it is a share of, however
+        // odd the arithmetic upstream gets.
+        let remaining = (band_x + band_w - cursor).max(0.0);
+        let seg_w = (share * band_w).clamp(0.0, remaining);
+        band.push_str(&format!(
+            "  {}\n",
+            texture::series_bar(
+                cursor,
+                band_y,
+                seg_w,
+                band_h,
+                pens[index],
+                theme.fg,
+                Side::Right
+            ),
+        ));
+        if seg_w >= 16.0 {
+            band.push_str(&format!(
+                "  <text class=\"value\" x=\"{x}\" y=\"{y}\" text-anchor=\"middle\" dominant-baseline=\"central\" fill=\"{ink}\">{n:02}</text>\n",
+                x = texture::coord(cursor + seg_w / 2.0),
+                y = texture::coord(band_y + band_h / 2.0),
+                ink = contrast_on(pens[index]),
+                n = index + 1,
+            ));
+        }
+        cursor += seg_w;
+        edges.push(cursor);
+    }
+    // What is left of the band is everybody the plot does not draw. Saying so
+    // is the difference between a measured remainder and an empty tail that
+    // looks like a rendering fault.
+    let plotted_commits: i64 = shown.iter().map(|author| author.commits).sum();
+    let rest = total_commits.saturating_sub(plotted_commits);
+    if rest > 0 && band_x + band_w - cursor >= 12.0 {
+        band.push_str(&format!(
+            "  <text class=\"meta\" x=\"{x}\" y=\"{y}\" text-anchor=\"end\">others {share:.1}%</text>\n",
+            x = texture::coord(band_x + band_w),
+            y = texture::coord(band_y - 9.0),
+            share = rest as f64 / total_commits as f64 * 100.0,
         ));
     }
 
-    let footer_y = (height - 12) as f32;
+    // The measured value of this sheet: where the top authors cross half of
+    // the attributed commits.
+    let dimension = match bus_factor {
+        0 => String::new(),
+        factor if factor <= edges.len() => {
+            let end = edges[factor - 1];
+            let carried: i64 = shown.iter().take(factor).map(|author| author.commits).sum();
+            let value = format!(
+                "factor {factor} · {:.1}%",
+                carried as f64 / total_commits as f64 * 100.0
+            );
+            format!(
+                "  {left}{right}{dim}\n",
+                left = texture::extension_tick(
+                    band_x,
+                    band_y + band_h,
+                    Side::Down,
+                    extension_len(BUS_DIM_STANDOFF),
+                    theme.border
+                ),
+                right = texture::extension_tick(
+                    end,
+                    band_y + band_h,
+                    Side::Down,
+                    extension_len(BUS_DIM_STANDOFF),
+                    theme.border
+                ),
+                dim = texture::dimension_h(
+                    band_x,
+                    end,
+                    band_y + band_h + BUS_DIM_STANDOFF,
+                    &measured(&value, theme, 11.0)
+                ),
+            )
+        }
+        _ => String::new(),
+    };
+
+    // The key: the same numbers, against the same pens, with the people they
+    // belong to. Two columns, so a wide sheet is not one long column.
+    let key_y = band_y + band_h + 58.0;
+    let key_row_h = 54.0_f32;
+    let key_col_w = (band_w - 20.0) / 2.0;
+    let key_rows = shown.len().div_ceil(2);
+    let mut key = String::new();
+    for (index, author) in shown.iter().enumerate() {
+        let x = band_x + (index % 2) as f32 * (key_col_w + 20.0);
+        let y = key_y + (index / 2) as f32 * key_row_h;
+        let label = truncate_tail(&author.label, 20);
+        let share = author.commits as f64 / total_commits as f64 * 100.0;
+        let content = format!(
+            r##"<title>{tooltip}</title>
+    <text class="meta" x="{nx}" y="{cy}" dominant-baseline="central">{n:02}</text>
+    <rect x="{sx}" y="{sy}" width="10" height="10" fill="{pen}" shape-rendering="crispEdges" />
+    <clipPath id="owner-clip-{index}"><rect width="34" height="34" /></clipPath>
+    <g transform="translate({ax}, {ay})">{photo}<rect class="avatar-edge" x="0" y="0" width="34" height="34" /></g>
+    <text class="label" x="{tx}" y="{ty}">{label}</text>
+    <text class="meta" x="{tx}" y="{my}">{commits} commits · {share:.1}%</text>"##,
+            tooltip = escape_xml(&format!(
+                "{} · {} commits · {share:.1}%",
+                author.label, author.commits
+            )),
+            n = index + 1,
+            nx = texture::coord(x),
+            cy = texture::coord(y + 17.0),
+            sx = texture::coord(x + 22.0),
+            sy = texture::coord(y + 12.0),
+            pen = pens[index],
+            ax = texture::coord(x + 40.0),
+            ay = texture::coord(y),
+            photo = bus_photo(author.avatar_url.as_deref(), &label, index),
+            tx = texture::coord(x + 84.0),
+            ty = texture::coord(y + 15.0),
+            my = texture::coord(y + 31.0),
+            label = escape_xml(&label),
+            commits = author.commits,
+        );
+        let linked = author.login.as_ref().map_or(content.clone(), |login| {
+            format!(
+                r##"<a class="person-link" href="{href}" target="_blank" rel="noopener">{content}</a>"##,
+                href = escape_xml(&format!("https://github.com/{login}")),
+            )
+        });
+        key.push_str(&format!(
+            "  <g opacity=\"1\">\n    {motion}\n    {linked}\n  </g>\n",
+            motion = motion_reveal(index),
+        ));
+    }
+
+    let repo_field = truncate_tail(repo, 22);
+    let factor_field = bus_factor.to_string();
+    let authors_field = sorted.len().to_string();
+    let commits_field = humanize(total_commits);
+    let fields = [
+        TitleField {
+            label: "repo",
+            value: &repo_field,
+        },
+        TitleField {
+            label: "factor",
+            value: &factor_field,
+        },
+        TitleField {
+            label: "risk",
+            value: risk,
+        },
+        TitleField {
+            label: "authors",
+            value: &authors_field,
+        },
+        TitleField {
+            label: "commits",
+            value: &commits_field,
+        },
+    ];
+    let block_y = key_y + key_rows as f32 * key_row_h - 12.0;
+    let height = block_y + texture::title_block_height(fields.len()) + COLOPHON_BAND;
+
     format!(
-        r##"<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 {width} {height}" role="img" aria-label="Monthly commit trend for {repo}">
+        r##"<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 {width:.0} {height:.0}" role="img" aria-label="Bus factor for {repo}">
   <style><![CDATA[
-    .title {{ fill: {fg}; font: 600 18px ui-sans-serif, system-ui, sans-serif; }}
-    .subtitle {{ fill: {muted}; font: 13px ui-sans-serif, system-ui, sans-serif; }}
-    .axis {{ fill: {muted}; font: 11px ui-sans-serif, system-ui, sans-serif; }}
-    .peak-label {{ fill: {accent}; font: 600 12px ui-sans-serif, system-ui, sans-serif; }}
-    .footer-link {{ fill: {muted}; font: 600 11px ui-sans-serif, system-ui, sans-serif; text-decoration: none; letter-spacing: 0.02em; }}
-    .footer-link:hover {{ fill: {fg}; }}
-    @media (prefers-reduced-motion: reduce) {{
-      .motion {{ display: none; }}
-    }}
+{css}
+{avatar_css}
+    .person-link {{ cursor: pointer; }}
+    .person-link:hover .label {{ text-decoration: underline; }}
+    .person-link:hover .avatar-edge {{ stroke: {fg}; stroke-width: {emphasis}; }}
   ]]></style>
-  <text class="title" x="{pad_l:.0}" y="34">{repo}</text>
-  <text class="subtitle" x="{pad_l:.0}" y="56">Commits per month · {total} total · peak {peak_commits} in {peak_month}</text>
-  {y_ticks}
-  <g opacity="1">
-    <animate class="motion" attributeName="opacity" from="0" to="1" dur="0.2s" begin="0s" fill="freeze" />
-    <path d="{area}" fill="url(#gd-pixel-fill)" opacity="0.94" />
-    <path d="{path}" fill="none" stroke="{accent}" stroke-width="2.5" stroke-linecap="round" stroke-linejoin="round" />
-    <circle cx="{peak_x:.1}" cy="{peak_y:.1}" r="5" fill="{accent}" />
-    <text class="peak-label" x="{peak_label_x:.1}" y="{peak_label_y:.1}" text-anchor="{peak_anchor}">{peak_commits}</text>
-  </g>
-{footer}
+  <text class="title" x="{pad}" y="{title_y}">Bus factor</text>
+  <text class="caption" x="{pad}" y="{caption_y}">Contributors with at least 1% of attributed commits · {repo}</text>
+{band}{dimension}{key}{block}{footer}
 </svg>"##,
-        width = width,
-        height = height,
         repo = escape_xml(repo),
+        css = sheet_css(theme),
+        avatar_css = avatar_css(theme),
         fg = theme.fg,
-        muted = theme.muted,
-        accent = theme.accent,
-        pad_l = pad_l,
-        total = humanize(total),
-        peak_commits = peak.commits,
-        peak_month = peak_month,
-        y_ticks = y_ticks,
-        area = area,
-        path = path,
-        peak_x = peak_x,
-        peak_y = peak_y,
-        peak_label_x = peak_label_x,
-        peak_label_y = peak_y + 4.0,
-        peak_anchor = peak_anchor,
-        footer = brand::footer_lockup((width as f32) - 24.0, footer_y, theme),
+        emphasis = texture::W_EMPHASIS,
+        pad = texture::coord(PAD),
+        title_y = texture::coord(TITLE_Y),
+        caption_y = texture::coord(CAPTION_Y),
+        block = texture::title_block(width - PAD - BLOCK_W, block_y, BLOCK_W, &fields, theme),
+        footer = brand::footer_lockup(width - PAD, height - 12.0, theme),
     )
 }
 
-fn empty_chart(width: u32, height: u32, message: &str, theme: &Theme) -> String {
+/// A 34px key photo, or the author's initial when there is none.
+fn bus_photo(url: Option<&str>, label: &str, index: usize) -> String {
+    match url {
+        Some(url) => format!(
+            r#"<image href="{url}" width="34" height="34" clip-path="url(#owner-clip-{index})" preserveAspectRatio="xMidYMid slice" />"#,
+            url = escape_xml(url),
+        ),
+        None => {
+            let initial = label
+                .chars()
+                .next()
+                .unwrap_or('?')
+                .to_uppercase()
+                .to_string();
+            format!(
+                r#"<rect class="avatar-fallback-bg" width="34" height="34" /><text class="avatar-fallback" x="17" y="17" text-anchor="middle" dominant-baseline="central" font-size="14">{initial}</text>"#,
+                initial = escape_xml(&initial),
+            )
+        }
+    }
+}
+
+// ---------------------------------------------------------------------------
+// Shared
+// ---------------------------------------------------------------------------
+
+/// A sheet with nothing on it says why, in ink, and keeps its colophon.
+fn empty_chart(width: f32, height: f32, message: &str, theme: &Theme) -> String {
     format!(
-        r##"<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 {width} {height}" role="img" aria-label="{message}">
+        r##"<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 {width:.0} {height:.0}" role="img" aria-label="{message}">
   <style><![CDATA[
-    .footer-link {{ fill: {muted}; font: 600 11px ui-sans-serif, system-ui, sans-serif; text-decoration: none; letter-spacing: 0.02em; }}
+    .caption {{ fill: {muted}; font: 13px {sans}; }}
+    .footer-link {{ fill: {muted}; font: 600 11px {sans}; text-decoration: none; letter-spacing: 0.02em; }}
+    .footer-link:hover {{ fill: {fg}; }}
   ]]></style>
-  <text x="50%" y="50%" text-anchor="middle" fill="{muted}"
-        font-family="ui-sans-serif, system-ui, sans-serif" font-size="14">{message}</text>
+  <text class="caption" x="{cx}" y="{cy}" text-anchor="middle" dominant-baseline="central">{message}</text>
 {footer}
 </svg>"##,
-        width = width,
-        height = height,
         muted = theme.muted,
+        fg = theme.fg,
+        sans = texture::SANS,
+        cx = texture::coord(width / 2.0),
+        cy = texture::coord(height / 2.0),
         message = escape_xml(message),
-        footer = brand::footer_lockup(width as f32 - 24.0, height as f32 - 12.0, theme),
+        footer = brand::footer_lockup(width - 24.0, height - 12.0, theme),
     )
 }
 
@@ -1860,6 +2226,11 @@ fn truncate_tail(s: &str, max: usize) -> String {
     format!("…{tail}")
 }
 
+/// XML text escaping.
+///
+/// [`crate::texture::escape_xml`] is the canonical copy; this one also
+/// escapes the apostrophe, because a repository or author label can carry one
+/// and these sheets letter those inside attributes as well as in text.
 fn escape_xml(s: &str) -> String {
     s.replace('&', "&amp;")
         .replace('<', "&lt;")
@@ -1880,9 +2251,255 @@ mod tests {
             .join("\n")
     }
 
+    fn sample_days() -> Vec<DayCount> {
+        vec![
+            DayCount {
+                day: NaiveDate::from_ymd_opt(2026, 1, 3).unwrap(),
+                commits: 5,
+            },
+            DayCount {
+                day: NaiveDate::from_ymd_opt(2026, 1, 6).unwrap(),
+                commits: 1,
+            },
+        ]
+    }
+
+    fn sample_files() -> Vec<FileRow> {
+        vec![
+            FileRow {
+                path: "src/auth.rs".into(),
+                count: 47,
+            },
+            FileRow {
+                path: "src/db.rs".into(),
+                count: 23,
+            },
+        ]
+    }
+
+    /// Every sheet this module draws, in one print, for the contract tests
+    /// that have to hold across the whole family.
+    fn every_sheet(theme: &Theme) -> Vec<(&'static str, String)> {
+        let start = NaiveDate::from_ymd_opt(2026, 1, 1).unwrap();
+        let end = NaiveDate::from_ymd_opt(2026, 1, 31).unwrap();
+        let days = sample_days();
+        vec![
+            (
+                "bug magnets",
+                render_bug_magnets("o/r", &sample_files(), theme),
+            ),
+            (
+                "top changed",
+                render_top_changed("o/r", &sample_files(), theme),
+            ),
+            (
+                "commit activity",
+                render_heatmap("o/r", "Commit activity", start, end, &days, None, theme),
+            ),
+            (
+                "contributors",
+                render_contributors(
+                    "o/r",
+                    &[ContributorRow {
+                        login: Some("a".into()),
+                        name: "a".into(),
+                        avatar_url: None,
+                        commits: 3,
+                    }],
+                    theme,
+                ),
+            ),
+            (
+                "languages",
+                render_languages(
+                    "o/r",
+                    &[LanguageBar {
+                        language: "Rust".into(),
+                        files: 2,
+                        lines_code: 30,
+                        lines_blank: 3,
+                        lines_comment: 1,
+                    }],
+                    theme,
+                ),
+            ),
+            (
+                "todo trend",
+                render_todo_trend(
+                    "o/r",
+                    &[
+                        TodoPoint {
+                            day: start,
+                            running_total: 1,
+                        },
+                        TodoPoint {
+                            day: end,
+                            running_total: 4,
+                        },
+                    ],
+                    theme,
+                ),
+            ),
+            (
+                "bus factor",
+                render_bus_factor(
+                    "o/r",
+                    &[
+                        AuthorShare {
+                            label: "alice".into(),
+                            login: Some("alice".into()),
+                            avatar_url: None,
+                            commits: 5,
+                        },
+                        AuthorShare {
+                            label: "bob".into(),
+                            login: None,
+                            avatar_url: None,
+                            commits: 3,
+                        },
+                    ],
+                    8,
+                    theme,
+                ),
+            ),
+            ("commit trend", render_commit_trend("o/r", &days, theme)),
+            (
+                "contribution profile",
+                render_contribution_profile(
+                    "@alice",
+                    &ContributionProfile {
+                        owned_repos: 4,
+                        external_repos: 9,
+                        owned_commits: 120,
+                        external_commits: 380,
+                        visionary_count: 2,
+                    },
+                    theme,
+                ),
+            ),
+        ]
+    }
+
+    /// The whole point of the redraw: not one pattern, tier ladder, dither
+    /// field, gradient or rounded corner survives on any sheet, in either
+    /// print. These ids used to be on every one of them.
+    #[test]
+    fn no_sheet_carries_a_pattern_a_gradient_or_a_rounded_corner() {
+        for theme in [&theme::LIGHT, &theme::DARK] {
+            for (name, svg) in every_sheet(theme) {
+                for banned in [
+                    "gd-pixel-fill",
+                    "gd-pixel-field",
+                    "gd-pixel-fade",
+                    "gd-dither-wave",
+                    "gd-heat-t",
+                    "gd-lang",
+                    "gd-contrib-own",
+                    "data-gitdebt-texture",
+                    "data-gitdebt-heat-defs",
+                    "data-gitdebt-language-defs",
+                    "<pattern",
+                    "url(#gd-",
+                    "linearGradient",
+                    "radialGradient",
+                    "feGaussianBlur",
+                    "filter=",
+                    "drop-shadow",
+                    "box-shadow",
+                    "rx=",
+                    "ry=",
+                    "border-radius",
+                    "var(--",
+                    "prefers-color-scheme",
+                ] {
+                    assert!(!svg.contains(banned), "{name} still carries {banned}");
+                }
+            }
+        }
+    }
+
+    /// Three weights and no others, everywhere.
+    ///
+    /// Lettering is exempt, and only lettering: a cut value strokes its own
+    /// glyphs in the ground colour to open a gap in the rule it sits on, and
+    /// that halo is wide on purpose. Every drawn line is 0.5, 1 or 2.
+    #[test]
+    fn sheets_draw_only_the_three_line_weights() {
+        for theme in [&theme::LIGHT, &theme::DARK] {
+            for (name, svg) in every_sheet(theme) {
+                for (index, _) in svg.match_indices("stroke-width=\"") {
+                    let tag_start = svg[..index].rfind('<').expect("owning tag");
+                    if svg[tag_start..].starts_with("<text") {
+                        continue;
+                    }
+                    let rest = &svg[index + "stroke-width=\"".len()..];
+                    let value = &rest[..rest.find('"').expect("closing quote")];
+                    assert!(
+                        matches!(value, "0.5" | "1" | "2"),
+                        "{name} draws a {value} weight"
+                    );
+                }
+            }
+        }
+    }
+
+    /// Every sheet closes with a title block: the field labels uppercase and
+    /// tracked, the values tabular, in a box whose bottom-right corner is the
+    /// system's one chamfer.
+    #[test]
+    fn every_sheet_closes_with_a_title_block() {
+        for (name, svg) in every_sheet(&theme::LIGHT) {
+            assert!(svg.contains(">REPO<") || svg.contains(">LOGIN<"), "{name}");
+            assert!(
+                svg.contains(&format!("letter-spacing=\"{}\"", texture::LABEL_TRACKING)),
+                "{name} letters no field label"
+            );
+            assert!(
+                svg.contains("font-variant-numeric=\"tabular-nums\""),
+                "{name} has no tabular value"
+            );
+            // The chamfer: a closed path that steps in by 10 before the
+            // bottom edge. Nothing else in the drawing is cut.
+            assert!(svg.contains("H0.00Z") || svg.contains('Z'), "{name}");
+        }
+    }
+
+    /// Drafting red is spent on the measured value and nothing else. A bar
+    /// sheet's whole red budget is one dimension: its rule, its two
+    /// terminators and its lettering.
+    #[test]
+    fn a_bar_sheet_spends_its_red_only_on_the_dimension() {
+        for theme in [&theme::LIGHT, &theme::DARK] {
+            let svg = render_bug_magnets("foo/bar", &sample_files(), theme);
+            assert_eq!(
+                svg.matches(theme.accent).count(),
+                4,
+                "red belongs to the dimension line, its terminators and its value"
+            );
+            // And that dimension measures the peak, with its unit.
+            assert!(svg.contains(">47 fix commits<"));
+            assert!(svg.contains("paint-order=\"stroke\""));
+        }
+    }
+
+    /// A plotted bar is a flat pen with a 1px ink hairline standing at the
+    /// measured edge, and no texture of any kind.
+    #[test]
+    fn bars_are_flat_pens_with_a_leading_hairline() {
+        let svg = render_bug_magnets("foo/bar", &sample_files(), &theme::LIGHT);
+        // The widest bar reaches the full plot width; its hairline stands on
+        // that edge, top to bottom of the bar.
+        assert!(svg.contains(&format!("fill=\"{}\"", theme::LIGHT.ink_3)));
+        assert!(svg.contains(&format!(
+            "<line x1=\"778.00\" y1=\"120.00\" x2=\"778.00\" y2=\"134.00\" stroke=\"{}\" stroke-width=\"1\" />",
+            theme::LIGHT.fg
+        )));
+        assert!(!svg.contains("fill-opacity"));
+    }
+
     /// A capped analysis window must not assert "0 commits" for days it
-    /// never read. The cells are still drawn (the grid keeps its shape) but
-    /// they say what they actually know.
+    /// never read. The cells are still drawn (the calendar keeps its shape)
+    /// but they say what they actually know.
     #[test]
     fn heatmap_does_not_claim_zero_for_unanalyzed_days() {
         let start = NaiveDate::from_ymd_opt(2026, 1, 1).unwrap();
@@ -1953,27 +2570,17 @@ mod tests {
 
     #[test]
     fn bug_magnets_renders_paths_links_and_baked_colors() {
-        let rows = vec![
-            FileRow {
-                path: "src/auth.rs".into(),
-                count: 47,
-            },
-            FileRow {
-                path: "src/db.rs".into(),
-                count: 23,
-            },
-        ];
-        let svg = render_bug_magnets("foo/bar", &rows, &theme::LIGHT);
+        let svg = render_bug_magnets("foo/bar", &sample_files(), &theme::LIGHT);
         assert!(svg.contains("Fix-labelled changes"));
         assert!(svg.contains("analyzed commit window"));
         assert!(svg.contains("src/auth.rs"));
-        assert!(svg.contains("47"));
+        assert!(svg.contains(">47</text>"));
         assert!(svg.contains("<animate"));
         assert!(svg.contains("gitdebt.com"));
         assert!(svg.contains("https://github.com/foo/bar/blob/HEAD/src/auth.rs"));
-        // Concrete light-theme color baked in.
+        // Concrete light-print colors baked in.
         assert!(svg.contains(theme::LIGHT.fg));
-        // No leftover CSS variable references — those don't survive `<img>` rendering.
+        assert!(svg.contains(theme::LIGHT.ink_3));
         assert!(!svg.contains("var(--"));
     }
 
@@ -1984,12 +2591,11 @@ mod tests {
             count: 1,
         }];
         let svg = render_bug_magnets("a/b", &rows, &theme::DARK);
-        // Dark theme's bar color and fg both present.
         assert!(svg.contains(theme::DARK.fg));
-        assert!(svg.contains(theme::DARK.bug));
-        // Light theme's *primary* foreground must not be the chart fg.
-        // (We can't blanket-assert `#0f172a` is absent — contrast_on()
-        //  legitimately returns it as text on light-coloured backgrounds.)
+        assert!(svg.contains(theme::DARK.accent));
+        // The light print's ink is never the lettering colour here. (It can
+        // still appear as an attribute, because `contrast_on` legitimately
+        // letters graphite onto a light fill.)
         assert!(!svg.contains(&format!("fill: {};", theme::LIGHT.fg)));
         assert!(!svg.contains("var(--"));
     }
@@ -2038,17 +2644,18 @@ mod tests {
         assert!(svg.contains("text-anchor=\"end\""));
     }
 
-    /// The commit-activity heatmap used to be the one repo-stat chart with
-    /// no dither at all — a flat five-step gray ramp. It must now carry the
-    /// same ordered-dither contract as everything else: density tiers and
-    /// concrete theme colors.
+    /// The commit-activity ramp is a stepped set of inks with a key that
+    /// letters the count range each step stands for. It steps through the
+    /// drawing's own ladder rather than the plotter pens — those exist for
+    /// several series at once and sit in one narrow lightness band, which is
+    /// exactly what a magnitude cannot use — and the mark grows with the ink.
     #[test]
-    fn commit_activity_heatmap_is_dithered_with_dynamic_signal_colors() {
+    fn commit_activity_steps_through_a_labelled_ink_ladder() {
         let mut days = Vec::new();
-        for (i, commits) in [1i64, 3, 9, 40, 0, 7, 22].into_iter().enumerate() {
+        for (index, commits) in [1i64, 3, 9, 40, 0, 7, 22].into_iter().enumerate() {
             days.push(DayCount {
                 day: NaiveDate::from_ymd_opt(2026, 3, 1).unwrap()
-                    + chrono::Duration::days(i as i64),
+                    + chrono::Duration::days(index as i64),
                 commits,
             });
         }
@@ -2056,28 +2663,29 @@ mod tests {
         let end = NaiveDate::from_ymd_opt(2026, 3, 7).unwrap();
         for theme in [&theme::LIGHT, &theme::DARK] {
             let svg = render_heatmap("foo/bar", "Commit activity", start, end, &days, None, theme);
-            assert!(svg.contains("data-gitdebt-heat-defs=\"true\""));
-            assert!(svg.contains("class=\"heat-ink\""));
-            assert!(svg.contains("shape-rendering=\"crispEdges\""));
-            // Every referenced tier must have a matching def.
-            for tier in HEAT_TIERS.iter().skip(1) {
+            for (size, ink) in HEAT_STEPS {
                 assert!(
-                    svg.contains(&format!("id=\"gd-heat-t{tier}\"")),
-                    "missing tier {tier} def"
+                    svg.contains(&format!(
+                        "width=\"{}\" height=\"{}\" fill=\"{}\"",
+                        texture::coord(size),
+                        texture::coord(size),
+                        ink(theme)
+                    )),
+                    "a step never plots"
                 );
+                // No step is drafting red, and none of them is a pen: the
+                // pen set belongs to charts that draw several series at once.
+                assert_ne!(ink(theme), theme.accent);
+                assert!(!theme.pens.contains(&ink(theme)));
             }
-            assert!(svg.contains("fill=\"url(#gd-heat-t13)\""));
-            assert!(!svg.contains(theme.heat_2), "flat gray ramp must be gone");
-            let (violet, blue, pink) = crate::texture::wave_stops(theme);
-            assert!(svg.contains(violet));
-            assert!(svg.contains(blue));
-            assert!(svg.contains(pink));
-            for alpha in HEAT_ALPHA.iter().skip(1) {
-                assert!(
-                    svg.contains(&format!("fill-opacity=\"{alpha}\"")),
-                    "missing level alpha {alpha}"
-                );
-            }
+            // A day with no commits keeps its place on the empty ground.
+            assert!(svg.contains(&format!("fill=\"{}\"", theme.track)));
+            assert!(svg.contains(">COMMITS PER DAY<"));
+            assert!(svg.contains(">0</text>"));
+            assert!(svg.contains(">≤"));
+            assert!(svg.contains("&gt;"));
+            // The peak is the measured datum, so it carries the red leader.
+            assert!(svg.contains("peak 40 · 2026-03-04"));
             assert_eq!(
                 svg,
                 render_heatmap("foo/bar", "Commit activity", start, end, &days, None, theme)
@@ -2086,139 +2694,34 @@ mod tests {
     }
 
     #[test]
-    fn heat_ink_is_empty_for_dormant_days() {
-        assert_eq!(heat_ink(0.0, 0.0, 14.0, 0), "");
-        assert!(heat_ink(0.0, 0.0, 14.0, 1).contains("gd-heat-t2"));
-        // Out-of-range levels clamp to the top tier instead of panicking.
-        assert!(heat_ink(0.0, 0.0, 14.0, 99).contains("gd-heat-t13"));
-        assert!(heat_ink(0.0, 0.0, 14.0, 4).contains("pointer-events=\"none\""));
-    }
-
-    #[test]
-    fn every_repo_chart_carries_dither_markup() {
-        let start = NaiveDate::from_ymd_opt(2026, 1, 1).unwrap();
-        let end = NaiveDate::from_ymd_opt(2026, 1, 7).unwrap();
-        let days = vec![DayCount {
-            day: NaiveDate::from_ymd_opt(2026, 1, 3).unwrap(),
-            commits: 5,
-        }];
-        let files = vec![FileRow {
-            path: "src/lib.rs".into(),
-            count: 12,
-        }];
-        let charts: [(&str, String); 8] = [
-            (
-                "bug magnets",
-                render_bug_magnets("o/r", &files, &theme::DARK),
-            ),
-            (
-                "top changed",
-                render_top_changed("o/r", &files, &theme::DARK),
-            ),
-            (
-                "commit activity",
-                render_heatmap(
-                    "o/r",
-                    "Commit activity",
-                    start,
-                    end,
-                    &days,
-                    None,
-                    &theme::DARK,
-                ),
-            ),
-            (
-                "contributors",
-                render_contributors(
-                    "o/r",
-                    &[ContributorRow {
-                        login: Some("a".into()),
-                        name: "a".into(),
-                        avatar_url: None,
-                        commits: 3,
-                    }],
-                    &theme::DARK,
-                ),
-            ),
-            (
-                "languages",
-                render_languages(
-                    "o/r",
-                    &[LanguageBar {
-                        language: "Rust".into(),
-                        files: 2,
-                        lines_code: 30,
-                        lines_blank: 3,
-                        lines_comment: 1,
-                    }],
-                    &theme::DARK,
-                ),
-            ),
-            (
-                "todo trend",
-                render_todo_trend(
-                    "o/r",
-                    &[
-                        TodoPoint {
-                            day: start,
-                            running_total: 1,
-                        },
-                        TodoPoint {
-                            day: end,
-                            running_total: 4,
-                        },
-                    ],
-                    &theme::DARK,
-                ),
-            ),
-            (
-                "bus factor",
-                render_bus_factor(
-                    "o/r",
-                    &[AuthorShare {
-                        label: "a".into(),
-                        login: None,
-                        avatar_url: None,
-                        commits: 5,
-                    }],
-                    5,
-                    &theme::DARK,
-                ),
-            ),
-            (
-                "commit trend",
-                render_commit_trend("o/r", &days, &theme::DARK),
-            ),
-        ];
-        for (name, svg) in charts {
-            let dithered = svg.contains("url(#gd-pixel-fill)")
-                || svg.contains("url(#gd-heat-t")
-                || svg.contains("url(#gd-lang");
-            assert!(dithered, "{name} renders its data without dither");
-            // The shared pixel-grain field is on every surface.
-            assert!(
-                svg.contains("data-gitdebt-texture=\"true\""),
-                "{name} is missing the shared texture field"
-            );
-        }
-    }
-
-    #[test]
-    fn empty_charts_keep_the_shared_texture_field() {
-        // The empty state used to paint an opaque background rect on top of
-        // the texture field, so "no data" looked like a different product.
-        // No chart paints a canvas at all now, so the absence is structural
-        // rather than a property of this one state.
-        let svg = render_commit_trend("o/r", &[], &theme::DARK);
-        assert!(svg.contains("no commit data yet"));
-        assert!(svg.contains("data-gitdebt-texture=\"true\""));
-        let texture = svg.find("data-gitdebt-texture").expect("texture");
-        assert!(texture < svg.find("<text x=\"50%\"").expect("message"));
-        assert!(!svg.contains("data-gitdebt-canvas"));
-        assert!(!svg.contains(&format!(
-            "<rect width=\"1200\" height=\"360\" fill=\"{}\" />",
-            theme::DARK.bg
-        )));
+    fn heat_steps_ladder_from_the_empty_ground_to_graphite() {
+        assert_eq!(heat_level(0, (1, 4, 9)), 0);
+        assert_eq!(heat_level(1, (1, 4, 9)), 1);
+        assert_eq!(heat_level(4, (1, 4, 9)), 2);
+        assert_eq!(heat_level(9, (1, 4, 9)), 3);
+        assert_eq!(heat_level(90, (1, 4, 9)), 4);
+        // A dormant day carries no mark at all, and the top step is graphite
+        // filling its whole cell.
+        assert_eq!(heat_mark(0.0, 0.0, 14.0, 0, &theme::LIGHT), "");
+        let top = heat_mark(0.0, 0.0, 14.0, 4, &theme::LIGHT);
+        assert!(top.contains(&format!("fill=\"{}\"", theme::LIGHT.fg)));
+        assert!(top.contains("x=\"0.00\" y=\"0.00\" width=\"14.00\" height=\"14.00\""));
+        // Smaller marks are centred in their cell, never parked in a corner.
+        let first = heat_mark(0.0, 0.0, 14.0, 1, &theme::LIGHT);
+        assert!(first.contains("x=\"3.00\" y=\"3.00\" width=\"8.00\" height=\"8.00\""));
+        // Out-of-range levels clamp to the top step instead of panicking.
+        assert_eq!(heat_mark(0.0, 0.0, 14.0, 99, &theme::LIGHT), top);
+        // The ladder only darkens (or, in the second print, only brightens).
+        let ladder: Vec<f32> = HEAT_STEPS
+            .iter()
+            .map(|(_, ink)| luma(parse_hex(ink(&theme::LIGHT)).expect("hex")))
+            .collect();
+        assert!(ladder.windows(2).all(|pair| pair[0] > pair[1]));
+        // A degenerate quantile set still letters a readable key.
+        assert_eq!(
+            heat_key_ranges((0, 0, 0)),
+            ["0", "≤1", "≤1", "≤1", ">1"].map(String::from)
+        );
     }
 
     #[test]
@@ -2235,15 +2738,14 @@ mod tests {
             &theme::LIGHT,
         );
         assert!(svg.contains("Commits in the last 52 weeks"));
-        let cells = svg.matches("class=\"cell").count();
-        assert!(
-            (360..=371).contains(&cells),
-            "expected ~364 cells, got {cells}"
-        );
+        // One cell per day in the range and not one more: the key's swatches
+        // are a key, not calendar days, so they no longer inflate this count.
+        let days = (end - start).num_days() + 1;
+        assert_eq!(svg.matches("class=\"cell\"").count(), days as usize);
     }
 
     #[test]
-    fn contributors_are_minimal_wrapped_linked_avatars() {
+    fn contributors_are_square_framed_linked_photos() {
         let rows = vec![ContributorRow {
             login: Some("zhom".into()),
             name: "zhom".into(),
@@ -2253,20 +2755,20 @@ mod tests {
         let svg = render_contributors("foo/bar", &rows, &theme::LIGHT);
         assert!(svg.contains("href=\"https://github.com/zhom"));
         assert!(svg.contains("<image"));
-        assert!(svg.contains("avatar-pixels"));
         assert!(svg.contains("1 public commit author · "));
         assert!(!svg.contains("analyzed commit window"));
         assert!(!svg.contains("100 commits"));
-        assert!(!svg.contains("class=\"commits\""));
-        assert!(!svg.contains("class=\"share\""));
         assert!(!svg.contains("animateTransform"));
-        assert!(svg.contains("translateY(-10px) scale(1.08)"));
-        assert!(svg.contains("(hover: hover) and (pointer: fine)"));
-        assert!(!svg.contains("drop-shadow"));
-        // The dither ring must never be knocked out with a canvas-coloured
-        // stroke: with no canvas behind it that is an opaque halo.
-        assert!(svg.contains(".avatar-pixels { fill: url(#gd-pixel-fill); stroke: none;"));
-        assert!(!svg.contains(&format!("stroke: {}", theme::LIGHT.bg)));
+        // The photo is square, clipped to a rect, inside a 1px frame. The
+        // dither ring, the circle and the hover lift are all gone.
+        assert!(svg.contains(
+            "<clipPath id=\"contributor-clip-0\"><rect width=\"62\" height=\"62\" /></clipPath>"
+        ));
+        assert!(svg.contains("class=\"avatar-edge\" x=\"0\" y=\"0\" width=\"62\" height=\"62\""));
+        assert!(!svg.contains("<circle"));
+        assert!(!svg.contains("translateY"));
+        assert!(!svg.contains("scale(1.08)"));
+        assert!(!svg.contains("avatar-pixels"));
     }
 
     #[test]
@@ -2287,24 +2789,24 @@ mod tests {
         assert!(!svg.contains("analyzed commit window"));
         assert!(
             svg.contains("transform=\"translate(49, 86)\""),
-            "the first dither ring should begin at the 44px content gutter"
+            "the first photo should begin at the 44px content gutter"
         );
         assert!(
             svg.contains("transform=\"translate(989, 86)\""),
-            "the last dither ring should end at the matching 44px gutter"
+            "the last photo should end at the matching 44px gutter"
         );
         assert!(
             !svg.contains("viewBox=\"0 0 1100 208\""),
-            "a multi-row set must grow the deterministic canvas"
+            "a multi-row set must grow the deterministic sheet"
         );
     }
 
-    /// The standalone tile is the grid's avatar and nothing else: no chart
-    /// title, no subtitle, no footer lockup, no canvas. Its geometry has to
-    /// match the grid's cell exactly, or a README grid built from these tiles
-    /// would not line up with the chart it came from.
+    /// The standalone tile is the grid's photo and nothing else: no title, no
+    /// caption, no title block, no colophon. Its geometry has to match the
+    /// grid's cell exactly, or a README grid built from these tiles would not
+    /// line up with the chart it came from.
     #[test]
-    fn contributor_avatar_is_one_avatar_on_a_transparent_tile() {
+    fn contributor_avatar_is_one_photo_on_a_transparent_tile() {
         let row = ContributorRow {
             login: Some("zhom".into()),
             name: "zhom".into(),
@@ -2315,20 +2817,23 @@ mod tests {
 
         assert!(svg.contains("viewBox=\"0 0 72 72\""));
         assert!(svg.contains("width=\"72\" height=\"72\""));
-        assert!(svg.contains("class=\"avatar-pixels\" cx=\"31\" cy=\"31\" r=\"36\""));
-        assert!(svg.contains("class=\"avatar-outline\" cx=\"31\" cy=\"31\" r=\"31\""));
+        assert!(svg.contains("transform=\"translate(5, 5)\""));
+        assert!(svg.contains(
+            "<clipPath id=\"gd-avatar-clip\"><rect width=\"62\" height=\"62\" /></clipPath>"
+        ));
+        assert!(svg.contains("class=\"avatar-edge\" x=\"0\" y=\"0\" width=\"62\" height=\"62\""));
         assert!(svg.contains("<image href=\"data:image/png;base64,AAAA\""));
         assert!(svg.contains("aria-label=\"zhom\""));
 
         assert!(!svg.contains("<title>"));
         assert!(!svg.contains("class=\"title\""));
-        assert!(!svg.contains("class=\"subtitle\""));
+        assert!(!svg.contains("class=\"caption\""));
         assert!(!svg.contains("data-gitdebt-logo"));
         assert!(!svg.contains("footer-link"));
-        // Transparent like every other shareable surface: no canvas rect, and
-        // the ring's outer edge is dither rather than paint.
+        // Transparent like every other shareable surface: no sheet is painted
+        // behind the photo.
         assert!(!svg.contains(&format!("fill=\"{}\"", theme::DARK.bg)));
-        assert!(svg.contains(".avatar-pixels { fill: url(#gd-pixel-fill); stroke: none;"));
+        assert!(!svg.contains("<circle"));
         // Baked ink only.
         assert!(!svg.contains("var(--"));
         assert!(!svg.contains("prefers-color-scheme"));
@@ -2355,8 +2860,10 @@ mod tests {
         assert!(third.contains(&format!("begin=\"{:.2}s\"", reveal_begin(3))));
         assert_ne!(first, third);
 
-        // No avatar URL → the initial, never a broken <image>.
+        // No avatar URL → the initial, never a broken <image>, and centred by
+        // the baseline rather than a guessed offset.
         assert!(first.contains(">A</text>"));
+        assert!(first.contains("dominant-baseline=\"central\""));
         assert!(!first.contains("<image"));
 
         // Static is the default output, and it is complete: the reveal's
@@ -2378,8 +2885,6 @@ mod tests {
         assert!(!svg.contains("<rect"));
         assert!(!svg.contains("<circle"));
         assert!(!svg.contains("<text"));
-        // Undecorated on purpose: the shared grain would be a visible square.
-        assert!(!svg.contains("data-gitdebt-texture"));
         assert_eq!(svg, render_blank_avatar());
     }
 
@@ -2419,8 +2924,11 @@ mod tests {
         assert!(svg.contains("no TODO/FIXME movement in the analyzed commit window"));
     }
 
+    /// The trace is the sheet's primary data, so it is the one thing in
+    /// drafting red, and the peak is measured by a vertical dimension that
+    /// letters its value on its own line.
     #[test]
-    fn todo_trend_renders_path_and_marker() {
+    fn todo_trend_plots_one_red_trace_and_measures_its_peak() {
         let pts = vec![
             TodoPoint {
                 day: NaiveDate::from_ymd_opt(2026, 1, 1).unwrap(),
@@ -2439,6 +2947,16 @@ mod tests {
         assert!(!svg.contains("attributeName=\"r\""));
         assert!(!svg.contains("stroke-dashoffset"));
         assert!(svg.contains("dur=\"0.2s\""));
+        assert_eq!(
+            svg.matches(theme::LIGHT.accent).count(),
+            1,
+            "the trace is the whole red budget"
+        );
+        assert!(svg.contains(&format!("stroke-width=\"{}\"", texture::W_EMPHASIS)));
+        assert!(svg.contains(">peak 50<"));
+        assert!(svg.contains("rotate(-90"));
+        // The axis is lettered at both ends, never a background grid.
+        assert!(svg.contains(">2026-01-01<") && svg.contains(">2026-12-31<"));
     }
 
     #[test]
@@ -2525,8 +3043,11 @@ mod tests {
         assert_eq!(compute_bus_factor(&[10, 10], 100), 2);
     }
 
+    /// Concentration is one measured band: a segment per author in its own
+    /// pen, numbered against a key, and one red dimension marking where the
+    /// bus factor actually falls.
     #[test]
-    fn bus_factor_chart_renders_avatar_ownership_risk() {
+    fn bus_factor_band_is_segmented_numbered_and_dimensioned() {
         let authors = vec![
             AuthorShare {
                 label: "alice".into(),
@@ -2549,15 +3070,25 @@ mod tests {
         ];
         let svg = render_bus_factor("foo/bar", &authors, 100, &theme::LIGHT);
         assert!(svg.contains("Bus factor"));
-        assert!(svg.contains("OWNERSHIP RISK · FACTOR 1"));
+        assert!(svg.contains(">FACTOR<") && svg.contains(">RISK<"));
         assert!(svg.contains(">Solo</text>"));
         assert!(svg.contains("alice"));
-        assert!(svg.contains("60.0%"));
+        assert!(svg.contains("60 commits · 60.0%"));
         assert!(svg.contains("https://github.com/alice"));
         assert!(svg.contains("<image"));
-        assert!(svg.contains(theme::LIGHT.accent));
         assert!(svg.contains("gitdebt.com"));
         assert!(!svg.contains("var(--"));
+        // Every segment numbered, keyed to the same number in the list.
+        assert!(svg.contains(">01</text>") && svg.contains(">03</text>"));
+        // Three authors, three distinct pens, none of them drafting red.
+        let pens = pens_for(&theme::LIGHT, &["alice", "bob", "carol"]);
+        for pen in &pens {
+            assert!(svg.contains(&format!("fill=\"{pen}\"")));
+            assert_ne!(*pen, theme::LIGHT.accent);
+        }
+        // The dimension carries the whole red budget and letters the factor.
+        assert_eq!(svg.matches(theme::LIGHT.accent).count(), 4);
+        assert!(svg.contains(">factor 1 · 60.0%<"));
     }
 
     #[test]
@@ -2583,6 +3114,26 @@ mod tests {
         );
         assert!(svg.contains("visible"));
         assert!(!svg.contains(">tiny</text>"));
+    }
+
+    /// Seven category pens, so seven segments: an eighth would have to repeat
+    /// a pen, and a repeated pen in one band lies about how many people it is
+    /// showing.
+    #[test]
+    fn bus_factor_band_never_repeats_a_pen() {
+        let authors: Vec<AuthorShare> = (0..12)
+            .map(|index| AuthorShare {
+                label: format!("author-{index}"),
+                login: None,
+                avatar_url: None,
+                commits: 100 - index,
+            })
+            .collect();
+        let svg = render_bus_factor("foo/bar", &authors, 1_140, &theme::LIGHT);
+        assert_eq!(svg.matches("class=\"person-link\"").count(), 0);
+        assert!(svg.contains(">07</text>"));
+        assert!(!svg.contains(">08</text>"));
+        assert_eq!(BUS_SEGMENTS, 7);
     }
 
     #[test]
@@ -2673,6 +3224,7 @@ mod tests {
         assert!(svg.contains("Commits per month"));
         // Feb 2026 sums to 10 and is the peak.
         assert!(svg.contains("peak 10 in 2026-02"));
+        assert!(svg.contains(">peak 10<"));
         assert!(!svg.contains("stroke-dashoffset"));
         assert!(svg.contains("dur=\"0.2s\""));
         assert!(svg.contains(theme::LIGHT.accent));
@@ -2709,6 +3261,16 @@ mod tests {
             render_commit_trend("x/y", &days, &theme::DARK),
             render_commit_trend("x/y", &days, &theme::DARK),
         );
+        for theme in [&theme::LIGHT, &theme::DARK] {
+            for (name, svg) in every_sheet(theme) {
+                let again = every_sheet(theme)
+                    .into_iter()
+                    .find(|(other, _)| *other == name)
+                    .map(|(_, svg)| svg)
+                    .expect("same sheet");
+                assert_eq!(svg, again, "{name} is not byte-deterministic");
+            }
+        }
     }
 
     #[test]
@@ -2730,38 +3292,30 @@ mod tests {
             },
         ];
         let svg = render_languages("foo/bar", &rows, &theme::LIGHT);
-        // Subtitle has both "lines" and "code" totals.
+        // Caption has both "lines" and "code" totals.
         assert!(svg.contains(" lines · "));
         assert!(svg.contains(" code · "));
         // Per-row meta has files + code.
         assert!(svg.contains("88 files · "));
-        // Each language gets its OWN ink, on the dot, the dither ladder,
-        // and the value contour. Labels stay themed.
+        // Each language plots in its own conventional ink, with the graphite
+        // hairline standing at the measured edge.
         let rust = language_color("Rust", &theme::LIGHT);
         let ts = language_color("TypeScript", &theme::LIGHT);
         assert_ne!(rust, ts);
-        assert!(svg.contains(&format!(
-            r##"<circle cx="6" cy="9.0" r="6" fill="{rust}" />"##
-        )));
-        assert!(svg.contains(r##"id="gd-lang0-t11""##));
-        assert!(svg.contains(r##"id="gd-lang1-t11""##));
-        assert!(svg.contains(&format!(
-            "<rect x=\"1\" y=\"1\" width=\"1\" height=\"1\" fill=\"{rust}\" />"
-        )));
-        assert!(svg.contains(&format!(
-            "<rect x=\"1\" y=\"1\" width=\"1\" height=\"1\" fill=\"{ts}\" />"
-        )));
-        assert!(svg.contains(r##"fill="url(#gd-lang1-t11)""##));
-        assert!(svg.contains(&format!(r##"fill="none" stroke="{ts}""##)));
-        assert!(svg.contains(".bar-label { fill: #0a0a0a;"));
-        // Alpha-only: the two tiers differ in opacity, never in shade.
-        assert!(svg.contains(r##"fill-opacity="0.2""##));
-        assert!(svg.contains(r##"fill-opacity="0.92""##));
+        assert!(svg.contains(&format!("fill=\"{rust}\"")));
+        assert!(svg.contains(&format!("fill=\"{ts}\"")));
+        assert!(svg.contains(&format!("stroke=\"{}\"", theme::LIGHT.fg)));
+        // The peak sets the scale, and it is the one dimensioned value.
+        assert!(svg.contains(">55.5k lines<"));
+        assert_eq!(svg.matches(theme::LIGHT.accent).count(), 4);
+        // No swatch dot, no tier ladder, no alpha modulation.
+        assert!(!svg.contains("<circle"));
+        assert!(!svg.contains("fill-opacity"));
     }
 
     #[test]
     fn language_colors_are_deterministic_stable_and_distinct() {
-        // Same input → same bytes, in both themes.
+        // Same input → same bytes, in both prints.
         for theme in [&theme::LIGHT, &theme::DARK] {
             assert_eq!(language_color("Rust", theme), language_color("Rust", theme));
             assert_eq!(
@@ -2769,13 +3323,14 @@ mod tests {
                 language_color("Made-up lang", theme)
             );
         }
-        // The conventional hue survives; only lightness is corrected.
+        // The conventional hue survives; only lightness is corrected. These
+        // are real language brand colours and are not part of the palette.
         assert_eq!(conventional_language_color("Rust"), Some("#dea584"));
         assert_eq!(conventional_language_color("Go"), Some("#00add8"));
         assert_eq!(conventional_language_color("Config"), Some("#8b8b8b"));
         assert_eq!(conventional_language_color("Unknown language"), None);
 
-        // Every common language resolves to its own color, per theme.
+        // Every common language resolves to its own color, per print.
         let langs = [
             "Rust",
             "TypeScript",
@@ -2825,27 +3380,24 @@ mod tests {
     }
 
     #[test]
-    fn language_colors_stay_legible_on_both_canvases() {
-        // Near-black dark canvas: nothing may sink below the readable
-        // floor (Lua's #000080 and JSON's #292929 are the worst cases).
+    fn language_colors_stay_legible_on_both_prints() {
+        // Near-black dark ground: nothing may sink below the readable floor
+        // (Lua's #000080 and JSON's #292929 are the worst cases).
         for name in ["Lua", "JSON", "PowerShell", "Ruby", "C", "Less", "Made-up"] {
             let dark = parse_hex(&language_color(name, &theme::DARK)).expect("hex");
             assert!(
                 luma(dark) >= 0.29,
-                "{name} is too dark on the dark canvas: {:?}",
-                dark
+                "{name} is too dark on the dark print: {dark:?}"
             );
-            // Light theme: nothing may wash out (JavaScript, OCaml, Shell).
             let light = parse_hex(&language_color(name, &theme::LIGHT)).expect("hex");
             assert!(
                 luma(light) <= 0.56,
-                "{name} is too light on the light canvas: {:?}",
-                light
+                "{name} is too light on the light print: {light:?}"
             );
         }
         for name in ["JavaScript", "OCaml", "Shell", "SVG"] {
             let light = parse_hex(&language_color(name, &theme::LIGHT)).expect("hex");
-            assert!(luma(light) <= 0.56, "{name} washes out on white");
+            assert!(luma(light) <= 0.56, "{name} washes out on paper");
         }
     }
 
@@ -2871,7 +3423,7 @@ mod tests {
         }];
         let svg = render_languages("foo/bar", &rows, &theme::DARK);
         assert!(svg.contains(&language_color("Unknown language", &theme::DARK)));
-        assert!(svg.contains(".bar-label { fill: #fafafa;"));
+        assert!(svg.contains(&format!(".label {{ fill: {};", theme::DARK.fg)));
     }
 
     #[test]
@@ -2887,8 +3439,26 @@ mod tests {
         assert!(svg.contains("42.0k files in 1 languages · current HEAD tree"));
         assert!(svg.contains("42000 files in current HEAD"));
         assert!(!svg.contains("42.0k lines"));
+        assert!(svg.contains(">42.0k files<"));
     }
 
+    #[test]
+    fn empty_sheets_letter_the_reason_and_keep_the_colophon() {
+        let svg = render_commit_trend("o/r", &[], &theme::DARK);
+        assert!(svg.contains("no commit data yet"));
+        assert!(svg.contains("data-gitdebt-logo=\"true\""));
+        assert!(svg.contains("dominant-baseline=\"central\""));
+        // No sheet paints a ground: every surface composites onto whatever
+        // page embeds it.
+        assert!(!svg.contains(&format!(
+            "<rect width=\"1200\" height=\"360\" fill=\"{}\" />",
+            theme::DARK.bg
+        )));
+    }
+
+    /// The static-output guards. Every sheet's finished frame has to survive
+    /// with the SMIL stripped: nothing is zero-width, nothing sits at zero
+    /// opacity, and no trace is hidden behind a dash offset.
     #[test]
     fn charts_keep_their_finished_frame_without_smil() {
         let files = vec![FileRow {
@@ -2925,7 +3495,7 @@ mod tests {
             }],
             &theme::LIGHT,
         ));
-        assert!(contributors.contains("class=\"avatar-pos\""));
+        assert!(contributors.contains("class=\"avatar-frame\""));
         assert!(contributors.contains("opacity=\"1\""));
 
         let languages = without_smil(&render_languages(
@@ -2971,8 +3541,8 @@ mod tests {
             &theme::LIGHT,
         ));
         assert!(!todos.contains("stroke-dashoffset"));
-        assert!(todos.contains("fill=\"url(#gd-pixel-fill)\" opacity=\"0.94\""));
-        assert!(todos.contains(" r=\"5\""));
+        assert!(todos.contains(&format!("fill=\"{}\" />", theme::LIGHT.track)));
+        assert!(todos.contains(&format!("stroke=\"{}\"", theme::LIGHT.accent)));
 
         let commits = without_smil(&render_commit_trend(
             "foo/bar",
@@ -2989,12 +3559,15 @@ mod tests {
             &theme::LIGHT,
         ));
         assert!(!commits.contains("stroke-dashoffset"));
-        assert!(commits.contains("fill=\"url(#gd-pixel-fill)\" opacity=\"0.94\""));
-        assert!(commits.contains(" r=\"5\""));
+        assert!(commits.contains(&format!("fill=\"{}\" />", theme::LIGHT.track)));
+        assert!(commits.contains(&format!("stroke=\"{}\"", theme::LIGHT.accent)));
     }
 
+    /// Two lanes, two pens, one red dimension on the wider one, and the
+    /// repository count tallied as extension ticks along the lane it was
+    /// measured on. The pulsing badge and its moving patterns are gone.
     #[test]
-    fn contribution_profile_is_varied_animated_and_deterministic() {
+    fn contribution_profile_plots_two_lanes_and_tallies_its_repos() {
         let profile = ContributionProfile {
             owned_repos: 4,
             external_repos: 9,
@@ -3003,16 +3576,36 @@ mod tests {
             visionary_count: 2,
         };
         let first = render_contribution_profile("@alice", &profile, &theme::DARK);
-        let second = render_contribution_profile("@alice", &profile, &theme::DARK);
-        assert_eq!(first, second);
+        assert_eq!(
+            first,
+            render_contribution_profile("@alice", &profile, &theme::DARK)
+        );
         assert!(first.contains("Ecosystem-led contributor"));
-        assert!(first.contains("VISIONARY · 2 breakout projects"));
-        assert!(first.contains("#9b7bff"));
-        assert!(first.contains("#46b3ff"));
-        assert!(first.contains("#ef72ff"));
-        assert!(first.matches("<animateTransform").count() >= 2);
-        assert!(first.contains("dur=\"0.68s\""));
-        assert!(first.contains("prefers-reduced-motion: reduce"));
+        assert!(first.contains(">BREAKOUT<") && first.contains(">2 projects<"));
+        assert!(!first.contains("VISIONARY"));
+        assert!(!first.contains("<animateTransform"));
+        assert!(!first.contains("<circle"));
+        // Two distinct pens, neither of them drafting red.
+        let pens = pens_for(&theme::DARK, &["owned", "external"]);
+        assert_ne!(pens[0], pens[1]);
+        for pen in &pens {
+            assert!(first.contains(&format!("fill=\"{pen}\"")));
+            assert_ne!(*pen, theme::DARK.accent);
+        }
+        // The wider lane carries the sheet's one dimension.
+        assert!(first.contains(">76% of commits<"));
+        assert_eq!(first.matches(theme::DARK.accent).count(), 4);
+        // Nine repositories, nine 0.5px tally ticks on the external lane,
+        // plus four on the owned one.
+        assert_eq!(
+            first
+                .matches(&format!(
+                    "stroke=\"{}\" stroke-width=\"0.5\"",
+                    theme::DARK.ink_3
+                ))
+                .count(),
+            13
+        );
 
         let frozen = crate::raster::freeze_svg_animations(&first);
         assert!(!frozen.contains("<animate"));
@@ -3030,6 +3623,7 @@ mod tests {
             },
             &theme::DARK,
         );
-        assert!(!one_sided.contains("width=\"0.0\""));
+        assert!(!one_sided.contains("width=\"0.00\" height=\"26.00\""));
+        assert!(!one_sided.contains(">BREAKOUT<"));
     }
 }

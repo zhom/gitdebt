@@ -1,5 +1,5 @@
 ---
-import "@/styles/globals.css";
+import Sheet from "@/layouts/Sheet.astro";
 import {
   staticCatalogRequired,
   staticRepoPaths,
@@ -9,30 +9,26 @@ import {
   loadBuildRepoSnapshot,
   type BuildAnalyzeResponse as AnalyzeResponse,
 } from "@/lib/build-repo-snapshot";
-import BaseHead from "@/components/BaseHead.astro";
 import { AgentReadmePrompt } from "@/components/AgentReadmePrompt";
 import { ButtonLink } from "@/components/ButtonLink";
 import { CodeBlock } from "@/components/CodeBlock";
-import Seo from "@/components/Seo.astro";
-import SiteHeader from "@/components/SiteHeader.astro";
-import SiteFooter from "@/components/SiteFooter.astro";
-import { PageAmbientSignal } from "@/components/PageAmbientSignal";
 import { RepoHero } from "@/components/RepoHero";
 import { ChartViewer } from "@/components/ChartViewer";
 import { EarnedBadges } from "@/components/EarnedBadges";
 import { InteractiveRepoSignals } from "@/components/InteractiveRepoSignals";
-import { SeriesProvenance } from "@/components/SeriesProvenance";
 import { UsageSection, type UsageResponse } from "@/components/UsageSection";
 import { WarmRepos } from "@/components/WarmRepos";
 import {
   BODY,
   CAPTION,
-  EYEBROW,
+  FIELD,
   HEADING,
   MEASURE,
-  PANEL_PADDED,
+  PANEL,
+  ROW,
   SECTION_ACTION,
   SECTION_HEADER,
+  VALUE,
 } from "@/components/style-tokens";
 import { categoriesForRepo, relatedRepos } from "@/data/categories";
 import { starFacts } from "@/lib/agent-prompt";
@@ -46,6 +42,7 @@ import {
   formatMonthYear,
   gainedInTrailingDays,
   growthTrend,
+  lifetimePacePerDay,
   starMilestones,
   formatCompact,
 } from "@/lib/star-insights";
@@ -161,6 +158,7 @@ const firstYear = historyFirstYear(history);
 const firstStarYear = firstYear !== null ? String(firstYear) : null;
 const gained90 = hasHistory ? gainedInTrailingDays(history, 90) : null;
 const gained30 = hasHistory ? gainedInTrailingDays(history, 30) : null;
+const pace = hasHistory ? lifetimePacePerDay(history) : null;
 const trend = hasHistory ? growthTrend(history) : null;
 const milestones = hasHistory ? starMilestones(history) : [];
 const createdFull = formatFullDate(data?.created_at ?? null);
@@ -169,6 +167,39 @@ const firstStarMonth = hasHistory ? formatMonthYear(history[0].date) : null;
 // Source, coverage date, state — the only three things gitdebt can observe
 // about how this series was read. Never a count and never a share.
 const freshness = historyFreshness(data);
+
+/**
+ * The three spans the trace is dimensioned by.
+ *
+ * Each one is a real measurement of the series that is drawn directly above it,
+ * which is what earns them the measured-value ink. None of them is a claim
+ * about what the series is missing.
+ */
+const nf = new Intl.NumberFormat("en-US");
+const dimensions: { field: string; value: string }[] = [];
+if (gained30 !== null) {
+  dimensions.push({ field: "Last 30 days", value: `+${nf.format(gained30)}` });
+}
+if (gained90 !== null) {
+  dimensions.push({ field: "Last 90 days", value: `+${nf.format(gained90)}` });
+}
+if (pace !== null) {
+  // The unit is set by the heading these sit on the baseline of — "Star
+  // history" or "Public star activity" — so it is stated once, not three times.
+  dimensions.push({
+    field: archiveHistory ? "Actions / day" : "Stars / day",
+    value: pace >= 10 ? nf.format(Math.round(pace)) : pace.toFixed(1),
+  });
+}
+
+const trendNote =
+  trend === "accelerating"
+    ? `The last 90 days run ahead of this repository's lifetime average.`
+    : trend === "slowing"
+      ? `The last 90 days run behind its lifetime average, which is ordinary for a mature project.`
+      : trend === "steady"
+        ? `The last 90 days run in line with its lifetime average.`
+        : null;
 
 const title = `${repoSlug} — star history & stats · gitdebt`;
 
@@ -223,7 +254,7 @@ if (data && hasHistory) {
     }.${archiveHistory ? ` The chart itself is rebuilt from historical star data, which records star actions and not unstars, so it reads as an attention signal rather than a net star count.` : ""}`,
   });
   if (gained90 !== null) {
-    const pace =
+    const paceNote =
       trend === "accelerating"
         ? ` That's faster than its lifetime average ${archiveHistory ? "activity" : "growth"} pace.`
         : trend === "slowing"
@@ -238,10 +269,10 @@ if (data && hasHistory) {
       a: archiveHistory
         ? `gitdebt observed about ${gained90.toLocaleString()} public star actions for ${repoSlug} over the latest 90 days of archive coverage${
             gained30 !== null ? ` (about ${gained30.toLocaleString()} in the latest 30)` : ""
-          }. This is an approximate attention signal, not a net-star count, because unstars are not present.${pace}`
+          }. This is an approximate attention signal, not a net-star count, because unstars are not present.${paceNote}`
         : `${repoSlug} gained about ${gained90.toLocaleString()} stars over the last 90 days of its history${
             gained30 !== null ? ` (about ${gained30.toLocaleString()} in the last 30)` : ""
-          } — figures are approximate for older repos, whose star history is downsampled.${pace}`,
+          } — figures are approximate for older repos, whose star history is downsampled.${paceNote}`,
     });
   }
   if (gained30 !== null) {
@@ -391,104 +422,121 @@ const readmeBlock = provenanceReadmeBlock({
 });
 ---
 
-<!doctype html>
-<html lang="en">
-  <head>
-    <BaseHead />
-    <Seo
-      title={title}
-      description={description}
-      canonicalPath={canonicalPath}
-      ogImage={ogImage}
-      imageAlt={`Star history social card for ${repoSlug}`}
-      noindex={noindex}
-      jsonLd={jsonLd}
-    />
-    {/* This page is de-indexed because the build could not read its snapshot,
-        not because the repository has nothing to show. `audit-seo` counts the
-        marker and reports it on its own line. A production build throws above
-        before such a page can be emitted, so the marker being here at all is
-        the proof that this build was not a production one. */}
+<Sheet
+  title={title}
+  description={description}
+  canonicalPath={canonicalPath}
+  ogImage={ogImage}
+  imageAlt={`Star history social card for ${repoSlug}`}
+  noindex={noindex}
+  jsonLd={jsonLd}
+>
+  {/* This page is de-indexed because the build could not read its snapshot,
+      not because the repository has nothing to show. `audit-seo` counts the
+      marker and reports it on its own line. A production build throws above
+      before such a page can be emitted, so the marker being here at all is
+      the proof that this build was not a production one. */}
+  <Fragment slot="head">
     {indexability.buildDefect && (
       <meta name={BUILD_DEFECT_META.name} content={BUILD_DEFECT_META.unreachable} />
     )}
-  </head>
-  <body>
-    <div class="isolate flex min-h-dvh flex-col">
-      <PageAmbientSignal
-        client:load
-        mode="repository"
-        seed={repoSlug}
-        values={[
-          data?.total_stars ?? 0,
-          data?.history_event_count ?? 0,
-          history.length,
-        ]}
-      />
-      <SiteHeader />
+  </Fragment>
 
-      <main id="main-content" class="mx-auto w-full max-w-6xl flex-1 px-6 py-12">
-        <nav aria-label="Breadcrumb" class="font-mono text-[11px] text-muted-foreground">
+  {/*
+    ── THE SHEET ──────────────────────────────────────────────────────────────
+    The head, the dimensions, and the object are one band, because they are one
+    drawing: a repository, measured. Everything below this band is a note on it.
+  */}
+  <section class="registered border-b border-rule bg-paper">
+    <div class="mx-auto max-w-6xl px-6 pt-8 pb-16">
+      <nav aria-label="Breadcrumb" class="font-mono text-[0.75rem] text-ink-3">
+        <a
+          href="/"
+          class="outline-none transition-colors duration-[--duration-ui] hover:text-ink focus-visible:outline-2 focus-visible:outline-offset-2 focus-visible:outline-signal"
+          >gitdebt</a
+        >
+        <span class="px-1.5 text-rule-strong" aria-hidden="true">/</span>
+        {ownerProfile ? (
           <a
-            href="/"
-            class="rounded outline-none transition-colors duration-150 hover:text-foreground focus-visible:ring-2 focus-visible:ring-accent/30"
-            >gitdebt</a
+            href={`/${ownerProfile}`}
+            class="outline-none transition-colors duration-[--duration-ui] hover:text-ink focus-visible:outline-2 focus-visible:outline-offset-2 focus-visible:outline-signal"
+            >{owner}</a
           >
-          <span class="px-1.5 text-border" aria-hidden="true">/</span>
-          {ownerProfile ? (
-            <a
-              href={`/${ownerProfile}`}
-              class="rounded outline-none transition-colors duration-150 hover:text-foreground focus-visible:ring-2 focus-visible:ring-accent/30"
-              >{owner}</a
-            >
-          ) : (
-            <span>{owner}</span>
-          )}
-          <span class="px-1.5 text-border" aria-hidden="true">/</span>
-          <span class="text-foreground">{repo}</span>
-        </nav>
+        ) : (
+          <span>{owner}</span>
+        )}
+        <span class="px-1.5 text-rule-strong" aria-hidden="true">/</span>
+        <span class="text-ink">{repo}</span>
+      </nav>
 
-        <div class="mt-8">
-          <RepoHero
+      {/* The sheet head: the slug lettered as the drawing's subject, its star
+          total, and whatever the live read is doing right now. It owns the
+          page's one `<h1>` and its one primary action. */}
+      <div class="mt-6">
+        <RepoHero
+          client:load
+          owner={owner}
+          repo={repo}
+          apiBase={apiBase}
+          initialData={data}
+        />
+      </div>
+
+      {/* ── The object ──────────────────────────────────────────────────────
+          The trace is drawn as SVG in the served markup, with its readings
+          under it as a table, so the series is present before any script runs
+          and readable by a screen reader either way. The dimensions sit on the
+          heading's baseline: they measure the drawing directly beneath them. */}
+      <div class="mt-14">
+        <div class={SECTION_HEADER}>
+          <h2 class={HEADING}>
+            {archiveHistory ? "Public star activity" : "Star history"}
+          </h2>
+          {dimensions.length > 0 && (
+            <dl class="flex flex-wrap items-baseline gap-x-8 gap-y-2">
+              {dimensions.map((dimension) => (
+                <div class="flex items-baseline gap-2">
+                  <dt class={FIELD}>{dimension.field}</dt>
+                  <dd class:list={[VALUE, "text-[1.0625rem]"]}>
+                    {dimension.value}
+                  </dd>
+                </div>
+              ))}
+            </dl>
+          )}
+        </div>
+
+        {/* The panel's own field label names the plotted quantity, which is a
+            different statement from the heading above it: the heading names
+            the section, the label names what the line measures.
+
+            COUPLING, on purpose: `RepoHero` renders `SeriesProvenance` with
+            `variant="panel"` a few rows above this, so SOURCE, COVERAGE and
+            STATE are already stated once on this page and are deliberately not
+            repeated under the drawing. If that panel ever leaves the hero, this
+            section has to state them instead — a chart without its source is
+            the one thing this product may not publish. */}
+        <div class="mt-6 min-w-0">
+          <ChartViewer
             client:load
-            owner={owner}
-            repo={repo}
             apiBase={apiBase}
-            initialData={data}
+            path={`/api/repos/${owner}/${repo}/chart.svg`}
+            alt={`${archiveHistory ? "Approximate public star activity" : "Star history"} for ${repoSlug}`}
+            caption={archiveHistory ? "Public star actions" : "Cumulative stars"}
+            priority={true}
+            liveRepo={repoSlug}
+            embedLink={canonical}
+            label={repoSlug}
+            points={history}
           />
         </div>
 
-        <section class="mt-16 scroll-mt-24 border-t border-border/60 pt-12">
-          <div class={SECTION_HEADER}>
-            <h2 class={HEADING}>
-              {archiveHistory ? "Public star activity" : "Star history"}
-            </h2>
-          </div>
-          <div class="mt-6">
-            <ChartViewer
-              client:load
-              apiBase={apiBase}
-              path={`/api/repos/${owner}/${repo}/chart.svg`}
-              alt={`${archiveHistory ? "Approximate public star activity" : "Star history"} for ${repoSlug}`}
-              caption={archiveHistory ? "Approximate public star activity" : "Cumulative star history"}
-              priority={true}
-              liveRepo={repoSlug}
-              embedLink={canonical}
-              label={repoSlug}
-              points={history}
-            />
-          </div>
-          {/* The header used to caption this date "latest star", which reads as
-              a repository that stopped gaining stars rather than a coverage
-              window that closed. Source, date and state now sit on the chart
-              itself, said once and in the vocabulary that can be defended. */}
-          <div class="mt-4 flex flex-wrap items-center justify-between gap-x-8 gap-y-2">
-            <SeriesProvenance
-              client:visible
-              variant="inline"
-              snapshot={data}
-              slug={repoSlug}
-            />
+        {/* Two captions under the drawing, both left on the same margin as
+            everything else on the sheet. They are not flung to opposite edges
+            of a 72rem row with a dead gulf between them. */}
+        {(trendNote || milestones.length > 0) && (
+          <div class="mt-5 max-w-[72ch] space-y-1.5">
+            {trendNote && <p class={CAPTION}>{trendNote}</p>}
             {milestones.length > 0 && (
               <p class={CAPTION}>
                 {archiveHistory ? "Observed activity milestones" : "Star milestones"}:{" "}
@@ -503,208 +551,215 @@ const readmeBlock = provenanceReadmeBlock({
               </p>
             )}
           </div>
-        </section>
-
-        <section id="readme" class="mt-16 scroll-mt-24 border-t border-border/60 pt-12">
-          <div class={SECTION_HEADER}>
-            <h2 class={HEADING}>Put this in your README</h2>
-            <a href={`/${repoSlug}.md`} class={SECTION_ACTION}>
-              markdown for agents
-              <span
-                aria-hidden="true"
-                class="transition-transform duration-150 group-hover:translate-x-0.5 motion-reduce:transition-none"
-                >→</span
-              >
-            </a>
-          </div>
-          <p class:list={["mt-2", BODY, MEASURE]}>
-            Copy the block below to publish the chart with its source and
-            coverage date stated beside it — the same three facts this page
-            shows, as text a reader can check. Or hand the prompt underneath to
-            a coding agent and it adds the badges and repo-health charts too.
-          </p>
-          {readmeBlock ? (
-            <div class="mt-6">
-              <CodeBlock
-                client:visible
-                code={readmeBlock.snippet}
-                language={readmeBlock.language}
-                label={`README.md · ${repoSlug} star history`}
-                copyLabel="Copy block"
-                copyAriaLabel={`Copy the README block for ${repoSlug}`}
-              />
-              <p class:list={["mt-2", CAPTION, MEASURE]}>
-                Light and dark variants, alt text, and one provenance line.
-                Provenance is text in your README, never baked into the image
-                URL, so the chart stays cacheable.
-              </p>
-            </div>
-          ) : (
-            <div class:list={["mt-6", PANEL_PADDED]}>
-              <p class={EYEBROW}>Star-history block</p>
-              <p class:list={["mt-2", CAPTION, MEASURE]}>
-                Available once gitdebt has read this repository.
-              </p>
-            </div>
-          )}
-          <div class="mt-8">
-            <AgentReadmePrompt
-              client:visible
-              apiBase={apiBase}
-              siteOrigin={site}
-              target={{ kind: "repo", slug: repoSlug, stars: promptStars }}
-            />
-          </div>
-        </section>
-
-        <section class="mt-16 scroll-mt-24 border-t border-border/60 pt-12">
-          <div class={SECTION_HEADER}>
-            <h2 class={HEADING}>Earned badges</h2>
-            <a href="/badges" class={SECTION_ACTION}>
-              badge studio
-              <span
-                aria-hidden="true"
-                class="transition-transform duration-150 group-hover:translate-x-0.5 motion-reduce:transition-none"
-                >→</span
-              >
-            </a>
-          </div>
-          <p class:list={["mt-2", BODY, MEASURE]}>
-            Embeddable maintenance, ownership, and star-momentum signals,
-            computed from commit and star history.
-          </p>
-          <div class="mt-6">
-            <EarnedBadges client:visible owner={owner} repo={repo} apiBase={apiBase} embedLink={canonical} />
-          </div>
-        </section>
-
-        <section id="stats" class="mt-16 scroll-mt-24 border-t border-border/60 pt-12">
-          <div class={SECTION_HEADER}>
-            <h2 class={HEADING}>Where changes concentrate</h2>
-            <a href="/about" class={SECTION_ACTION}>
-              methodology
-              <span
-                aria-hidden="true"
-                class="transition-transform duration-150 group-hover:translate-x-0.5 motion-reduce:transition-none"
-                >→</span
-              >
-            </a>
-          </div>
-          <p class:list={["mt-2", BODY, MEASURE]}>
-            Fix-labelled changes, file change frequency, ownership risk, and
-            maintenance cadence for {repoSlug}, each computed from its analyzed
-            commit window.
-          </p>
-          <div class="mt-6">
-            <InteractiveRepoSignals
-              client:load
-              apiBase={apiBase}
-              slug={repoSlug}
-              embedLink={canonical}
-            />
-          </div>
-        </section>
-
-        <section class="mt-16 scroll-mt-24 border-t border-border/60 pt-12">
-          <div class={SECTION_HEADER}>
-            <h2 class={HEADING}>Stars versus package downloads</h2>
-          </div>
-          <div class="mt-6">
-            <UsageSection
-              client:visible
-              owner={owner}
-              repo={repo}
-              apiBase={apiBase}
-              initialData={usage}
-              showEmbed={false}
-            />
-          </div>
-        </section>
-
-        {faqs.length > 0 && (
-          <section class="mt-16 scroll-mt-24 border-t border-border/60 pt-12">
-            <div class={SECTION_HEADER}>
-              <h2 class={HEADING}>{repoSlug} at a glance</h2>
-            </div>
-            <div class="mt-8 grid gap-x-12 gap-y-8 sm:grid-cols-2">
-              {faqs.map((f) => (
-                <article>
-                  <h3 class="text-[13px] text-foreground/90">{f.q}</h3>
-                  <p class:list={["mt-1.5", BODY]}>{f.a}</p>
-                </article>
-              ))}
-            </div>
-          </section>
         )}
+      </div>
+    </div>
+  </section>
 
-        <section class="mt-16 scroll-mt-24 border-t border-border/60 pt-12">
-          <div class={SECTION_HEADER}>
-            <h2 class={HEADING}>Compare {repoSlug} with similar projects</h2>
-            <a
-              href={`/compare?repos=${encodeURIComponent(repoSlug)}`}
-              class={SECTION_ACTION}
-            >
-              comparison builder
-              <span
-                aria-hidden="true"
-                class="transition-transform duration-150 group-hover:translate-x-0.5 motion-reduce:transition-none"
-                >→</span
-              >
-            </a>
-          </div>
-          <div class="mt-6 flex flex-wrap items-center gap-2">
-            {vsLinks.map((other) => (
-              <a
-                href={`/vs/${repoSlug}/${other}`}
-                data-warm-repos={`${repoSlug},${other}`}
-                class="dither-chip rounded-md outline-none focus-visible:ring-2 focus-visible:ring-accent/30"
-              >
-                vs {other}
-              </a>
-            ))}
-            <ButtonLink
-              client:visible
-              href={`/compare?repos=${encodeURIComponent(repoSlug)}`}
-              variant="outline"
-              size="sm"
-              pulse
-            >
-              Compare with any repo
-            </ButtonLink>
-          </div>
-          {repoCategories.length > 0 && (
-            <p class:list={["mt-6", BODY, MEASURE]}>
-              {repoSlug} is featured in{" "}
-              {repoCategories.map((c, i) => (
-                <>
-                  {i > 0 && ", "}
-                  <a
-                    href={`/compare/${c.slug}`}
-                    class="rounded underline decoration-border underline-offset-4 outline-none transition-colors duration-150 hover:text-foreground hover:decoration-foreground/60 focus-visible:ring-2 focus-visible:ring-accent/30"
-                  >
-                    {c.name} compared
-                  </a>
-                </>
-              ))}
-              {" "}— see how the whole category stacks up.
-            </p>
-          )}
-        </section>
-
-        <WarmRepos
+  {/* ── What the commits say ────────────────────────────────────────────────
+      Four readings taken from a source the star curve never touches. This is
+      the densest passage on the sheet, and it earns the quiet one after it. */}
+  <section id="stats" class="scroll-mt-24 border-b border-rule bg-table">
+    <div class="mx-auto max-w-6xl px-6 py-16">
+      <div class={SECTION_HEADER}>
+        <h2 class={HEADING}>
+          The commit history reads {repoSlug} a second time
+        </h2>
+        <a href="/about" class={SECTION_ACTION}>methodology</a>
+      </div>
+      <p class:list={["mt-3", BODY, MEASURE]}>
+        Fix-labelled changes, file change frequency, ownership concentration and
+        maintenance cadence, each computed from this repository's analyzed
+        commit window. None of them is derived from stars, which is why they are
+        allowed to disagree with the curve above.
+      </p>
+      <div class="mt-8">
+        <InteractiveRepoSignals
           client:load
           apiBase={apiBase}
-          repos={[repoSlug, ...vsLinks]}
+          slug={repoSlug}
+          embedLink={canonical}
         />
-      </main>
-
-      <SiteFooter
-        signalValues={[
-          data?.total_stars ?? 0,
-          data?.history_event_count ?? 0,
-          history.length,
-        ]}
-      />
+      </div>
     </div>
-  </body>
-</html>
+  </section>
+
+  {/* ── Attention against use ─────────────────────────────────────────────── */}
+  <section class="border-b border-rule bg-paper">
+    <div class="mx-auto max-w-6xl px-6 py-14">
+      {/* No paragraph here on purpose: the drawing below states the claim in
+          the only terms that can be checked, and the section it follows is the
+          densest on the sheet. A heading and the chart is the whole passage. */}
+      <h2 class={HEADING}>Attention is not adoption.</h2>
+      <div class="mt-6">
+        <UsageSection
+          client:visible
+          owner={owner}
+          repo={repo}
+          apiBase={apiBase}
+          initialData={usage}
+          showEmbed={false}
+        />
+      </div>
+    </div>
+  </section>
+
+  {/* ── Badges ──────────────────────────────────────────────────────────── */}
+  <section class="border-b border-rule bg-table">
+    <div class="mx-auto max-w-6xl px-6 py-14">
+      <div class={SECTION_HEADER}>
+        <h2 class={HEADING}>Earned badges</h2>
+        <a href="/badges" class={SECTION_ACTION}>badge studio</a>
+      </div>
+      <p class:list={["mt-3", BODY, MEASURE]}>
+        Maintenance, ownership and star-momentum signals, computed from the same
+        commit and star history and embeddable as static images.
+      </p>
+      <div class="mt-6">
+        <EarnedBadges
+          client:visible
+          owner={owner}
+          repo={repo}
+          apiBase={apiBase}
+          embedLink={canonical}
+        />
+      </div>
+    </div>
+  </section>
+
+  {/* ── Notes ───────────────────────────────────────────────────────────────
+      The quiet passage. Plain prose, two columns, every question sharing a
+      baseline with the one beside it. */}
+  {faqs.length > 0 && (
+    <section class="border-b border-rule bg-paper">
+      <div class="mx-auto max-w-6xl px-6 py-16">
+        <h2 class={HEADING}>Notes on {repoSlug}</h2>
+        <dl class="mt-8 grid gap-x-12 gap-y-9 sm:grid-cols-2">
+          {faqs.map((f) => (
+            <div class="sm:row-span-2 sm:grid sm:grid-rows-subgrid sm:gap-y-2">
+              <dt class="text-[0.9375rem] leading-[1.4] text-ink [text-wrap:pretty]">
+                {f.q}
+              </dt>
+              <dd class:list={["mt-2 sm:mt-0", BODY]}>{f.a}</dd>
+            </div>
+          ))}
+        </dl>
+      </div>
+    </section>
+  )}
+
+  {/* ── Against another repository ─────────────────────────────────────────
+      Dense: three drawn rows and one control, nothing else. */}
+  <section class="border-b border-rule bg-table">
+    <div class="mx-auto max-w-6xl px-6 py-12">
+      <div class={SECTION_HEADER}>
+        <h2 class={HEADING}>Read {repo} against a neighbour</h2>
+        <a
+          href={`/compare?repos=${encodeURIComponent(repoSlug)}`}
+          class={SECTION_ACTION}
+        >
+          comparison builder
+        </a>
+      </div>
+
+      <ul
+        role="list"
+        class="mt-6 grid gap-px border border-rule-strong bg-rule sm:grid-cols-3"
+      >
+        {vsLinks.map((other) => (
+          <li class="bg-paper">
+            <a
+              href={`/vs/${repoSlug}/${other}`}
+              data-warm-repos={`${repoSlug},${other}`}
+              class:list={[ROW, "min-h-14"]}
+            >
+              {/* One datum per row, set as one string: the relation and the
+                  repository are the same fact, so they wear the same voice. */}
+              <span class="min-w-0 flex-1 truncate font-mono text-[0.8125rem]">
+                <span class="text-ink-3">vs</span> {other}
+              </span>
+            </a>
+          </li>
+        ))}
+      </ul>
+
+      <div class="mt-6">
+        {/* Default size, not `sm`: the small variant is 36px tall and the
+            site's floor for a control a finger has to hit is 44. */}
+        <ButtonLink
+          href={`/compare?repos=${encodeURIComponent(repoSlug)}`}
+          variant="quiet"
+        >
+          Compare with any repository
+        </ButtonLink>
+      </div>
+
+      {repoCategories.length > 0 && (
+        <p class:list={["mt-6", CAPTION, MEASURE]}>
+          {repoSlug} is featured in{" "}
+          {repoCategories.map((c, i) => (
+            <>
+              {i > 0 && ", "}
+              <a
+                href={`/compare/${c.slug}`}
+                class="underline decoration-rule-strong underline-offset-[3px] outline-none transition-colors duration-[--duration-ui] hover:text-signal hover:decoration-signal focus-visible:outline-2 focus-visible:outline-offset-2 focus-visible:outline-signal"
+                >{c.name} compared</a
+              >
+            </>
+          ))}
+          {" "}— the whole category on one drawing.
+        </p>
+      )}
+    </div>
+  </section>
+
+  {/* ── The snippet, last ────────────────────────────────────────────────── */}
+  <section id="readme" class="scroll-mt-24 bg-paper">
+    <div class="mx-auto max-w-6xl px-6 py-16">
+      <div class={SECTION_HEADER}>
+        <h2 class={HEADING}>Put this drawing in your README</h2>
+        <a href={`/${repoSlug}.md`} class={SECTION_ACTION}>markdown for agents</a>
+      </div>
+      <p class:list={["mt-3", BODY, MEASURE]}>
+        The block below publishes the chart with its source and coverage date
+        stated beside it — the same three facts the title block above shows, as
+        text a reader can check. The prompt underneath hands a coding agent the
+        badges and repo-health charts as well.
+      </p>
+      {readmeBlock ? (
+        <div class="mt-8">
+          <CodeBlock
+            client:visible
+            code={readmeBlock.snippet}
+            language={readmeBlock.language}
+            label={`README.md · ${repoSlug} star history`}
+            copyLabel="Copy block"
+            copyAriaLabel={`Copy the README block for ${repoSlug}`}
+          />
+          <p class:list={["mt-3", CAPTION, MEASURE]}>
+            Light and dark variants, alt text, and one provenance line.
+            Provenance is text in your README, never baked into the image URL,
+            so the chart stays cacheable.
+          </p>
+        </div>
+      ) : (
+        <div class:list={["mt-8 max-w-xl", PANEL]}>
+          <p class={FIELD}>Star-history block</p>
+          <p class:list={["mt-2.5", CAPTION, MEASURE]}>
+            Available once gitdebt has read this repository.
+          </p>
+        </div>
+      )}
+      <div class="mt-10">
+        <AgentReadmePrompt
+          client:visible
+          apiBase={apiBase}
+          siteOrigin={site}
+          target={{ kind: "repo", slug: repoSlug, stars: promptStars }}
+        />
+      </div>
+    </div>
+  </section>
+
+  <WarmRepos client:load apiBase={apiBase} repos={[repoSlug, ...vsLinks]} />
+</Sheet>

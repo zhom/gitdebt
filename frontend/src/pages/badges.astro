@@ -1,18 +1,16 @@
 ---
 export const prerender = true;
 
-import "@/styles/globals.css";
-import BaseHead from "@/components/BaseHead.astro";
+import Sheet from "@/layouts/Sheet.astro";
 import { AgentReadmePrompt } from "@/components/AgentReadmePrompt";
-import Seo from "@/components/Seo.astro";
-import SiteHeader from "@/components/SiteHeader.astro";
-import SiteFooter from "@/components/SiteFooter.astro";
 import { EmbedCatalog } from "@/components/BadgeStudio";
 import { ReportLayerGraphic } from "@/components/ReportLayerGraphic";
 import {
   BODY,
+  BREADCRUMB,
   CAPTION,
-  EYEBROW,
+  CRUMB,
+  FIELD,
   HEADING,
   LEAD,
   MEASURE,
@@ -99,6 +97,14 @@ const title = "GitHub README badges and embeds · gitdebt";
 const description = `Point ${allAssets.length} README embeds at your repository: metrics and signal badges, the star-history chart, repository and maintainer cards, and ${healthCount} health charts.`;
 const ogImage = `${apiBase}/api/og.png`;
 
+/** The sheet's own tally. Every figure is counted off the arrays it renders. */
+const tally = [
+  { field: "Assets", value: String(allAssets.length) },
+  { field: "Health charts", value: String(healthCount) },
+  { field: "Formats", value: String(formatCount) },
+  { field: "Parameters", value: String(QUERY_REFERENCE.length) },
+];
+
 const jsonLd = [
   {
     "@context": "https://schema.org",
@@ -170,186 +176,177 @@ const jsonLd = [
 ];
 ---
 
-<!doctype html>
-<html lang="en">
-  <head>
-    <BaseHead />
-    <Seo
-      title={title}
-      description={description}
-      canonicalPath="/badges"
-      ogImage={ogImage}
-      imageAlt="gitdebt GitHub README badge builder"
-      imageType="image/png"
-      imageWidth={1200}
-      imageHeight={630}
-      jsonLd={jsonLd}
-    />
-  </head>
-  <body>
-    <div class="isolate flex min-h-dvh flex-col">
-      <SiteHeader />
+<Sheet
+  title={title}
+  description={description}
+  canonicalPath="/badges"
+  ogImage={ogImage}
+  imageAlt="gitdebt GitHub README badge builder"
+  jsonLd={jsonLd}
+>
+  {/* ── The title block, with the sheet's own tally beside it ────────────── */}
+  <section class="registered border-b border-rule bg-paper">
+    <div class="mx-auto w-full max-w-6xl px-6 pt-8 pb-14">
+      <nav aria-label="Breadcrumb" class={BREADCRUMB}>
+        <a href="/" class={CRUMB}>gitdebt</a>
+        <span class="px-1.5 text-rule-strong" aria-hidden="true">/</span>
+        <span class="text-ink">badges</span>
+      </nav>
 
-      <main id="main-content" class="mx-auto w-full max-w-6xl flex-1 px-6 py-12">
-        <nav aria-label="Breadcrumb" class="font-mono text-[11px] text-muted-foreground">
-          <a
-            href="/"
-            class="rounded outline-none transition-colors duration-150 hover:text-foreground focus-visible:ring-2 focus-visible:ring-accent/30"
-            >gitdebt</a
-          >
-          <span class="px-1.5 text-border" aria-hidden="true">/</span>
-          <span class="text-foreground">badges</span>
-        </nav>
+      <h1 class:list={["mt-6", TITLE]}>Everything you can embed in a README</h1>
+      <p class:list={["mt-5", LEAD, MEASURE]}>
+        Badges, the star-history chart, repository and maintainer cards, a
+        social preview, and repository-health charts. Every asset is a plain
+        image URL served from gitdebt's own database — no account, no token.
+      </p>
 
-        <header class="mt-8">
-          <h1 class={TITLE}>Everything you can embed in a README</h1>
-          <p class:list={["mt-3", LEAD, BODY]}>
-            Badges, the star-history chart, repository and maintainer cards, a
-            social preview, and {healthCount} repository-health charts. Every asset
-            is a plain image URL served from gitdebt's own database. Point them
-            at your repository below and copy what you need.
-          </p>
-          <p class:list={["mt-3 font-mono", CAPTION]}>
-            {allAssets.length} assets · {formatCount} formats · light and dark · no
-            account or token
-          </p>
-        </header>
-
-        <EmbedCatalog
-          client:load
-          apiBase={apiBase}
-          siteOrigin={site}
-          defaultSlug={exampleSlug}
-          defaultProvenance={provenance?.snippet ?? null}
-        />
-
-        <noscript>
-          <p class:list={["mt-6", BODY, MEASURE]}>
-            Without JavaScript the catalog stays pointed at {exampleSlug} and the
-            copy buttons are inert. Every snippet is still printed in full, and a
-            published embed never needs JavaScript.
-          </p>
-        </noscript>
-
-        <section
-          id="reference"
-          aria-labelledby="reference-title"
-          class="mt-16 scroll-mt-24 border-t border-border/60 pt-12"
-        >
-          <div class="flex items-end justify-between gap-6">
-            <div class="min-w-0">
-              <h2 id="reference-title" class={HEADING}>URL reference</h2>
-              <p class:list={[CAPTION, "mt-1"]}>
-                {QUERY_REFERENCE.length} parameters
-              </p>
+      {/*
+        The counts are the drawing's schedule of parts, so they are lettered as
+        one: a field and its figure, each read off the array that renders it.
+        The same four numbers used to run together in one mono sentence, where
+        nothing said which figure belonged to which noun.
+      */}
+      <dl
+        class="mt-10 grid grid-cols-2 gap-px border border-rule-strong bg-rule sm:grid-cols-4"
+      >
+        {
+          tally.map((entry) => (
+            <div class="bg-paper p-5">
+              <dt class:list={[FIELD, "min-h-[1.5rem]"]}>{entry.field}</dt>
+              <dd class="mt-2.5 font-draft text-[1.75rem] leading-none tabular-nums text-ink">
+                {entry.value}
+              </dd>
             </div>
-            <figure aria-hidden="true" class="hidden shrink-0 sm:block">
-              <div class="flex h-24 items-center overflow-hidden opacity-80">
-                <ReportLayerGraphic client:visible kind="readme" />
-              </div>
-              <figcaption class:list={[CAPTION, "mt-1 text-right"]}>
-                Illustrative — no repository values
-              </figcaption>
-            </figure>
-          </div>
+          ))
+        }
+      </dl>
+    </div>
+  </section>
 
-          <p class:list={["mt-6", BODY, MEASURE]}>
+  {/* ── The catalog ──────────────────────────────────────────────────────── */}
+  <section class="border-b border-rule bg-table">
+    <div class="mx-auto w-full max-w-6xl px-6 py-16">
+      <EmbedCatalog
+        client:load
+        apiBase={apiBase}
+        siteOrigin={site}
+        defaultSlug={exampleSlug}
+        defaultProvenance={provenance?.snippet ?? null}
+      />
+
+      <noscript>
+        <p class:list={["mt-6", BODY, MEASURE]}>
+          Without JavaScript the catalog stays pointed at {exampleSlug} and the
+          copy buttons are inert. Every snippet is still printed in full, and a
+          published embed never needs JavaScript.
+        </p>
+      </noscript>
+    </div>
+  </section>
+
+  {/* ── URL reference ────────────────────────────────────────────────────── */}
+  <section
+    id="reference"
+    aria-labelledby="reference-title"
+    class="scroll-mt-24 border-b border-rule bg-paper"
+  >
+    <div class="mx-auto w-full max-w-6xl px-6 py-16">
+      <div class="flex flex-wrap items-end justify-between gap-x-8 gap-y-4">
+        <div class="min-w-0">
+          <h2 id="reference-title" class={HEADING}>URL reference</h2>
+          <p class:list={["mt-3", BODY, MEASURE]}>
             Swap the owner and name in any URL; nothing else changes.
           </p>
+        </div>
+        <figure aria-hidden="true" class="hidden shrink-0 sm:block">
+          <ReportLayerGraphic client:visible kind="readme" />
+          <figcaption class:list={["mt-1.5 text-right", CAPTION]}>
+            Illustrative — no repository values
+          </figcaption>
+        </figure>
+      </div>
 
-          <div class="mt-6 overflow-x-auto">
-            <table class="w-full min-w-[42rem] border-collapse text-left">
-              <caption class="sr-only">
-                Query parameters that change what an asset renders
-              </caption>
-              <thead>
-                <tr class="border-b border-border/60">
-                  <th scope="col" class:list={[EYEBROW, "py-2 pr-6"]}>
-                    Parameter
-                  </th>
-                  <th scope="col" class:list={[EYEBROW, "py-2 pr-6"]}>
-                    Applies to
-                  </th>
-                  <th scope="col" class:list={[EYEBROW, "py-2"]}>Effect</th>
-                </tr>
-              </thead>
-              <tbody>
-                {
-                  QUERY_REFERENCE.map((row) => (
-                    <tr class="border-b border-border/40">
-                      <td class="py-3 pr-6 align-top font-mono text-[12px] text-foreground">
-                        {row.param}
-                      </td>
-                      <td class:list={[CAPTION, "py-3 pr-6 align-top"]}>
-                        {row.applies}
-                      </td>
-                      <td class:list={[BODY, "py-3 align-top"]}>
-                        {segments(row.effect).map((part) =>
-                          part.code ? (
-                            <code class="font-mono text-foreground">{part.text}</code>
-                          ) : (
-                            part.text
-                          ),
-                        )}
-                      </td>
-                    </tr>
-                  ))
-                }
-              </tbody>
-            </table>
-          </div>
-
-          <ul role="list" class="mt-8 grid gap-x-12 gap-y-8 sm:grid-cols-2">
+      <div class="mt-8 overflow-x-auto border border-rule-strong bg-paper">
+        <table class="w-full min-w-[42rem] border-collapse text-left">
+          <caption class="sr-only">
+            Query parameters that change what an asset renders
+          </caption>
+          <thead>
+            <tr class="border-b border-rule-strong">
+              <th scope="col" class:list={[FIELD, "px-4 py-3"]}>Parameter</th>
+              <th scope="col" class:list={[FIELD, "px-4 py-3"]}>Applies to</th>
+              <th scope="col" class:list={[FIELD, "px-4 py-3"]}>Effect</th>
+            </tr>
+          </thead>
+          <tbody>
             {
-              PUBLISHED_RULES.map((rule) => (
-                <li class:list={[BODY, MEASURE]}>
-                  {segments(rule).map((part) =>
-                    part.code ? (
-                      <code class="font-mono text-foreground">{part.text}</code>
-                    ) : (
-                      part.text
-                    ),
-                  )}
-                </li>
+              QUERY_REFERENCE.map((row) => (
+                <tr class="border-b border-rule last:border-0">
+                  <td class="px-4 py-3 align-top font-mono text-[0.75rem] text-ink">
+                    {row.param}
+                  </td>
+                  <td class:list={[CAPTION, "px-4 py-3 align-top"]}>
+                    {row.applies}
+                  </td>
+                  <td class:list={[BODY, "px-4 py-3 align-top"]}>
+                    {segments(row.effect).map((part) =>
+                      part.code ? (
+                        <code class="font-mono text-[0.8125rem] text-ink">
+                          {part.text}
+                        </code>
+                      ) : (
+                        part.text
+                      ),
+                    )}
+                  </td>
+                </tr>
               ))
             }
-          </ul>
-        </section>
+          </tbody>
+        </table>
+      </div>
 
-        <section
-          id="agent"
-          aria-labelledby="agent-title"
-          class="mt-16 scroll-mt-24 border-t border-border/60 pt-12"
-        >
-          <div class={SECTION_HEADER}>
-            <h2 id="agent-title" class={HEADING}>Let an agent do it</h2>
-            <a href="/badges.md" class={SECTION_ACTION}>
-              markdown for agents
-              <span
-                aria-hidden="true"
-                class="transition-transform duration-150 group-hover:translate-x-0.5 motion-reduce:transition-none"
-                >→</span
-              >
-            </a>
-          </div>
-          <p class:list={["mt-6", BODY, MEASURE]}>
-            This prompt resolves your repository from its git remote, then adds
-            the badge, the star-history chart, and the health charts that fit —
-            replacing an existing star-history widget in place rather than
-            stacking a second one under it.
-          </p>
-          <div class="mt-6">
-            <AgentReadmePrompt
-              client:visible
-              apiBase={apiBase}
-              siteOrigin={site}
-              target={{ kind: "generic" }}
-            />
-          </div>
-        </section>
-      </main>
-
-      <SiteFooter />
+      <ul role="list" class="mt-8 grid gap-x-12 gap-y-4 sm:grid-cols-2">
+        {
+          PUBLISHED_RULES.map((rule) => (
+            <li class:list={[BODY, MEASURE]}>
+              {segments(rule).map((part) =>
+                part.code ? (
+                  <code class="font-mono text-[0.8125rem] text-ink">
+                    {part.text}
+                  </code>
+                ) : (
+                  part.text
+                ),
+              )}
+            </li>
+          ))
+        }
+      </ul>
     </div>
-  </body>
-</html>
+  </section>
+
+  {/* ── Let an agent do it ───────────────────────────────────────────────── */}
+  <section id="agent" aria-labelledby="agent-title" class="scroll-mt-24 bg-table">
+    <div class="mx-auto w-full max-w-6xl px-6 py-16">
+      <div class={SECTION_HEADER}>
+        <h2 id="agent-title" class={HEADING}>Let an agent do it</h2>
+        <a href="/badges.md" class={SECTION_ACTION}>markdown for agents</a>
+      </div>
+      <p class:list={["mt-4", BODY, MEASURE]}>
+        This prompt resolves your repository from its git remote, then adds the
+        badge, the star-history chart, and the health charts that fit —
+        replacing an existing star-history widget in place rather than stacking
+        a second one under it.
+      </p>
+      <div class="mt-8">
+        <AgentReadmePrompt
+          client:visible
+          apiBase={apiBase}
+          siteOrigin={site}
+          target={{ kind: "generic" }}
+        />
+      </div>
+    </div>
+  </section>
+</Sheet>

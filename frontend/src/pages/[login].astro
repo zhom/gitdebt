@@ -1,13 +1,8 @@
 ---
-import "@/styles/globals.css";
+import Sheet from "@/layouts/Sheet.astro";
 import { catalogReposFor, staticLoginPaths } from "@/lib/build-catalog";
 import { loadBuildProfileSnapshot } from "@/lib/build-profile-snapshot";
 import { staticApiBase } from "@/lib/static-api-base";
-import BaseHead from "@/components/BaseHead.astro";
-import Seo from "@/components/Seo.astro";
-import SiteHeader from "@/components/SiteHeader.astro";
-import SiteFooter from "@/components/SiteFooter.astro";
-import { PageAmbientSignal } from "@/components/PageAmbientSignal";
 import {
   LiveUserProfile,
   type UserAnalyze,
@@ -120,77 +115,48 @@ const jsonLd: Record<string, unknown>[] = [
 ];
 ---
 
-<!doctype html>
-<html lang="en">
-  <head>
-    <BaseHead />
-    <Seo
-      title={title}
-      description={description}
-      canonicalPath={canonicalPath}
-      ogImage={ogImage}
-      noindex={noindex}
-      jsonLd={jsonLd}
-    />
-  </head>
-  <body>
-    <div class="isolate flex min-h-dvh flex-col">
-      <PageAmbientSignal
-        client:load
-        mode="profile"
-        seed={login}
-        values={[
-          data?.total_stars ?? 0,
-          data?.repos_included ?? 0,
-          stats?.authored_commits ?? 0,
-          stats?.commit_streak?.longest_days ?? 0,
-        ]}
-      />
-      <SiteHeader />
+<Sheet
+  title={title}
+  description={description}
+  canonicalPath={canonicalPath}
+  ogImage={ogImage}
+  noindex={noindex}
+  jsonLd={jsonLd}
+>
+  <section class="registered bg-paper">
+    <div class="mx-auto w-full max-w-6xl px-6 pt-8 pb-16">
+      <nav aria-label="Breadcrumb" class="font-mono text-[0.75rem] text-ink-3">
+        <a
+          href="/"
+          class="outline-none transition-colors duration-[--duration-ui] hover:text-ink focus-visible:outline-2 focus-visible:outline-offset-2 focus-visible:outline-signal"
+          >gitdebt</a
+        >
+        <span class="px-1.5 text-rule-strong" aria-hidden="true">/</span>
+        <span class="text-ink">{login}</span>
+      </nav>
 
-      <main id="main-content" class="mx-auto w-full max-w-6xl flex-1 px-6 py-12">
-        <nav aria-label="Breadcrumb" class="font-mono text-[11px] text-muted-foreground">
-          <a
-            href="/"
-            class="rounded outline-none transition-colors duration-150 hover:text-foreground focus-visible:ring-2 focus-visible:ring-accent/30"
-            >gitdebt</a
-          >
-          <span class="px-1.5 text-border" aria-hidden="true">/</span>
-          <span class="text-foreground">{login}</span>
-        </nav>
+      <div class="mt-6">
+        <LiveUserProfile
+          client:load
+          apiBase={apiBase}
+          login={login}
+          siteOrigin={site}
+          analyze={data}
+          stats={stats}
+          repos={ownedRepos}
+        />
+      </div>
 
-        <div class="mt-8">
-          <LiveUserProfile
-            client:load
-            apiBase={apiBase}
-            login={login}
-            siteOrigin={site}
-            analyze={data}
-            stats={stats}
-            repos={ownedRepos}
-          />
-        </div>
-
-        {/* No source marker here, deliberately. This curve sums many
-            repositories whose series were read differently, and the aggregate
-            payload carries no per-repository source, so a single mark over it
-            would be a claim gitdebt cannot make. */}
-        {hasData && (
-          <p class:list={["mt-6", CAPTION, MEASURE]}>
-            This aggregate sums star series whose source differs per repository.
-            Each repository report names its own source and coverage date.
-          </p>
-        )}
-      </main>
-
-      <SiteFooter
-        signalValues={[
-          data?.total_stars ?? 0,
-          data?.repos_included ?? 0,
-          stats?.authored_commits ?? 0,
-          stats?.contributed_repos ?? 0,
-        ]}
-      />
+      {/* No source marker here, deliberately. This curve sums many
+          repositories whose series were read differently, and the aggregate
+          payload carries no per-repository source, so a single mark over it
+          would be a claim gitdebt cannot make. */}
+      {hasData && (
+        <p class:list={["mt-8", CAPTION, MEASURE]}>
+          This aggregate sums star series whose source differs per repository.
+          Each repository's own sheet names its source and coverage date.
+        </p>
+      )}
     </div>
-  </body>
-</html>
+  </section>
+</Sheet>

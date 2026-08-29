@@ -1,500 +1,431 @@
 @import "tailwindcss";
-@import "tw-animate-css";
+
+/* ---------------------------------------------------------------------------
+   gitdebt — the drafting sheet.
+
+   The product measures a repository. So the page is a technical drawing of
+   one: ink on plot paper, dimension lines that span two real points and carry
+   a number, leaders that point at a datum, and a title block that states the
+   source.
+
+   The one rule that governs every line in this file:
+
+       EVERY LINE TERMINATES ON SOMETHING REAL.
+
+   A dimension line spans two measured points and carries a value. A leader
+   points at a datum. A frame encloses a sheet. A rule that measures nothing,
+   separates nothing, and encloses nothing is deleted — it is decoration
+   wearing a drawing's clothes. There is no page grid, no graph paper, no
+   texture behind the content.
+   --------------------------------------------------------------------------- */
+
+/* Format 1452 — Frank Adebiaye, with Anton Moglia. SIL Open Font License 1.1.
+   A DIN 1451 descendant built from modules with no optical corrections: the
+   letterform of the industrial standard sheet, drawn by a machine rather than
+   corrected by an eye. It is the drawing's own hand, so it letters the
+   drawing's own words — headings, measured values, the title block — and
+   never body prose, which it was not cut for. One weight, 11.7 KB. */
+@font-face {
+  font-family: "Format 1452";
+  src: url("../fonts/format-1452.woff2") format("woff2");
+  font-weight: 400;
+  font-style: normal;
+  font-display: swap;
+}
 
 @theme inline {
+  /* The drawing's hand. Condensed, monoline, unapologetically constructed. */
+  --font-draft: "Format 1452", "DIN Alternate", "Oswald", ui-sans-serif, sans-serif;
+  /* Prose. A true neutral, not a chosen trendy face: it carries reading, not
+     identity, and it costs nothing to load. */
   --font-sans:
-    -apple-system, BlinkMacSystemFont, "SF Pro Text", "Inter Variable",
-    ui-sans-serif, system-ui, sans-serif;
-  --font-sans--font-feature-settings: "cv02", "cv03", "cv04", "cv11", "ss01";
+    system-ui, -apple-system, BlinkMacSystemFont, "Segoe UI", Roboto,
+    ui-sans-serif, sans-serif;
+  /* Data. Slugs, tabular figures, snippets — text that is genuinely a value. */
   --font-mono:
     "Geist Mono Variable", ui-monospace, "SFMono-Regular", "Menlo", monospace;
 
-  --color-background: var(--background);
-  --color-foreground: var(--foreground);
-  --color-card: var(--card);
-  --color-card-foreground: var(--card-foreground);
-  --color-popover: var(--popover);
-  --color-popover-foreground: var(--popover-foreground);
-  --color-primary: var(--primary);
-  --color-primary-foreground: var(--primary-foreground);
-  --color-secondary: var(--secondary);
-  --color-secondary-foreground: var(--secondary-foreground);
-  --color-muted: var(--muted);
-  --color-muted-foreground: var(--muted-foreground);
-  --color-accent: var(--accent);
-  --color-accent-foreground: var(--accent-foreground);
-  --color-destructive: var(--destructive);
-  --color-destructive-foreground: var(--destructive-foreground);
-  --color-border: var(--border);
-  --color-input: var(--input);
-  --color-ring: var(--ring);
-
+  --color-paper: var(--paper);
+  --color-table: var(--table);
+  --color-ink: var(--ink);
+  --color-ink-2: var(--ink-2);
+  --color-ink-3: var(--ink-3);
+  --color-rule: var(--rule);
+  --color-rule-strong: var(--rule-strong);
   --color-signal: var(--signal);
-  --color-signal-foreground: var(--signal-foreground);
-  --color-grid: var(--grid);
+  --color-signal-ink: var(--signal-ink);
+  --color-signal-wash: var(--signal-wash);
 
-  --color-chart-1: var(--chart-1);
-  --color-chart-2: var(--chart-2);
-  --color-chart-3: var(--chart-3);
-  --color-chart-4: var(--chart-4);
-  --color-chart-5: var(--chart-5);
-  --color-chart-6: var(--chart-6);
-  --color-chart-7: var(--chart-7);
-  --color-chart-8: var(--chart-8);
+  --color-pen-1: var(--pen-1);
+  --color-pen-2: var(--pen-2);
+  --color-pen-3: var(--pen-3);
+  --color-pen-4: var(--pen-4);
+  --color-pen-5: var(--pen-5);
+  --color-pen-6: var(--pen-6);
+  --color-pen-7: var(--pen-7);
+  --color-pen-8: var(--pen-8);
 
-  --radius-sm: calc(var(--radius) - 4px);
-  --radius-md: calc(var(--radius) - 2px);
-  --radius-lg: var(--radius);
-  --radius-xl: calc(var(--radius) + 4px);
+  /* Line weights, as a drawing grades them. Thin is construction, medium is
+     the object, thick is the cut. Nothing in between, nothing arbitrary. */
+  --line-thin: 0.5px;
+  --line-medium: 1px;
+  --line-thick: 2px;
+
+  --ease-draw: cubic-bezier(0.65, 0, 0.35, 1);
+  --ease-land: cubic-bezier(0.16, 1, 0.3, 1);
+
+  --duration-draw: 900ms;
+  --duration-measure: 260ms;
+  --duration-land: 130ms;
+  --duration-ui: 140ms;
 }
 
 :root {
-  color-scheme: dark;
+  color-scheme: light;
 
-  --radius: 0.5rem;
-  --motion-ease-out: cubic-bezier(0.23, 1, 0.32, 1);
-  --motion-ease-in-out: cubic-bezier(0.77, 0, 0.175, 1);
+  /* The sheet, and the table it lies on. Depth comes from the two grounds,
+     never from a shadow bloomed on every side. */
+  --paper: oklch(1 0 0);
+  --table: oklch(0.977 0.0018 250);
 
-  --background: oklch(0.14 0.006 265);
-  --foreground: oklch(0.94 0.003 265);
-  --card: oklch(0.17 0.006 265);
-  --card-foreground: oklch(0.94 0.003 265);
-  --popover: oklch(0.185 0.006 265);
-  --popover-foreground: oklch(0.94 0.003 265);
+  /* Graphite, not black. Three steps, and there is no fourth. */
+  /* Contrast on both grounds is measured, not assumed. ink 18.5 / 17.2,
+     ink-2 7.8 / 7.3, ink-3 5.05 / 4.71 (paper / table). ink-3 sat at 0.575
+     and failed AA at 4.37 on paper and 4.08 on the table, which is exactly
+     where a caption colour is never checked. */
+  --ink: oklch(0.19 0.008 250);
+  --ink-2: oklch(0.44 0.008 250);
+  --ink-3: oklch(0.54 0.007 250);
 
-  --primary: oklch(0.94 0.003 265);
-  --primary-foreground: oklch(0.14 0.006 265);
-  --signal: oklch(0.94 0.003 265);
-  --signal-foreground: oklch(0.14 0.006 265);
+  --rule: oklch(0.9 0.003 250);
+  --rule-strong: oklch(0.82 0.004 250);
 
-  --secondary: oklch(0.215 0.006 265);
-  --secondary-foreground: oklch(0.91 0.003 265);
-  --muted: oklch(0.205 0.006 265);
-  --muted-foreground: oklch(0.7 0.005 265);
-  /* The accent is a hue, and it is spent only on focus and selection. */
-  --accent: oklch(0.66 0.15 255);
-  --accent-foreground: oklch(0.95 0.003 265);
+  /* The one saturated colour on the sheet: drafting red, the ink a drawing
+     reserves for a revision and a section cut. It is spent ONLY on a measured
+     value and its terminators, on the live data trace, and on the single
+     primary action of a page. It is never a tag, never a status dot, never a
+     decorative accent. If it is not attached to something measured, it is
+     wrong. */
+  --signal: oklch(0.55 0.2 29);
+  --signal-ink: oklch(1 0 0);
+  --signal-wash: oklch(0.55 0.2 29 / 0.08);
 
-  --destructive: oklch(0.77 0.13 24);
-  --destructive-foreground: oklch(0.15 0.02 24);
+  /* The plotter pen set. Multi-series charts only, and every series is
+     labelled at its own line end, so hue is never the sole carrier of
+     meaning. All eight sit within one narrow lightness band so that none of
+     them shouts over the others. */
+  --pen-1: oklch(0.29 0.008 250);
+  --pen-2: oklch(0.55 0.2 29);
+  --pen-3: oklch(0.48 0.12 250);
+  --pen-4: oklch(0.55 0.09 130);
+  --pen-5: oklch(0.55 0.11 55);
+  --pen-6: oklch(0.5 0.08 300);
+  --pen-7: oklch(0.52 0.08 195);
+  --pen-8: oklch(0.55 0.02 60);
 
-  --chart-1: #f2f2f2;
-  --chart-2: #d5d5d5;
-  --chart-3: #b8b8b8;
-  --chart-4: #9d9d9d;
-  --chart-5: #858585;
-  --chart-6: #c8c8c8;
-  --chart-7: #aaaaaa;
-  --chart-8: #939393;
-
-  --border: oklch(1 0 0 / 0.14);
-  --input: oklch(1 0 0 / 0.2);
-  --ring: oklch(0.94 0.003 265);
-  --grid: oklch(1 0 0 / 0.06);
-
-  /* Categorical swatches. Assigned per series key, never cycled by index.
-     Grey is documented as "no data". */
-  --swatch-green: rgb(40, 210, 110);
-  --swatch-blue: rgb(53, 143, 243);
-  --swatch-purple: rgb(150, 110, 255);
-  --swatch-pink: rgb(240, 90, 190);
-  --swatch-orange: rgb(255, 150, 50);
-  --swatch-red: rgb(240, 70, 70);
-  --swatch-grey: rgb(92, 92, 100);
-
-  /* Foreground as a raw RGB triplet, for canvas fills. */
-  --ink: 237 237 237;
-
-  /* Deprecated: the accidental purple/blue/pink brand. Neutralised here so
-     nothing reads as branded, and kept only until the last `var(--dither-wave-*)`
-     reference is migrated to a swatch. */
-  --dither-wave-1: rgb(150, 152, 160);
-  --dither-wave-2: rgb(120, 124, 134);
-  --dither-wave-3: rgb(96, 100, 110);
-
-  --shadow-card: none;
+  /* Ink as a raw triplet, for canvas fills that cannot read oklch. These are
+     the sRGB values of `--ink` and `--signal` exactly; a canvas drawing a
+     different graphite from the CSS is how a chart stops belonging to its own
+     page. */
+  --ink-rgb: 17 20 23;
+  --signal-rgb: 204 41 31;
 }
 
 @layer base {
   * {
-    @apply border-border outline-ring/50;
+    border-color: var(--rule);
   }
+
   html {
-    scroll-padding-top: 5rem;
+    scroll-padding-top: 5.5rem;
     overflow-x: clip;
     @media (prefers-reduced-motion: no-preference) {
       scroll-behavior: smooth;
     }
   }
+
   body {
-    @apply bg-background text-foreground font-sans antialiased;
+    background-color: var(--table);
+    color: var(--ink);
+    font-family: var(--font-sans);
     min-height: 100dvh;
     overflow-x: clip;
     isolation: isolate;
-    font-optical-sizing: auto;
+    -webkit-font-smoothing: antialiased;
     text-rendering: optimizeLegibility;
     -webkit-tap-highlight-color: transparent;
   }
+
+  /* The drawing's hand never needs anti-aliasing softened, and it is always
+     set tight: it was drawn from modules, so it sets evenly at any size. */
+  :is(h1, h2, h3) {
+    font-family: var(--font-draft);
+    font-weight: 400;
+    letter-spacing: 0.005em;
+    text-wrap: balance;
+  }
+
   :focus-visible {
-    outline: 2px solid var(--ring);
-    outline-offset: 3px;
+    outline: var(--line-thick) solid var(--signal);
+    outline-offset: 2px;
   }
-  /* Fallback press feedback for hand-rolled buttons. Components that own their
-     press animation opt out with `data-press="off"`. */
-  button:not(:disabled):not([data-press="off"]) {
-    transition: transform 120ms var(--motion-ease-out);
-  }
-  button:not(:disabled):not([data-press="off"]):active {
-    transform: scale(0.985);
-  }
+
   ::selection {
-    @apply bg-primary text-primary-foreground;
+    background-color: var(--signal);
+    color: var(--signal-ink);
+  }
+
+  /* Tabular figures wherever a number is a measurement, which on this site is
+     everywhere a number appears. */
+  :is(.tnum, td, th) {
+    font-variant-numeric: tabular-nums;
   }
 }
 
+/* ---------------------------------------------------------------------------
+   The bespoke silhouette: the cut corner.
+
+   A drawing's title block has its outer corner cut. Every panel and the
+   primary action carry the same 10px chamfer on the bottom-right, and nothing
+   else on this site is chamfered. It is the one shape that belongs to gitdebt.
+
+   `clip-path` removes a triangle, so content must be padded clear of it. That
+   is what `--cut-clear` is for, and every `.cut` surface applies it.
+   --------------------------------------------------------------------------- */
+
+@utility cut {
+  --cut: 10px;
+  --cut-clear: calc(var(--cut) + 0.25rem);
+  clip-path: polygon(
+    0 0,
+    100% 0,
+    100% calc(100% - var(--cut)),
+    calc(100% - var(--cut)) 100%,
+    0 100%
+  );
+  padding-right: max(var(--cut-clear), var(--pad-x, 0px));
+  padding-bottom: max(var(--cut-clear), var(--pad-y, 0px));
+}
+
+/*
+ * A chamfered panel: a drawn 1px edge around a paper fill, cut at the
+ * bottom-right. Self-contained — do NOT also apply `cut` to it.
+ *
+ * Two things make this harder than it looks, and the first version got both
+ * wrong, which turned every panel on the site into a solid grey slab:
+ *
+ * 1. A `clip-path` shears a border, so the edge cannot be a `border`. It has to
+ *    be a shape drawn behind the fill.
+ * 2. A `z-index: -1` pseudo-element does NOT paint behind its own parent's
+ *    background. Painting order inside a stacking context puts the context
+ *    element's background first and negative-z descendants immediately after,
+ *    so the pseudo covers the very background it was meant to sit behind.
+ *
+ * So the element itself stays transparent and paints nothing, and BOTH layers
+ * are pseudo-elements: `::before` is the edge at full size, `::after` is the
+ * paper inset by the edge's own width. The content then paints above both.
+ */
+@utility cut-edge {
+  --cut: 10px;
+  position: relative;
+  isolation: isolate;
+  background-color: transparent;
+  padding-right: max(calc(var(--cut) + 0.25rem), var(--pad-x, 0px));
+  padding-bottom: max(calc(var(--cut) + 0.25rem), var(--pad-y, 0px));
+
+  &::before,
+  &::after {
+    position: absolute;
+    z-index: -1;
+    content: "";
+    clip-path: polygon(
+      0 0,
+      100% 0,
+      100% calc(100% - var(--cut)),
+      calc(100% - var(--cut)) 100%,
+      0 100%
+    );
+  }
+
+  /* The drawn edge. */
+  &::before {
+    inset: 0;
+    background-color: var(--rule-strong);
+  }
+
+  /* The paper, inset by one line width so the edge reads as a hairline. */
+  &::after {
+    inset: var(--line-medium);
+    background-color: var(--paper);
+  }
+}
+
+/* ---------------------------------------------------------------------------
+   The sheet.
+
+   A page's content sits on paper, and the paper lies on the table. The step
+   between the two grounds is the whole elevation model: there are no shadows
+   on this site except one, and it belongs to a layer that genuinely floats
+   above the sheet (a menu, a popover). Nothing else casts.
+   --------------------------------------------------------------------------- */
+
+@utility sheet {
+  background-color: var(--paper);
+  border-inline: var(--line-medium) solid var(--rule);
+}
+
+/* The only shadow in the system. Tight, low, offset downward from one light,
+   and tinted to the ink rather than bloomed in black. */
+@utility lifted {
+  box-shadow:
+    0 1px 1px oklch(0.19 0.008 250 / 0.04),
+    0 4px 10px -4px oklch(0.19 0.008 250 / 0.14);
+}
+
+/* ---------------------------------------------------------------------------
+   Drawing notation.
+
+   These are the marks the product is built from. Each one is defined by what
+   it measures; none of them is available as ornament.
+   --------------------------------------------------------------------------- */
+
+/* A rule that separates two real regions. Round caps, because a square-capped
+   hairline dropped between sections is the cheapest mark in design. */
+@utility rule-drawn {
+  height: var(--line-medium);
+  border: 0;
+  border-radius: var(--line-medium);
+  background-color: var(--rule);
+}
+
+/* Registration marks: the four corner ticks that tell you where the sheet
+   ends. They enclose the sheet, so they measure something. */
+@utility registered {
+  position: relative;
+
+  &::before,
+  &::after {
+    position: absolute;
+    width: 9px;
+    height: 9px;
+    content: "";
+    pointer-events: none;
+    border-color: var(--rule-strong);
+    border-style: solid;
+  }
+
+  &::before {
+    top: 0;
+    left: 0;
+    border-width: var(--line-medium) 0 0 var(--line-medium);
+  }
+
+  &::after {
+    right: 0;
+    bottom: 0;
+    border-width: 0 var(--line-medium) var(--line-medium) 0;
+  }
+}
+
+/* The drawing's own lettering, for a label that names a measured field.
+   It is NOT the site's universal small-text costume: prose captions stay in
+   the prose face, and only a field label on the drawing gets this. */
+@utility drafted {
+  font-family: var(--font-draft);
+  font-size: 0.75rem;
+  letter-spacing: 0.09em;
+  line-height: 1;
+  text-transform: uppercase;
+  color: var(--ink-3);
+}
+
+/* A measured value. Drafting red, tabular, and it never appears without the
+   thing it measures beside it. */
+@utility measured {
+  font-family: var(--font-draft);
+  font-variant-numeric: tabular-nums;
+  color: var(--signal);
+  letter-spacing: 0.01em;
+}
+
+/* ---------------------------------------------------------------------------
+   Motion.
+
+   The drawing draws itself. That is the one gesture this site owns, and it is
+   built on `stroke-dashoffset`, which animates a real path along its real
+   length — a line that arrives at its true end with its true cap. Nothing on
+   this site animates from `opacity: 0`: content is present in the markup and
+   visible on paint, and the motion is the pen travelling over it.
+   --------------------------------------------------------------------------- */
+
+@keyframes draw-stroke {
+  from {
+    stroke-dashoffset: var(--draw-length, 1000);
+  }
+  to {
+    stroke-dashoffset: 0;
+  }
+}
+
+@keyframes extend-x {
+  from {
+    transform: scaleX(0);
+  }
+  to {
+    transform: scaleX(1);
+  }
+}
+
+@keyframes land {
+  0% {
+    transform: translateX(-2px);
+    opacity: 0;
+  }
+  70% {
+    transform: translateX(0.5px);
+    opacity: 1;
+  }
+  100% {
+    transform: translateX(0);
+    opacity: 1;
+  }
+}
+
+/* A trace inks in along its own length. The element is in the DOM and its
+   geometry is final before this runs; if the animation never fires, the path
+   is simply drawn. */
+@utility inks-in {
+  stroke-dasharray: var(--draw-length, 1000);
+  animation: draw-stroke var(--duration-draw) var(--ease-draw) both;
+  animation-delay: var(--draw-delay, 0ms);
+}
+
+/* A dimension line extends from its origin toward its terminator. Transform
+   origin is the datum it starts from, so it grows out of a real point. */
+@utility extends {
+  transform-origin: left center;
+  animation: extend-x var(--duration-measure) var(--ease-draw) both;
+  animation-delay: var(--draw-delay, 0ms);
+}
+
+/* An arrow terminator arrives, overshoots by half a pixel, and settles — the
+   way a pen lands. */
+@utility lands {
+  animation: land var(--duration-land) var(--ease-land) both;
+  animation-delay: var(--draw-delay, 0ms);
+}
+
 @media (prefers-reduced-motion: reduce) {
-  html:focus-within {
+  html {
     scroll-behavior: auto;
   }
 
-  button:not(:disabled):not([data-press="off"]):active {
-    transform: none;
-  }
-}
-
-.mobile-nav-icon {
-  grid-area: 1 / 1;
-  transition:
-    opacity 120ms var(--motion-ease-out),
-    transform 120ms var(--motion-ease-out);
-}
-
-.mobile-nav-icon-close {
-  opacity: 0;
-  transform: scale(0.97);
-}
-
-details[open][data-state="open"] .mobile-nav-icon-menu {
-  opacity: 0;
-  transform: scale(0.97);
-}
-
-details[open][data-state="open"] .mobile-nav-icon-close {
-  opacity: 1;
-  transform: scale(1);
-}
-
-.mobile-nav-panel {
-  opacity: 0;
-  pointer-events: none;
-  transform: translateY(-6px) scale(0.985);
-  transition:
-    opacity 140ms var(--motion-ease-out),
-    transform 140ms var(--motion-ease-out);
-}
-
-details[open][data-state="open"] .mobile-nav-panel {
-  opacity: 1;
-  pointer-events: auto;
-  transform: translateY(0) scale(1);
-  transition-duration: 180ms;
-}
-
-.site-header [data-auth-slot] details > summary {
-  min-width: 3rem;
-  min-height: 3rem;
-  box-shadow: none;
-}
-
-.site-header [data-auth-slot] details > div {
-  box-shadow: none;
-}
-
-@media (prefers-reduced-motion: reduce) {
-  .mobile-nav-icon,
-  .mobile-nav-panel {
-    transform: none;
-    transition-property: opacity;
-    transition-duration: 120ms;
-  }
-}
-
-/* ---------------------------------------------------------------------------
-   Dither support classes.
-
-   Real ordered dithering is a low-resolution canvas upscaled with
-   `image-rendering: pixelated`, where per-cell alpha comes from a threshold
-   test (see `src/lib/dither.ts`). CSS cannot express a varying-density
-   threshold field: a fixed-density radial-gradient screen reads as noise, not
-   as dither. Everything below is therefore a no-JS fallback, a flat treatment,
-   or plain chrome. No dot screens.
-   --------------------------------------------------------------------------- */
-
-/* Honest stand-in for a canvas that has not hydrated: a 4px checkerboard tint
-   in the current text color. Islands drop the class on mount. */
-@utility dither-fallback {
-  background-image: linear-gradient(
-    135deg,
-    color-mix(in oklab, currentColor 10%, transparent) 25%,
-    transparent 25% 50%,
-    color-mix(in oklab, currentColor 10%, transparent) 50% 75%,
-    transparent 75%
-  );
-  background-size: 4px 4px;
-}
-
-/* Interactive surfaces that cannot ship an island: flat, never textured. */
-@utility control-flat {
-  border-color: color-mix(in oklab, var(--border) 60%, transparent);
-  background-color: color-mix(in oklab, var(--background) 40%, transparent);
-  transition:
-    border-color 150ms var(--motion-ease-out),
-    background-color 150ms var(--motion-ease-out),
-    color 150ms var(--motion-ease-out);
-
-  &:hover,
-  &[aria-expanded="true"],
-  &[aria-pressed="true"] {
-    border-color: color-mix(in oklab, var(--foreground) 25%, transparent);
-    background-color: color-mix(in oklab, var(--card) 60%, transparent);
-  }
-}
-
-/* Sticky chrome carries no border: the hairline is a gradient that dies at
-   both ends. Host needs `position: relative`. */
-.chrome {
-  background: color-mix(in oklab, var(--background) 82%, transparent);
-  backdrop-filter: blur(14px) saturate(1.5);
-}
-
-.chrome::after {
-  position: absolute;
-  inset-inline: 0;
-  top: 100%;
-  height: 1px;
-  content: "";
-  background: linear-gradient(
-    to right,
-    transparent,
-    color-mix(in oklab, var(--border) 80%, transparent) 20%,
-    color-mix(in oklab, var(--border) 80%, transparent) 80%,
-    transparent
-  );
-}
-
-@media (max-width: 40rem) {
-  .chrome {
-    background: color-mix(in oklab, var(--background) 93%, transparent);
-  }
-}
-
-@media (prefers-reduced-transparency: reduce) {
-  .chrome {
-    background: var(--background);
-    backdrop-filter: none;
-  }
-}
-
-/* One staggered rise, once, driven by an inline `--reveal-delay`. */
-.reveal {
-  animation: reveal 700ms cubic-bezier(0.2, 0, 0, 1) both;
-  animation-delay: var(--reveal-delay, 0ms);
-}
-
-@keyframes reveal {
-  from {
-    opacity: 0;
-    transform: translateY(10px);
-  }
-  to {
-    opacity: 1;
-    transform: none;
-  }
-}
-
-@media (prefers-reduced-motion: reduce) {
-  .reveal {
-    animation: none;
-  }
-}
-
-@utility card-panel {
-  @apply border-y border-border bg-card text-card-foreground sm:border-x;
-  box-shadow: none;
-}
-
-.signal-panel {
-  position: relative;
-  min-width: 0;
-  border-top: 1px solid var(--border);
-  background: transparent;
-}
-
-.evidence-band {
-  position: relative;
-  isolation: isolate;
-  overflow: hidden;
-}
-
-/* ---------------------------------------------------------------------------
-   Deprecated aliases.
-
-   Every class in this block used to paint a fixed-density CSS dot screen. The
-   dots are gone; what remains is the flat treatment each call site should have
-   had. They exist only until the last call site moves to `<Button>`, the
-   control classes, or a canvas primitive, then they are deleted.
-   --------------------------------------------------------------------------- */
-
-/* -> `<Button variant="outline" | "ghost">`, or the shared CONTROL field. */
-.dither-control {
-  position: relative;
-  border-color: color-mix(in oklab, var(--border) 60%, transparent);
-  background-color: color-mix(in oklab, var(--background) 40%, transparent);
-  transition:
-    border-color 150ms var(--motion-ease-out),
-    background-color 150ms var(--motion-ease-out),
-    color 150ms var(--motion-ease-out);
-}
-
-.dither-control:hover,
-.dither-control[aria-expanded="true"],
-.dither-control[aria-pressed="true"] {
-  border-color: color-mix(in oklab, var(--foreground) 25%, transparent);
-  background-color: color-mix(in oklab, var(--card) 60%, transparent);
-}
-
-/* -> POPOVER in `ui/dither-surface.tsx`. */
-.dither-menu {
-  border: 1px solid color-mix(in oklab, var(--border) 80%, transparent);
-  border-radius: var(--radius);
-  background-color: var(--card);
-  box-shadow: 0 8px 24px rgb(0 0 0 / 0.32);
-}
-
-/* -> `<DitherField>` on the section itself. */
-.dither-depth {
-  background: transparent;
-}
-
-/* -> `<DitherSurface variant="gradient" edge={0.5}>`. */
-.dither-badge-bed {
-  background-color: color-mix(in oklab, var(--card) 45%, transparent);
-}
-
-/* -> a plain arrow glyph; movement, not glow. */
-.dither-arrow {
-  filter: none;
-}
-
-/* -> `<Button variant="primary">`. */
-.dither-primary {
-  background-color: var(--primary);
-  color: var(--primary-foreground);
-  transition:
-    opacity 150ms var(--motion-ease-out),
-    transform 120ms var(--motion-ease-out);
-}
-
-.dither-primary:hover,
-.dither-primary[aria-expanded="true"],
-.dither-primary[aria-pressed="true"] {
-  border-color: transparent;
-  opacity: 0.92;
-}
-
-/* -> `rounded-lg border border-border/60 bg-background/40 p-3.5`. */
-.dither-panel {
-  position: relative;
-  isolation: isolate;
-  border: 1px solid color-mix(in oklab, var(--border) 60%, transparent);
-  border-radius: var(--radius);
-  background-color: color-mix(in oklab, var(--background) 40%, transparent);
-}
-
-/* Kept by name, rebuilt without the dot screen. */
-.dither-chip {
-  display: inline-flex;
-  align-items: center;
-  gap: 0.375rem;
-  border: 1px solid color-mix(in oklab, var(--border) 60%, transparent);
-  border-radius: calc(var(--radius) - 4px);
-  padding: 0.125rem 0.5rem;
-  background-color: transparent;
-  color: var(--muted-foreground);
-  font-family: var(--font-mono);
-  font-size: 0.625rem;
-  font-variant-numeric: tabular-nums;
-  letter-spacing: 0.08em;
-  text-transform: uppercase;
-}
-
-/* Interactive chips are never smaller than a finger. */
-a.dither-chip,
-button.dither-chip,
-label.dither-chip {
-  min-height: 2.25rem;
-  padding-inline: 0.625rem;
-  font-size: 0.6875rem;
-  text-transform: none;
-  transition:
-    background-color 150ms var(--motion-ease-out),
-    color 150ms var(--motion-ease-out);
-}
-
-a.dither-chip:hover,
-button.dither-chip:hover,
-label.dither-chip:hover {
-  background-color: color-mix(in oklab, var(--card) 60%, transparent);
-  color: var(--foreground);
-}
-
-.mono-label {
-  color: var(--muted-foreground);
-  font-family: var(--font-mono);
-  font-size: 0.6875rem;
-  font-weight: 500;
-  font-variant-numeric: tabular-nums;
-  letter-spacing: 0.14em;
-  text-transform: uppercase;
-}
-
-/* -> a 1-row canvas progress fill. */
-.signal-dither-fill {
-  background-color: color-mix(in oklab, var(--foreground) 82%, transparent);
-  background-image: none;
-}
-
-@media (max-width: 39.999rem) {
-  .site-header [data-auth-slot] details > div {
-    position: fixed;
-    top: 4.5rem;
-    right: 1rem;
-    left: 1rem;
-    width: auto;
-    max-width: none;
-  }
-
-  .site-header [data-auth-slot] details > div a,
-  .site-header [data-auth-slot] details > div button {
-    min-height: 3rem;
-  }
-}
-
-@media (prefers-reduced-transparency: reduce) {
-  .site-header {
-    background-color: var(--background);
-    backdrop-filter: none;
-  }
-}
-
-@media (prefers-contrast: more) {
-  :root {
-    --border: oklch(1 0 0 / 0.34);
-    --input: oklch(1 0 0 / 0.42);
-    --muted-foreground: oklch(0.82 0.004 265);
-  }
-
-  :focus-visible {
-    outline-width: 3px;
+  /* Reduced motion removes the travel, never the mark. Every animated element
+     resolves to its finished state instantly. */
+  .inks-in,
+  .extends,
+  .lands {
+    animation-duration: 1ms;
+    animation-delay: 0ms;
   }
 }

@@ -8,13 +8,20 @@
  * hand, and the target has to reach both.
  *
  * The catalog is an island so the target can move, but Astro prerenders it, so
- * the default target's twenty figures and snippets are in the static HTML
- * before a byte of JavaScript runs.
+ * the default target's figures and snippets are in the static HTML before a
+ * byte of JavaScript runs.
  *
  * `readme-embeds.ts` is the only catalog: its output is held to byte equality
  * with the Rust renderer behind `/api/md`, so what this page shows, what an
  * agent fetches, and what the API serves cannot drift. Nothing here is
  * hand-maintained.
+ *
+ * This was 899 lines, and most of the excess was one option stated twice: two
+ * copy actions for the same snippet, two hand-rolled `<pre>` blocks where
+ * `CodeBlock` already exists, a hand-drawn chevron on two native selects, the
+ * animation switch restated as a sentence of prose, and a decorative animated
+ * graphic on every section header with a caption apologising that it was not
+ * real data. One control column, one preview, one snippet.
  */
 
 import {
@@ -25,16 +32,13 @@ import {
   type ReactNode,
   type SubmitEvent,
 } from "react";
-import { AnimatePresence, motion, useReducedMotion } from "motion/react";
-import { ArrowRight, ChevronDown } from "lucide-react";
 
-import { CodeBlock, TOKEN_CLASS, tokenize } from "@/components/CodeBlock";
-import { CopyButton } from "@/components/CopyButton";
-import { ReportLayerGraphic } from "@/components/ReportLayerGraphic";
+import { CodeBlock } from "@/components/CodeBlock";
 import {
   BODY,
   CAPTION,
-  EYEBROW,
+  DATUM,
+  FIELD,
   HEADING,
   MEASURE,
   PANEL,
@@ -42,18 +46,9 @@ import {
   SECTION_HEADER,
 } from "@/components/style-tokens";
 import { Button } from "@/components/ui/button";
-import { DitherCheckbox } from "@/components/ui/dither-checkbox";
-import { DitherSegmented } from "@/components/ui/dither-segmented";
-import { DitherSwitch } from "@/components/ui/dither-switch";
-import { CONTROL } from "@/components/ui/dither-surface";
-import { DitherSurface } from "@/components/ui/dither-surface";
-import { INK } from "@/lib/dither";
+import { CONTROL, Checkbox, Segmented, Switch } from "@/components/ui/controls";
 import { MEDIA_RENDER_REVISION } from "@/lib/media";
-import {
-  DURATION,
-  EASE_OUT,
-  REDUCED_MOTION_DURATION,
-} from "@/lib/motion";
+import { setLiveSubject } from "@/lib/live-title";
 import {
   assetUrl,
   bestEmbed,
@@ -66,9 +61,23 @@ import {
 import { useRenderedTheme } from "@/lib/rendered-theme";
 import { cn } from "@/lib/utils";
 
+/**
+ * The house checkbox and switch are drawn at their true size — 16px and 20px,
+ * because that is how big those marks are on a drawing. A pointer target is not
+ * a mark, so it is extended past the mark with a transparent overlay rather
+ * than by inflating the graphic. 44px in both axes, both controls.
+ */
+const CHECKBOX_TARGET = "relative before:absolute before:-inset-3.5 before:content-['']";
+const SWITCH_TARGET =
+  "relative before:absolute before:-inset-y-3 before:-inset-x-1 before:content-['']";
+
+/** A native select, wearing the field treatment every control here shares. */
+const SELECT = "block min-h-11 w-full px-3 font-mono text-[0.8125rem]";
+
 type Metric = "stars" | "forks" | "downloads";
 type BadgeSource = "auto" | "npm" | "crates" | "pypi" | "docker";
 type ThemeChoice = "auto" | "light" | "dark";
+type Dialect = "markdown" | "html";
 
 const METRICS: { id: Metric; label: string }[] = [
   { id: "stars", label: "Stars" },
@@ -79,15 +88,20 @@ const METRICS: { id: Metric; label: string }[] = [
 const SOURCES: { id: BadgeSource; label: string }[] = [
   { id: "auto", label: "Auto" },
   { id: "npm", label: "npm" },
-  { id: "crates", label: "crates" },
+  { id: "crates", label: "crates.io" },
   { id: "pypi", label: "PyPI" },
-  { id: "docker", label: "Docker" },
+  { id: "docker", label: "Docker Hub" },
 ];
 
-const THEMES: { id: ThemeChoice; label: string }[] = [
-  { id: "auto", label: "Auto" },
-  { id: "light", label: "Light" },
-  { id: "dark", label: "Dark" },
+const THEMES: { value: ThemeChoice; label: string }[] = [
+  { value: "auto", label: "Auto" },
+  { value: "light", label: "Light" },
+  { value: "dark", label: "Dark" },
+];
+
+const DIALECTS: { value: Dialect; label: string }[] = [
+  { value: "markdown", label: "Markdown" },
+  { value: "html", label: "HTML" },
 ];
 
 type Props = {
@@ -129,286 +143,182 @@ export function BadgeStudio({
   const [animate, setAnimate] = useState(false);
   const [source, setSource] = useState<BadgeSource>("auto");
   const [theme, setTheme] = useState<ThemeChoice>("auto");
-  const reduceMotion = useReducedMotion();
+  const [dialect, setDialect] = useState<Dialect>("markdown");
   const renderedTheme = useRenderedTheme();
+  const uid = useId().replaceAll(":", "");
 
   const badgeBase = `${apiBase}/api/repos/${owner}/${repo}/badge.svg`;
 
   function toggleMetric(id: Metric) {
     setMetrics((prev) => {
-      const has = prev.includes(id);
-      const next = has ? prev.filter((m) => m !== id) : [...prev, id];
+      const next = prev.includes(id)
+        ? prev.filter((m) => m !== id)
+        : [...prev, id];
       return METRICS.filter((m) => next.includes(m.id)).map((m) => m.id);
     });
   }
 
-  const lightUrl = useMemo(
-    () =>
-      `${badgeBase}?${badgeQuery({ metrics, animate, source, theme: "light", preview: true })}`,
-    [badgeBase, metrics, animate, source],
-  );
-  const darkUrl = useMemo(
-    () =>
-      `${badgeBase}?${badgeQuery({ metrics, animate, source, theme: "dark", preview: true })}`,
-    [badgeBase, metrics, animate, source],
-  );
+  /**
+   * One builder for four URLs. A preview carries the render revision and may
+   * animate; a published URL does neither, ever — those are the only two
+   * differences, and stating them once is what stops them drifting apart.
+   */
+  const url = (assetTheme: "light" | "dark", preview: boolean) =>
+    `${badgeBase}?${badgeQuery({ metrics, animate: preview && animate, source, theme: assetTheme, preview })}`;
 
-  const resolvedThemeUrl =
-    theme === "auto"
-      ? renderedTheme === "dark"
-        ? darkUrl
-        : lightUrl
-      : theme === "dark"
-        ? darkUrl
-        : lightUrl;
+  const baked: "light" | "dark" =
+    theme === "auto" ? (renderedTheme === "dark" ? "dark" : "light") : theme;
+  const previewUrl = url(baked, true);
 
   const label = `${owner}/${repo}`;
   const alt = `${label} stats badge`;
   const linkHref = readmeLink(siteOrigin, `/${label}`);
 
-  const embedLightUrl = `${badgeBase}?${badgeQuery({
-    metrics,
-    animate: false,
-    source,
-    theme: "light",
-    preview: false,
-  })}`;
-  const embedDarkUrl = `${badgeBase}?${badgeQuery({
-    metrics,
-    animate: false,
-    source,
-    theme: "dark",
-    preview: false,
-  })}`;
-  const embedThemeUrl = theme === "dark" ? embedDarkUrl : embedLightUrl;
-  const pictureEmbed = `<a href="${linkHref}">
-  <picture>
-    <source media="(prefers-color-scheme: dark)" srcset="${embedDarkUrl}" />
-    <img alt="${alt}" src="${embedLightUrl}" />
-  </picture>
-</a>`;
-  const flatEmbed = `<a href="${linkHref}">
-  <img alt="${alt}" src="${embedThemeUrl}" />
-</a>`;
-  const markdown =
+  const snippet =
     theme === "auto"
-      ? pictureEmbed
-      : `[![${alt}](${embedThemeUrl})](${linkHref})`;
-  const html = theme === "auto" ? pictureEmbed : flatEmbed;
+      ? `<a href="${linkHref}">
+  <picture>
+    <source media="(prefers-color-scheme: dark)" srcset="${url("dark", false)}" />
+    <img alt="${alt}" src="${url("light", false)}" />
+  </picture>
+</a>`
+      : dialect === "markdown"
+        ? `[![${alt}](${url(theme, false)})](${linkHref})`
+        : `<a href="${linkHref}">
+  <img alt="${alt}" src="${url(theme, false)}" />
+</a>`;
 
   const noMetrics = metrics.length === 0;
 
   return (
-    <div className="space-y-8">
-      <div className="grid gap-6 lg:grid-cols-[minmax(0,1fr)_minmax(0,1.1fr)]">
-        <div className={cn(PANEL, "space-y-6 p-3.5")}>
-          <div>
-            <p className={EYEBROW}>Metrics</p>
-            <div
-              className="mt-3 flex flex-wrap gap-x-5 gap-y-1"
-              role="group"
-              aria-label="Metrics"
-            >
-              {METRICS.map((m) => (
-                <DitherCheckbox
-                  key={m.id}
-                  id={`badge-metric-${m.id}`}
-                  name="metrics"
-                  value={m.id}
+    <div className="grid gap-x-10 gap-y-8 lg:grid-cols-[minmax(0,17rem)_minmax(0,1fr)]">
+      {/* ── The control column. One statement of each option, and no more. ── */}
+      <div className="space-y-7">
+        <fieldset>
+          <legend className={FIELD}>Metrics</legend>
+          <div className="mt-2">
+            {METRICS.map((m) => (
+              <div key={m.id} className="flex min-h-11 items-center gap-3">
+                <Checkbox
                   checked={metrics.includes(m.id)}
                   onCheckedChange={() => toggleMetric(m.id)}
-                >
+                  aria-labelledby={`${uid}-${m.id}`}
+                  className={CHECKBOX_TARGET}
+                />
+                <span id={`${uid}-${m.id}`} className="text-[0.875rem] text-ink">
                   {m.label}
-                </DitherCheckbox>
-              ))}
-            </div>
-            <AnimatePresence initial={false}>
-              {noMetrics && (
-                <motion.p
-                  initial={{
-                    opacity: 0,
-                    y: reduceMotion ? 0 : -4,
-                  }}
-                  animate={{ opacity: 1, y: 0 }}
-                  exit={{ opacity: 0, transition: { duration: 0.12 } }}
-                  transition={{
-                    duration: reduceMotion
-                      ? REDUCED_MOTION_DURATION
-                      : DURATION.enter,
-                    ease: EASE_OUT,
-                  }}
-                  className="mt-2 text-[11px] text-[var(--swatch-red)]"
-                  role="alert"
-                >
-                  Pick at least one metric.
-                </motion.p>
-              )}
-            </AnimatePresence>
-          </div>
-
-          <div className="grid gap-5 sm:grid-cols-2">
-            <div>
-              <label htmlFor="badge-source" className={cn(EYEBROW, "block")}>
-                Source
-              </label>
-              <div className="relative mt-3 grid grid-cols-1 items-center">
-                <select
-                  id="badge-source"
-                  name="source"
-                  value={source}
-                  onChange={(e) => setSource(e.target.value as BadgeSource)}
-                  className={cn(
-                    CONTROL,
-                    "col-start-1 row-start-1 appearance-none pr-9 text-foreground",
-                  )}
-                >
-                  {SOURCES.map((s) => (
-                    <option key={s.id} value={s.id}>
-                      {s.label}
-                    </option>
-                  ))}
-                </select>
-                <ChevronDown
-                  className="pointer-events-none col-start-1 row-start-1 mr-3 size-3.5 justify-self-end text-muted-foreground"
-                  strokeWidth={2}
-                  aria-hidden="true"
-                />
+                </span>
               </div>
-            </div>
-            <div>
-              <label htmlFor="badge-theme" className={cn(EYEBROW, "block")}>
-                Theme
-              </label>
-              <div className="relative mt-3 grid grid-cols-1 items-center">
-                <select
-                  id="badge-theme"
-                  name="theme"
-                  value={theme}
-                  onChange={(e) => setTheme(e.target.value as ThemeChoice)}
-                  className={cn(
-                    CONTROL,
-                    "col-start-1 row-start-1 appearance-none pr-9 text-foreground",
-                  )}
-                >
-                  {THEMES.map((t) => (
-                    <option key={t.id} value={t.id}>
-                      {t.label}
-                    </option>
-                  ))}
-                </select>
-                <ChevronDown
-                  className="pointer-events-none col-start-1 row-start-1 mr-3 size-3.5 justify-self-end text-muted-foreground"
-                  strokeWidth={2}
-                  aria-hidden="true"
-                />
-              </div>
-            </div>
+            ))}
           </div>
-
-          <div>
-            <p className={EYEBROW} id="badge-animation-label">
-              Animation
+          {noMetrics && (
+            <p role="alert" className="mt-1 text-[0.8125rem] text-signal">
+              Pick at least one metric.
             </p>
-            <div className="mt-2 inline-flex items-center gap-2">
-              <DitherSwitch
-                id="badge-animation"
-                name="animation"
-                checked={animate}
-                onCheckedChange={setAnimate}
-                aria-labelledby="badge-animation-label"
-              />
-              <span className="font-mono text-[12px] text-muted-foreground">
-                {animate ? "Animated" : "Static"}
-              </span>
-            </div>
-          </div>
+          )}
+        </fieldset>
+
+        <div>
+          <label htmlFor={`${uid}-source`} className={FIELD}>
+            Downloads from
+          </label>
+          <select
+            id={`${uid}-source`}
+            name="source"
+            value={source}
+            onChange={(event) => setSource(event.target.value as BadgeSource)}
+            className={cn(CONTROL, SELECT, "mt-2")}
+          >
+            {SOURCES.map((s) => (
+              <option key={s.id} value={s.id}>
+                {s.label}
+              </option>
+            ))}
+          </select>
         </div>
 
-        <div className={cn(PANEL, "flex flex-col overflow-hidden")}>
-          <div className="flex items-center justify-between gap-2 border-b border-border/40 px-4 py-3">
-            <div className={EYEBROW}>Live preview</div>
-            <CopyButton
-              value={theme === "auto" ? pictureEmbed : embedThemeUrl}
-              ariaLabel={
-                theme === "auto"
-                  ? "Copy theme-aware badge embed"
-                  : "Copy badge URL"
-              }
-              idleLabel={theme === "auto" ? "Embed" : "URL"}
+        <div>
+          {/* `Segmented` forwards only `aria-label`, so the drawn label and the
+              accessible name are stated separately and identically. */}
+          <p className={FIELD}>Theme</p>
+          <Segmented
+            aria-label="Theme"
+            value={theme}
+            options={THEMES}
+            onValueChange={setTheme}
+            className="mt-2 w-full"
+          />
+        </div>
+
+        <div className="flex min-h-11 items-center justify-between gap-4">
+          <span className={FIELD} id={`${uid}-motion`}>
+            Motion in the preview
+          </span>
+          <Switch
+            checked={animate}
+            onCheckedChange={setAnimate}
+            aria-labelledby={`${uid}-motion`}
+            className={SWITCH_TARGET}
+          />
+        </div>
+
+        {/* The dialect only changes anything once a single theme is baked: an
+            `auto` badge is two assets and `<picture>` is the only markup that
+            can carry both, so there is nothing to choose. */}
+        {theme !== "auto" && (
+          <div>
+            <p className={FIELD}>Snippet</p>
+            <Segmented
+              aria-label="Snippet dialect"
+              value={dialect}
+              options={DIALECTS}
+              onValueChange={setDialect}
+              className="mt-2 w-full"
             />
           </div>
+        )}
+      </div>
 
-          <div className="dither-fallback relative isolate flex flex-1 items-center justify-center overflow-hidden px-6 py-12">
-            <DitherSurface fill={INK} variant="gradient" edge={0.5} alpha={0.16} />
+      {/* ── The specimen, and the snippet that publishes it. ──────────────── */}
+      <div className="min-w-0 space-y-6">
+        <figure className="border border-rule-strong bg-paper">
+          <figcaption className="flex flex-wrap items-baseline justify-between gap-x-6 gap-y-1 border-b border-rule px-3 py-3">
+            <span className={FIELD}>Specimen</span>
+            <span className={cn(DATUM, "min-w-0 truncate text-ink-3")}>
+              {label}
+            </span>
+          </figcaption>
+          <div className="flex min-h-36 items-center justify-center bg-table px-4 py-8">
             {noMetrics ? (
-              <p className="relative text-[13px] text-muted-foreground">
-                Pick a metric to preview your badge.
-              </p>
+              <p className={CAPTION}>Pick a metric to draw the badge.</p>
             ) : (
               <img
-                src={resolvedThemeUrl}
+                src={previewUrl}
                 alt={alt}
                 decoding="async"
-                className="relative block h-auto max-w-full"
+                className="block h-auto max-w-full"
               />
             )}
           </div>
-
-          <p className={cn(BODY, "border-t border-border/40 px-4 py-3")}>
-            SVG previews can animate here. Copied README SVGs stay static, so
-            nobody's README moves without being asked; add{" "}
-            <code className="font-mono text-foreground">animate=1</code> to the
-            URL when you want the motion. Auto emits separate light and dark
-            assets.
+          <p className={cn(CAPTION, "border-t border-rule px-3 py-3")}>
+            The specimen may move; a published snippet never does. Add{" "}
+            <code className="font-mono text-ink">animate=1</code> to the URL when
+            you want the motion in a README.
           </p>
-        </div>
-      </div>
+        </figure>
 
-      {!noMetrics && <BadgeEmbed markdown={markdown} html={html} />}
+        {!noMetrics && (
+          <CodeBlock
+            code={snippet}
+            language={theme === "auto" ? "html" : dialect}
+            label={`${theme === "auto" || dialect === "html" ? "HTML" : "README.md"} · ${label} · ${theme}`}
+            copyLabel="Copy badge"
+            copyAriaLabel="Copy the metrics badge snippet"
+            maxHeightClass="max-h-48"
+          />
+        )}
+      </div>
     </div>
-  );
-}
-
-const EMBED_FORMATS = [
-  { value: "markdown" as const, label: "Markdown" },
-  { value: "html" as const, label: "HTML" },
-];
-
-function BadgeEmbed({ markdown, html }: { markdown: string; html: string }) {
-  const [mode, setMode] = useState<"markdown" | "html">("markdown");
-  const snippet = mode === "markdown" ? markdown : html;
-
-  return (
-    <figure className={cn(PANEL, "overflow-hidden")}>
-      <figcaption className="flex flex-wrap items-center justify-between gap-3 border-b border-border/40 px-4 py-3">
-        <div className={EYEBROW}>Embed badge</div>
-        <DitherSegmented
-          role="radiogroup"
-          aria-label="Embed format"
-          value={mode}
-          options={EMBED_FORMATS}
-          onValueChange={setMode}
-        />
-      </figcaption>
-      <div className="relative">
-        <pre className="overflow-x-auto px-4 py-4 font-mono text-[12px] leading-relaxed">
-          <code>
-            {tokenize(snippet, mode === "html" ? "html" : "markdown").map(
-              (token, index) => (
-                <span key={index} className={TOKEN_CLASS[token.kind]}>
-                  {token.text}
-                </span>
-              ),
-            )}
-          </code>
-        </pre>
-        <CopyButton
-          value={snippet}
-          ariaLabel="Copy badge embed snippet"
-          className="absolute top-3 right-3 backdrop-blur"
-        />
-      </div>
-    </figure>
   );
 }
 
@@ -444,7 +354,7 @@ function inlineCode(text: string): ReactNode[] {
     .filter((part) => part.length > 0)
     .map((part, index) =>
       part.startsWith("`") && part.endsWith("`") && part.length > 2 ? (
-        <code key={index} className="font-mono text-foreground">
+        <code key={index} className="font-mono text-ink">
           {part.slice(1, -1)}
         </code>
       ) : (
@@ -457,7 +367,7 @@ function inlineCode(text: string): ReactNode[] {
  * The on-page preview URL: the published asset plus the revision that keeps the
  * site off stale edge objects. It must never reach a copied snippet.
  */
-function previewUrl(
+function previewAssetUrl(
   apiBase: string,
   asset: EmbedAsset,
   theme: "light" | "dark",
@@ -466,6 +376,11 @@ function previewUrl(
   return `${url}${url.includes("?") ? "&" : "?"}render=${MEDIA_RENDER_REVISION}`;
 }
 
+/**
+ * One asset: what it is, what it looks like, and the exact markup to publish
+ * it. The three regions sit on one gutter and the snippet is anchored to the
+ * bottom, so a row of figures lines up whatever length their descriptions run.
+ */
 function AssetFigure({
   apiBase,
   asset,
@@ -477,41 +392,37 @@ function AssetFigure({
 }) {
   const snippet = bestEmbed(apiBase, asset, link);
   const language = bestEmbedLanguage(asset);
-  const light = previewUrl(apiBase, asset, "light");
-  const dark = previewUrl(apiBase, asset, "dark");
+  const light = previewAssetUrl(apiBase, asset, "light");
+  const dark = previewAssetUrl(apiBase, asset, "dark");
 
   return (
     <figure
       className={cn(
-        PANEL,
-        "flex flex-col overflow-hidden",
+        "flex h-full flex-col border border-rule-strong bg-paper",
         FULL_WIDTH.has(asset.id) && "sm:col-span-2",
       )}
     >
-      <figcaption className="border-b border-border/40 px-4 py-3">
-        <h3 className="text-[13px] text-foreground">{asset.name}</h3>
-        <p className={cn(CAPTION, "mt-1")}>
+      <figcaption className="border-b border-rule px-3 py-3">
+        <div className="flex flex-wrap items-baseline justify-between gap-x-6 gap-y-1">
+          <h3 className="font-draft text-[1.0625rem] leading-[1.2] text-ink">{asset.name}</h3>
+          <span className={cn(DATUM, "text-ink-3")}>
+            {asset.formats.join(" · ")}
+            {asset.themed ? " · light + dark" : ""}
+          </span>
+        </div>
+        <p className={cn(CAPTION, "mt-1.5")}>
           {inlineCode(asset.purpose)} Goes in {inlineCode(asset.placement)}.
-        </p>
-        <p className={cn(EYEBROW, "mt-2")}>
-          {asset.formats.join(" · ")} ·{" "}
-          {asset.themed ? "light + dark" : "single theme"}
         </p>
       </figcaption>
 
-      <div className="flex flex-1 items-center justify-center bg-card/40 px-4 py-5">
-        {asset.themed ? (
-          <picture>
+      <div className="flex flex-1 items-center justify-center bg-table px-3 py-6">
+        {/* One `<img>`, with the dark variant added as a `<source>` when the
+            asset actually has one. A `<picture>` with no source is exactly its
+            own `<img>`, so the two branches were one branch. */}
+        <picture>
+          {asset.themed && (
             <source media="(prefers-color-scheme: dark)" srcSet={dark} />
-            <img
-              src={light}
-              alt={asset.alt}
-              loading="lazy"
-              decoding="async"
-              className="block h-auto max-w-full"
-            />
-          </picture>
-        ) : (
+          )}
           <img
             src={light}
             alt={asset.alt}
@@ -519,58 +430,21 @@ function AssetFigure({
             decoding="async"
             className="block h-auto max-w-full"
           />
-        )}
+        </picture>
       </div>
 
-      <div className="relative border-t border-border/40">
-        <pre className="max-h-40 overflow-auto px-4 py-3 pr-24 font-mono text-[11px] leading-relaxed">
-          <code>
-            {tokenize(snippet, language).map((token, index) => (
-              <span key={index} className={TOKEN_CLASS[token.kind]}>
-                {token.text}
-              </span>
-            ))}
-          </code>
-        </pre>
-        <CopyButton
-          value={snippet}
-          ariaLabel={`Copy the ${asset.name} embed snippet`}
-          className="absolute top-2.5 right-3 backdrop-blur"
+      <div className="border-t border-rule">
+        <CodeBlock
+          className="border-0"
+          code={snippet}
+          language={language}
+          label={asset.themed ? "HTML" : "README.md"}
+          copyLabel="Copy"
+          copyAriaLabel={`Copy the ${asset.name} embed snippet`}
+          maxHeightClass="max-h-36"
         />
       </div>
     </figure>
-  );
-}
-
-/** Section header: heading, a live count, and one illustrative graphic. */
-function CatalogHeader({
-  id,
-  title,
-  meta,
-  graphic,
-}: {
-  id: string;
-  title: string;
-  meta: string;
-  graphic: "stars" | "health" | "readme";
-}) {
-  return (
-    <div className="flex items-end justify-between gap-6">
-      <div className="min-w-0">
-        <h2 id={id} className={HEADING}>
-          {title}
-        </h2>
-        <p className={cn(CAPTION, "mt-1")}>{meta}</p>
-      </div>
-      <figure aria-hidden="true" className="hidden shrink-0 sm:block">
-        <div className="flex h-24 items-center overflow-hidden opacity-80">
-          <ReportLayerGraphic kind={graphic} />
-        </div>
-        <figcaption className={cn(CAPTION, "mt-1 text-right")}>
-          Illustrative — no repository values
-        </figcaption>
-      </figure>
-    </div>
   );
 }
 
@@ -607,7 +481,6 @@ export function EmbedCatalog({
   const [slug, setSlug] = useState(defaultSlug);
   const [draft, setDraft] = useState(defaultSlug);
   const [error, setError] = useState<string | null>(null);
-  const reduceMotion = useReducedMotion();
   const fieldId = useId().replaceAll(":", "");
 
   // A pasted `/badges?repo=owner/name` link lands on the right target. Read
@@ -619,6 +492,7 @@ export function EmbedCatalog({
     if (!parsed) return;
     setSlug(parsed);
     setDraft(parsed);
+    retitle(parsed);
   }, []);
 
   const login = slug.split("/")[0];
@@ -627,14 +501,26 @@ export function EmbedCatalog({
   const repoLink = readmeLink(siteOrigin, `/${slug}`);
   const profileLink = readmeLink(siteOrigin, `/${login}`);
 
-  const headline = repoAssets.filter(
-    (asset) => asset.group !== "health",
-  );
+  const headline = repoAssets.filter((asset) => asset.group !== "health");
   const health = repoAssets.filter((asset) => asset.group === "health");
 
   // Composed at build time for one repository. A visitor-typed target has no
   // analyze payload on a static page, so its source is not established here.
   const provenance = slug === defaultSlug ? defaultProvenance : null;
+
+  /**
+   * The tab follows the URL. The address bar is rewritten below, and nothing
+   * used to correct the title with it, so a bookmark of
+   * `/badges?repo=vercel/next.js` was filed under the generic catalog title.
+   * No `path` is passed: this page really is prerendered at `/badges`, so its
+   * canonical must not be rewritten to a query URL.
+   */
+  function retitle(target: string) {
+    setLiveSubject({
+      subject: `${target} README embeds`,
+      description: `Every gitdebt README embed and badge, pointed at ${target}.`,
+    });
+  }
 
   function apply(event: SubmitEvent<HTMLFormElement>) {
     event.preventDefault();
@@ -650,22 +536,21 @@ export function EmbedCatalog({
     if (parsed === defaultSlug) next.searchParams.delete("repo");
     else next.searchParams.set("repo", parsed);
     window.history.replaceState(null, "", next);
+    retitle(parsed);
   }
 
   return (
     <div>
       <form
         onSubmit={apply}
-        className={cn(PANEL, "mt-8 flex flex-col gap-3 p-3.5 sm:flex-row sm:items-end")}
+        className={cn(PANEL, "mt-8 flex flex-col gap-4 sm:flex-row sm:items-end")}
       >
         <div className="min-w-0 flex-1">
-          <label htmlFor={`${fieldId}-repo`} className={cn(EYEBROW, "block")}>
+          <label htmlFor={`${fieldId}-repo`} className={FIELD}>
             Repository
           </label>
-          <div className="mt-2 flex min-h-10 items-center rounded-md border border-border/60 bg-background/60 font-mono text-[13px] transition-[border-color] duration-150 hover:border-foreground/25 focus-within:border-accent/70">
-            <span className="pl-3 text-muted-foreground select-none">
-              github.com/
-            </span>
+          <div className="mt-2 flex min-h-11 items-center border border-rule-strong bg-paper font-mono text-[0.8125rem] transition-colors duration-[--duration-ui] hover:border-ink-3 focus-within:border-ink-3">
+            <span className="pl-3 text-ink-3 select-none">github.com/</span>
             <input
               id={`${fieldId}-repo`}
               name="repo"
@@ -676,65 +561,45 @@ export function EmbedCatalog({
               autoCorrect="off"
               spellCheck={false}
               aria-invalid={error ? true : undefined}
-              aria-describedby={`${fieldId}-hint`}
-              className="w-full min-w-0 flex-1 bg-transparent py-2 pr-3 pl-1 text-foreground placeholder:text-muted-foreground/50 outline-none"
+              aria-describedby={error ? `${fieldId}-error` : `${fieldId}-hint`}
+              className="w-full min-w-0 flex-1 bg-transparent py-2 pr-3 pl-1 text-ink outline-none placeholder:text-ink-3"
             />
           </div>
         </div>
-        <Button type="submit" variant="outline">
+        <Button type="submit" variant="primary">
           Point every asset here
-          <ArrowRight />
         </Button>
       </form>
 
-      <div className="mt-2 flex flex-wrap items-baseline justify-between gap-x-6 gap-y-1">
+      {error && (
+        <p
+          id={`${fieldId}-error`}
+          role="alert"
+          className="mt-2 text-[0.8125rem] text-signal"
+        >
+          {error}
+        </p>
+      )}
+
+      <div className="mt-3 flex flex-wrap items-baseline justify-between gap-x-6 gap-y-1">
         <p id={`${fieldId}-hint`} className={cn(CAPTION, MEASURE)}>
-          Every URL, preview, and snippet below is pointed at {slug}. A
-          repository nobody has analyzed yet renders a placeholder frame and
-          queues the work, then fills in at the same URL.
+          Every URL, preview and snippet below is pointed at {slug}. A repository
+          nobody has read yet renders a placeholder frame and queues the work,
+          then fills in at the same URL.
         </p>
         <a href={`/${slug}`} className={SECTION_ACTION}>
           open the {slug} report
-          <span
-            aria-hidden="true"
-            className="transition-transform duration-150 group-hover:translate-x-0.5 motion-reduce:transition-none"
-          >
-            →
-          </span>
         </a>
       </div>
 
-      <AnimatePresence initial={false}>
-        {error && (
-          <motion.p
-            key={error}
-            initial={{ opacity: 0, y: reduceMotion ? 0 : -4 }}
-            animate={{ opacity: 1, y: 0 }}
-            exit={{ opacity: 0, transition: { duration: 0.12 } }}
-            transition={{
-              duration: reduceMotion ? REDUCED_MOTION_DURATION : DURATION.enter,
-              ease: EASE_OUT,
-            }}
-            className="mt-2 text-[11px] text-[var(--swatch-red)]"
-            role="alert"
-          >
-            {error}
-          </motion.p>
-        )}
-      </AnimatePresence>
-
-      <section aria-labelledby="studio-title" className="mt-12">
+      <section aria-labelledby="studio-title" className="mt-14">
         <div className={SECTION_HEADER}>
           <h2 id="studio-title" className={HEADING}>
             Metrics badge
           </h2>
-          <p className={CAPTION}>interactive</p>
+          <p className={CAPTION}>Stars, forks and package downloads in one chip</p>
         </div>
-        <p className={cn("mt-6", BODY, MEASURE)}>
-          Stars, forks, and package downloads in one chip. Pick the metrics and
-          the theme, then copy Markdown or theme-aware HTML.
-        </p>
-        <div className="mt-6">
+        <div className="mt-8">
           <BadgeStudio
             apiBase={apiBase}
             owner={login}
@@ -744,104 +609,126 @@ export function EmbedCatalog({
         </div>
       </section>
 
-      <section
+      <CatalogSection
         id="repository"
-        aria-labelledby="repository-title"
-        className="mt-16 scroll-mt-24 border-t border-border/60 pt-12"
+        title="Charts, cards and previews"
+        count={headline.length}
+        subject={slug}
+        lead={
+          <>
+            Each figure lists the encodings its path answers: swap{" "}
+            <code className="font-mono text-ink">chart.svg</code> for{" "}
+            <code className="font-mono text-ink">chart.gif</code> and nothing else
+            changes.
+          </>
+        }
       >
-        <CatalogHeader
-          id="repository-title"
-          title="Charts, cards, and previews"
-          meta={`${headline.length} assets · ${slug}`}
-          graphic="stars"
-        />
-        <p className={cn("mt-6", BODY, MEASURE)}>
-          Each asset lists the encodings its path answers: swap{" "}
-          <code className="font-mono text-foreground">chart.svg</code> for{" "}
-          <code className="font-mono text-foreground">chart.gif</code> and
-          nothing else changes. An animated SVG plays in a GitHub README, so GIF
-          is for the surfaces that show one as a single static frame — npm,
-          PyPI, Docker Hub, a CSS background.
-        </p>
-        <div className="mt-8 grid gap-x-12 gap-y-10 sm:grid-cols-2">
-          {headline.flatMap((asset) => {
-            const figure = (
-              <AssetFigure
-                key={asset.id}
-                apiBase={apiBase}
-                asset={asset}
-                link={repoLink}
-              />
-            );
-            // The provenance block belongs directly under the chart it states
-            // the source of, not in a section of its own.
-            return asset.id === "chart"
-              ? [
-                  figure,
-                  <ProvenanceBlock
-                    key="provenance"
-                    slug={slug}
-                    snippet={provenance}
-                  />,
-                ]
-              : [figure];
-          })}
-        </div>
-      </section>
-
-      <section
-        id="health"
-        aria-labelledby="health-title"
-        className="mt-16 scroll-mt-24 border-t border-border/60 pt-12"
-      >
-        <CatalogHeader
-          id="health-title"
-          title="Repository-health charts"
-          meta={`${health.length} assets · calculated from the public Git history`}
-          graphic="health"
-        />
-        <div className="mt-8 grid gap-x-12 gap-y-10 sm:grid-cols-2">
-          {health.map((asset) => (
+        {headline.flatMap((asset) => {
+          const figure = (
             <AssetFigure
               key={asset.id}
               apiBase={apiBase}
               asset={asset}
               link={repoLink}
             />
-          ))}
-        </div>
-      </section>
+          );
+          // The provenance block belongs directly under the chart whose source
+          // it states, not in a section of its own.
+          return asset.id === "chart"
+            ? [
+                figure,
+                <ProvenanceBlock key="provenance" slug={slug} snippet={provenance} />,
+              ]
+            : [figure];
+        })}
+      </CatalogSection>
 
-      <section
-        id="profile"
-        aria-labelledby="profile-title"
-        className="mt-16 scroll-mt-24 border-t border-border/60 pt-12"
+      <CatalogSection
+        id="health"
+        title="Repository-health charts"
+        count={health.length}
+        subject={slug}
+        lead="Calculated from the public commit history, not from stars — which is why they can disagree with the star curve, and why it matters when they do."
       >
-        <div className={SECTION_HEADER}>
-          <h2 id="profile-title" className={HEADING}>
-            Profile README embeds
-          </h2>
-          <p className={CAPTION}>{profileAssets.length} assets · {login}</p>
-        </div>
-        <p className={cn("mt-6", BODY, MEASURE)}>
-          The same routes for an account or organization, summed across its
-          public repositories. An organization profile README lives in{" "}
-          <code className="font-mono text-foreground">profile/README.md</code>{" "}
-          inside the repository named{" "}
-          <code className="font-mono text-foreground">.github</code>.
-        </p>
-        <div className="mt-8 grid gap-x-12 gap-y-10 sm:grid-cols-2">
-          {profileAssets.map((asset) => (
-            <AssetFigure
-              key={asset.id}
-              apiBase={apiBase}
-              asset={asset}
-              link={profileLink}
-            />
-          ))}
-        </div>
-      </section>
+        {health.map((asset) => (
+          <AssetFigure
+            key={asset.id}
+            apiBase={apiBase}
+            asset={asset}
+            link={repoLink}
+          />
+        ))}
+      </CatalogSection>
+
+      <CatalogSection
+        id="profile"
+        title="Profile README embeds"
+        count={profileAssets.length}
+        subject={login}
+        lead={
+          <>
+            The same routes for an account, summed across its public
+            repositories. An organization's profile README lives in{" "}
+            <code className="font-mono text-ink">profile/README.md</code> inside
+            the repository named{" "}
+            <code className="font-mono text-ink">.github</code>.
+          </>
+        }
+      >
+        {profileAssets.map((asset) => (
+          <AssetFigure
+            key={asset.id}
+            apiBase={apiBase}
+            asset={asset}
+            link={profileLink}
+          />
+        ))}
+      </CatalogSection>
     </div>
+  );
+}
+
+/**
+ * One section of the catalog: a heading, the count it actually rendered, one
+ * paragraph, and the grid.
+ *
+ * The count is stated beside the heading because it is a measured quantity —
+ * the length of the array below it, never a number typed into the copy.
+ */
+function CatalogSection({
+  id,
+  title,
+  count,
+  subject,
+  lead,
+  children,
+}: {
+  id: string;
+  title: string;
+  count: number;
+  subject: string;
+  lead: ReactNode;
+  children: ReactNode;
+}) {
+  return (
+    <section
+      id={id}
+      aria-labelledby={`${id}-title`}
+      className="mt-16 scroll-mt-24 border-t border-rule pt-12"
+    >
+      <div className={SECTION_HEADER}>
+        <h2 id={`${id}-title`} className={HEADING}>
+          {title}
+        </h2>
+        <p className={cn(DATUM, "text-ink-3")}>
+          {count} assets · {subject}
+        </p>
+      </div>
+      <p className={cn("mt-3", BODY, MEASURE)}>{lead}</p>
+      <div className="mt-8 grid items-stretch gap-6 sm:grid-cols-2">
+        {children}
+      </div>
+    </section>
   );
 }
 
@@ -861,22 +748,20 @@ function ProvenanceBlock({
 }) {
   return (
     <div className="sm:col-span-2">
-      <div className="flex items-baseline justify-between gap-4">
-        <h3 className="text-[13px] text-foreground">
+      <div className={SECTION_HEADER}>
+        <h3 className="font-draft text-[1.0625rem] leading-[1.2] text-ink">
           Star history with its source stated
         </h3>
-        <p className={CAPTION}>README block</p>
+        <p className={cn(DATUM, "text-ink-3")}>README block</p>
       </div>
-      <p className={cn(CAPTION, "mt-1", MEASURE)}>
-        The chart above, plus one line naming which source gitdebt read the
-        series from, the date it covers, and whether it still updates. Since
-        July 2026 GitHub serves the stargazer list only to a repository's own
-        admins and collaborators, so two charts on the same page can come from
-        different sources — this says which.
+      <p className={cn("mt-2", CAPTION, MEASURE)}>
+        The chart above, plus one line naming the source gitdebt read the series
+        from, the date it covers, and whether it still updates. Two charts on the
+        same page can come from different sources; this says which.
       </p>
       {snippet ? (
         <CodeBlock
-          className="mt-3"
+          className="mt-4"
           code={snippet}
           language="html"
           label={`README.md · ${slug} · source stated`}
@@ -885,8 +770,8 @@ function ProvenanceBlock({
           maxHeightClass="max-h-48"
         />
       ) : (
-        <div className={cn(PANEL, "mt-3 flex flex-wrap items-center gap-3 p-3.5")}>
-          <Button type="button" variant="soft" size="sm" disabled>
+        <div className={cn(PANEL, "mt-4 flex flex-wrap items-center gap-4")}>
+          <Button type="button" variant="quiet" disabled>
             Copy block
           </Button>
           <p className={CAPTION}>

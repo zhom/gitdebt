@@ -3,8 +3,10 @@ import { useEffect, useMemo, useState } from "react";
 import {
   BODY,
   CAPTION,
-  EYEBROW,
+  DATUM,
+  FIELD,
   HEADING,
+  MEASURE,
   SECTION_HEADER,
 } from "@/components/style-tokens";
 import {
@@ -14,6 +16,22 @@ import {
   type ComparisonStats,
   type ComparisonUsage,
 } from "@/lib/comparison-insights";
+import { cn } from "@/lib/utils";
+
+/**
+ * The comparison, as a schedule of measurements.
+ *
+ * A drawing compares parts in a table, and so does this: one row per signal,
+ * one column per repository, every figure tabular and every column the same
+ * width, so the eye can run down a column or across a row without the layout
+ * moving under it. Content length never decides where anything lands — a table
+ * is the one layout that guarantees that, which is why it is still a table.
+ *
+ * The leading figure in a row is lettered in drafting red. It is the measured
+ * best of that row, which is the only thing red is ever spent on here, and the
+ * same fact is stated in words to a screen reader so colour is never carrying
+ * it alone.
+ */
 
 export type ComparisonInitialRepo = {
   slug: string;
@@ -166,9 +184,7 @@ export function RepoComparisonMatrix({
       ).detail;
       if (
         detail?.repo &&
-        repos.some(
-          (slug) => slug.toLowerCase() === detail.repo?.toLowerCase(),
-        ) &&
+        repos.some((slug) => slug.toLowerCase() === detail.repo?.toLowerCase()) &&
         detail.analysis?.phase === "complete"
       ) {
         window.clearTimeout(statsTimer);
@@ -194,20 +210,17 @@ export function RepoComparisonMatrix({
   );
 
   return (
-    <section className="mt-16 scroll-mt-24 border-t border-border/60 pt-12">
+    <section className="mt-16 scroll-mt-24 border-t border-rule pt-12">
       <div className={SECTION_HEADER}>
-        <div>
-          <p className={EYEBROW}>Decision matrix</p>
-          <h2 className={`mt-2 ${HEADING}`}>Repository health compared</h2>
-        </div>
+        <h2 className={HEADING}>Repository health compared</h2>
         <p className={CAPTION}>
-          Live Postgres analysis · unavailable data stays labeled
+          Live analysis · unavailable data stays labelled
         </p>
       </div>
-      <p className={`mt-3 max-w-[74ch] ${BODY}`}>
+      <p className={cn("mt-3", BODY, MEASURE)}>
         Popularity is only one axis. Compare technical scale, maintenance
-        cadence, ownership resilience, and change pressure using the same
-        completed repository analysis behind each report.
+        cadence, ownership resilience and change pressure against the same
+        completed analysis that sits behind each report.
       </p>
 
       <div className="mt-10 grid gap-12">
@@ -235,98 +248,108 @@ function MetricGroup({
 }) {
   return (
     <section>
-      <div className="flex flex-wrap items-end justify-between gap-3">
-        <h3 className="font-mono text-sm font-medium tracking-wide">
-          :: {group}
+      <div className="flex flex-wrap items-baseline justify-between gap-x-6 gap-y-1">
+        <h3 className="font-draft text-[1.125rem] leading-tight text-ink">
+          {group}
         </h3>
         <p className={CAPTION}>{GROUP_COPY[group]}</p>
       </div>
-      <div className="-mx-6 -my-2 overflow-x-auto whitespace-nowrap">
-        <div className="inline-block min-w-full px-6 py-2 align-middle">
-          <table className="w-full text-left text-base sm:text-sm">
-            <thead>
-              <tr className="border-b border-border">
-                <th className="py-3 pr-5 font-mono font-medium whitespace-nowrap text-muted-foreground">
-                  Signal
+
+      <div className="mt-4 overflow-x-auto border border-rule-strong bg-paper">
+        <table className="w-full min-w-[42rem] border-collapse text-left">
+          <thead>
+            <tr className="border-b border-rule-strong">
+              <th scope="col" className={cn(FIELD, "px-4 py-3 align-bottom")}>
+                Signal
+              </th>
+              {repos.map((repo) => (
+                <th
+                  key={repo}
+                  scope="col"
+                  className="w-40 px-4 py-3 text-right align-bottom"
+                >
+                  <a
+                    href={`/${repo}`}
+                    className={cn(
+                      DATUM,
+                      "text-ink outline-none transition-colors duration-[--duration-ui] hover:text-signal focus-visible:outline-2 focus-visible:outline-offset-2 focus-visible:outline-signal",
+                    )}
+                  >
+                    {repo}
+                  </a>
                 </th>
-                {repos.map((repo) => (
+              ))}
+            </tr>
+          </thead>
+          <tbody>
+            {metrics.map((metric) => {
+              const comparable = metric.values
+                .map((value) => value.numeric)
+                .filter((value): value is number => value !== null);
+              const best =
+                comparable.length < 2 || metric.higherIsBetter === undefined
+                  ? null
+                  : metric.higherIsBetter
+                    ? Math.max(...comparable)
+                    : Math.min(...comparable);
+              // A tie has no leader. Marking every column red when two repos
+              // read the same — which is what an unanalysed pair does, since
+              // both sit at zero — states a result the data does not contain.
+              const leader =
+                best !== null &&
+                comparable.filter((value) => value === best).length === 1
+                  ? best
+                  : null;
+              return (
+                <tr key={metric.label} className="border-b border-rule last:border-0">
                   <th
-                    key={repo}
-                    className="py-3 pr-5 text-right font-mono font-medium whitespace-nowrap last:pr-0"
+                    scope="row"
+                    className="max-w-[22rem] px-4 py-3 text-left align-top font-normal"
                   >
-                    <a
-                      href={`/${repo}`}
-                      className="rounded outline-none hover:underline hover:decoration-border hover:underline-offset-4 focus-visible:ring-2 focus-visible:ring-accent/30"
-                    >
-                      {repo}
-                    </a>
+                    <span className="text-[0.875rem] text-ink">
+                      {metric.label}
+                    </span>
+                    <span className={cn(CAPTION, "mt-1 block")}>
+                      {metric.description}
+                    </span>
                   </th>
-                ))}
-              </tr>
-            </thead>
-            <tbody className="tabular-nums">
-              {metrics.map((metric) => {
-                const comparable = metric.values
-                  .map((value) => value.numeric)
-                  .filter((value): value is number => value !== null);
-                const leader =
-                  comparable.length < 2 || metric.higherIsBetter === undefined
-                    ? null
-                    : metric.higherIsBetter
-                      ? Math.max(...comparable)
-                      : Math.min(...comparable);
-                return (
-                  <tr
-                    key={metric.label}
-                    className="border-b border-border/40 last:border-0"
-                  >
-                    <td className="max-w-[20rem] py-3 pr-5 whitespace-normal">
-                      <span className="font-medium">{metric.label}</span>
-                      <span className="mt-0.5 block text-base text-muted-foreground sm:text-sm">
-                        {metric.description}
-                      </span>
-                    </td>
-                    {metric.values.map((value, index) => {
-                      const wins =
-                        leader !== null && value.numeric === leader;
-                      return (
-                        <td
-                          key={`${metric.label}-${repos[index]}`}
-                          className="min-w-36 py-3 pr-5 text-right align-top last:pr-0"
+                  {metric.values.map((value, index) => {
+                    const wins = leader !== null && value.numeric === leader;
+                    return (
+                      <td
+                        key={`${metric.label}-${repos[index]}`}
+                        className="px-4 py-3 text-right align-top"
+                      >
+                        <span
+                          className={cn(
+                            DATUM,
+                            wins
+                              ? "text-signal"
+                              : value.numeric === null
+                                ? "text-ink-3"
+                                : "text-ink",
+                          )}
                         >
-                          <span
-                            className={
-                              wins
-                                ? "font-semibold text-foreground"
-                                : value.numeric === null
-                                  ? "text-muted-foreground"
-                                  : "text-foreground"
-                            }
-                          >
-                            {wins && (
-                              <span
-                                className="mr-1 text-accent"
-                                aria-label="Best result in this row"
-                              >
-                                ◆
-                              </span>
-                            )}
-                            {value.display}
-                          </span>
-                          {value.note && (
-                            <span className="mt-0.5 block font-mono text-[0.6875rem] text-muted-foreground">
-                              {value.note}
+                          {wins && (
+                            <span className="sr-only">
+                              Best result in this row:{" "}
                             </span>
                           )}
-                        </td>
-                      );
-                    })}
-                  </tr>
-                );
-              })}
-            </tbody>
-          </table>
-        </div>
+                          {value.display}
+                        </span>
+                        {value.note && (
+                          <span className={cn(CAPTION, "mt-1 block")}>
+                            {value.note}
+                          </span>
+                        )}
+                      </td>
+                    );
+                  })}
+                </tr>
+              );
+            })}
+          </tbody>
+        </table>
       </div>
     </section>
   );

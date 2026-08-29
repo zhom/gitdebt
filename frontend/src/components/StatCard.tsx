@@ -1,22 +1,28 @@
 import { useEffect, useRef, useState } from "react";
-import { AnimatePresence, motion, useReducedMotion } from "motion/react";
 
 import { EmbedSnippet } from "@/components/EmbedSnippet";
-import { EYEBROW, PANEL } from "@/components/style-tokens";
+import { CAPTION, FIELD } from "@/components/style-tokens";
 import { MEDIA_RENDER_REVISION } from "@/lib/media";
-import {
-  DURATION,
-  EASE_OUT,
-  REDUCED_MOTION_DURATION,
-} from "@/lib/motion";
 import { useRenderedTheme } from "@/lib/rendered-theme";
-import { cn } from "@/lib/utils";
+
+/**
+ * A rendered chart, mounted on the sheet.
+ *
+ * The frame states what the drawing is (a FIELD label in the title bar) and
+ * offers the one action that belongs to it (take the embed). The image itself
+ * is the object, so nothing is drawn over it and nothing is drawn under it.
+ *
+ * The image is in the markup and painted at first paint. It is never faded in,
+ * never revealed by a timeline, and never gated on this island hydrating: the
+ * retry state exists only to answer a server that has not finished rendering
+ * the chart yet, and until that happens the picture on screen is the picture
+ * the server sent.
+ */
 
 type Props = {
   src: string;
   alt: string;
   caption?: string;
-  delay?: number;
   apiBase?: string;
   embedLink?: string;
   priority?: boolean;
@@ -43,15 +49,16 @@ export function StatCard({
   liveRepo,
 }: Props) {
   const [attempt, setAttempt] = useState(0);
-  // The image is useful content even before this island hydrates. Starting in
+  // The image is useful content before this island hydrates. Starting in
   // `ready` keeps the server-rendered media visible and avoids the cached-image
-  // race where `load` fires before React attaches its handler, leaving the
-  // gathering veil on screen forever.
+  // race where `load` fires before React attaches its handler, which would
+  // leave a veil on screen forever.
   const [phase, setPhase] = useState<Phase>("ready");
   const timerRef = useRef<ReturnType<typeof setTimeout> | null>(null);
-  const reduceMotion = useReducedMotion();
   const theme = useRenderedTheme();
 
+  // Every parameter, in this order, is part of the CDN key the byte-parity
+  // goldens assert. Nothing here may be reordered, renamed or dropped.
   const liveSrc = appendParam(
     appendParam(appendParam(src, "context", "app"), "animate", "1"),
     "render",
@@ -71,16 +78,18 @@ export function StatCard({
     const targetRepo = liveRepo;
     if (!targetRepo) return;
     // Edge-triggered: refresh when analysis *becomes* complete, not on every
-    // frame that reports it complete. Each bump appends a fresh `_=N`, which
-    // is a brand-new CDN key, so a repeating trigger re-rendered every card at
-    // the origin for the rest of the star backfill.
+    // frame that reports it complete. Each bump appends a fresh `_=N`, which is
+    // a brand-new CDN key, so a repeating trigger re-rendered every card at the
+    // origin for the rest of the star backfill.
     let wasComplete = false;
     function refresh(event: Event) {
       if (!targetRepo) return;
-      const detail = (event as CustomEvent<{
-        repo?: string;
-        analysis?: { phase?: string; complete?: boolean };
-      }>).detail;
+      const detail = (
+        event as CustomEvent<{
+          repo?: string;
+          analysis?: { phase?: string; complete?: boolean };
+        }>
+      ).detail;
       if (detail?.repo?.toLowerCase() !== targetRepo.toLowerCase()) return;
       const complete =
         detail.analysis?.phase === "complete" ||
@@ -117,13 +126,15 @@ export function StatCard({
     }, retryDelay(attempt));
   }
 
-  const chartPath = apiBase && src.startsWith(apiBase) ? src.slice(apiBase.length) : src;
+  const chartPath =
+    apiBase && src.startsWith(apiBase) ? src.slice(apiBase.length) : src;
+  const pending = phase !== "ready";
 
   return (
-    <figure className={cn(PANEL, "relative overflow-hidden")}>
+    <figure className="border border-rule-strong bg-paper">
       {caption && (
-        <figcaption className="flex items-center justify-between gap-3 border-b border-border/40 px-3.5 py-3">
-          <div className={EYEBROW}>{caption}</div>
+        <figcaption className="flex min-h-11 items-center justify-between gap-3 border-b border-rule px-4 py-2">
+          <span className={FIELD}>{caption}</span>
           {embedLink && apiBase && (
             <EmbedSnippet
               apiBase={apiBase}
@@ -137,70 +148,36 @@ export function StatCard({
         </figcaption>
       )}
       <div className="relative">
-        <motion.div
-          initial={false}
-          animate={{
-            opacity: phase === "ready" ? 1 : 0,
-            y: phase === "ready" || reduceMotion ? 0 : 4,
-          }}
-          transition={{
-            duration: reduceMotion
-              ? REDUCED_MOTION_DURATION
-              : DURATION.enter,
-            ease: EASE_OUT,
-          }}
-          aria-hidden={phase !== "ready"}
-        >
-          <img
-            key={attempt}
-            src={themedSrc}
-            alt={alt}
-            loading={priority ? "eager" : "lazy"}
-            fetchPriority={priority ? "high" : "auto"}
-            decoding="async"
-            onLoad={handleLoad}
-            onError={handleError}
-            className="block w-full"
-          />
-        </motion.div>
+        <img
+          key={attempt}
+          src={themedSrc}
+          alt={alt}
+          loading={priority ? "eager" : "lazy"}
+          fetchPriority={priority ? "high" : "auto"}
+          decoding="async"
+          onLoad={handleLoad}
+          onError={handleError}
+          className="block w-full"
+        />
 
-        <AnimatePresence initial={false}>
-          {phase !== "ready" && (
-            <motion.div
-              key={phase}
-              initial={{
-                opacity: 0,
-                y: reduceMotion ? 0 : 4,
-              }}
-              animate={{ opacity: 1, y: 0 }}
-              exit={{
-                opacity: 0,
-                transition: { duration: 0.1, ease: EASE_OUT },
-              }}
-              transition={{
-                duration: reduceMotion
-                  ? REDUCED_MOTION_DURATION
-                  : DURATION.enter,
-                ease: EASE_OUT,
-              }}
-              className="absolute inset-0 flex flex-col items-center justify-center gap-3 px-6 py-12"
-              aria-live="polite"
-            >
-              <div
-                className={cn(
-                  "h-32 w-full rounded-md border border-border/40 bg-background/40",
-                  phase === "gathering" ? "motion-safe:animate-pulse" : "",
-                )}
-                aria-hidden="true"
-              />
-              <p className="text-center font-mono text-[11px] text-muted-foreground">
+        {/* Only while the server is still drawing. It covers the frame rather
+            than dimming it, because a half-loaded image under a veil reads as a
+            rendering fault. The note is prose; the box behind it is the sheet's
+            registration marks, which say "a drawing belongs here". */}
+        {pending && (
+          <div
+            className="absolute inset-0 grid place-items-center bg-paper px-6 py-10"
+            aria-live="polite"
+          >
+            <div className="registered w-full max-w-sm px-5 py-8 text-center">
+              <p className={CAPTION}>
                 {phase === "gathering"
-                  ? "Analyzing repository history…"
-                  : "Analysis is still running. This chart appears when it finishes."}
+                  ? "Reading the repository's history. This drawing appears as soon as it is rendered."
+                  : "Analysis is still running. This drawing appears when it finishes."}
               </p>
-            </motion.div>
-          )}
-        </AnimatePresence>
+            </div>
+          </div>
+        )}
       </div>
     </figure>
   );

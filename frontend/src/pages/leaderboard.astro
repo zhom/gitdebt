@@ -1,26 +1,31 @@
 ---
-import "@/styles/globals.css";
-import { staticApiBase } from "@/lib/static-api-base";
-import BaseHead from "@/components/BaseHead.astro";
-import Seo from "@/components/Seo.astro";
-import SiteHeader from "@/components/SiteHeader.astro";
-import SiteFooter from "@/components/SiteFooter.astro";
+export const prerender = true;
+
+import Sheet from "@/layouts/Sheet.astro";
 import { MomentumBoard } from "@/components/MomentumBoard";
-import { weeklyPace } from "@/lib/momentum";
-import { formatCompact } from "@/lib/star-insights";
 import {
   BODY,
+  BREADCRUMB,
   CAPTION,
+  CRUMB,
+  DATUM,
+  FIELD,
+  FIGURE,
   HEADING,
   LEAD,
-  PANEL_PADDED,
+  MEASURE,
+  PANEL,
+  PROSE_LINK,
   ROW,
-  ROW_BADGE,
   SECTION_ACTION,
   SECTION_HEADER,
   TITLE,
+  VALUE,
 } from "@/components/style-tokens";
 import { CATEGORIES } from "@/data/categories";
+import { weeklyPace } from "@/lib/momentum";
+import { formatCompact } from "@/lib/star-insights";
+import { staticApiBase } from "@/lib/static-api-base";
 
 const apiBase = staticApiBase();
 const site = (Astro.site ?? new URL("https://gitdebt.com")).href.replace(/\/$/, "");
@@ -283,190 +288,197 @@ if (lead && leadPace && mostStarredShown.length > 0) {
 }
 ---
 
-<!doctype html>
-<html lang="en">
-  <head>
-    <BaseHead />
-    <Seo
-      title={title}
-      description={description}
-      canonicalPath={canonicalPath}
-      ogImage={ogImage}
-      noindex={noindex}
-      jsonLd={jsonLd}
-    />
-  </head>
-  <body>
-    <div class="isolate flex min-h-dvh flex-col">
-      <SiteHeader />
+<Sheet
+  title={title}
+  description={description}
+  canonicalPath={canonicalPath}
+  ogImage={ogImage}
+  noindex={noindex}
+  jsonLd={jsonLd}
+>
+  {/* ── The title block ──────────────────────────────────────────────────── */}
+  <section class="registered border-b border-rule bg-paper">
+    <div class="mx-auto w-full max-w-6xl px-6 pt-8 pb-14">
+      <nav aria-label="Breadcrumb" class={BREADCRUMB}>
+        <a href="/" class={CRUMB}>gitdebt</a>
+        <span class="px-1.5 text-rule-strong" aria-hidden="true">/</span>
+        <span class="text-ink">leaderboard</span>
+      </nav>
 
-      <main id="main-content" class="mx-auto w-full max-w-[88rem] flex-1 px-6 py-12">
-        <nav aria-label="Breadcrumb" class="font-mono text-[11px] text-muted-foreground">
-          <a
-            href="/"
-            class="rounded outline-none transition-colors duration-150 hover:text-foreground focus-visible:ring-2 focus-visible:ring-accent/30"
-            >gitdebt</a
-          >
-          <span class="px-1.5 text-border" aria-hidden="true">/</span>
-          <span class="text-foreground">leaderboard</span>
-        </nav>
+      <div
+        class="mt-6 grid gap-x-12 gap-y-8 lg:grid-cols-[minmax(0,1fr)_auto] lg:items-end"
+      >
+        <h1 class={TITLE}>Fastest-growing & most-starred repos</h1>
 
-        <header class="mt-8">
-          <h1 class={TITLE}>Fastest-growing & most-starred repos</h1>
-          {lead && leadPace ? (
-            <p class:list={["mt-3", LEAD, BODY]}>
-              <a
-                href={`/${lead.repo}`}
-                class="rounded text-foreground underline decoration-border underline-offset-4 outline-none transition-colors duration-150 hover:decoration-foreground/60 focus-visible:ring-2 focus-visible:ring-accent/30"
-                >{lead.repo}</a
-              >
-              {" "}sets the fastest weekly pace on the board, gaining{" "}
-              <span class="text-foreground tabular-nums">{leadPace.count.toLocaleString()}</span> stars in
-              {" "}{leadPace.window}. Rankings come from public star timestamps
-              {totalAnalyzed
-                ? ` across the ${totalAnalyzed.toLocaleString()} repos gitdebt has analyzed`
-                : " across every repo gitdebt has analyzed"} — a repo joins once its
-              star history is cached.
+        {/* The lead row's pace, dimensioned: a field, its figure in drafting
+            red, and the span the figure was measured over. It is the one
+            measured value in this title block, so it is the only red on it. */}
+        {lead && leadPace && (
+          <div class="lg:text-right">
+            <p class={FIELD}>Fastest weekly pace</p>
+            <p class:list={["mt-2.5", VALUE, FIGURE]}>
+              +{leadPace.count.toLocaleString()}
             </p>
-          ) : (
-            <p class:list={["mt-3", LEAD, BODY]}>
-              Repos ranked by star growth and total stars, computed from public star
-              timestamps across every repo gitdebt has analyzed.
+            <p class:list={["mt-1.5", CAPTION]}>
+              stars in {leadPace.window} · {lead.repo}
             </p>
-          )}
-          <p class:list={["mt-3 font-mono", CAPTION]}>
-            Data updated {updatedDate} · rankings refreshed daily from cached public history
-          </p>
-        </header>
-
-        {!loaded && (
-          <section class:list={["mt-12", PANEL_PADDED]} role="alert">
-            <p class="font-mono text-[10px] tracking-[0.25em] text-[var(--swatch-red)] uppercase">
-              Leaderboard unavailable
-            </p>
-            <p class:list={["mt-2", BODY]}>
-              We couldn't load the rankings. Try again in a moment.
-            </p>
-          </section>
-        )}
-
-        {loaded && !hasRows && (
-          <section class:list={["mt-12", PANEL_PADDED]}>
-            <p class={BODY}>
-              {mostStarredShown.length > 0
-                ? "Growth rankings are unavailable right now. The most-starred board below is current."
-                : "No repos have a complete star history yet. Look up any repo to start tracking it — it joins the leaderboard as soon as its history is cached."}
-            </p>
-          </section>
-        )}
-
-        {loaded && hasRows && lead && (
-          <section id="ranking" class="mt-10 scroll-mt-24">
-            <div class={SECTION_HEADER}>
-              <h2 class={HEADING}>Every tracked repo, ranked by weekly pace</h2>
-              <p class={CAPTION}>
-                <span style="color: rgb(40 210 110)">▲</span> climbing ·
-                <span style="color: rgb(255 150 50)">▼</span> cooling
-              </p>
-            </div>
-            <div class="mt-8">
-              <MomentumBoard client:visible rows={rankedRows} />
-            </div>
-            <p class:list={["mt-3", CAPTION]}>
-              Bar length is the weekly pace; the brighter tip is today's, on the same
-              per-day scale — a short bar with a bright tip is a repo spiking right now.
-              The arrow compares today against the same repo's 30-day pace. A dash means
-              the repo is outside that window's top ranks, not that it gained nothing.
-            </p>
-            <p class:list={["mt-2", CAPTION]}>
-              Rankings are computed from star timestamps whose source differs per
-              repository; each report names its own — see{" "}
-              <a
-                href={`/${lead.repo}`}
-                class="rounded underline decoration-border underline-offset-4 outline-none transition-colors duration-150 hover:text-foreground hover:decoration-foreground/60 focus-visible:ring-2 focus-visible:ring-accent/30"
-                >{lead.repo}</a
-              >.
-              {vsPair && vsLabel && (
-                <Fragment>
-                  {" "}Or compare the top two directly:{" "}
-                  <a
-                    href={`/vs/${vsPair[0]}/${vsPair[1]}`}
-                    class="rounded underline decoration-border underline-offset-4 outline-none transition-colors duration-150 hover:text-foreground hover:decoration-foreground/60 focus-visible:ring-2 focus-visible:ring-accent/30"
-                    >{vsLabel}</a
-                  >.
-                </Fragment>
-              )}
-            </p>
-          </section>
-        )}
-
-        {mostStarredShown.length > 0 && (
-          <section
-            id="most-starred"
-            class="mt-16 scroll-mt-24 border-t border-border/60 pt-12"
-          >
-            <div class={SECTION_HEADER}>
-              <h2 class={HEADING}>Most-starred repos</h2>
-              <p class={CAPTION}>top {mostStarredShown.length} by current total stars</p>
-            </div>
-            <ul role="list" class="mt-8 grid gap-x-10 sm:grid-cols-2">
-              {mostStarredShown.map((row, index) => (
-                <li>
-                  <a href={`/${row.repo}`} class={ROW}>
-                    <span class="w-6 shrink-0 text-right text-muted-foreground/60 tabular-nums">
-                      {index + 1}
-                    </span>
-                    <span class="min-w-0 flex-1 truncate">{row.repo}</span>
-                    <span class={ROW_BADGE}>
-                      <span class="sr-only">stars: </span>{formatCompact(row.stars)}
-                    </span>
-                  </a>
-                </li>
-              ))}
-            </ul>
-          </section>
-        )}
-
-        <section class="mt-16 scroll-mt-24 border-t border-border/60 pt-12">
-          <div class={SECTION_HEADER}>
-            <h2 class={HEADING}>Browse by category</h2>
-            <a href="/compare#categories" class={SECTION_ACTION}>
-              all categories
-              <span
-                aria-hidden="true"
-                class="transition-transform duration-150 group-hover:translate-x-0.5 motion-reduce:transition-none"
-                >→</span
-              >
-            </a>
           </div>
-          <ul role="list" class="mt-8 grid gap-x-10 sm:grid-cols-2">
-            {featuredCategories.map((c) => (
-              <li>
-                <a href={`/compare/${c.slug}`} class={ROW}>
-                  <span class="min-w-0 flex-1 py-2">
-                    <span class="block truncate">{c.name}</span>
-                    <span class="mt-0.5 block truncate text-[11px] text-muted-foreground/80 group-hover:text-muted-foreground">
-                      {c.short}
-                    </span>
-                  </span>
-                  <span class={ROW_BADGE}>{c.repos.length}</span>
-                </a>
-              </li>
-            ))}
-          </ul>
-          <p class:list={["mt-6", BODY]}>
-            Or{" "}
-            <a
-              href="/compare"
-              class="rounded underline decoration-border underline-offset-4 outline-none transition-colors duration-150 hover:text-foreground hover:decoration-foreground/60 focus-visible:ring-2 focus-visible:ring-accent/30"
-            >
-              build your own star-history comparison
-            </a>.
-          </p>
-        </section>
-      </main>
+        )}
+      </div>
 
-      <SiteFooter />
+      {lead && leadPace ? (
+        <p class:list={["mt-6", LEAD, MEASURE]}>
+          <a href={`/${lead.repo}`} class={PROSE_LINK}>{lead.repo}</a> sets the
+          fastest weekly pace on the board. Rankings come from public star
+          timestamps{totalAnalyzed
+            ? ` across the ${totalAnalyzed.toLocaleString()} repos gitdebt has analyzed`
+            : " across every repo gitdebt has analyzed"} — a repo joins once its
+          star history is cached.
+        </p>
+      ) : (
+        <p class:list={["mt-6", LEAD, MEASURE]}>
+          Repos ranked by star growth and total stars, computed from public star
+          timestamps across every repo gitdebt has analyzed.
+        </p>
+      )}
+
+      <p class:list={["mt-4", CAPTION]}>
+        Data updated {updatedDate} · rankings refreshed daily from cached public
+        history
+      </p>
     </div>
-  </body>
-</html>
+  </section>
+
+  {/* ── The board ────────────────────────────────────────────────────────── */}
+  <section id="ranking" class="scroll-mt-24 border-b border-rule bg-table">
+    <div class="mx-auto w-full max-w-6xl px-6 py-16">
+      {!loaded && (
+        <div class:list={["max-w-2xl", PANEL]} role="alert">
+          <p class={FIELD}>Leaderboard unavailable</p>
+          <p class:list={["mt-2.5", BODY, MEASURE]}>
+            We couldn't load the rankings. Try again in a moment.
+          </p>
+        </div>
+      )}
+
+      {loaded && !hasRows && (
+        <div class:list={["max-w-2xl", PANEL]}>
+          <p class={FIELD}>No ranking yet</p>
+          <p class:list={["mt-2.5", BODY, MEASURE]}>
+            {mostStarredShown.length > 0
+              ? "Growth rankings are unavailable right now. The most-starred board below is current."
+              : "No repos have a complete star history yet. Look up any repo to start tracking it — it joins the leaderboard as soon as its history is cached."}
+          </p>
+        </div>
+      )}
+
+      {loaded && hasRows && lead && (
+        <Fragment>
+          <div class={SECTION_HEADER}>
+            <h2 class={HEADING}>Every tracked repo, ranked by weekly pace</h2>
+            <p class={CAPTION}>{rankedRows.length} repositories</p>
+          </div>
+          <div class="mt-8">
+            <MomentumBoard client:visible rows={rankedRows} />
+          </div>
+          <p class:list={["mt-5", CAPTION, MEASURE]}>
+            Bar length is the weekly pace; the brighter tip is today's, on the
+            same per-day scale — a short bar with a bright tip is a repo spiking
+            right now. The direction mark compares today against the same repo's
+            30-day pace: an arrowhead up is climbing, down is cooling, a rule is
+            level. A dash means the repo is outside that window's top ranks, not
+            that it gained nothing.
+          </p>
+          <p class:list={["mt-3", CAPTION, MEASURE]}>
+            Rankings are computed from star timestamps whose source differs per
+            repository; each report names its own — see <a
+              href={`/${lead.repo}`}
+              class={PROSE_LINK}>{lead.repo}</a
+            >.{vsPair && vsLabel && (
+              <Fragment>
+                {" "}Or compare the top two directly: <a
+                  href={`/vs/${vsPair[0]}/${vsPair[1]}`}
+                  class={PROSE_LINK}>{vsLabel}</a
+                >.
+              </Fragment>
+            )}
+          </p>
+        </Fragment>
+      )}
+    </div>
+  </section>
+
+  {/* ── Most starred ─────────────────────────────────────────────────────── */}
+  {mostStarredShown.length > 0 && (
+    <section id="most-starred" class="scroll-mt-24 border-b border-rule bg-paper">
+      <div class="mx-auto w-full max-w-6xl px-6 py-16">
+        <div class={SECTION_HEADER}>
+          <h2 class={HEADING}>Most-starred repos</h2>
+          <p class={CAPTION}>
+            top {mostStarredShown.length} by current total stars
+          </p>
+        </div>
+        <ul
+          role="list"
+          class="mt-8 grid gap-px border border-rule-strong bg-rule sm:grid-cols-2"
+        >
+          {mostStarredShown.map((row, index) => (
+            <li class="bg-paper">
+              <a href={`/${row.repo}`} class:list={[ROW, "justify-between"]}>
+                <span class:list={[DATUM, "w-6 shrink-0 text-right text-ink-3"]}>
+                  {index + 1}
+                </span>
+                <span class="min-w-0 flex-1 truncate">{row.repo}</span>
+                <span class:list={[DATUM, "shrink-0 text-ink-3"]}>
+                  <span class="sr-only">stars: </span>
+                  {formatCompact(row.stars)}
+                </span>
+              </a>
+            </li>
+          ))}
+        </ul>
+      </div>
+    </section>
+  )}
+
+  {/* ── Browse by category ───────────────────────────────────────────────── */}
+  <section class="bg-table">
+    <div class="mx-auto w-full max-w-6xl px-6 py-16">
+      <div class={SECTION_HEADER}>
+        <h2 class={HEADING}>Browse by category</h2>
+        <a href="/compare#categories" class={SECTION_ACTION}>all categories</a>
+      </div>
+      <ul
+        role="list"
+        class="mt-8 grid gap-px border border-rule-strong bg-rule sm:grid-cols-2"
+      >
+        {
+          featuredCategories.map((category) => (
+            <li class="bg-paper">
+              <a
+                href={`/compare/${category.slug}`}
+                data-warm-repos={category.repos.join(",")}
+                class:list={[ROW, "min-h-16 justify-between py-2.5"]}
+              >
+                <span class="min-w-0 flex-1">
+                  <span class="block truncate">{category.name}</span>
+                  <span class:list={["mt-0.5 block truncate", CAPTION]}>
+                    {category.short}
+                  </span>
+                </span>
+                <span class:list={[DATUM, "shrink-0 text-ink-3"]}>
+                  {category.repos.length}
+                </span>
+              </a>
+            </li>
+          ))
+        }
+      </ul>
+      <p class:list={["mt-6", BODY, MEASURE]}>
+        Or <a href="/compare" class={PROSE_LINK}
+          >build your own star-history comparison</a
+        >.
+      </p>
+    </div>
+  </section>
+</Sheet>

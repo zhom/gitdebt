@@ -870,11 +870,15 @@
   --gd-fg: var(--fgColor-default, var(--color-fg-default, #1f2328));
   --gd-muted: var(--fgColor-muted, var(--color-fg-muted, #59636e));
   --gd-border: var(--borderColor-default, var(--color-border-default, #d1d9e0));
-  --gd-accent: #5b2cff;
+  /*
+   * Drafting red — gitdebt's one signal colour, and the only colour this panel
+   * introduces to a GitHub page. Everything else is inherited from GitHub's own
+   * variables above, which is what keeps an injected panel from reading as an
+   * advert. The purple that used to sit here belonged to no system.
+   */
+  --gd-accent: #cc291f;
   --gd-gold: var(--fgColor-attention, var(--color-attention-fg, #9a6700));
   --gd-mono: ui-monospace, SFMono-Regular, "SF Mono", Menlo, Consolas, "Liberation Mono", monospace;
-  --gd-field: url("data:image/svg+xml,%3Csvg%20xmlns='http://www.w3.org/2000/svg'%20width='8'%20height='8'%3E%3Cpath%20fill='%235b2cff'%20fill-opacity='.5'%20d='M0%200h2v2H0zM4%200h2v2H4zM2%202h2v2H2zM0%204h2v2H0zM4%204h2v2H4zM6%206h2v2H6z'/%3E%3Cpath%20fill='%235b2cff'%20fill-opacity='.2'%20d='M2%200h2v2H2zM6%200h2v2H6zM0%202h2v2H0zM4%202h2v2H4zM6%202h2v2H6zM2%204h2v2H2zM6%204h2v2H6zM0%206h2v2H0zM2%206h2v2H2zM4%206h2v2H4z'/%3E%3C/svg%3E");
-  --gd-field-alpha: 0.22;
 
   position: relative;
   isolation: isolate;
@@ -882,27 +886,23 @@
   color: var(--gd-fg);
   background: var(--gd-bg);
   border: 1px solid var(--gd-border);
+  /*
+   * The outer card keeps GitHub's own 6px radius so it seats into GitHub's
+   * layout rather than sitting on top of it. Everything INSIDE it is square,
+   * which is gitdebt's shape language: the container belongs to GitHub, the
+   * drawing belongs to gitdebt.
+   */
   border-radius: 6px;
   overflow: hidden;
 }
 .gd-card[data-gd-theme="dark"] {
-  --gd-accent: #9b7bff;
-  --gd-field: url("data:image/svg+xml,%3Csvg%20xmlns='http://www.w3.org/2000/svg'%20width='8'%20height='8'%3E%3Cpath%20fill='%239b7bff'%20fill-opacity='.5'%20d='M0%200h2v2H0zM4%200h2v2H4zM2%202h2v2H2zM0%204h2v2H0zM4%204h2v2H4zM6%206h2v2H6z'/%3E%3Cpath%20fill='%239b7bff'%20fill-opacity='.2'%20d='M2%200h2v2H2zM6%200h2v2H6zM0%202h2v2H0zM4%202h2v2H4zM6%202h2v2H6zM2%204h2v2H2zM6%204h2v2H6zM0%206h2v2H0zM2%206h2v2H2zM4%206h2v2H4z'/%3E%3C/svg%3E");
-  --gd-field-alpha: 0.3;
+  --gd-accent: #f0674e;
 }
 
 .gd-header {
   position: relative;
   display: flex; align-items: center; justify-content: space-between; gap: 8px;
   padding: 8px 16px; border-bottom: 1px solid var(--gd-border);
-}
-.gd-header::before {
-  content: ""; position: absolute; inset: 0; z-index: -1;
-  background-image: var(--gd-field);
-  opacity: var(--gd-field-alpha);
-  -webkit-mask-image: linear-gradient(to left, #000, transparent 70%);
-  mask-image: linear-gradient(to left, #000, transparent 70%);
-  pointer-events: none;
 }
 .gd-title {
   display: flex; align-items: center; gap: 8px;
@@ -931,33 +931,50 @@
 
 .gd-body { padding: 12px 16px 14px; }
 
+/* A status line is a sentence, so it is set as prose rather than in the
+   tracked-out mono that used to wear every small string here. */
 .gd-status {
   display: flex; align-items: center; gap: 8px;
-  margin: 0 0 10px; font: 11px/1.6 var(--gd-mono);
-  letter-spacing: 0.02em; color: var(--gd-muted);
+  margin: 0 0 10px; font-size: 12px; line-height: 1.6;
+  color: var(--gd-muted);
 }
 .gd-status[hidden] { display: none; }
+
+/*
+ * Working indicator: a dimension line being drawn, over and over.
+ *
+ * What stood here was a dot with an expanding box-shadow ring — the pulsing
+ * "live" glow. This measures instead: a 1px rule that extends across its full
+ * track from a fixed origin, with square caps that never change shape, then
+ * starts again. It fills the whole track every cycle, which is what keeps a
+ * repeating fill from reading as a stalled one.
+ */
 .gd-status-loading::before {
-  content: ""; width: 9px; height: 9px; border-radius: 50%;
-  background: var(--gd-accent); flex: 0 0 auto;
-  animation: gd-pulse 1.4s ease-out infinite;
+  content: ""; width: 16px; height: 1px; flex: 0 0 auto;
+  background: var(--gd-accent);
+  transform-origin: left center;
+  animation: gd-measure 1.4s cubic-bezier(0.65, 0, 0.35, 1) infinite;
 }
-@keyframes gd-pulse {
-  0% { box-shadow: 0 0 0 0 color-mix(in oklab, var(--gd-accent) 50%, transparent); }
-  70% { box-shadow: 0 0 0 7px transparent; } 100% { box-shadow: 0 0 0 0 transparent; }
+@keyframes gd-measure {
+  0% { transform: scaleX(0); }
+  55% { transform: scaleX(1); }
+  100% { transform: scaleX(1); opacity: 0; }
 }
-@media (prefers-reduced-motion: reduce) { .gd-status-loading::before { animation: none; } }
+@media (prefers-reduced-motion: reduce) {
+  .gd-status-loading::before { animation: none; transform: scaleX(1); }
+}
 .gd-status-error { color: var(--fgColor-danger, var(--color-danger-fg, #cf222e)); }
 
 .gd-chart-wrap { width: 100%; }
+/* Square: everything inside the card is gitdebt's shape, not GitHub's. */
 .gd-chart {
-  display: block; width: 100%; height: auto; border-radius: 6px;
+  display: block; width: 100%; height: auto;
   border: 1px solid var(--gd-border); background: var(--gd-bg);
 }
 .gd-chart-error {
   padding: 16px 12px; text-align: center;
-  font: 11px/1.6 var(--gd-mono); letter-spacing: 0.02em; color: var(--gd-muted);
-  border: 1px dashed var(--gd-border); border-radius: 6px;
+  font-size: 12px; line-height: 1.6; color: var(--gd-muted);
+  border: 1px solid var(--gd-border);
 }
 
 .gd-toggle {
@@ -967,13 +984,12 @@
   font: 600 10px/1.6 var(--gd-mono);
   letter-spacing: 0.08em; text-transform: uppercase;
   color: var(--gd-fg);
-  background: color-mix(in srgb, var(--gd-accent) 4%, var(--gd-subtle));
-  border: 1px solid var(--gd-border); border-radius: 6px; cursor: pointer;
+  /* A plain surface. The 4% accent tint was an inner glow in a quieter key. */
+  background: var(--gd-subtle);
+  border: 1px solid var(--gd-border); cursor: pointer;
 }
 .gd-toggle[hidden] { display: none; }
-.gd-toggle:hover {
-  border-color: color-mix(in srgb, var(--gd-accent) 55%, var(--gd-border));
-}
+.gd-toggle:hover { border-color: var(--gd-accent); }
 .gd-toggle-caret {
   display: inline-block; color: var(--gd-muted); font-size: 10px;
   transform: rotate(0deg);
@@ -1003,7 +1019,7 @@
     transform 140ms cubic-bezier(0.23, 1, 0.32, 1);
 }
 .gd-stat {
-  margin: 0; border: 1px solid var(--gd-border); border-radius: 6px;
+  margin: 0; border: 1px solid var(--gd-border);
   overflow: hidden; background: var(--gd-bg);
 }
 .gd-stat-img { display: block; width: 100%; height: auto; }

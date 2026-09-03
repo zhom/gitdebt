@@ -311,8 +311,17 @@ export function layoutFileCouplings(
   const nodes: CouplingNode[] = [];
   for (const cluster of clusters) {
     const index = clusterIndex.get(cluster.id) ?? 0;
-    const clusterAngle =
-      -Math.PI / 2 + (index / Math.max(1, clusters.length)) * Math.PI * 2;
+    // The ring starts on the x axis, not at the top of the circle.
+    //
+    // Two clusters is the ordinary case, and from -PI/2 it put both centres on
+    // x = 0.5, one above the other: the assembly came out roughly 1:3 tall and
+    // was then fitted into a 2:1 sheet, so it used about a fifth of the width,
+    // left the rest of the sheet empty, and packed the nodes close enough that
+    // the measured value and both filenames landed on top of each other. From 0
+    // the same two clusters sit left and right, which is the axis the sheet
+    // actually has to spend. The y radius stays squashed by 0.68, so every
+    // other count still spreads wider than it is tall.
+    const clusterAngle = (index / Math.max(1, clusters.length)) * Math.PI * 2;
     const clusterRadius = clusters.length === 1 ? 0 : 0.25;
     const centerX = 0.5 + Math.cos(clusterAngle) * clusterRadius;
     const centerY = 0.5 + Math.sin(clusterAngle) * clusterRadius * 0.68;
@@ -322,8 +331,16 @@ export function layoutFileCouplings(
       const angle =
         angleSeed * Math.PI * 2 +
         (localIndex / Math.max(1, paths.length)) * Math.PI * 2;
+      // The orbit grows with the cluster's population. A fixed 0.075..0.145
+      // ring is roomy for three files and packed solid for eleven, which is
+      // what a monorepo's busiest directory actually returns: every node in it
+      // landed within a few units of its neighbours, so the assembly read as
+      // one blot and no two labels could be placed apart. The growth is capped
+      // so a big cluster spreads without swallowing the sheet, and the
+      // 0.08..0.92 clamp below still bounds it.
+      const spread = Math.min(1.9, 0.7 + paths.length * 0.12);
       const orbit =
-        paths.length === 1 ? 0 : 0.075 + 0.035 * (localIndex % 3);
+        paths.length === 1 ? 0 : (0.075 + 0.035 * (localIndex % 3)) * spread;
       const totals = nodeTotals.get(path)!;
       nodes.push({
         id: path,

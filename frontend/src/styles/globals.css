@@ -376,6 +376,17 @@
   }
 }
 
+/* The measurement arrives on the datum the trace has just reached. It is the
+   notation that fades up, never the value: see the `measures` utility. */
+@keyframes measure-in {
+  from {
+    opacity: 0;
+  }
+  to {
+    opacity: 1;
+  }
+}
+
 @keyframes land {
   0% {
     transform: translateX(-2px);
@@ -396,15 +407,57 @@
    is simply drawn. */
 @utility inks-in {
   stroke-dasharray: var(--draw-length, 1000);
+
+  /* The dash pattern MUST be measured in the same space `--draw-length` was
+     computed in, which is user units.
+
+     `vector-effect: non-scaling-stroke` moves the whole stroke geometry — the
+     dash pattern with it — into the host coordinate space. On any sheet whose
+     viewBox is not 1:1 with its rendered width the pattern is then measured
+     against a path that is `scaleX` times longer than the number handed to it,
+     so `dasharray: L` stops covering the path and starts REPEATING along it:
+     the trace arrives permanently chopped into lit and unlit fragments. That
+     shipped on the two theme specimens, whose fixed 240-unit viewBox is
+     stretched to about 2.16x, and it half-inked every trace during the window
+     before a measured sheet has measured itself.
+
+     A CSS declaration beats an SVG presentation attribute, so the utility that
+     owns the dash also settles the vector effect for every path that wears it,
+     rather than leaving it to each of the seven call sites to remember.
+     `pathLength` is NOT an alternative — it does not renormalise a host-space
+     dash, verified in the browser. */
+  vector-effect: none;
+
   animation: draw-stroke var(--duration-draw) var(--ease-draw) both;
   animation-delay: var(--draw-delay, 0ms);
 }
 
-/* A dimension line extends from its origin toward its terminator. Transform
-   origin is the datum it starts from, so it grows out of a real point. */
+/* A dimension line extends from its origin toward its terminator.
+   `transform-box: fill-box` is what makes that origin the LINE's own start:
+   `transform-origin` on an SVG element resolves against the view-box by
+   default, so `left center` was the sheet's left edge, and the line swept in
+   from x=0 instead of growing out of the datum it measures from. */
 @utility extends {
+  transform-box: fill-box;
   transform-origin: left center;
   animation: extend-x var(--duration-measure) var(--ease-draw) both;
+  animation-delay: var(--draw-delay, 0ms);
+}
+
+/* A measurement is taken AFTER the object is drawn.
+
+   This carries the leader, the terminator and the drop line of a measured
+   value — notation, and only notation. The figure and the date it points at
+   are never inside it: a measured value is content and content is painted at
+   first paint. Before this fix the whole flag was static, so for the length of
+   the draw a terminator sat at the far right pointing at a datum the trace had
+   not reached — a line terminating on nothing, which is the one thing this
+   drawing may never show.
+
+   `opacity: 0` lives only in the keyframe, never in the base rule, so a path
+   that never animates is simply visible. */
+@utility measures {
+  animation: measure-in var(--duration-measure) var(--ease-draw) both;
   animation-delay: var(--draw-delay, 0ms);
 }
 
@@ -424,7 +477,8 @@
      resolves to its finished state instantly. */
   .inks-in,
   .extends,
-  .lands {
+  .lands,
+  .measures {
     animation-duration: 1ms;
     animation-delay: 0ms;
   }

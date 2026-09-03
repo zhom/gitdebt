@@ -44,6 +44,30 @@ const compact = (value: number) =>
     maximumFractionDigits: 1,
   }).format(value);
 
+type Box = { x: number; y: number; w: number; h: number };
+
+/**
+ * The area two boxes share, in square user units. A hairline of contact counts
+ * as zero, so two labels may sit shoulder to shoulder without one of them being
+ * pushed away for nothing.
+ */
+function overlapArea(a: Box, b: Box): number {
+  const x = Math.min(a.x + a.w, b.x + b.w) - Math.max(a.x, b.x);
+  const y = Math.min(a.y + a.h, b.y + b.h) - Math.max(a.y, b.y);
+  return x > 1 && y > 1 ? x * y : 0;
+}
+
+/**
+ * Advance width per character as a fraction of the font size, measured in the
+ * browser for the two voices this sheet letters in. These only have to be close
+ * enough to keep two labels off each other, which is why an estimate is honest
+ * here: `getComputedTextLength` would need the text in the document first, and
+ * a placement that only settles after a measuring pass is a placement that is
+ * wrong at first paint.
+ */
+const DRAFT_ADVANCE = 0.47;
+const MONO_ADVANCE = 0.6;
+
 function tail(path: string): string {
   return path.split("/").at(-1) || path;
 }
@@ -176,6 +200,74 @@ export function FileCouplingNetwork({
       // dimension is terminated when the value will not fit between them.
       heads: [head(from, ux, uy), head(to, -ux, -uy)],
     };
+  })();
+
+  /**
+   * Where the two named files are lettered.
+   *
+   * A filename cannot be placed relative to the measured value by assumption,
+   * because the pair being measured sits at whatever angle the assembly gives
+   * it: past about 45° of vertical the dimension is carried BESIDE its line
+   * instead of above it, and a name set under its own file then lands in
+   * exactly that band. That shipped — "167 CO-CHANGES" and "27 FIX-LABELLED"
+   * were drawn straight through "ReactFiberWorkLoop…".
+   *
+   * So the value's box is claimed first, and each name takes the first slot —
+   * under its file, then over it, then pushed clear — that runs into neither
+   * the value nor the name already placed.
+   */
+  const valueBox: Box | null = dimension
+    ? (() => {
+        const top = `${compact(active.cochanges)} CO-CHANGES`;
+        const bottom = `${compact(active.fixCommits)} FIX-LABELLED`;
+        const w = Math.max(
+          top.length * 17 * DRAFT_ADVANCE,
+          bottom.length * 11 * DRAFT_ADVANCE,
+        );
+        const { x, y, anchor } = dimension.label;
+        const left = anchor === "middle" ? x - w / 2 : anchor === "end" ? x - w : x;
+        // The first line's baseline is `y`; the second sits 15 under it.
+        return { x: left, y: y - 13, w, h: 32 };
+      })()
+    : null;
+
+  const namePlacements = (() => {
+    const claimed: Box[] = valueBox ? [valueBox] : [];
+    const out: { id: string; label: string; x: number; y: number }[] = [];
+    for (const id of [active.source, active.target]) {
+      const point = placed.get(id);
+      const node = layout.nodes.find((item) => item.id === id);
+      if (!point || !node) continue;
+      // Clear of both sheet edges by the name's own half width, so a long name
+      // at an extreme node cannot run off the drawing.
+      const w = node.label.length * 11.5 * MONO_ADVANCE;
+      const x = Math.min(VIEW_W - 8 - w / 2, Math.max(8 + w / 2, point.x));
+      const under = point.y + point.size / 2 + 17;
+      const over = point.y - point.size / 2 - 9;
+      const box = (y: number): Box => ({ x: x - w / 2, y: y - 12, w, h: 16 });
+      // Under the file first, then over it, then progressively further out on
+      // alternating sides, so a name never travels further from its own file
+      // than it has to.
+      const slots = [under, over];
+      for (let step = 1; step <= 3; step += 1) {
+        slots.push(under + step * 17, over - step * 17);
+      }
+      const inSheet = slots.filter((y) => y >= 14 && y <= VIEW_H - 5);
+      const overlap = (y: number) =>
+        claimed.reduce((total, other) => total + overlapArea(box(y), other), 0);
+      // The first free slot, or failing that the least bad one — never a blind
+      // fall back to the first candidate, which is how two files with the same
+      // truncated name ended up lettered on top of each other.
+      const slot =
+        inSheet.find((y) => overlap(y) === 0) ??
+        inSheet.reduce(
+          (best, y) => (overlap(y) < overlap(best) ? y : best),
+          inSheet[0] ?? under,
+        );
+      claimed.push(box(slot));
+      out.push({ id, label: node.label, x, y: slot });
+    }
+    return out;
   })();
 
   return (
@@ -316,39 +408,28 @@ export function FileCouplingNetwork({
           })}
 
           {/* Only the two files being measured are named. Naming all fourteen
-              at once is how a drawing turns into a word cloud. */}
-          {[active.source, active.target].map((id) => {
-            const point = placed.get(id);
-            if (!point) return null;
-            const node = layout.nodes.find((item) => item.id === id);
-            if (!node) return null;
-            // Clear of both sheet edges by half a full-length filename, so a
-            // long name at an extreme node cannot run off the drawing.
-            const x = Math.min(VIEW_W - 80, Math.max(80, point.x));
-            // Under the file wherever there is room, because the dimension is
-            // carried above or beside its line and never below it.
-            const below = point.y < VIEW_H - 26;
-            return (
-              <text
-                key={`${id}-label`}
-                x={x}
-                y={below ? point.y + point.size / 2 + 17 : point.y - point.size / 2 - 9}
-                textAnchor="middle"
-                className="font-mono"
-                fontSize="11.5"
-                fill="var(--ink)"
+              at once is how a drawing turns into a word cloud. The slots come
+              from `namePlacements`, which keeps them off the measured value. */}
+          {namePlacements.map(({ id, label, x, y }) => (
+            <text
+              key={`${id}-label`}
+              x={x}
+              y={y}
+              textAnchor="middle"
+              className="font-mono"
+              fontSize="11.5"
+              fill="var(--ink)"
+            >
+              <tspan
+                stroke="var(--paper)"
+                strokeWidth="5"
+                paintOrder="stroke"
+                strokeLinejoin="round"
               >
-                <tspan
-                  stroke="var(--paper)"
-                  strokeWidth="5"
-                  paintOrder="stroke"
-                  strokeLinejoin="round"
-                >
-                  {node.label}
-                </tspan>
-              </text>
-            );
-          })}
+                {label}
+              </tspan>
+            </text>
+          ))}
 
           {/* Hit targets, over the drawing. An edge is a line the pointer can
               land on and a file is a square it can land on; neither needs a

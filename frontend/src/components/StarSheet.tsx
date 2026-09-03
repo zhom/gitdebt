@@ -124,17 +124,32 @@ export function StarSheet({
   const frameRef = useRef<HTMLElement>(null);
   const viewW = usePlotWidth(frameRef, FALLBACK_W);
   const narrow = viewW < NARROW;
-  /** The value column: enough for the figure and the date beneath it. */
-  const padR = narrow ? 74 : 96;
+  /**
+   * The value column: enough for the figure and, beneath it, the LONGEST date
+   * the sheet can state — not the one it happens to be stating today.
+   *
+   * Sizing this to the current string is how it broke. At 96 the column held
+   * 82px and "AUGUST 28, 2026" measures 81.8px, so the drawing cleared its own
+   * right edge by two tenths of a pixel and looked correct for a week. The
+   * moment the coverage date rolled into September the stamp grew to 96.7px and
+   * "SEPTEMBER 3, 2026" was sliced by the SVG's own viewBox, because an SVG
+   * root clips at its bounds.
+   *
+   * So the budget is the widest case with a real margin, measured in the
+   * browser rather than estimated: "SEPTEMBER 30, 2026" is 104px at 10.5px with
+   * 0.08em tracking; the stamp starts 14px past the dimension's end; text is
+   * never set against the rim, so 8px is kept clear. 14 + 104 + 8 = 126.
+   */
+  const padR = narrow ? 74 : 126;
   const valueSize = narrow ? 15 : 19;
   const dateSize = narrow ? 9 : 10.5;
   /**
    * A narrow sheet states the month, a wide one states the day.
    *
-   * "AUGUST 28, 2026" needs about 72px at 9px and the value column has 60,
-   * so on a phone the full date ran off the right edge of the drawing. A
-   * drawing that cannot letter a value inside its own sheet states a coarser
-   * one rather than a clipped one.
+   * A phone cannot spare 126px for a value column, and the abbreviated stamp
+   * ("SEP 2026", 38.6px) sits inside the 60px a 74px column leaves. A drawing
+   * that cannot letter a value inside its own sheet states a coarser one rather
+   * than a clipped one.
    */
   const stampDate = (iso: string) =>
     ((narrow ? formatMonthYear(iso) : formatFullDate(iso)) ?? "").toUpperCase();
@@ -298,34 +313,50 @@ export function StarSheet({
             baseline and a second runs out to the value at the right margin.
             Both terminate on real points. ───────────────────────────────── */}
         <g>
-          <line
-            x1={active.x}
-            y1={active.y}
-            x2={active.x}
-            y2={baselineY}
-            stroke="var(--signal)"
-            strokeWidth="1"
-            strokeDasharray="3 3"
-            strokeLinecap="round"
-            opacity={isProbing ? 1 : 0.55}
-          />
-          <line
-            x1={active.x}
-            y1={active.y}
-            x2={viewW - padR + 10}
-            y2={active.y}
-            stroke="var(--signal)"
-            strokeWidth="1"
-            strokeLinecap="round"
-            opacity={isProbing ? 1 : 0.55}
-          />
-          {/* The terminator: a filled arrowhead landing on the datum. */}
-          <path
-            d={`M${active.x} ${active.y} l-5 -3.2 l0 6.4 z`}
-            fill="var(--signal)"
-          />
-          <circle cx={active.x} cy={active.y} r="2.5" fill="var(--signal)" />
+          {/* The notation, and only the notation.
+              It waits for the trace, because until the trace arrives at this
+              datum there is nothing here to measure. Previously all four of
+              these were painted at t=0 while the trace was still travelling,
+              so for the length of the draw an arrowhead sat at the far right
+              of the sheet pointing at a point the object had not reached —
+              the one thing a dimensioned drawing may never show. The delay is
+              the draw's own duration, read from the same token, so the two
+              cannot drift apart. */}
+          <g
+            className="measures"
+            style={{ ["--draw-delay" as string]: "var(--duration-draw)" }}
+          >
+            <line
+              x1={active.x}
+              y1={active.y}
+              x2={active.x}
+              y2={baselineY}
+              stroke="var(--signal)"
+              strokeWidth="1"
+              strokeDasharray="3 3"
+              strokeLinecap="round"
+              opacity={isProbing ? 1 : 0.55}
+            />
+            <line
+              x1={active.x}
+              y1={active.y}
+              x2={viewW - padR + 10}
+              y2={active.y}
+              stroke="var(--signal)"
+              strokeWidth="1"
+              strokeLinecap="round"
+              opacity={isProbing ? 1 : 0.55}
+            />
+            {/* The terminator: a filled arrowhead landing on the datum. */}
+            <path
+              d={`M${active.x} ${active.y} l-5 -3.2 l0 6.4 z`}
+              fill="var(--signal)"
+            />
+            <circle cx={active.x} cy={active.y} r="2.5" fill="var(--signal)" />
+          </g>
 
+          {/* The value is content, so it is lettered at first paint and is
+              never inside the group above. */}
           <text
             x={viewW - padR + 14}
             y={active.y}

@@ -17,7 +17,7 @@
     "test": "node --test test/*.test.mjs"
   },
   "devDependencies": {
-    "web-ext": "^10.5.0"
+    "web-ext": "^10.6.0"
   },
   "overrides": {
     "adm-zip": "0.6.0",

@@ -2,12 +2,11 @@
 //!
 //! The browser extension fires `/api/ext/ping` (and the website fires
 //! `/analyze`) on every `github.com/owner/repo` a user opens. Those read
-//! paths must be non-blocking and budget-safe, so the expensive part —
-//! paginating a repo's full stargazer timeline against GitHub's API — is
-//! moved off the request and onto this queue. The background worker
-//! (`worker.rs`) drains it under the shared `RateLimitTracker`, so the
-//! queue *physically cannot* exceed the GitHub budget no matter how many
-//! repos are enqueued.
+//! paths must be non-blocking and budget-safe, so the GitHub part — reading a
+//! repository's whole star history — is moved off the request and onto this
+//! queue. The background worker (`worker.rs`) drains it under the shared
+//! `RateLimitTracker`, so the queue *physically cannot* exceed the GitHub
+//! budget no matter how many repos are enqueued.
 //!
 //! Backed by the `star_fetch_queue` table. Mirrors the proven shape of
 //! `repo_analysis` (Postgres-backed, `FOR UPDATE SKIP LOCKED` claim) but
@@ -79,18 +78,25 @@ pub struct RepoQueueStatus {
 ///
 /// `priority` is the caller's popularity snapshot (typically the repo's
 /// `view_count`); higher drains first.
+///
+/// A repository whose GitHub star history was read within
+/// [`crate::analyzer::STARGAZER_REFRESH_TTL`] is not enqueued at all: some
+/// callers (sign-in warm-up, the metadata backfill) offer repositories without
+/// checking freshness first, and re-reading a history that cannot have moved
+/// would spend budget for nothing.
 pub async fn enqueue(db: &Db, repo: &str, priority: i64) -> Result<()> {
     let now = Utc::now();
-    // A `dead` row is reserved for a confirmed permanent condition (currently
-    // a 404 tombstone or the local-development legacy endpoint restriction).
-    // Transient failures stay pending with a durable `next_attempt_at`.
+    // A `dead` row is reserved for a confirmed permanent condition (a 404
+    // tombstone, or a private repository parked restricted). Transient
+    // failures stay pending with a durable `next_attempt_at`.
     sqlx::query(
         "INSERT INTO star_fetch_queue (repo, status, priority, enqueued_at) \
          SELECT $1, 'pending', $2, $3 \
          WHERE NOT EXISTS ( \
              SELECT 1 FROM repos \
              WHERE repo = $1 AND history_complete = TRUE \
-               AND history_source = 'github_api' \
+               AND history_source = 'github_history' \
+               AND stargazers_fetched_at > $4 \
                AND metadata_fetched_at IS NOT NULL \
          ) \
          ON CONFLICT (repo) DO UPDATE SET \
@@ -101,6 +107,7 @@ pub async fn enqueue(db: &Db, repo: &str, priority: i64) -> Result<()> {
     .bind(repo)
     .bind(priority)
     .bind(now)
+    .bind(now - crate::analyzer::STARGAZER_REFRESH_TTL)
     .execute(&db.pool)
     .await?;
     Ok(())
@@ -125,10 +132,9 @@ pub async fn enqueue_cold_or_stale_many(db: &Db, repos: &[String], priority: i64
              WHERE cached.repo IS NULL \
                 OR (cached.missing = FALSE AND ( \
                     cached.history_complete = FALSE \
-                    OR (cached.history_source = 'gh_archive' AND ( \
-                        cached.archive_fetched_at IS NULL \
-                        OR cached.archive_fetched_at < NOW() - INTERVAL '6 hours' \
-                    )) \
+                    OR cached.history_source IS DISTINCT FROM 'github_history' \
+                    OR cached.stargazers_fetched_at IS NULL \
+                    OR cached.stargazers_fetched_at < NOW() - INTERVAL '6 hours' \
                 )) \
          ) \
          INSERT INTO star_fetch_queue (repo, status, priority, enqueued_at) \
@@ -145,101 +151,57 @@ pub async fn enqueue_cold_or_stale_many(db: &Db, repos: &[String], priority: i64
     Ok(result.rows_affected())
 }
 
-/// Offer repositories still on the exact GitHub-API snapshot to GH Archive, so
-/// their star history can start moving again.
+/// The background sweep's selection, hoisted so a test can read its clauses.
 ///
-/// A repository whose history came from the stargazer API is frozen by design:
-/// [`crate::cache::RepoSummary::stargazers_fresh_within`] treats a complete
-/// `github_api` snapshot as permanently fresh (it is exact, so ageing it out
-/// would only re-fetch identical rows), [`enqueue`] refuses to queue one, and
-/// the hourly follower selects only `history_source = 'gh_archive'`. Those
-/// three rules are individually right and collectively fatal: a repository that
-/// landed on the API path before GH Archive was available can never be
-/// refreshed by anything, and its curve stops on the day it was first read.
+/// Two kinds of repository, in this order:
 ///
-/// Migration — not refresh — is the way out. One archive backfill splices
-/// archive activity onto the frozen exact segment and flips `history_source` to
-/// `spliced` (see [`crate::cache::Cache::commit_archive_backfill_window`]),
-/// after which the existing hourly follower keeps the tail current forever. The
-/// exact curve is kept, not overwritten: it is non-approximate, and the archive
-/// is not. This offers those repositories to the ordinary star-fetch queue; the
-/// archive coordinator claims them like any other job.
+///  1. Published histories that are not GitHub's star history yet: a
+///     stargazer-list snapshot frozen by the July 2026 restriction, or an
+///     approximate archive or spliced series. Each is strictly improved by one
+///     read, so they drain first, most-viewed first.
+///  2. GitHub star histories last read before `$2`, oldest read first among
+///     equally viewed repositories.
 ///
-/// Only meaningful when GH Archive is configured. With it disabled the same
-/// queue is drained by the stargazer-list fallback, which would re-paginate an
-/// already-exact snapshot — precisely what the frozen-by-design rules exist to
-/// prevent — so callers must gate on the archive client being present.
-///
-/// `limit` bounds one pass: this is warm-up nobody is waiting on, and the cost
-/// is BigQuery scans rather than worker slots.
-pub async fn enqueue_archive_migrations(db: &Db, limit: usize) -> Result<u64> {
-    let limit = i64::try_from(limit.clamp(1, 5_000)).unwrap_or(5_000);
-    let result = sqlx::query(
-        "WITH eligible AS ( \
-             SELECT repo FROM repos \
-             WHERE history_source = 'github_api' \
-               AND history_complete = TRUE \
-               AND NOT missing \
-               AND NOT archive_complete \
-               AND github_id IS NOT NULL \
-               AND NOT EXISTS ( \
-                   SELECT 1 FROM star_fetch_queue q WHERE q.repo = repos.repo \
-               ) \
-             ORDER BY star_count DESC NULLS LAST, repo \
-             LIMIT $1 \
-         ) \
-         INSERT INTO star_fetch_queue (repo, status, priority, enqueued_at) \
-         SELECT repo, 'pending', 0, NOW() FROM eligible \
-         ON CONFLICT (repo) DO NOTHING",
-    )
-    .bind(limit)
-    .execute(&db.pool)
-    .await?;
-    Ok(result.rows_affected())
-}
+/// Only repositories with published history and public metadata: a cold
+/// repository is read when somebody asks for it, not speculatively. A
+/// repository holding a queue row of any status is skipped — pending and
+/// in-progress work is already handled, and a `dead` park is a decision this
+/// sweep must not reverse.
+const STAR_HISTORY_SWEEP_SQL: &str = "WITH eligible AS ( \
+         SELECT repo FROM repos \
+         WHERE history_complete = TRUE \
+           AND NOT missing \
+           AND metadata_fetched_at IS NOT NULL \
+           AND ( \
+               history_source IS DISTINCT FROM 'github_history' \
+               OR stargazers_fetched_at IS NULL \
+               OR stargazers_fetched_at < $2 \
+           ) \
+           AND NOT EXISTS ( \
+               SELECT 1 FROM star_fetch_queue q WHERE q.repo = repos.repo \
+           ) \
+         ORDER BY (history_source IS NOT DISTINCT FROM 'github_history'), \
+                  view_count DESC, stargazers_fetched_at NULLS FIRST, repo \
+         LIMIT $1 \
+     ) \
+     INSERT INTO star_fetch_queue (repo, status, priority, enqueued_at) \
+     SELECT repo, 'pending', 0, NOW() FROM eligible \
+     ON CONFLICT (repo) DO NOTHING \
+     RETURNING repo";
 
-/// Eligibility for a migration, identical to the sweep's — stated once so the
-/// single-repository path cannot drift from it. Not a search: every clause is
-/// an equality or an existence check against an indexed key.
-const ARCHIVE_MIGRATION_ELIGIBLE_SQL: &str = "repos.repo = $1 \
-       AND repos.history_source = 'github_api' \
-       AND repos.history_complete = TRUE \
-       AND NOT repos.missing \
-       AND NOT repos.archive_complete \
-       AND repos.github_id IS NOT NULL \
-       AND NOT EXISTS ( \
-           SELECT 1 FROM star_fetch_queue q WHERE q.repo = $1 \
-       )";
-
-/// Offer ONE frozen repository to GH Archive, now.
-///
-/// [`enqueue_archive_migrations`] runs once per worker start over the biggest
-/// repositories first, so a modest one waits behind every larger one and can
-/// sit at its 2026-07-20 boundary through any number of deploys. The person
-/// looking at that repository's report is the best possible signal that it is
-/// worth a backfill, and this is what lets their visit start one instead of
-/// joining a queue that may never reach them.
-///
-/// Returns whether this call created the job. It sits on a hot path — a report
-/// view — so it must stay two indexed probes and it must be idempotent: an
-/// existing queue row (of any status) makes it a no-op, so repeated views of
-/// the same repository add nothing. Callers MUST gate on GH Archive being
-/// configured for the reason [`enqueue_archive_migrations`] documents.
-///
-/// `priority` is the caller's popularity snapshot, so a repository somebody is
-/// actually looking at drains ahead of the sweep's priority-0 backlog.
-pub async fn enqueue_archive_migration(db: &Db, repo: &str, priority: i64) -> Result<bool> {
-    let sql = format!(
-        "INSERT INTO star_fetch_queue (repo, status, priority, enqueued_at) \
-         SELECT $1, 'pending', $2, NOW() FROM repos WHERE {ARCHIVE_MIGRATION_ELIGIBLE_SQL} \
-         ON CONFLICT (repo) DO NOTHING"
-    );
-    let result = sqlx::query(sqlx::AssertSqlSafe(sql))
-        .bind(repo)
-        .bind(priority.max(0))
-        .execute(&db.pool)
-        .await?;
-    Ok(result.rows_affected() > 0)
+/// One bounded pass of the background star-history sweep: see
+/// [`STAR_HISTORY_SWEEP_SQL`] for what it selects. Priority 0, so anything a
+/// visitor is waiting on drains first. Returns the repositories enqueued.
+pub async fn enqueue_star_history_sweep(
+    db: &Db,
+    limit: i64,
+    stale_before: chrono::DateTime<Utc>,
+) -> Result<Vec<String>> {
+    Ok(sqlx::query_scalar(STAR_HISTORY_SWEEP_SQL)
+        .bind(limit.clamp(1, 5_000))
+        .bind(stale_before)
+        .fetch_all(&db.pool)
+        .await?)
 }
 
 /// True iff the repo currently has a `pending` or `in_progress` row.
@@ -438,12 +400,15 @@ pub async fn requeue_archive_window(db: &Db, repo: &str) -> Result<()> {
     Ok(())
 }
 
-/// Re-open every non-missing job parked by an older release.
+/// Re-open every non-missing job parked `dead`, once per worker start.
 ///
-/// Historic versions charged shared BigQuery failures against each repository
-/// and eventually parked the entire queue. A configured archive source can
-/// retry those jobs safely; confirmed 404 tombstones remain terminal.
-pub async fn revive_retryable_for_archive(db: &Db) -> Result<u64> {
+/// Almost every such park was made against a source that no longer decides
+/// anything: older releases parked repositories `restricted` when GitHub
+/// closed the stargazer list, and parked whole batches after shared BigQuery
+/// failures. GitHub's star history serves every public repository, so those
+/// jobs can now succeed. A private repository simply parks again after one
+/// metadata lookup; confirmed 404 tombstones remain terminal.
+pub async fn revive_parked_on_startup(db: &Db) -> Result<u64> {
     let result = sqlx::query(
         "UPDATE star_fetch_queue SET status = 'pending', attempts = 0, \
             partial = FALSE, next_page = 1, next_attempt_at = NOW(), \
@@ -644,70 +609,85 @@ mod tests {
         }
     }
 
-    /// The on-demand path must offer exactly what the sweep offers.
-    ///
-    /// A single-repository path that is looser than the sweep is how an
-    /// already-archived or already-queued repository gets a duplicate job, and
-    /// how a repository with no numeric id reaches a coordinator that cannot
-    /// query for it. Rather than restate the predicate twice, both read the
-    /// same clauses — this checks each one is actually in there.
+    /// The sweep upgrades every non-GitHub history before it refreshes any
+    /// GitHub one, never touches a repository nobody has published, and never
+    /// overrides an existing queue row of any status.
     #[test]
-    fn on_demand_migration_shares_the_sweep_eligibility() {
+    fn sweep_upgrades_first_and_respects_existing_rows() {
+        let sql = STAR_HISTORY_SWEEP_SQL;
         for clause in [
-            "history_source = 'github_api'",
             "history_complete = TRUE",
-            "missing",
-            "archive_complete",
-            "github_id IS NOT NULL",
+            "NOT missing",
+            "metadata_fetched_at IS NOT NULL",
+            "history_source IS DISTINCT FROM 'github_history'",
+            "stargazers_fetched_at < $2",
             "NOT EXISTS",
+            "ON CONFLICT (repo) DO NOTHING",
         ] {
-            assert!(
-                ARCHIVE_MIGRATION_ELIGIBLE_SQL.contains(clause),
-                "on-demand eligibility is missing `{clause}`"
-            );
+            assert!(sql.contains(clause), "sweep is missing `{clause}`");
         }
-        // A queue row in ANY status blocks a second one: `dead` included, or a
-        // restricted park would be re-offered on every single report view.
+        // FALSE sorts before TRUE: upgrades drain ahead of refreshes.
+        assert!(sql.contains("ORDER BY (history_source IS NOT DISTINCT FROM 'github_history')"));
+        let selection = sql
+            .split("INSERT INTO")
+            .next()
+            .expect("the selection precedes the insert");
         assert!(
-            !ARCHIVE_MIGRATION_ELIGIBLE_SQL.contains("status"),
-            "an existing row of any status must make this a no-op"
+            !selection.contains("status"),
+            "a queue row of any status must block the sweep"
         );
     }
 
-    /// Against Postgres: the on-demand offer creates at most one job, and only
-    /// for a repository the sweep would also have picked.
+    /// Against Postgres: the sweep offers upgrades and stale refreshes, and
+    /// leaves fresh, cold, tombstoned and already-queued repositories alone.
     #[tokio::test]
-    async fn on_demand_migration_is_idempotent_and_skips_ineligible_repos() {
+    async fn sweep_offers_upgrades_and_stale_refreshes_only() {
         let Some(db) = crate::test_db::shared().await else {
             eprintln!("skipping: set GITDEBT_TEST_DATABASE_URL to run");
             return;
         };
-        let prefix = format!("gitdebt-migrate-test-{}", std::process::id());
+        let prefix = format!("gitdebt-sweep-test-{}", std::process::id());
         let frozen = format!("{prefix}/frozen");
-        let archived = format!("{prefix}/archived");
+        let spliced = format!("{prefix}/spliced");
+        let stale = format!("{prefix}/stale");
+        let fresh = format!("{prefix}/fresh");
+        let cold = format!("{prefix}/cold");
+        let tombstoned = format!("{prefix}/tombstoned");
         let queued = format!("{prefix}/queued");
-        let all = [frozen.clone(), archived.clone(), queued.clone()];
+        let all = [
+            frozen.clone(),
+            spliced.clone(),
+            stale.clone(),
+            fresh.clone(),
+            cold.clone(),
+            tombstoned.clone(),
+            queued.clone(),
+        ];
         clear_migration_fixture(&db, &all).await;
 
-        for (repo, source, archive_complete) in [
-            (&frozen, "github_api", false),
-            // Already migrated: nothing left to offer.
-            (&archived, "spliced", true),
-            // Frozen, but a job already exists — a second row is impossible
-            // (the slug is the primary key) and re-offering is pure noise.
-            (&queued, "github_api", false),
+        for (repo, source, complete, missing, read_hours_ago) in [
+            (&frozen, Some("github_api"), true, false, None),
+            (&spliced, Some("spliced"), true, false, None),
+            (&stale, Some("github_history"), true, false, Some(48)),
+            (&fresh, Some("github_history"), true, false, Some(1)),
+            (&cold, None, false, false, None),
+            (&tombstoned, Some("github_api"), true, true, None),
+            (&queued, Some("github_api"), true, false, None),
         ] {
             sqlx::query(
                 "INSERT INTO repos (repo, github_id, star_count, metadata_fetched_at, \
-                    stargazers_complete, history_complete, history_source, archive_complete, \
+                    history_complete, history_source, missing, stargazers_fetched_at, \
                     history_splice_at, history_splice_position) \
-                 VALUES ($1, 777, 10, NOW(), TRUE, TRUE, $2, $3, \
-                    CASE WHEN $2 = 'spliced' THEN NOW() END, \
-                    CASE WHEN $2 = 'spliced' THEN 1 END)",
+                 VALUES ($1, 777, 10, NOW(), $2, $3, $4, \
+                    NOW() - $5 * INTERVAL '1 hour', \
+                    CASE WHEN $3 = 'spliced' THEN NOW() END, \
+                    CASE WHEN $3 = 'spliced' THEN 1 END)",
             )
             .bind(repo)
+            .bind(complete)
             .bind(source)
-            .bind(archive_complete)
+            .bind(missing)
+            .bind(read_hours_ago.map(f64::from))
             .execute(&db.pool)
             .await
             .unwrap();
@@ -721,31 +701,49 @@ mod tests {
         .await
         .unwrap();
 
-        assert!(
-            enqueue_archive_migration(&db, &frozen, 5).await.unwrap(),
-            "a frozen exact snapshot is what this path exists for"
-        );
-        assert!(
-            !enqueue_archive_migration(&db, &frozen, 5).await.unwrap(),
-            "a second report view must add nothing"
-        );
-        assert!(!enqueue_archive_migration(&db, &archived, 5).await.unwrap());
-        assert!(!enqueue_archive_migration(&db, &queued, 5).await.unwrap());
-        assert!(
-            !enqueue_archive_migration(&db, &format!("{prefix}/unknown"), 5)
+        let swept =
+            enqueue_star_history_sweep(&db, 5_000, Utc::now() - chrono::Duration::hours(24))
                 .await
-                .unwrap(),
-            "an unknown repository has no exact series to migrate"
-        );
-
-        let jobs: i64 = sqlx::query_scalar(
-            "SELECT COUNT(*) FROM star_fetch_queue WHERE repo = ANY($1) AND status = 'pending'",
+                .unwrap();
+        // The sweep is global by design. Hand back every row it added outside
+        // this fixture, or another suite sharing the database claims them.
+        let outside: Vec<&String> = swept
+            .iter()
+            .filter(|repo| !repo.starts_with(&prefix))
+            .collect();
+        sqlx::query("DELETE FROM star_fetch_queue WHERE repo = ANY($1)")
+            .bind(&outside)
+            .execute(&db.pool)
+            .await
+            .unwrap();
+        let mut offered: Vec<String> = sqlx::query_scalar(
+            "SELECT repo FROM star_fetch_queue WHERE repo = ANY($1) AND status = 'pending'",
         )
         .bind(&all[..])
-        .fetch_one(&db.pool)
+        .fetch_all(&db.pool)
         .await
         .unwrap();
-        assert_eq!(jobs, 1, "exactly one migration job across the fixture");
+        offered.sort();
+        let mut expected = vec![frozen.clone(), spliced.clone(), stale.clone()];
+        expected.sort();
+        assert_eq!(offered, expected);
+
+        // A fresh GitHub star history is never re-enqueued by an ordinary
+        // offer either; a stale or legacy one is.
+        sqlx::query("DELETE FROM star_fetch_queue WHERE repo = ANY($1)")
+            .bind(&all[..])
+            .execute(&db.pool)
+            .await
+            .unwrap();
+        enqueue(&db, &fresh, 1).await.unwrap();
+        enqueue(&db, &frozen, 1).await.unwrap();
+        let offered: Vec<String> =
+            sqlx::query_scalar("SELECT repo FROM star_fetch_queue WHERE repo = ANY($1)")
+                .bind(&all[..])
+                .fetch_all(&db.pool)
+                .await
+                .unwrap();
+        assert_eq!(offered, vec![frozen.clone()]);
 
         clear_migration_fixture(&db, &all).await;
     }

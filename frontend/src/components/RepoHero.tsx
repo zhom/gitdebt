@@ -27,17 +27,18 @@ import { cn } from "@/lib/utils";
 
 export type StarPoint = { date: string; stars: number };
 export type HistoryKind =
+  /** GitHub's own star history: exact per day, complete, refreshed. */
+  | "daily_stargazers"
   | "current_stargazers"
   | "public_star_actions"
   /** Exact through `history_splice_at`, archive-derived after it. */
   | "stargazers_then_activity"
   | "unavailable";
 /**
- * `restricted` is a real terminal value the analyzer emits: GitHub serves the
- * repository's stargazer list only to applications that administer it, so there
- * is nothing left to attempt. It was missing from this union, which is why the
- * report used to poll a no-store endpoint forever and offer a retry that was
- * never scheduled.
+ * `restricted` is a real terminal value the analyzer emits: the repository is
+ * not public, so there is nothing left to attempt. It was missing from this
+ * union, which is why the report used to poll a no-store endpoint forever and
+ * offer a retry that was never scheduled.
  */
 const HISTORY_STATUSES = [
   "ready",
@@ -470,9 +471,8 @@ export function RepoHero({ owner, repo, apiBase, initialData }: Props) {
 
       {/* Every state, not just the archive one. An owner arriving at their own
           frozen repository previously saw nothing at all here. The block
-          carries no sign-in action: for the two states that used to offer one,
-          the copy inside says signing in changes nothing gitdebt can read, and
-          a button under that sentence only reads as a contradiction. */}
+          carries no sign-in action: signing in changes nothing gitdebt can
+          read, so a button here would only promise a fix that is not one. */}
       {data && (
         <SeriesProvenance
           snapshot={data}
@@ -661,7 +661,7 @@ function progressDetail(
     // in the one place that sentence is written.
     return (
       noticeText(historyFreshness({ history_status: "restricted" })) ??
-      "GitHub does not serve this repository's stargazer list to gitdebt."
+      "This repository is not public."
     );
   }
   if (work.phase === "retrying" || work.phase === "failed") {

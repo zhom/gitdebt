@@ -236,9 +236,11 @@ const access = [
       <p class:list={["mt-4", BODY, MEASURE]}>
         The health signals come from a shallow git clone analyzed on our side,
         and each one is a pure, unit-tested function over that data. Star
-        history is different: it is read either from GitHub's stargazer list or
-        rebuilt from historical star data, and every report names the source
-        that produced its chart.
+        history is different: it is read from GitHub's own star history, day
+        by day back to each repository's creation. A series gitdebt read
+        before that existed came from GitHub's stargazer list or from
+        historical star data until it is read again, and every report names
+        the source that produced its chart.
       </p>
 
       {

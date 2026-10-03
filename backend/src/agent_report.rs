@@ -99,6 +99,8 @@ pub enum QueueState {
 #[derive(Debug, Clone)]
 pub struct ReportStars {
     pub total_stars: u32,
+    /// The `/analyze` `history_kind` of the series.
+    pub kind: &'static str,
     /// GH Archive star *actions* rather than an exact stargazer snapshot.
     pub approximate: bool,
     pub event_count: u32,
@@ -243,12 +245,10 @@ fn running_sections(view: &ReportView, running: &RunningReport) -> Vec<String> {
                 (true, _) => "backfilling in resumable chunks".to_string(),
                 (false, "ready") => "ready".to_string(),
                 (false, "retrying") => "retrying after a failed attempt".to_string(),
-                // Not "queued": nothing is queued and nothing will be. GitHub
-                // serves this repository's stargazers only to its own admins
-                // and collaborators, so the wait never ends on its own.
-                (false, "restricted") => {
-                    "not available — GitHub restricts this repository's stargazers".to_string()
-                }
+                // Not "queued": nothing is queued and nothing will be. A
+                // restricted park is a private repository, which gitdebt
+                // never publishes, so the wait never ends on its own.
+                (false, "restricted") => "not available — the repository is not public".to_string(),
                 (false, _) => "queued".to_string(),
             },
         ],
@@ -322,6 +322,15 @@ fn ready_sections(view: &ReportView, ready: &ReadyReport) -> Vec<String> {
     sections
 }
 
+/// What the plotted series measures, in the report's words.
+fn series_label(stars: &ReportStars) -> &'static str {
+    match stars.kind {
+        "daily_stargazers" => "current stargazers by day (GitHub star history)",
+        _ if stars.approximate => "public star actions (historical data)",
+        _ => "current stargazers (exact snapshot)",
+    }
+}
+
 fn star_sections(stars: &ReportStars) -> Vec<String> {
     let mut sections = Vec::new();
     let mut rows = vec![
@@ -329,14 +338,7 @@ fn star_sections(stars: &ReportStars) -> Vec<String> {
             "GitHub stars".to_string(),
             thousands(i64::from(stars.total_stars)),
         ],
-        vec![
-            "Series".to_string(),
-            if stars.approximate {
-                "public star actions (historical data)".to_string()
-            } else {
-                "current stargazers (exact snapshot)".to_string()
-            },
-        ],
+        vec!["Series".to_string(), series_label(stars).to_string()],
     ];
     if stars.event_count > 0 {
         rows.push(vec![
@@ -804,6 +806,7 @@ The complete asset catalog, with every snippet, is at https://gitdebt.com/badges
         let rendered = render(&view(ReportState::Ready(Box::new(ReadyReport {
             stars: ReportStars {
                 total_stars: 12_043,
+                kind: "current_stargazers",
                 approximate: false,
                 event_count: 11_904,
                 created_on: Some(day(2016, 3, 28)),
@@ -1000,6 +1003,7 @@ The complete asset catalog, with every snippet, is at https://gitdebt.com/badges
         let rendered = render(&view(ReportState::Ready(Box::new(ReadyReport {
             stars: ReportStars {
                 total_stars: 4_210,
+                kind: "public_star_actions",
                 approximate: true,
                 event_count: 4_190,
                 created_on: Some(day(2019, 1, 2)),
@@ -1018,6 +1022,7 @@ The complete asset catalog, with every snippet, is at https://gitdebt.com/badges
         let pending = render(&view(ReportState::Ready(Box::new(ReadyReport {
             stars: ReportStars {
                 total_stars: 4_210,
+                kind: "public_star_actions",
                 approximate: true,
                 event_count: 4_190,
                 created_on: None,
@@ -1028,6 +1033,22 @@ The complete asset catalog, with every snippet, is at https://gitdebt.com/badges
             health: ReportHealthSection::Running,
         }))));
         assert!(pending.contains("| GitHub stars | 4,210 |"));
+        assert!(pending.contains("| Series | public star actions (historical data) |"));
+
+        let daily = render(&view(ReportState::Ready(Box::new(ReadyReport {
+            stars: ReportStars {
+                total_stars: 3_947,
+                kind: "daily_stargazers",
+                approximate: false,
+                event_count: 3_947,
+                created_on: None,
+                coverage_start: None,
+                coverage_end: None,
+                insights: None,
+            },
+            health: ReportHealthSection::Running,
+        }))));
+        assert!(daily.contains("| Series | current stargazers by day (GitHub star history) |"));
         assert!(pending.contains(
             "Poll https://api.gitdebt.com/api/repos/owner/repo/progress.json for the analysis phase"
         ));

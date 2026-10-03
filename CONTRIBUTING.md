@@ -91,8 +91,8 @@ This runs:
 - **Product boundary**: star analytics stay factual and repo-focused. Never
   add fake-star detection, account scoring, suspicious-user labels, or
   stargazer profiles
-- **Star reads use Postgres**: do not add another GitHub stargazer pagination
-  path
+- **Star reads use Postgres**: star history comes from GitHub's star-history
+  endpoint through the background worker; never read GitHub's stargazer list
 - **Completeness transactions**: writers replace entity data and flip the
   `*_complete` flag atomically; readers never see partial data. Changes to
   `backend/src/db.rs` or `backend/src/cache.rs` require an invariant test

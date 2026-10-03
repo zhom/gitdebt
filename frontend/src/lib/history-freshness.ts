@@ -1,14 +1,15 @@
 /**
  * What a repository's star history actually covers, and why.
  *
- * One boolean cannot say this honestly. Since GitHub restricted the stargazer
- * list to a repository's own admins and collaborators (July 2026), a chart can
- * be behind for reasons that are not interchangeable: the exact series stopped
- * on the day the endpoint closed; the approximate series is still flowing; the
- * exact series stopped and approximate activity was spliced onto its end;
- * gitdebt was never able to read this repository at all. Each deserves a
- * different sentence, and none of them is the owner's fault — most owners have
- * no idea the endpoint changed.
+ * One boolean cannot say this honestly. The normal case is GitHub's own star
+ * history (September 2026): exact, net of unstars, complete from the creation
+ * week, and refreshed. Older series are still being moved onto it, and until a
+ * repository is reached its chart can be behind for reasons that are not
+ * interchangeable: an exact stargazer-list series stopped when GitHub closed
+ * that list (July 2026); an approximate archive series is still flowing; an
+ * exact series had approximate activity spliced onto its end. A repository
+ * that is not public is never read at all. Each deserves a different sentence,
+ * and none of them is the owner's fault.
  *
  * Pure, and deliberately free of DOM and framework imports, so the states can
  * be unit-tested under `node --test` (see `scripts/history-freshness.test.mjs`).
@@ -19,7 +20,9 @@
 export type HistorySnapshot = {
   history_complete?: boolean;
   /**
-   * "current_stargazers" (exact) | "public_star_actions" (archive) |
+   * "daily_stargazers" (GitHub's star history) |
+   * "current_stargazers" (exact stargazer-list snapshot) |
+   * "public_star_actions" (archive) |
    * "stargazers_then_activity" (exact through the splice, archive after it) |
    * "unavailable"
    */
@@ -38,6 +41,8 @@ export type HistorySnapshot = {
 };
 
 export type HistoryFreshness =
+  /** GitHub's own star history: exact per day, complete, and refreshed. */
+  | { state: "daily"; through: Date | null }
   /** Exact, from the stargazer list, and still being refreshed. */
   | { state: "exact_current"; through: Date | null }
   /** Exact, but the endpoint closed — the series stops on a fixed date. */
@@ -51,16 +56,16 @@ export type HistoryFreshness =
    * mean the same thing on both sides of the join.
    */
   | { state: "spliced"; through: Date | null; splicedAt: Date | null }
-  /** GitHub will not serve this repository's stargazers to gitdebt at all. */
+  /** The repository is not public, so gitdebt does not read it at all. */
   | { state: "restricted"; through: Date | null }
   /** Nothing to say yet: cold, queued, or a payload too old to classify. */
   | { state: "unknown"; through: null };
 
 /**
- * The date the endpoint closed. A complete *exact* series whose coverage stops
- * on or after this is frozen by the restriction rather than merely stale — the
- * distinction the reader needs, because one of them can still resolve itself
- * and the other cannot.
+ * The date the stargazer list closed. A complete *exact* stargazer-list series
+ * whose coverage stops on or after this is frozen by the closure rather than
+ * merely stale — the distinction the reader needs, because only the frozen one
+ * is waiting on gitdebt's re-read from GitHub's star history.
  */
 const RESTRICTION_DATE = Date.UTC(2026, 6, 1); // 2026-07-01
 
@@ -78,6 +83,8 @@ export function historyFreshness(snapshot: HistorySnapshot | null | undefined): 
   if (snapshot.history_status === "restricted") return { state: "restricted", through };
 
   if (!snapshot.history_complete) return { state: "unknown", through: null };
+
+  if (snapshot.history_kind === "daily_stargazers") return { state: "daily", through };
 
   // Before the archive branch, and keyed on the kind alone. A spliced series is
   // approximate in its tail and therefore carries `history_approximate: true`,
@@ -132,33 +139,19 @@ export function formatThrough(through: Date | null): string | null {
 }
 
 /**
- * Who the restriction shuts out, said from gitdebt's side of it.
+ * The closed stargazer list, said from gitdebt's side of it.
  *
- * These sentences used to name the exception — "only to a repository's own
+ * These sentences once named the exception — "only to a repository's own
  * admins and collaborators" — which is a true description of GitHub's rule and
- * the wrong sentence to put in front of the one reader most likely to see it.
- * A repository's own owner reads "admins and collaborators" as *so it should
- * work for me*, signs in, and finds the chart still stopped, because gitdebt
- * reads GitHub with its own application credentials and those administer
- * nothing. Naming the people who can read the list, in a product that cannot,
- * is an invitation to a door that does not exist.
- *
- * So: state the limit as it applies to gitdebt, and close the sign-in door in
- * the same breath. No remedy is offered because there is none to offer — there
- * is no repository connection flow, no endpoint, no install link and no grant
- * field in the analyze payload — and no sentence hints that one may appear,
- * which would be a promise this module cannot keep. The wording also has to
- * survive being read beside the sign-in caption on the same card, which already
- * says in as many words that signing in does not restore a stargazer read.
- *
- * The readers GitHub kept are one shared phrase rather than two hand-written
- * ones, because `NO_SIGN_IN` says "not one of them" and every sentence it joins
- * has to leave that pronoun the same antecedent to point at.
+ * the wrong sentence to put in front of the one reader most likely to see it:
+ * a repository's own owner reads it as *so signing in should fix it*, and it
+ * never did. gitdebt does not read the stargazer list for anyone any more. It
+ * reads GitHub's star history, which is public, so the way forward for a
+ * frozen series is a re-read gitdebt starts on its own, never something the
+ * reader has to do.
  */
-const ADMINISTERING_APPS = "applications that administer the repository";
-const RESTRICTION = `GitHub restricted stargazer lists to ${ADMINISTERING_APPS}`;
-const NO_SIGN_IN =
-  "gitdebt is not one of them, and signing in — even as this repository's owner — does not change what gitdebt can read";
+const CLOSED_LIST = "the GitHub stargazer list it was read from, which GitHub closed in July 2026";
+const MOVING = "gitdebt is re-reading it from GitHub's star history, which carries it to the present";
 
 /**
  * The notice copy.
@@ -173,8 +166,9 @@ const NO_SIGN_IN =
  * It also describes only what the product does TODAY. There is no repository
  * connection flow, so no sentence here may offer connecting a repository as a
  * remedy the reader can take. It would be an invented capability, and it would
- * contradict both the privacy policy and the sign-in caption these sentences
- * are rendered beside. State the restriction; do not promise a way around it.
+ * contradict the privacy policy. The one forward-looking sentence, on a frozen
+ * series, states work gitdebt does on its own — a live view or the background
+ * sweep queues the re-read — and asks nothing of the reader.
  *
  * The switch is exhaustive on purpose: `string | null` plus `strictNullChecks`
  * makes a new unhandled state a compile error rather than a silent `undefined`.
@@ -184,12 +178,13 @@ export function noticeText(freshness: HistoryFreshness): string | null {
   switch (freshness.state) {
     case "exact_frozen":
       return through
-        ? `Star history is complete through ${through}. In July 2026 ${RESTRICTION}. ${NO_SIGN_IN}, so the exact series ends there.`
-        : `In July 2026 ${RESTRICTION}. ${NO_SIGN_IN}, so the exact series ends where it does.`;
+        ? `This series ends on ${through}, the last day of ${CLOSED_LIST}. ${MOVING}.`
+        : `This series ends where ${CLOSED_LIST} stopped. ${MOVING}.`;
     case "restricted":
-      return `GitHub serves this repository's stargazer list only to ${ADMINISTERING_APPS}. ${NO_SIGN_IN}.`;
+      return "This repository is not public. gitdebt reads and publishes star history for public repositories only, whoever is signed in.";
     case "spliced":
       return spliceNotice(freshness.splicedAt);
+    case "daily":
     case "exact_current":
     case "archive":
     case "unknown":
@@ -241,6 +236,8 @@ function spliceNotice(splicedAt: Date | null): string {
 /** What produced the points. Not a judgement, a method. */
 export function sourceLabel(freshness: HistoryFreshness): string {
   switch (freshness.state) {
+    case "daily":
+      return "GitHub star history";
     case "exact_current":
     case "exact_frozen":
       return "GitHub stargazer list";
@@ -261,6 +258,7 @@ export function sourceLabel(freshness: HistoryFreshness): string {
 /** Whether the series still receives points, said in words. */
 export function stateLabel(freshness: HistoryFreshness): string {
   switch (freshness.state) {
+    case "daily":
     case "exact_current":
     case "archive":
     // A spliced series genuinely advances again — that is the whole point of
@@ -286,6 +284,11 @@ export function coverageLabel(freshness: HistoryFreshness): string {
 /** The paragraph under the mark. Three states delegate, so they are never retyped. */
 export function sourceDetail(freshness: HistoryFreshness): string {
   switch (freshness.state) {
+    case "daily":
+      // Said as a method, like every other detail: what a point is, and
+      // what it already accounts for. A day is GitHub's calendar day, which is
+      // why the sentence says "day" and never claims a timestamp per star.
+      return "Read from GitHub's own star history: for every day since the repository was created, the stars its current stargazers gave that day. Unstars are already taken out, so the line ends on the repository's star count.";
     case "exact_current":
       return "Every point is one star with its own timestamp, read from GitHub's stargazer list.";
     case "archive":
@@ -320,7 +323,8 @@ const UNESTABLISHED =
  *
  * So:
  *
- *   exact              solid       — one point per star, each with a timestamp
+ *   daily, exact       solid       — measured: GitHub's own daily count, or one
+ *                                    point per star with its own timestamp
  *   spliced            long dash   — the pattern its TAIL is drawn with; the
  *                                    head is the exact line and stays solid,
  *                                    which is the whole disclosure
@@ -338,6 +342,7 @@ const UNESTABLISHED =
  */
 export function sourceStroke(freshness: HistoryFreshness): string {
   switch (freshness.state) {
+    case "daily":
     case "exact_current":
     case "exact_frozen":
       return "";
@@ -358,6 +363,7 @@ export function sourceStroke(freshness: HistoryFreshness): string {
 /** True iff the series still receives points. Drives the mark's aperture. */
 export function seriesOpen(freshness: HistoryFreshness): boolean {
   return (
+    freshness.state === "daily" ||
     freshness.state === "exact_current" ||
     freshness.state === "archive" ||
     freshness.state === "spliced"

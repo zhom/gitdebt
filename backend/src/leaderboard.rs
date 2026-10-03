@@ -69,7 +69,7 @@ const MAX_STORED_RANK: i64 = 20_100;
 /// be asserted without a database.
 const SNAPSHOT_SQL: &str = "WITH eligible AS MATERIALIZED (\
              SELECT repo, COALESCE(star_count, 0)::BIGINT AS stars, \
-                    history_source IN ('gh_archive', 'spliced') AS advancing \
+                    history_source IN ('github_history', 'gh_archive', 'spliced') AS advancing \
              FROM repos \
              WHERE history_complete = TRUE \
                AND missing = FALSE \
@@ -162,7 +162,9 @@ mod tests {
     #[test]
     fn only_a_series_that_can_still_advance_contributes_activity() {
         assert!(
-            SNAPSHOT_SQL.contains("history_source IN ('gh_archive', 'spliced') AS advancing"),
+            SNAPSHOT_SQL.contains(
+                "history_source IN ('github_history', 'gh_archive', 'spliced') AS advancing"
+            ),
             "activity eligibility must be decided by source, not by date"
         );
         assert!(

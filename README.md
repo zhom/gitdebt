@@ -41,13 +41,13 @@
   commit heatmaps, TODO/FIXME trend, bus factor, language lines.
 - Package downloads (npm, crates.io, PyPI, Docker) plotted against stars.
 - Embeddable README assets: SVG and animated GIF charts, cards, and badges.
-- Stores star timestamps, not stargazer profiles. No account scoring or
+- Stores daily star counts, not stargazer profiles. No account scoring or
   labelling.
 
 > [!NOTE]
-> New star history is rebuilt from historical data, which records public star
-> events but not unstars, so those curves are approximate public star activity.
-> Repositories cached from GitHub earlier keep their exact snapshots.
+> Star history comes from GitHub's own star history: exact daily counts, net
+> of unstars, back to each repository's creation. Older series read from
+> historical data are re-read from it as gitdebt reaches them.
 
 ## Usage
 

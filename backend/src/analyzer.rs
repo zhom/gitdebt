@@ -44,6 +44,15 @@ const MAX_HISTORY_POINTS: usize = 400;
 /// happens out of band.
 pub const STARGAZER_REFRESH_TTL: chrono::Duration = chrono::Duration::hours(6);
 
+/// How old a star history may get before a read nobody is waiting on — an
+/// embedded chart or badge, an extension ping, the background sweep — asks
+/// for it to be read again. Longer than [`STARGAZER_REFRESH_TTL`] because these
+/// surfaces reach far more distinct repositories than report views do, and
+/// every re-read spends the shared GitHub budget. The series is daily, so a
+/// day-old read is at most one day behind; a repository whose count really
+/// moved is still re-read sooner through the extension's drift check.
+pub const EMBED_REFRESH_TTL: chrono::Duration = chrono::Duration::hours(24);
+
 #[derive(Clone)]
 pub struct AnalyzerCtx {
     pub github: Arc<GithubClient>,
@@ -182,8 +191,10 @@ pub struct AnalysisResult {
     pub queued: u32,
     /// True once the stargazer-timestamp fetch is complete and cached.
     pub history_complete: bool,
-    /// Semantics of the plotted series. `current_stargazers` is the legacy
-    /// exact current-membership snapshot; `public_star_actions` comes from
+    /// Semantics of the plotted series. `daily_stargazers` is GitHub's own
+    /// star history: current stargazers counted per day, exact and kept
+    /// current. `current_stargazers` is the legacy exact current-membership
+    /// snapshot from the stargazer list; `public_star_actions` comes from
     /// GH Archive WatchEvents and is approximate because unstars are absent;
     /// `stargazers_then_activity` is an exact snapshot that stopped being
     /// refreshable, with archive activity appended after the instant it
@@ -209,10 +220,10 @@ pub struct AnalysisResult {
     /// this repo (cold, stale, or already queued). The frontend polls
     /// until this is false.
     pub pending: bool,
-    /// True when the repo is very large (exceeded `MAX_STARGAZER_PAGES`) and
-    /// is being fetched in resumable chunks. Partial rows are never served;
-    /// a refresh can keep its prior complete snapshot visible, while a cold
-    /// backfill remains `pending` with an empty history.
+    /// True while a job left by an older release is part-way through a
+    /// resumable chunked backfill. GitHub's star history is read whole in one
+    /// job, so nothing new sets this; it stays in the payload for clients that
+    /// read it. Partial rows are never served either way.
     pub backfilling: bool,
     /// Stable public state for the history pipeline: `ready`, `queued`,
     /// `retrying`, or `not_public`.
@@ -368,32 +379,6 @@ async fn analyze_repo_with_enqueue(
         let priority = summary.as_ref().map(|s| s.view_count).unwrap_or(0);
         enqueue_fetch_known(ctx, &repo_full, priority).await;
     }
-    // A frozen exact snapshot takes neither branch above: it is complete, and
-    // it is permanently "fresh" because re-reading an exact list can only
-    // return identical rows — except that since 2026-07-20 GitHub will not
-    // serve that list at all, so the curve simply stops. Only an archive
-    // migration moves it again, and the startup sweep works down from the
-    // largest repositories, which can mean never for this one. Somebody
-    // opening the report is the signal that it is worth doing now.
-    if enqueue
-        && should_offer_archive_migration(summary.as_ref(), crate::gh_archive::is_configured())
-    {
-        let priority = summary.as_ref().map(|s| s.view_count).unwrap_or(0);
-        match queue::enqueue_archive_migration(ctx.cache.db(), &repo_full, priority).await {
-            Ok(true) => tracing::info!(
-                repo = %repo_full,
-                "frozen exact history offered to GH Archive on demand"
-            ),
-            // Already queued, already migrated, or not eligible: the ordinary
-            // outcome on every view after the first.
-            Ok(false) => {}
-            Err(error) => tracing::warn!(
-                repo = %repo_full,
-                %error,
-                "on-demand archive migration enqueue failed"
-            ),
-        }
-    }
     let pending = !history_complete;
     let queue_status = queue::repo_status(ctx.cache.db(), &repo_full)
         .await
@@ -442,11 +427,10 @@ async fn analyze_repo_with_enqueue(
             "ready"
         } else if queue_status.restricted {
             // Ahead of `retrying` on purpose. A restricted park is terminal
-            // until something changes outside gitdebt, so reporting it as a
-            // retry makes every client poll forever for a retry that is never
-            // scheduled. Since GitHub limited the stargazers endpoint to a
-            // repository's own admins and collaborators (July 2026) this is the
-            // ordinary state of most repositories, not a failure.
+            // until something changes outside gitdebt (the repository is
+            // private, or was parked by an older release and waits for the
+            // next worker start), so reporting it as a retry makes every
+            // client poll forever for a retry that is never scheduled.
             "restricted"
         } else if retrying {
             "retrying"
@@ -474,7 +458,7 @@ pub async fn star_series(owner: &str, repo: &str, ctx: &AnalyzerCtx) -> Result<V
         Some(series) => {
             let fresh = ctx
                 .cache
-                .repo_stargazers_fresh_within(&repo_full, STARGAZER_REFRESH_TTL)
+                .repo_stargazers_fresh_within(&repo_full, EMBED_REFRESH_TTL)
                 .await
                 .unwrap_or(false);
             if !fresh {
@@ -531,12 +515,14 @@ pub async fn enqueue_fetch(ctx: &AnalyzerCtx, repo_full: &str) {
 
 /// Semantics of the plotted series, as reported to every read surface.
 ///
-/// The three physical sources map one-to-one onto the three public values;
-/// nothing else may. A spliced series is exact through its boundary and public
-/// star actions after it, which is neither of the other two — reporting it as
-/// `current_stargazers` would claim its tail counts net stars, and as
-/// `public_star_actions` would throw away the exactness of everything before
-/// the boundary.
+/// The four physical sources map one-to-one onto the four public values;
+/// nothing else may. `daily_stargazers` is GitHub's own star history: current
+/// stargazers counted per day, kept current. `current_stargazers` is the older
+/// stargazer-list snapshot, exact but frozen where GitHub closed that list. A
+/// spliced series is exact through its boundary and public star actions after
+/// it, which is neither — reporting it as `current_stargazers` would claim its
+/// tail counts net stars, and as `public_star_actions` would throw away the
+/// exactness of everything before the boundary.
 fn history_kind(
     summary: Option<&crate::cache::RepoSummary>,
     public: bool,
@@ -546,40 +532,12 @@ fn history_kind(
         .filter(|_| public)
         .and_then(|value| value.history_source.as_deref());
     match source {
+        Some(crate::cache::HISTORY_SOURCE_DAILY) => "daily_stargazers",
         Some(crate::cache::HISTORY_SOURCE_ARCHIVE) => "public_star_actions",
         Some(crate::cache::HISTORY_SOURCE_SPLICED) => "stargazers_then_activity",
         _ if history_complete => "current_stargazers",
         _ => "unavailable",
     }
-}
-
-/// Whether this repository is a frozen exact snapshot worth offering to GH
-/// Archive on this view.
-///
-/// Pure, so the gate that matters most here is testable without a database:
-/// `archive_configured` false must veto everything. With GH Archive disabled
-/// the star-fetch queue is drained by the stargazer-list fallback, and handing
-/// it an already-exact snapshot would make it re-paginate an endpoint GitHub
-/// no longer serves — the exact thing the frozen-by-design rules prevent.
-///
-/// The remaining clauses are the cheap half of
-/// [`queue::enqueue_archive_migration`]'s eligibility, evaluated against the
-/// summary the caller has already loaded so an ineligible repository costs no
-/// query at all. The statement itself re-checks everything (including
-/// `archive_complete`, which the summary does not carry) inside Postgres, so
-/// this is an optimization and never the authority.
-fn should_offer_archive_migration(
-    summary: Option<&crate::cache::RepoSummary>,
-    archive_configured: bool,
-) -> bool {
-    archive_configured
-        && summary.is_some_and(|summary| {
-            !summary.missing
-                && summary.metadata_fetched_at.is_some()
-                && summary.stargazers_complete
-                && summary.github_id.is_some()
-                && summary.history_source.as_deref() == Some(crate::cache::HISTORY_SOURCE_EXACT)
-        })
 }
 
 /// Like [`enqueue_fetch`] but for callers (the `/analyze` hot path) that
@@ -702,6 +660,7 @@ mod tests {
     #[test]
     fn each_history_source_reports_its_own_kind() {
         let kinds = |source: Option<&str>| history_kind(Some(&summary(source)), true, true);
+        assert_eq!(kinds(Some("github_history")), "daily_stargazers");
         assert_eq!(kinds(Some("github_api")), "current_stargazers");
         assert_eq!(kinds(Some("gh_archive")), "public_star_actions");
         assert_eq!(kinds(Some("spliced")), "stargazers_then_activity");
@@ -731,56 +690,9 @@ mod tests {
         // payload must not date a join the series no longer has.
         let exact = crate::cache::RepoSummary {
             history_splice_at: Some(at),
-            ..summary(Some("github_api"))
+            ..summary(Some("github_history"))
         };
         assert_eq!(exact.history_splice_at_if_spliced(), None);
-    }
-
-    /// The migration offer is gated on GH Archive being configured, and that
-    /// gate is not advisory. Without it the same queue is drained by the
-    /// stargazer-list fallback, which would re-paginate an exact snapshot
-    /// against an endpoint GitHub restricted in July 2026 — burning budget to
-    /// re-fetch rows we already hold exactly, or to be refused outright.
-    #[test]
-    fn a_migration_is_never_offered_without_the_archive() {
-        let frozen = summary(Some("github_api"));
-        assert!(should_offer_archive_migration(Some(&frozen), true));
-        assert!(!should_offer_archive_migration(Some(&frozen), false));
-    }
-
-    /// Only a repository that is actually stuck is offered. An archive-backed
-    /// or already-spliced series is moving on its own, a cold one is the
-    /// ordinary queue's job, and a repository with no numeric id cannot be
-    /// asked for by the corpus query at all.
-    #[test]
-    fn only_frozen_exact_snapshots_are_offered_for_migration() {
-        for source in [Some("gh_archive"), Some("spliced"), None] {
-            assert!(
-                !should_offer_archive_migration(Some(&summary(source)), true),
-                "{source:?} does not need a migration"
-            );
-        }
-        let incomplete = crate::cache::RepoSummary {
-            stargazers_complete: false,
-            ..summary(Some("github_api"))
-        };
-        assert!(!should_offer_archive_migration(Some(&incomplete), true));
-        let unverified = crate::cache::RepoSummary {
-            metadata_fetched_at: None,
-            ..summary(Some("github_api"))
-        };
-        assert!(!should_offer_archive_migration(Some(&unverified), true));
-        let tombstoned = crate::cache::RepoSummary {
-            missing: true,
-            ..summary(Some("github_api"))
-        };
-        assert!(!should_offer_archive_migration(Some(&tombstoned), true));
-        let no_id = crate::cache::RepoSummary {
-            github_id: None,
-            ..summary(Some("github_api"))
-        };
-        assert!(!should_offer_archive_migration(Some(&no_id), true));
-        assert!(!should_offer_archive_migration(None, true));
     }
 
     /// Locks the exact `/analyze` JSON shape the frontend codes against.

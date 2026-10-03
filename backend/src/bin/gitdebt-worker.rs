@@ -1,9 +1,9 @@
 //! `gitdebt-worker`: every background pool — repo-history analysis,
-//! star-history acquisition (GH Archive coordinator + hourly follower, or
-//! the debug stargazer-list fallback), and the leaderboard refresher — plus
-//! a minimal health server. Any number of replicas is safe: queues claim
-//! with `FOR UPDATE SKIP LOCKED`, and the two GH Archive singletons elect a
-//! leader through session-level advisory locks.
+//! star-history acquisition (GitHub's star-history endpoint, plus the GH
+//! Archive hourly follower for series not yet moved onto it), and the
+//! leaderboard refresher — plus a minimal health server. Any number of
+//! replicas is safe: queues claim with `FOR UPDATE SKIP LOCKED`, and the
+//! hourly follower elects a leader through a session-level advisory lock.
 
 use std::sync::Arc;
 
@@ -11,37 +11,12 @@ use anyhow::{Context, Result};
 use axum::{Json, Router, extract::State, http::StatusCode, response::IntoResponse, routing::get};
 use gitdebt::{bootstrap, db::Db};
 
-/// Star-history acquisition concurrency.
-///
-/// With GH Archive enabled this is *only* the fan-out for the cheap GitHub
-/// metadata lookups that resolve stable numeric repo IDs — the timelines
-/// themselves come from batched BigQuery corpus scans run by the leader — and
-/// in the local-only fallback it is the stargazer-list pool. Either way the
-/// work is GitHub-rate-limit bound, not CPU bound: extra tasks buy nothing but
-/// hidden round-trip latency, while each one holds a Postgres connection to
-/// write with. Four keeps that pressure off a database sharing 12 vCPU with
-/// the analysis pool and this host's other tenants; the previous 8 contended
-/// with the analysis workers for exactly the connections and disk they needed.
+/// Star-history workers. The work is GitHub-rate-limit bound, not CPU bound:
+/// extra tasks buy nothing but hidden round-trip latency, while each one holds
+/// a Postgres connection to write with. Four keeps that pressure off a
+/// database sharing 12 vCPU with the analysis pool and this host's other
+/// tenants.
 const STAR_WORKERS: usize = 4;
-
-/// How many frozen `github_api` histories one process start offers to GH
-/// Archive.
-///
-/// Still a spend control, but it was priced against the wrong unit. BigQuery
-/// bills for the corpus a query scans, and the repository filter is a semi-join
-/// over a parameter array that prunes nothing (see `archive_worker::
-/// fetch_complete`) — so a date window costs the same whether it is asked about
-/// 50 repositories or 500. Migration candidates all share one cold cursor and
-/// therefore land in one cohort, which means 50 per start bought the same
-/// number of scans as 500 and spread them across ten times as many deploys.
-///
-/// 500 keeps a redeploy loop from turning a one-time migration into a repeated
-/// bill, stays well under `archive_worker::DEFAULT_BATCH_SIZE` (1500) so one
-/// coordinator pass can still hold a start's worth alongside ordinary work, and
-/// leaves the peak memory of a pass inside the bound that batch size was chosen
-/// for. Repositories nobody is waiting on drain from here; the ones somebody
-/// opens jump the queue through `queue::enqueue_archive_migration`.
-const ARCHIVE_MIGRATIONS_PER_START: usize = 500;
 
 #[tokio::main]
 async fn main() -> Result<()> {
@@ -86,18 +61,13 @@ async fn main() -> Result<()> {
         );
     }
 
-    // Resolve the configuration that can be fatal BEFORE any work is claimed
-    // or enqueued. Constructing this after the pools were running meant a bad
-    // or briefly unavailable credential produced a restart loop in which every
-    // iteration re-ran the startup sweeps and abandoned a handful of freshly
-    // claimed jobs to their lease timeout.
-    let archive_client = gitdebt::gh_archive::GhArchiveBigQueryClient::from_env()
-        .await
-        .context("GH Archive BigQuery configuration/authentication failed")?;
-    if archive_client.is_none() && !cfg!(debug_assertions) {
-        anyhow::bail!(
-            "GH_ARCHIVE_ENABLED=1 and valid BigQuery credentials are required in release deployments"
-        );
+    // Jobs parked by older releases — `restricted` when GitHub closed the
+    // stargazer list, or whole batches after shared BigQuery failures — can
+    // all succeed against GitHub's star history. Revived before the pool
+    // starts so the first claims already see them.
+    let revived = gitdebt::queue::revive_parked_on_startup(&db).await?;
+    if revived > 0 {
+        tracing::info!(revived, "star-history: revived parked jobs");
     }
 
     // Deployment bootstrap: the comparison catalog is embedded from the
@@ -109,33 +79,11 @@ async fn main() -> Result<()> {
         anyhow::bail!("curated comparison catalog unexpectedly contains no repositories");
     }
     // Star history: one set-based statement that only touches cold or stale
-    // rows, against a queue whose cost is GH Archive scans rather than worker
-    // slots. Safe to offer in full, once, at startup.
+    // rows. Safe to offer in full, once, at startup: a read is a few requests
+    // per repository, paced by the worker against the GitHub budget.
     let catalog_star_jobs = gitdebt::queue::enqueue_cold_or_stale_many(&db, &catalog, 0)
         .await
         .context("enqueue curated star histories")?;
-    // Repositories still carrying an exact GitHub-API snapshot cannot be
-    // refreshed by anything: the snapshot never ages out, the enqueue path
-    // refuses them, and the hourly follower only selects archive-backed rows.
-    // Offering them for an archive backfill splices archive activity onto the
-    // frozen exact curve and moves them onto the followed path — after which
-    // they stay current on their own. Gated on the archive client because with
-    // it absent this same queue is drained by the stargazer fallback, which
-    // would re-paginate an already-exact snapshot.
-    if archive_client.is_some() {
-        match gitdebt::queue::enqueue_archive_migrations(&db, ARCHIVE_MIGRATIONS_PER_START).await {
-            Ok(0) => {}
-            Ok(migrated) => tracing::info!(
-                migrated,
-                "github_api histories offered to GH Archive for migration"
-            ),
-            // Warm-up nobody is waiting on: a failure here must not stop a
-            // deployment that is otherwise healthy.
-            Err(error) => {
-                tracing::warn!(%error, "archive migration sweep failed");
-            }
-        }
-    }
 
     tracing::info!(
         catalog_size = catalog.len(),
@@ -161,8 +109,7 @@ async fn main() -> Result<()> {
     gitdebt::repo_analysis::spawn_catalog_backfill(db.clone(), catalog);
     // Heal legacy rows with complete history but no public-metadata stamp
     // (invisible to every reader). Startup + hourly, bounded, idempotent;
-    // the star-fetch claim path writes the metadata. Runs in archive and
-    // fallback modes alike.
+    // the star-history claim path writes the metadata.
     gitdebt::worker::spawn_metadata_backfill(db.clone());
     // Keep the numbers on README-embedded badges, cards, and OG images
     // current for repositories that are only ever seen through an embed and
@@ -176,35 +123,27 @@ async fn main() -> Result<()> {
     // passes delete local bare-clone dirs no clone_path row references
     // (a 24h mtime guard protects in-flight clones).
     gitdebt::repo_stats::spawn_orphan_clone_sweep(db.clone(), storage.clone());
-    if let Some(archive_client) = archive_client {
-        let revived = gitdebt::queue::revive_retryable_for_archive(&db).await?;
-        if revived > 0 {
-            tracing::info!(revived, "gh-archive: revived retryable history jobs");
-        }
-        gitdebt::archive_worker::spawn(
-            gitdebt::archive_worker::ArchiveWorkerCtx::from_env(
-                Arc::new(archive_client),
-                services.github.clone(),
-                cache.clone(),
-                STAR_WORKERS,
-            ),
-            database_url.clone(),
-        );
+    // Star history comes from GitHub's own star-history endpoint: exact, net
+    // of unstars, complete back to each repository's creation, and public.
+    // It is the only writer of new series, so the GH Archive backfill
+    // coordinator is no longer started: two writers draining one queue would
+    // race to publish different measurements of the same repository.
+    gitdebt::worker::spawn_pool(
+        gitdebt::worker::WorkerCtx::new(services.github.clone(), cache.clone()),
+        STAR_WORKERS,
+    );
+    // Moves every remaining archive, spliced and frozen series onto GitHub's
+    // star history, most-viewed first, then keeps the ones nobody is looking
+    // at from going stale.
+    gitdebt::worker::spawn_star_history_sweep(db.clone(), services.github.clone());
+    tracing::info!(star_workers = STAR_WORKERS, "star-history pool started");
+    // Archive-backed series keep advancing hour by hour until the sweep
+    // reaches them. Once none remain the follower tracks nothing and stops
+    // downloading (see `gh_archive_hourly`).
+    if gitdebt::gh_archive::is_configured() {
         gitdebt::archive_hourly_db::spawn(db.clone(), database_url.clone())
             .context("GH Archive hourly follower configuration failed")?;
-        tracing::info!(
-            metadata_concurrency = STAR_WORKERS,
-            "GH Archive historical coordinator and hourly follower contending for leadership"
-        );
-    } else {
-        gitdebt::worker::spawn_pool(
-            gitdebt::worker::WorkerCtx::new(services.github.clone(), cache.clone()),
-            STAR_WORKERS,
-        );
-        tracing::warn!(
-            star_workers = STAR_WORKERS,
-            "GH Archive disabled; using the restricted GitHub stargazer-list fallback"
-        );
+        tracing::info!("GH Archive hourly follower contending for leadership");
     }
 
     // Minimal health server for orchestrator probes. Serving it with

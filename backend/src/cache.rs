@@ -20,11 +20,15 @@ pub struct Cache {
     db: Db,
 }
 
-pub type StargazerEvent = (i64, DateTime<Utc>);
-
 /// The exact current-membership snapshot from GitHub's stargazer list.
-/// Frozen since GitHub restricted that endpoint on 2026-07-20.
+/// Frozen since GitHub restricted that endpoint on 2026-07-20; nothing writes
+/// it any more. Rows still carrying it are upgraded to
+/// [`HISTORY_SOURCE_DAILY`] as the worker reaches them.
 pub const HISTORY_SOURCE_EXACT: &str = "github_api";
+/// GitHub's own star history: the current stargazers counted per calendar day,
+/// complete from the creation week and net of unstars (`repo_star_days`).
+/// Exact, and kept current by re-reading it whole.
+pub const HISTORY_SOURCE_DAILY: &str = "github_history";
 /// Approximate public star activity reconstructed from the GH Archive corpus.
 pub const HISTORY_SOURCE_ARCHIVE: &str = "gh_archive";
 /// The exact segment through `repos.history_splice_at`, then archive activity
@@ -60,29 +64,6 @@ type ArchiveBackfillRow = (
     bool,
     bool,
 );
-
-async fn upsert_stargazer_events(
-    conn: &mut PgConnection,
-    repo: &str,
-    items: &[StargazerEvent],
-) -> Result<()> {
-    let positions: Vec<i64> = items.iter().map(|(position, _)| *position).collect();
-    let timestamps: Vec<DateTime<Utc>> = items.iter().map(|(_, at)| *at).collect();
-    sqlx::query(
-        "INSERT INTO repo_stargazers (repo, position, starred_at) \
-         SELECT $1, events.position, events.starred_at \
-         FROM UNNEST($2::BIGINT[], $3::TIMESTAMPTZ[]) \
-              AS events(position, starred_at) \
-         ON CONFLICT (repo, position) DO UPDATE \
-         SET starred_at = EXCLUDED.starred_at",
-    )
-    .bind(repo)
-    .bind(positions)
-    .bind(timestamps)
-    .execute(conn)
-    .await?;
-    Ok(())
-}
 
 async fn upsert_archive_events(
     conn: &mut PgConnection,
@@ -189,22 +170,20 @@ impl<'row> sqlx::FromRow<'row, sqlx::postgres::PgRow> for RepoSummary {
 
 impl RepoSummary {
     /// Mirror of [`Cache::repo_stargazers_fresh_within`] over the
-    /// already-loaded summary. Exact GitHub API snapshots are immutable
-    /// once complete; only approximate GH Archive histories age out.
+    /// already-loaded summary. Only GitHub's star history is ever fresh, and
+    /// only within `ttl` of its last read.
     ///
-    /// A spliced series is deliberately NOT permanently fresh. Its exact
-    /// segment is immutable, but its archive tail is the part that has to keep
-    /// moving — treating the whole thing as frozen because half of it is exact
-    /// would recreate the stall the splice exists to end.
+    /// Every other source is stale by definition, because each can now be
+    /// replaced by something strictly better: a frozen stargazer-list snapshot
+    /// stops on the day GitHub restricted that list, and an archive or spliced
+    /// series is approximate where GitHub's star history is exact. Reporting
+    /// them fresh is what would keep a repository on them forever.
     pub fn stargazers_fresh_within(&self, ttl: chrono::Duration) -> bool {
-        if self.stargazers_complete && self.history_source.as_deref() == Some(HISTORY_SOURCE_EXACT)
-        {
-            return true;
-        }
-        match (self.stargazers_complete, self.stargazers_fetched_at) {
-            (true, Some(fetched_at)) => Utc::now() - fetched_at < ttl,
-            _ => false,
-        }
+        self.stargazers_complete
+            && self.history_source.as_deref() == Some(HISTORY_SOURCE_DAILY)
+            && self
+                .stargazers_fetched_at
+                .is_some_and(|fetched_at| Utc::now() - fetched_at < ttl)
     }
 
     /// Whether any part of the plotted series is GH Archive activity.
@@ -222,11 +201,10 @@ impl RepoSummary {
 
     /// The splice boundary, but only for a series that actually has one.
     ///
-    /// The column outlives the source. `put_repo_stargazers` and
-    /// `finish_repo_stargazers_partial` set `history_source = 'github_api'`
-    /// without clearing the boundary, so a spliced repository that later takes
-    /// an exact write keeps a stale instant in the row. Publishing it would
-    /// date a join that no longer exists — the read surfaces ask this instead
+    /// The column must never be trusted on its own. Writers clear it when
+    /// they replace a spliced series, but a row written by an older release
+    /// may still carry an instant for a join that no longer exists, and
+    /// publishing it would date that join — the read surfaces ask this instead
     /// of the field.
     pub fn history_splice_at_if_spliced(&self) -> Option<DateTime<Utc>> {
         self.history_splice_at
@@ -427,41 +405,100 @@ impl Cache {
         Ok(Some(crate::export::cumulative_points(&deltas)))
     }
 
-    /// Atomically replace this repo's stargazer set and mark complete.
-    /// Single transaction — the visible state is always either "old data,
-    /// complete=false" or "new data, complete=true", never a mix.
-    pub async fn put_repo_stargazers(&self, repo: &str, items: &[StargazerEvent]) -> Result<()> {
+    /// Atomically replace a repository's star history with GitHub's, and make
+    /// it the published series.
+    ///
+    /// One transaction, so a reader sees either the previous series or this
+    /// one and never a mix. The day rows are replaced whole: the source is
+    /// re-read whole on every refresh, which is what carries an unstar of an
+    /// old star into the curve as well as a new star.
+    ///
+    /// Every other source's rows for the repository are deleted in the same
+    /// transaction. GitHub's history is complete back to the creation week, so
+    /// it supersedes both a frozen stargazer-list snapshot and archive activity,
+    /// and keeping either would leave rows no reader selects that a later
+    /// writer could splice onto. The archive columns are reset with them: the
+    /// hourly follower only advances archive-backed sources, so archive state
+    /// left behind would describe a follow that has stopped.
+    ///
+    /// COVERAGE DATE is the instant of the read, not the last starred day. The
+    /// history is complete through the moment GitHub answered, including any
+    /// quiet stretch at its end; dating it by the last star would understate
+    /// it for every repository that had a quiet week.
+    ///
+    /// A successful write is positive evidence the repository exists and is
+    /// public, so it also clears a stale `missing` tombstone.
+    pub async fn put_repo_star_days(
+        &self,
+        repo: &str,
+        days: &[crate::star_history::StarDay],
+    ) -> Result<i64> {
+        let mut starred_on: Vec<DateTime<Utc>> = Vec::with_capacity(days.len());
+        let mut stars: Vec<i32> = Vec::with_capacity(days.len());
+        let mut position_before: Vec<i64> = Vec::with_capacity(days.len());
+        let mut total: i64 = 0;
+        for day in days {
+            anyhow::ensure!(day.stars > 0, "a stored day has at least one star");
+            if let Some(previous) = starred_on.last() {
+                anyhow::ensure!(
+                    previous.date_naive() < day.day,
+                    "star days must be strictly ascending"
+                );
+            }
+            starred_on.push(day.day.and_time(chrono::NaiveTime::MIN).and_utc());
+            stars.push(i32::try_from(day.stars).context("stars on one day exceed i32")?);
+            position_before.push(total);
+            total = total.saturating_add(day.stars);
+        }
+
         let mut tx = self.db.pool.begin().await?;
         sqlx::query("INSERT INTO repos (repo) VALUES ($1) ON CONFLICT DO NOTHING")
             .bind(repo)
             .execute(&mut *tx)
             .await?;
-        sqlx::query("DELETE FROM repo_stargazers WHERE repo = $1")
+        // Serialize with the hourly follower and any other writer of this row.
+        sqlx::query("SELECT repo FROM repos WHERE repo = $1 FOR UPDATE")
             .bind(repo)
-            .execute(&mut *tx)
+            .fetch_one(&mut *tx)
             .await?;
-        upsert_stargazer_events(&mut tx, repo, items).await?;
-        let now = Utc::now();
-        // A successful complete write is positive evidence the repo exists,
-        // so clear any stale `missing` tombstone (a repo can 404 transiently
-        // or be un-deleted). Without this the 404 tombstone was one-way.
+        for statement in [
+            "DELETE FROM repo_star_days WHERE repo = $1",
+            "DELETE FROM repo_stargazers WHERE repo = $1",
+            "DELETE FROM repo_star_arrivals WHERE repo = $1",
+        ] {
+            sqlx::query(statement).bind(repo).execute(&mut *tx).await?;
+        }
         sqlx::query(
-            "UPDATE repos SET stargazers_fetched_at = $1, stargazers_complete = TRUE, \
-                history_complete = TRUE, \
-                star_count = $2, history_source = 'github_api', \
-                history_observed_count = $2, history_coverage_start = $3, \
-                history_coverage_end = $4, missing = FALSE \
-             WHERE repo = $5",
+            "INSERT INTO repo_star_days (repo, starred_on, stars, position_before) \
+             SELECT $1, days.starred_on, days.stars, days.position_before \
+             FROM UNNEST($2::TIMESTAMPTZ[], $3::INTEGER[], $4::BIGINT[]) \
+                  AS days(starred_on, stars, position_before)",
+        )
+        .bind(repo)
+        .bind(&starred_on)
+        .bind(&stars)
+        .bind(&position_before)
+        .execute(&mut *tx)
+        .await?;
+        let now = Utc::now();
+        sqlx::query(
+            "UPDATE repos SET stargazers_fetched_at = $1, stargazers_complete = FALSE, \
+                history_complete = TRUE, history_source = 'github_history', \
+                star_count = $2, history_observed_count = $2, \
+                history_coverage_start = $3, history_coverage_end = $1, \
+                history_splice_at = NULL, history_splice_position = NULL, \
+                archive_complete = FALSE, archive_cursor = NULL, archive_fetched_at = NULL, \
+                archive_truncated_before = FALSE, missing = FALSE \
+             WHERE repo = $4",
         )
         .bind(now)
-        .bind(items.len() as i64)
-        .bind(items.first().map(|(_, at)| *at))
-        .bind(items.last().map(|(_, at)| *at))
+        .bind(total)
+        .bind(starred_on.first())
         .bind(repo)
         .execute(&mut *tx)
         .await?;
         tx.commit().await?;
-        Ok(())
+        Ok(total)
     }
 
     /// All the single-row `repos` fields the non-blocking analyze path
@@ -477,7 +514,8 @@ impl Cache {
     pub async fn get_repo_summary(&self, repo: &str) -> Result<Option<RepoSummary>> {
         let row = sqlx::query_as::<_, RepoSummary>(
             "SELECT missing, github_id, history_complete AS stargazers_complete, \
-                    COALESCE(archive_fetched_at, stargazers_fetched_at) \
+                    CASE WHEN history_source = 'github_history' THEN stargazers_fetched_at \
+                         ELSE COALESCE(archive_fetched_at, stargazers_fetched_at) END \
                         AS stargazers_fetched_at, \
                     metadata_fetched_at, star_count, history_source, \
                     history_observed_count, history_coverage_start, history_coverage_end, \
@@ -509,29 +547,28 @@ impl Cache {
         Ok(complete == Some(true))
     }
 
-    /// True iff the history needs no refresh. Exact GitHub API snapshots are
-    /// never re-fetched after completion. Approximate GH Archive histories —
-    /// including the archive tail of a spliced one — are fresh only within
-    /// `ttl` and may be refreshed from later partitions.
+    /// True iff the history needs no refresh: GitHub's star history read
+    /// within `ttl`. Every other source is stale, for the reason
+    /// [`RepoSummary::stargazers_fresh_within`] gives.
     pub async fn repo_stargazers_fresh_within(
         &self,
         repo: &str,
         ttl: chrono::Duration,
     ) -> Result<bool> {
         let row: Option<(bool, Option<DateTime<Utc>>, Option<String>)> = sqlx::query_as(
-            "SELECT history_complete, COALESCE(archive_fetched_at, stargazers_fetched_at), \
-                    history_source \
+            "SELECT history_complete, stargazers_fetched_at, history_source \
              FROM repos WHERE repo = $1 AND missing = FALSE \
                AND metadata_fetched_at IS NOT NULL",
         )
         .bind(repo)
         .fetch_optional(&self.db.pool)
         .await?;
-        match row {
-            Some((true, _, Some(source))) if source == HISTORY_SOURCE_EXACT => Ok(true),
-            Some((true, Some(fetched_at), _)) => Ok(Utc::now() - fetched_at < ttl),
-            _ => Ok(false),
-        }
+        Ok(match row {
+            Some((true, Some(fetched_at), Some(source))) if source == HISTORY_SOURCE_DAILY => {
+                Utc::now() - fetched_at < ttl
+            }
+            _ => false,
+        })
     }
 
     /// The cached authoritative star count for a repo. Reads the
@@ -550,38 +587,6 @@ impl Cache {
         .await?
         .flatten();
         Ok(n)
-    }
-
-    /// Read every cached stargazer row for a repo regardless of the
-    /// completeness flag, oldest-first. **Not** a public read path — the
-    /// completeness invariant still holds for [`get_repo_stargazers`].
-    /// The star-fetch worker uses this to seed an incremental refresh: it
-    /// needs the previously-committed (complete) set as the base it
-    /// appends the new tail onto.
-    pub async fn get_repo_stargazers_partial(&self, repo: &str) -> Result<Vec<StargazerEvent>> {
-        let rows = sqlx::query(
-            "SELECT position, starred_at FROM repo_stargazers \
-             WHERE repo = $1 ORDER BY position",
-        )
-        .bind(repo)
-        .fetch_all(&self.db.pool)
-        .await?;
-        let mut out = Vec::with_capacity(rows.len());
-        for row in rows {
-            let position: i64 = row.try_get("position")?;
-            let starred_at: DateTime<Utc> = row.try_get("starred_at")?;
-            out.push((position, starred_at));
-        }
-        Ok(out)
-    }
-
-    pub async fn repo_stargazer_row_count(&self, repo: &str) -> Result<i64> {
-        let count =
-            sqlx::query_scalar("SELECT COUNT(*)::BIGINT FROM repo_stargazers WHERE repo = $1")
-                .bind(repo)
-                .fetch_one(&self.db.pool)
-                .await?;
-        Ok(count)
     }
 
     /// Read cached timestamps at or after `since`, regardless of completeness.
@@ -791,138 +796,6 @@ impl Cache {
                 .await?;
         tx.commit().await?;
         Ok(observed)
-    }
-
-    /// Append newly-fetched stargazers to the existing set and mark the
-    /// repo complete, atomically. Used by the incremental refresh path:
-    /// the worker fetched only the new tail (the rows GitHub added since
-    /// the last fetch), so we keep the existing rows and `ON CONFLICT DO
-    /// NOTHING` any overlap, then flip `stargazers_complete = TRUE` and
-    /// update the count inside the same transaction. Like
-    /// [`put_repo_stargazers`], the visible state is never a half-written
-    /// mix. `total` is the full count after the append (the worker knows
-    /// it; passing it avoids a COUNT(*) round-trip).
-    pub async fn append_repo_stargazers(
-        &self,
-        repo: &str,
-        new_items: &[StargazerEvent],
-        total: i64,
-    ) -> Result<()> {
-        let mut tx = self.db.pool.begin().await?;
-        sqlx::query("INSERT INTO repos (repo) VALUES ($1) ON CONFLICT DO NOTHING")
-            .bind(repo)
-            .execute(&mut *tx)
-            .await?;
-        upsert_stargazer_events(&mut tx, repo, new_items).await?;
-        let now = Utc::now();
-        // Clear any stale `missing` tombstone — a successful append proves
-        // the repo is reachable again (see `put_repo_stargazers`).
-        sqlx::query(
-            "UPDATE repos SET stargazers_fetched_at = $1, stargazers_complete = TRUE, \
-                history_complete = TRUE, \
-                star_count = $2, history_source = 'github_api', \
-                history_observed_count = $2, \
-                history_coverage_start = COALESCE(history_coverage_start, \
-                    (SELECT MIN(starred_at) FROM repo_stargazers WHERE repo = $3)), \
-                history_coverage_end = (SELECT MAX(starred_at) FROM repo_stargazers WHERE repo = $3), \
-                missing = FALSE WHERE repo = $3",
-        )
-        .bind(now)
-        .bind(total)
-        .bind(repo)
-        .execute(&mut *tx)
-        .await?;
-        tx.commit().await?;
-        Ok(())
-    }
-
-    /// Persist rows from a *capped* (partial) fetch without marking the
-    /// repo complete. Honors the caching invariant: a fetch that hit the
-    /// per-attempt page cap leaves `stargazers_complete = FALSE` and no
-    /// reader ever trusts the half-written set. Rows are upserted so a
-    /// retried cursor chunk is idempotent.
-    pub async fn put_repo_stargazers_partial(
-        &self,
-        repo: &str,
-        items: &[StargazerEvent],
-    ) -> Result<()> {
-        let mut tx = self.db.pool.begin().await?;
-        sqlx::query(
-            "INSERT INTO repos (repo, stargazers_complete, history_complete) \
-             VALUES ($1, FALSE, FALSE) \
-             ON CONFLICT (repo) DO UPDATE SET \
-                stargazers_complete = FALSE, history_complete = FALSE",
-        )
-        .bind(repo)
-        .execute(&mut *tx)
-        .await?;
-        upsert_stargazer_events(&mut tx, repo, items).await?;
-        tx.commit().await?;
-        Ok(())
-    }
-
-    /// Start a fresh capped backfill. Existing rows are replaced and the
-    /// completeness flag stays false in the same transaction, so public
-    /// readers can never observe a mixed old/new history.
-    pub async fn replace_repo_stargazers_partial(
-        &self,
-        repo: &str,
-        items: &[StargazerEvent],
-    ) -> Result<()> {
-        let mut tx = self.db.pool.begin().await?;
-        sqlx::query(
-            "INSERT INTO repos (repo, stargazers_complete, history_complete) \
-             VALUES ($1, FALSE, FALSE) \
-             ON CONFLICT (repo) DO UPDATE SET \
-                stargazers_complete = FALSE, history_complete = FALSE",
-        )
-        .bind(repo)
-        .execute(&mut *tx)
-        .await?;
-        sqlx::query("DELETE FROM repo_stargazers WHERE repo = $1")
-            .bind(repo)
-            .execute(&mut *tx)
-            .await?;
-        upsert_stargazer_events(&mut tx, repo, items).await?;
-        tx.commit().await?;
-        Ok(())
-    }
-
-    /// Append the final chunk of a resumable backfill and atomically make
-    /// the accumulated set readable. The count is computed in the same
-    /// transaction so retries or page overlap cannot inflate `star_count`.
-    pub async fn finish_repo_stargazers_partial(
-        &self,
-        repo: &str,
-        items: &[StargazerEvent],
-    ) -> Result<i64> {
-        let mut tx = self.db.pool.begin().await?;
-        sqlx::query("INSERT INTO repos (repo) VALUES ($1) ON CONFLICT DO NOTHING")
-            .bind(repo)
-            .execute(&mut *tx)
-            .await?;
-        upsert_stargazer_events(&mut tx, repo, items).await?;
-        let total: i64 =
-            sqlx::query_scalar("SELECT COUNT(*)::BIGINT FROM repo_stargazers WHERE repo = $1")
-                .bind(repo)
-                .fetch_one(&mut *tx)
-                .await?;
-        sqlx::query(
-            "UPDATE repos SET stargazers_fetched_at = $1, stargazers_complete = TRUE, \
-             history_complete = TRUE, \
-             star_count = $2, history_source = 'github_api', \
-             history_observed_count = $2, \
-             history_coverage_start = (SELECT MIN(starred_at) FROM repo_stargazers WHERE repo = $3), \
-             history_coverage_end = (SELECT MAX(starred_at) FROM repo_stargazers WHERE repo = $3), \
-             missing = FALSE WHERE repo = $3",
-        )
-        .bind(Utc::now())
-        .bind(total)
-        .bind(repo)
-        .execute(&mut *tx)
-        .await?;
-        tx.commit().await?;
-        Ok(total)
     }
 
     /// Best-effort popularity bump: increment `view_count` and stamp
@@ -1376,8 +1249,8 @@ mod tests {
     // exercised by integration smoke tests rather than unit tests here.
     // What we *can* assert without a DB is the read-side completeness
     // invariant by construction: `get_repo_stargazers` early-returns
-    // `None` unless `stargazers_complete` is `true` (see the
-    // `complete != Some(true)` guard above), and `put_repo_stargazers`
+    // `None` unless `history_complete` is `true` (see the
+    // `complete != Some(true)` guard above), and `put_repo_star_days`
     // flips that flag only inside the committing transaction. Those two
     // properties are what the rest of the system trusts; any change to
     // them should be paired with a regression test against a test DB.
@@ -1503,25 +1376,41 @@ mod tests {
         }
     }
 
-    /// The archive tail of a spliced series is the half that has to keep
-    /// moving. Treating the whole series as permanently fresh because its
-    /// first half is exact would park it exactly where a frozen `github_api`
-    /// row is parked today — the stall the splice exists to end.
+    /// Only GitHub's star history is ever fresh, and only within the TTL.
+    ///
+    /// A frozen stargazer-list snapshot used to be permanently fresh, which
+    /// was right while it was exact and current and became a trap once GitHub
+    /// closed that list: nothing would ever refresh it. Archive and spliced
+    /// series are approximate where GitHub's history is exact. All three must
+    /// read as stale so every view and the background sweep move them onto it.
     #[test]
-    fn a_spliced_series_is_never_permanently_fresh() {
+    fn only_a_recent_github_star_history_is_fresh() {
         let ttl = chrono::Duration::hours(6);
-        let stale = |source: &str| super::RepoSummary {
+        let read = |source: &str, age: chrono::Duration| super::RepoSummary {
             stargazers_complete: true,
-            stargazers_fetched_at: Some(Utc::now() - chrono::Duration::days(30)),
+            stargazers_fetched_at: Some(Utc::now() - age),
             history_source: Some(source.to_string()),
             ..Default::default()
         };
-        assert!(
-            stale(super::HISTORY_SOURCE_EXACT).stargazers_fresh_within(ttl),
-            "an exact snapshot is immutable once complete"
-        );
-        assert!(!stale(super::HISTORY_SOURCE_SPLICED).stargazers_fresh_within(ttl));
-        assert!(!stale(super::HISTORY_SOURCE_ARCHIVE).stargazers_fresh_within(ttl));
+        let recent = chrono::Duration::minutes(5);
+        let old = chrono::Duration::days(30);
+        assert!(read(super::HISTORY_SOURCE_DAILY, recent).stargazers_fresh_within(ttl));
+        assert!(!read(super::HISTORY_SOURCE_DAILY, old).stargazers_fresh_within(ttl));
+        for source in [
+            super::HISTORY_SOURCE_EXACT,
+            super::HISTORY_SOURCE_SPLICED,
+            super::HISTORY_SOURCE_ARCHIVE,
+        ] {
+            assert!(
+                !read(source, recent).stargazers_fresh_within(ttl),
+                "{source} must be offered to GitHub's star history"
+            );
+        }
+        let incomplete = super::RepoSummary {
+            stargazers_complete: false,
+            ..read(super::HISTORY_SOURCE_DAILY, recent)
+        };
+        assert!(!incomplete.stargazers_fresh_within(ttl));
     }
 
     /// Approximate is a property of the whole series: a spliced one is exact
@@ -1536,12 +1425,13 @@ mod tests {
         assert!(with(Some(super::HISTORY_SOURCE_SPLICED)).history_is_approximate());
         assert!(with(Some(super::HISTORY_SOURCE_ARCHIVE)).history_is_approximate());
         assert!(!with(Some(super::HISTORY_SOURCE_EXACT)).history_is_approximate());
+        assert!(!with(Some(super::HISTORY_SOURCE_DAILY)).history_is_approximate());
         assert!(!with(None).history_is_approximate());
     }
 
-    /// The boundary column outlives the source that gave it meaning: the exact
-    /// writers set `history_source = 'github_api'` and leave
-    /// `history_splice_at` where it was. Publishing the raw column would date a
+    /// The boundary column can outlive the source that gave it meaning: a row
+    /// written by an older release may carry a splice instant under another
+    /// source. Publishing the raw column would date a
     /// join the series no longer has, on the one surface whose entire job is
     /// stating where the method changed.
     #[test]
@@ -1601,7 +1491,7 @@ mod tests {
         .execute(&db.pool)
         .await
         .unwrap();
-        let exact: Vec<super::StargazerEvent> = vec![(1, at(1, 0)), (2, at(10, 0)), (3, boundary)];
+        let exact: Vec<(i64, DateTime<Utc>)> = vec![(1, at(1, 0)), (2, at(10, 0)), (3, boundary)];
         for (position, starred_at) in &exact {
             sqlx::query(
                 "INSERT INTO repo_stargazers (repo, position, starred_at) VALUES ($1, $2, $3)",
@@ -1692,8 +1582,200 @@ mod tests {
         cleanup_splice_fixture(&db, &repo).await;
     }
 
+    /// End to end against Postgres: GitHub's star history replaces whatever
+    /// series a repository had, in one transaction, and the view expands it
+    /// back into one row per star with a single increasing order.
+    ///
+    /// The fixture starts from the worst case the upgrade meets in production:
+    /// a spliced repository, with exact rows, archive rows, a boundary and
+    /// archive follow state. After the write none of that may survive, because
+    /// a later writer could otherwise splice onto rows nobody reads, and the
+    /// hourly follower would keep stamping a follow that has stopped.
+    #[tokio::test]
+    async fn github_star_history_replaces_every_other_series() {
+        let Some(db) = crate::test_db::shared().await else {
+            eprintln!("skipping: set GITDEBT_TEST_DATABASE_URL to run");
+            return;
+        };
+        let cache = super::Cache::new(db.clone());
+        let repo = format!("gitdebt-star-days-test/{}", std::process::id());
+        let day = |d: u32| NaiveDate::from_ymd_opt(2026, 7, d).unwrap();
+        let at = |d: u32| chrono::TimeZone::with_ymd_and_hms(&Utc, 2026, 7, d, 9, 0, 0).unwrap();
+
+        cleanup_splice_fixture(&db, &repo).await;
+        sqlx::query(
+            "INSERT INTO repos (repo, github_id, star_count, metadata_fetched_at, \
+                stargazers_complete, history_complete, history_source, missing, \
+                history_splice_at, history_splice_position, archive_complete, \
+                archive_cursor, archive_fetched_at) \
+             VALUES ($1, 4343, 2, NOW(), TRUE, TRUE, 'spliced', TRUE, $2, 1, TRUE, \
+                '2026-07-21', NOW())",
+        )
+        .bind(&repo)
+        .bind(at(2))
+        .execute(&db.pool)
+        .await
+        .unwrap();
+        sqlx::query("INSERT INTO repo_stargazers (repo, position, starred_at) VALUES ($1, 1, $2)")
+            .bind(&repo)
+            .bind(at(2))
+            .execute(&db.pool)
+            .await
+            .unwrap();
+        sqlx::query(
+            "INSERT INTO repo_star_arrivals (repo, position, source_event_id, starred_at) \
+             VALUES ($1, 1, 'days-test', $2)",
+        )
+        .bind(&repo)
+        .bind(at(3))
+        .execute(&db.pool)
+        .await
+        .unwrap();
+
+        let days = vec![
+            crate::star_history::StarDay {
+                day: day(1),
+                stars: 2,
+            },
+            crate::star_history::StarDay {
+                day: day(4),
+                stars: 1,
+            },
+            crate::star_history::StarDay {
+                day: day(9),
+                stars: 3,
+            },
+        ];
+        let before = Utc::now();
+        assert_eq!(cache.put_repo_star_days(&repo, &days).await.unwrap(), 6);
+
+        type Row = (
+            Option<String>,
+            bool,
+            bool,
+            bool,
+            Option<i64>,
+            Option<i64>,
+            Option<DateTime<Utc>>,
+            Option<DateTime<Utc>>,
+            Option<DateTime<Utc>>,
+            bool,
+            Option<DateTime<Utc>>,
+        );
+        let row: Row = sqlx::query_as(
+            "SELECT history_source, history_complete, stargazers_complete, missing, \
+                    star_count, history_observed_count, history_coverage_start, \
+                    history_coverage_end, history_splice_at, archive_complete, \
+                    archive_fetched_at \
+             FROM repos WHERE repo = $1",
+        )
+        .bind(&repo)
+        .fetch_one(&db.pool)
+        .await
+        .unwrap();
+        assert_eq!(row.0.as_deref(), Some(super::HISTORY_SOURCE_DAILY));
+        assert!(row.1, "the series is readable");
+        assert!(!row.2, "no stargazer-list snapshot remains");
+        assert!(!row.3, "a successful read clears a stale tombstone");
+        assert_eq!((row.4, row.5), (Some(6), Some(6)));
+        assert_eq!(row.6, Some(at(1) - chrono::Duration::hours(9)));
+        assert!(
+            row.7.is_some_and(|end| end >= before),
+            "coverage runs to the read, not to the last starred day"
+        );
+        assert_eq!(row.8, None, "no splice boundary survives");
+        assert!(
+            !row.9 && row.10.is_none(),
+            "no archive follow state survives"
+        );
+
+        for table in ["repo_stargazers", "repo_star_arrivals"] {
+            let left: i64 = sqlx::query_scalar(sqlx::AssertSqlSafe(format!(
+                "SELECT COUNT(*) FROM {table} WHERE repo = $1"
+            )))
+            .bind(&repo)
+            .fetch_one(&db.pool)
+            .await
+            .unwrap();
+            assert_eq!(left, 0, "{table} rows are superseded");
+        }
+
+        let series: Vec<(i64, DateTime<Utc>)> = sqlx::query_as(
+            "SELECT position, starred_at FROM active_repo_star_history \
+             WHERE repo = $1 ORDER BY position",
+        )
+        .bind(&repo)
+        .fetch_all(&db.pool)
+        .await
+        .unwrap();
+        assert_eq!(
+            series
+                .iter()
+                .map(|(position, _)| *position)
+                .collect::<Vec<_>>(),
+            vec![1, 2, 3, 4, 5, 6],
+            "one row per star, numbered on from earlier days"
+        );
+        let midnight = |d: u32| at(d) - chrono::Duration::hours(9);
+        assert_eq!(
+            series.iter().map(|(_, at)| *at).collect::<Vec<_>>(),
+            vec![
+                midnight(1),
+                midnight(1),
+                midnight(4),
+                midnight(9),
+                midnight(9),
+                midnight(9)
+            ]
+        );
+
+        // A refresh replaces the days whole: an unstar on an old day lowers
+        // that day, it does not leave the earlier count behind.
+        let refreshed = vec![
+            crate::star_history::StarDay {
+                day: day(1),
+                stars: 1,
+            },
+            crate::star_history::StarDay {
+                day: day(9),
+                stars: 3,
+            },
+            crate::star_history::StarDay {
+                day: day(12),
+                stars: 1,
+            },
+        ];
+        assert_eq!(
+            cache.put_repo_star_days(&repo, &refreshed).await.unwrap(),
+            5
+        );
+        let deltas = crate::export::load_day_deltas(&db, &repo).await.unwrap();
+        assert_eq!(deltas, vec![(day(1), 1), (day(9), 3), (day(12), 1)]);
+        assert!(
+            cache
+                .repo_stargazers_fresh_within(&repo, chrono::Duration::hours(6))
+                .await
+                .unwrap()
+        );
+
+        // A malformed series never reaches the table.
+        let descending = vec![refreshed[1], refreshed[0]];
+        assert!(cache.put_repo_star_days(&repo, &descending).await.is_err());
+        assert_eq!(
+            crate::export::load_day_deltas(&db, &repo)
+                .await
+                .unwrap()
+                .len(),
+            3,
+            "a rejected write leaves the previous series intact"
+        );
+
+        cleanup_splice_fixture(&db, &repo).await;
+    }
+
     async fn cleanup_splice_fixture(db: &crate::db::Db, repo: &str) {
         for statement in [
+            "DELETE FROM repo_star_days WHERE repo = $1",
             "DELETE FROM repo_stargazers WHERE repo = $1",
             "DELETE FROM repo_star_arrivals WHERE repo = $1",
             "DELETE FROM repos WHERE repo = $1",

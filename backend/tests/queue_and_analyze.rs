@@ -26,6 +26,7 @@ use gitdebt::{
     progress, queue, repo_analysis,
     repo_history::{CommitInfo, RepoStorage},
     repo_stats,
+    star_history::days_of,
 };
 use sqlx::postgres::PgPoolOptions;
 use tokio::sync::Mutex;
@@ -78,6 +79,10 @@ async fn cleanup(db: &Db, prefix: &str) {
         .execute(&db.pool)
         .await;
     let _ = sqlx::query("DELETE FROM repo_stargazers WHERE repo LIKE $1")
+        .bind(&like)
+        .execute(&db.pool)
+        .await;
+    let _ = sqlx::query("DELETE FROM repo_star_days WHERE repo LIKE $1")
         .bind(&like)
         .execute(&db.pool)
         .await;
@@ -196,7 +201,7 @@ async fn queue_dedup_and_claim() {
 }
 
 #[tokio::test]
-async fn catalog_bootstrap_only_enqueues_cold_or_stale_approximate_histories() {
+async fn catalog_bootstrap_enqueues_every_history_but_a_fresh_github_one() {
     let Some(db) = test_db().await else {
         eprintln!("skipping: set GITDEBT_TEST_DATABASE_URL to run");
         return;
@@ -207,6 +212,8 @@ async fn catalog_bootstrap_only_enqueues_cold_or_stale_approximate_histories() {
     let cold = format!("{prefix}cold");
     let exact = format!("{prefix}exact");
     let approximate = format!("{prefix}approximate");
+    let fresh = format!("{prefix}fresh");
+    let stale = format!("{prefix}stale");
     let missing = format!("{prefix}missing");
     sqlx::query(
         "INSERT INTO repos \
@@ -214,11 +221,15 @@ async fn catalog_bootstrap_only_enqueues_cold_or_stale_approximate_histories() {
              stargazers_fetched_at, archive_fetched_at, missing) \
          VALUES \
             ($1, NOW(), TRUE, 'github_api', NOW() - INTERVAL '1 year', NULL, FALSE), \
-            ($2, NOW(), TRUE, 'gh_archive', NULL, NOW() - INTERVAL '7 hours', FALSE), \
-            ($3, NOW(), FALSE, NULL, NULL, NULL, TRUE)",
+            ($2, NOW(), TRUE, 'gh_archive', NULL, NOW() - INTERVAL '1 hour', FALSE), \
+            ($3, NOW(), TRUE, 'github_history', NOW() - INTERVAL '1 hour', NULL, FALSE), \
+            ($4, NOW(), TRUE, 'github_history', NOW() - INTERVAL '7 hours', NULL, FALSE), \
+            ($5, NOW(), FALSE, NULL, NULL, NULL, TRUE)",
     )
     .bind(&exact)
     .bind(&approximate)
+    .bind(&fresh)
+    .bind(&stale)
     .bind(&missing)
     .execute(&db.pool)
     .await
@@ -228,22 +239,27 @@ async fn catalog_bootstrap_only_enqueues_cold_or_stale_approximate_histories() {
         cold.clone(),
         exact.clone(),
         approximate.clone(),
+        fresh.clone(),
+        stale.clone(),
         missing.clone(),
     ];
+    // A frozen stargazer-list snapshot and an archive series are superseded by
+    // GitHub's star history however recently they moved; only a fresh GitHub
+    // star history and a tombstone are left alone.
     assert_eq!(
         queue::enqueue_cold_or_stale_many(&db, &repos, 0)
             .await
             .unwrap(),
-        2
+        4
     );
-    queue::enqueue(&db, &exact, 100).await.unwrap();
+    queue::enqueue(&db, &fresh, 100).await.unwrap();
     let queued: Vec<String> =
         sqlx::query_scalar("SELECT repo FROM star_fetch_queue WHERE repo LIKE $1 ORDER BY repo")
             .bind(format!("{prefix}%"))
             .fetch_all(&db.pool)
             .await
             .unwrap();
-    assert_eq!(queued, vec![approximate, cold]);
+    assert_eq!(queued, vec![approximate, cold, exact, stale]);
 
     cleanup(&db, prefix).await;
 }
@@ -948,7 +964,10 @@ async fn analyze_fresh_complete_repo_returns_history_not_pending() {
         .put_repo_metadata(&full, &metadata(101, 5, 0))
         .await
         .unwrap();
-    cache.put_repo_stargazers(&full, &items).await.unwrap();
+    cache
+        .put_repo_star_days(&full, &days_of(items.iter().map(|(_, at)| *at)))
+        .await
+        .unwrap();
     assert!(cache.repo_stargazers_complete(&full).await.unwrap());
     assert!(
         cache
@@ -964,11 +983,11 @@ async fn analyze_fresh_complete_repo_returns_history_not_pending() {
     .await
     .unwrap();
     assert!(
-        cache
+        !cache
             .repo_stargazers_fresh_within(&full, Duration::hours(6))
             .await
             .unwrap(),
-        "completed exact snapshots never age out"
+        "a GitHub star history ages out, so a stale one is read again"
     );
 
     let rate = std::sync::Arc::new(
@@ -1010,7 +1029,7 @@ async fn analyze_fresh_complete_repo_returns_history_not_pending() {
 }
 
 #[tokio::test]
-async fn incremental_append_through_cache() {
+async fn star_history_refresh_replaces_the_series_through_cache() {
     let Some(db) = test_db().await else {
         eprintln!("skipping: set GITDEBT_TEST_DATABASE_URL to run");
         return;
@@ -1022,30 +1041,33 @@ async fn incremental_append_through_cache() {
     let full = "gitdebt-test-incr/z".to_string();
 
     let base = Utc.timestamp_opt(1_700_000_000, 0).unwrap();
-    let initial: Vec<(i64, _)> = (0..3)
-        .map(|i| (i + 1, base + Duration::seconds(i)))
-        .collect();
     cache
         .put_repo_metadata(&full, &metadata(102, 3, 0))
         .await
         .unwrap();
-    cache.put_repo_stargazers(&full, &initial).await.unwrap();
+    cache
+        .put_repo_star_days(&full, &days_of((0..3).map(|i| base + Duration::seconds(i))))
+        .await
+        .unwrap();
 
-    // Incremental append of two newer rows.
-    let tail: Vec<(i64, _)> = (3..5)
-        .map(|i| (i + 1, base + Duration::seconds(i)))
-        .collect();
-    cache.append_repo_stargazers(&full, &tail, 5).await.unwrap();
+    // A refresh re-reads the whole history: two newer stars on the next day.
+    let refreshed = (0..3)
+        .map(|i| base + Duration::seconds(i))
+        .chain((0..2).map(|i| base + Duration::days(1) + Duration::seconds(i)));
+    cache
+        .put_repo_star_days(&full, &days_of(refreshed))
+        .await
+        .unwrap();
 
     let got = cache.get_repo_stargazers(&full).await.unwrap().unwrap();
-    assert_eq!(got.len(), 5, "appended tail is present and complete");
+    assert_eq!(got.len(), 5, "the refreshed series is present and complete");
     let chart_series = cache.get_repo_star_series(&full).await.unwrap().unwrap();
     assert_eq!(
         chart_series.len(),
-        1,
-        "same-day events must aggregate before common read paths"
+        2,
+        "one cumulative point per starred day"
     );
-    assert_eq!(chart_series[0].stars, 5);
+    assert_eq!(chart_series[1].stars, 5);
     assert_eq!(cache.get_repo_star_count(&full).await.unwrap(), Some(5));
 
     cleanup(&db, prefix).await;
@@ -1063,7 +1085,11 @@ async fn completed_history_is_hidden_until_public_metadata_is_recorded() {
     let cache = Cache::new(db.clone());
     let full = format!("{prefix}legacy");
     let at = Utc.timestamp_opt(1_700_000_000, 0).unwrap();
-    cache.put_repo_stargazers(&full, &[(1, at)]).await.unwrap();
+    let day = at.date_naive().and_hms_opt(0, 0, 0).unwrap().and_utc();
+    cache
+        .put_repo_star_days(&full, &days_of([at]))
+        .await
+        .unwrap();
 
     assert!(
         cache.get_repo_stargazers(&full).await.unwrap().is_none(),
@@ -1082,79 +1108,10 @@ async fn completed_history_is_hidden_until_public_metadata_is_recorded() {
         .unwrap();
     assert_eq!(
         cache.get_repo_stargazers(&full).await.unwrap().unwrap(),
-        vec![at]
+        vec![day]
     );
     assert!(cache.repo_stargazers_complete(&full).await.unwrap());
     assert_eq!(cache.get_repo_star_count(&full).await.unwrap(), Some(1));
-
-    cleanup(&db, prefix).await;
-}
-
-#[tokio::test]
-async fn partial_fetch_leaves_incomplete() {
-    let Some(db) = test_db().await else {
-        eprintln!("skipping: set GITDEBT_TEST_DATABASE_URL to run");
-        return;
-    };
-    let prefix = "gitdebt-test-partial/";
-    cleanup(&db, prefix).await;
-
-    let cache = Cache::new(db.clone());
-    let full = "gitdebt-test-partial/big".to_string();
-
-    let base = Utc.timestamp_opt(1_700_000_000, 0).unwrap();
-    let stale = vec![(99, base - Duration::seconds(1))];
-    cache
-        .put_repo_metadata(&full, &metadata(103, 1, 0))
-        .await
-        .unwrap();
-    cache.put_repo_stargazers(&full, &stale).await.unwrap();
-
-    let items: Vec<(i64, _)> = (0..10)
-        .map(|i| (i + 1, base + Duration::seconds(i)))
-        .collect();
-
-    // A fresh backfill replaces the prior snapshot and becomes unreadable
-    // until every chunk is committed.
-    cache
-        .replace_repo_stargazers_partial(&full, &items[..4])
-        .await
-        .unwrap();
-    assert!(
-        !cache.repo_stargazers_complete(&full).await.unwrap(),
-        "partial fetch keeps stargazers_complete = FALSE"
-    );
-    assert!(cache.get_repo_stargazers(&full).await.unwrap().is_none());
-    let first = cache.get_repo_stargazers_partial(&full).await.unwrap();
-    assert_eq!(first.len(), 4);
-    assert!(first.iter().all(|(position, _)| *position != 99));
-
-    // Continuation retries are idempotent, and only the final transaction
-    // flips the cache back to complete with an exact row count.
-    cache
-        .put_repo_stargazers_partial(&full, &items[4..7])
-        .await
-        .unwrap();
-    cache
-        .put_repo_stargazers_partial(&full, &items[4..7])
-        .await
-        .unwrap();
-    let total = cache
-        .finish_repo_stargazers_partial(&full, &items[7..])
-        .await
-        .unwrap();
-    assert_eq!(total, 10);
-    assert!(cache.repo_stargazers_complete(&full).await.unwrap());
-    assert_eq!(
-        cache
-            .get_repo_stargazers(&full)
-            .await
-            .unwrap()
-            .unwrap()
-            .len(),
-        10
-    );
-    assert_eq!(cache.get_repo_star_count(&full).await.unwrap(), Some(10));
 
     cleanup(&db, prefix).await;
 }

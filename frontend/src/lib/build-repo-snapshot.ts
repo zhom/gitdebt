@@ -7,6 +7,7 @@ export type BuildAnalyzeResponse = {
   queued: number;
   history_complete: boolean;
   history_kind:
+    | "daily_stargazers"
     | "current_stargazers"
     | "public_star_actions"
     | "stargazers_then_activity"

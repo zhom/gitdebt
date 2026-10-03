@@ -40,11 +40,11 @@ const collected = [
   },
   {
     term: "Public repository data",
-    desc: "We fetch and cache public GitHub data — stargazer timestamps, commit history, contributors, language lines, and similar metadata — to render star-history and repo-debt charts. We only ever read public data.",
+    desc: "We fetch and cache public GitHub data — daily star counts from GitHub's star history, commit history, contributors, language lines, and similar metadata — to render star-history and repo-debt charts. GitHub's star history names no stargazer, and we never collect who starred a repository. We only ever read public data.",
   },
   {
     term: "Optional GitHub sign-in",
-    desc: "If you choose to sign in, GitHub gives us your public profile identity and an OAuth token. We store the token encrypted at rest and use an HTTP-only signed session cookie to keep you signed in. Sign-in provides a one-click link to your profile-wide report and queues your own public repositories for analysis; public repository reports do not require it. gitdebt has no repository connection flow today. In July 2026 GitHub restricted the stargazer-list endpoint to a repository's own admins and collaborators, and the permission GitHub requires to read it is Contents (read and write). If gitdebt adds repository connection, it will request that permission solely to read that repository's stargazer timestamps. You would choose which repositories the app can see, and you could revoke it at any time from GitHub's settings. We never write to your repositories, and we never request account-management access.",
+    desc: "If you choose to sign in, GitHub gives us your public profile identity and an OAuth token. We store the token encrypted at rest and use an HTTP-only signed session cookie to keep you signed in. Sign-in provides a one-click link to your profile-wide report and queues your own public repositories for analysis; public repository reports do not require it. gitdebt has no repository connection flow, and star history does not need one: it comes from GitHub's public star history, which every public repository has. Sign-in does not change what gitdebt reads. We never write to your repositories, and we never request account-management access.",
   },
   {
     term: "Operational logs",
@@ -59,7 +59,7 @@ const principles = [
   },
   {
     term: "Public data only",
-    desc: "Every repo signal we compute comes from publicly available GitHub data, and every chart we publish is derived from a public repository. gitdebt has no repository connection flow today; if one is added, connecting a repository you administer would grant the Contents (read and write) permission GitHub now requires to read a stargazer list — we would use it only to read, never to write, and a private repository would never become a public page. We never request account-management permissions.",
+    desc: "Every repo signal we compute comes from publicly available GitHub data, and every chart we publish is derived from a public repository. gitdebt has no repository connection flow, and a private repository never becomes a public page. We never request account-management permissions.",
   },
   {
     term: "Minimal retention",

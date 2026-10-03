@@ -158,7 +158,7 @@ if (left.data && right.data) {
   };
   faqs.push({
     q: "Do both star histories cover the same period?",
-    a: `Not necessarily, and each chart names its own. ${readAs(slug1, left.data)}. ${readAs(slug2, right.data)}. Since July 2026 GitHub serves a repository's stargazer list only to its own admins and collaborators, so one series can stop on a fixed date while the other keeps flowing from public archive events.`,
+    a: `Not necessarily, and each chart names its own. ${readAs(slug1, left.data)}. ${readAs(slug2, right.data)}. A series read from GitHub's star history runs to its latest read. One read before that existed can stop on the date GitHub closed its stargazer list in July 2026, or come from public archive events, until gitdebt reads it again.`,
   });
   faqs.push({
     q: "How is this comparison computed?",
@@ -270,10 +270,11 @@ if (faqs.length > 0) {
       <div class="mx-auto max-w-6xl px-6 py-16">
         <h2 class={HEADING}>One axis, two sources</h2>
         <p class:list={["mt-3", BODY, MEASURE]}>
-          The overlay puts both repositories on one axis. It does not put them
-          on one source: since July 2026 a stargazer-list series stops on a
-          fixed date, while a series rebuilt from public archive events keeps
-          receiving points. Each column below states its own reading.
+          The overlay puts both repositories on one axis. It does not always
+          put them on one source: a series not yet read again from GitHub's
+          star history can stop on the date GitHub closed its stargazer list,
+          or be rebuilt from public archive events. Each column below states
+          its own reading.
         </p>
 
         <div class="mt-8 overflow-x-auto border border-rule-strong bg-paper">

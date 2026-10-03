@@ -31,6 +31,7 @@ async fn test_db() -> Option<Db> {
 
 async fn cleanup(db: &Db, prefix: &str) {
     for statement in [
+        "DELETE FROM repo_star_days WHERE repo LIKE $1",
         "DELETE FROM repo_stargazers WHERE repo LIKE $1",
         "DELETE FROM repos WHERE repo LIKE $1",
     ] {

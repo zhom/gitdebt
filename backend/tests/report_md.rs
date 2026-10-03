@@ -31,6 +31,7 @@ use gitdebt::{
     db::Db,
     github::RepoMetadata,
     repo_history::RepoStorage,
+    star_history::days_of,
 };
 use tower::ServiceExt;
 
@@ -60,6 +61,7 @@ async fn cleanup(db: &Db, owner: &str) {
     for statement in [
         "DELETE FROM star_fetch_queue WHERE repo LIKE $1",
         "DELETE FROM repo_analysis_queue WHERE repo LIKE $1",
+        "DELETE FROM repo_star_days WHERE repo LIKE $1",
         "DELETE FROM repo_stargazers WHERE repo LIKE $1",
         "DELETE FROM repo_history WHERE repo LIKE $1",
         "DELETE FROM repos WHERE repo LIKE $1",
@@ -181,7 +183,7 @@ async fn seed_complete_history(state: &ApiState, repo: &str, stars: i64) {
     state
         .analyzer
         .cache
-        .put_repo_stargazers(repo, &stargazers)
+        .put_repo_star_days(repo, &days_of(stargazers.iter().map(|(_, at)| *at)))
         .await
         .expect("seed complete history");
 }
@@ -292,7 +294,7 @@ async fn complete_star_history_answers_200_without_repository_health() {
     state
         .analyzer
         .cache
-        .put_repo_stargazers(&repo, &stargazers)
+        .put_repo_star_days(&repo, &days_of(stargazers.iter().map(|(_, at)| *at)))
         .await
         .expect("seed complete history");
 

@@ -14,6 +14,15 @@ import {
   stateLabel,
 } from "../src/lib/history-freshness.ts";
 
+/** GitHub's own star history, the source every series is moving onto. */
+const daily = (end) => ({
+  history_complete: true,
+  history_kind: "daily_stargazers",
+  history_approximate: false,
+  history_status: "ready",
+  history_coverage_end: end,
+});
+
 const exact = (end) => ({
   history_complete: true,
   history_kind: "current_stargazers",
@@ -34,13 +43,45 @@ const spliced = (end, at) => ({
   history_splice_at: at,
 });
 
-test("an exact series that stops after the restriction is frozen, not merely stale", () => {
-  // zhom/donutbrowser: complete, exact, last star 2026-07-20 — the week GitHub
-  // closed the endpoint. It cannot resolve itself, so it needs the notice.
+test("GitHub's star history is current, solid, and needs no notice", () => {
+  // zhom/donutbrowser after the move: exact per day, complete, refreshed. A
+  // coverage date past the July 2026 closure must NOT read as frozen — that
+  // was the stargazer list's closure, and this series does not come from it.
+  const f = historyFreshness(daily("2026-10-03T12:00:00Z"));
+  assert.equal(f.state, "daily");
+  assert.equal(needsNotice(f), false);
+  assert.equal(noticeText(f), null);
+  assert.equal(seriesOpen(f), true);
+  assert.equal(sourceStroke(f), "", "a measured series is an object line");
+  assert.equal(sourceLabel(f), "GitHub star history");
+  assert.equal(stateLabel(f), "Still updating");
+  assert.equal(coverageLabel(f), "Covers through October 3, 2026");
+  assert.match(sourceDetail(f), /GitHub's own star history/);
+  assert.match(sourceDetail(f), /Unstars are already taken out/);
+  // A day is GitHub's calendar day; nothing may claim a timestamp per star.
+  assert.doesNotMatch(sourceDetail(f), /timestamp/);
+});
+
+test("an incomplete or restricted daily payload is not read as a finished series", () => {
+  assert.equal(
+    historyFreshness({ ...daily("2026-10-03T12:00:00Z"), history_complete: false }).state,
+    "unknown",
+  );
+  assert.equal(
+    historyFreshness({ ...daily(null), history_complete: false, history_status: "restricted" })
+      .state,
+    "restricted",
+  );
+});
+
+test("an exact series that stops after the closure is frozen, not merely stale", () => {
+  // zhom/donutbrowser before the move: complete, exact, last star 2026-07-20 —
+  // the week GitHub closed the stargazer list. It needs the notice until the
+  // re-read from GitHub's star history replaces it.
   const f = historyFreshness(exact("2026-07-20T13:47:16Z"));
   assert.equal(f.state, "exact_frozen");
   assert.ok(needsNotice(f));
-  assert.match(noticeText(f), /complete through July 20, 2026/);
+  assert.match(noticeText(f), /ends on July 20, 2026/);
 });
 
 test("an exact series that stopped BEFORE the restriction is not blamed on it", () => {
@@ -72,8 +113,8 @@ test("a restricted park is terminal and says so without mentioning a date", () =
   });
   assert.equal(f.state, "restricted");
   assert.ok(needsNotice(f));
-  assert.match(noticeText(f), /only to applications that administer the repository/);
-  assert.doesNotMatch(noticeText(f), /complete through/);
+  assert.match(noticeText(f), /not public/);
+  assert.doesNotMatch(noticeText(f), /ends on/);
 });
 
 test("a spliced series keeps its exact half instead of being read as approximate", () => {
@@ -129,6 +170,7 @@ test("the notice never states a star count", () => {
   // is most prominent. Dates only — years are fine, counts are not.
   const COUNT = /\d{1,3},\d{3}|\b\d+\s+(?:of|stars)\b|\bshows\s+\d/i;
   for (const state of [
+    historyFreshness(daily("2026-10-03T12:00:00Z")),
     historyFreshness(exact("2026-07-20T13:47:16Z")),
     historyFreshness(exact(null)),
     historyFreshness({ history_complete: false, history_status: "restricted" }),
@@ -151,6 +193,7 @@ test("a malformed coverage date degrades to no date rather than Invalid Date", (
 
 /** One representative freshness per state, built through the real classifier. */
 const STATES = {
+  daily: historyFreshness(daily("2026-10-03T12:00:00Z")),
   exact_current: historyFreshness(exact("2024-03-02T00:00:00Z")),
   exact_frozen: historyFreshness(exact("2026-07-20T13:47:16Z")),
   archive: historyFreshness({
@@ -176,6 +219,7 @@ test("every state classifies to itself, so the table below is exhaustive", () =>
 });
 
 test("sourceLabel names the method that produced the points", () => {
+  assert.equal(sourceLabel(STATES.daily), "GitHub star history");
   assert.equal(sourceLabel(STATES.exact_current), "GitHub stargazer list");
   assert.equal(sourceLabel(STATES.exact_frozen), "GitHub stargazer list");
   assert.equal(sourceLabel(STATES.archive), "Historical star data");
@@ -190,6 +234,7 @@ test("sourceLabel names the method that produced the points", () => {
 });
 
 test("stateLabel says whether the series still receives points", () => {
+  assert.equal(stateLabel(STATES.daily), "Still updating");
   assert.equal(stateLabel(STATES.exact_current), "Still updating");
   assert.equal(stateLabel(STATES.archive), "Still updating");
   // The whole reason to splice: the series advances again. The label that
@@ -202,6 +247,7 @@ test("stateLabel says whether the series still receives points", () => {
 });
 
 test("coverageLabel states a date or says the window is not established", () => {
+  assert.equal(coverageLabel(STATES.daily), "Covers through October 3, 2026");
   assert.equal(coverageLabel(STATES.exact_frozen), "Covers through July 20, 2026");
   assert.equal(coverageLabel(STATES.archive), "Covers through August 8, 2026");
   // Coverage is where the line ends, never where it changes method — the splice
@@ -260,6 +306,7 @@ test("sourceStroke depends only on the state, never on the data", () => {
   assert.equal(sourceStroke(earlySplice), sourceStroke(lateSplice));
 
   // An exact series is an object line: measured, so it is drawn solid.
+  assert.equal(sourceStroke(STATES.daily), "");
   assert.equal(sourceStroke(STATES.exact_current), "");
   assert.equal(sourceStroke(STATES.exact_frozen), "");
   // Spliced carries the pattern its tail is drawn with; the head stays solid.
@@ -285,6 +332,7 @@ test("sourceStroke depends only on the state, never on the data", () => {
 });
 
 test("seriesOpen is true only where points are still arriving", () => {
+  assert.equal(seriesOpen(STATES.daily), true);
   assert.equal(seriesOpen(STATES.exact_current), true);
   assert.equal(seriesOpen(STATES.archive), true);
   assert.equal(seriesOpen(STATES.spliced), true);
@@ -360,29 +408,25 @@ test("no copy names who GitHub does serve, because to an owner that reads as an 
 });
 
 test("the frozen and restricted notices still say what actually happened", () => {
-  // Removing the false invitation must not remove the fact. The reader still
-  // needs the date the series stops at, the reason it stops, and — because the
-  // reader is often the repository's own signed-in owner — an explicit sentence
-  // saying that signing in does not reopen it.
+  // The frozen notice keeps the fact — the date the series stops and why — and
+  // states the one thing that will change it: gitdebt's own re-read from
+  // GitHub's star history. Nothing in it asks the reader to act.
   const frozen = noticeText(STATES.exact_frozen);
-  assert.match(frozen, /complete through July 20, 2026/);
-  assert.match(
-    frozen,
-    /In July 2026 GitHub restricted stargazer lists to applications that administer the repository/,
-  );
-  assert.match(frozen, /gitdebt is not one of them/);
-  assert.match(frozen, /signing in — even as this repository's owner — does not change/);
-  assert.match(frozen, /the exact series ends there/);
+  assert.match(frozen, /ends on July 20, 2026/);
+  assert.match(frozen, /GitHub stargazer list it was read from, which GitHub closed in July 2026/);
+  assert.match(frozen, /gitdebt is re-reading it from GitHub's star history/);
 
+  // A restricted park is now a private repository. It must say so, and must
+  // not blame the stargazer list, which has nothing to do with it any more.
   const restricted = noticeText(STATES.restricted);
-  assert.match(restricted, /only to applications that administer the repository/);
-  assert.match(restricted, /gitdebt is not one of them/);
-  assert.match(restricted, /signing in — even as this repository's owner — does not change/);
+  assert.match(restricted, /This repository is not public/);
+  assert.match(restricted, /public repositories only, whoever is signed in/);
+  assert.doesNotMatch(restricted, /stargazer list/);
 
-  // Neither may hold out a later fix. "cannot read it today" or "until gitdebt
-  // is granted access" would be a promise this module has no way to keep.
+  // Neither may tell the reader to do something: there is nothing a reader can
+  // do, and an instruction would read as a missing feature.
   for (const text of [frozen, restricted]) {
-    assert.doesNotMatch(text, /\b(yet|for now|today|until|once|soon|restore[sd]?)\b/i, text);
+    assert.doesNotMatch(text, /\b(sign in to|please|you (?:can|should|must))\b/i, text);
   }
 });
 

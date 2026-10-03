@@ -86,7 +86,7 @@ async fn current_schema_connect_does_not_wait_for_writer_locks() {
         .fetch_one(&initialized.pool)
         .await
         .expect("read installed schema version");
-    assert_eq!(version, 4);
+    assert_eq!(version, gitdebt::db::CURRENT_SCHEMA_VERSION);
 
     let blocker = hold_write_lock(&initialized).await;
     let connected = tokio::time::timeout(

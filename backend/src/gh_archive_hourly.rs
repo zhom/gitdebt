@@ -563,7 +563,22 @@ impl GhArchiveHourlyFollower {
                 .as_ref()
                 .expect("tracked IDs are initialized above");
 
-            match self.fetch_parse_hour(hour, ids).await? {
+            // Every repository can now move to GitHub's own star history, after
+            // which this follower tracks nothing. An hour that can match no
+            // tracked repository needs no download: committing it empty is
+            // exactly what parsing it would have produced, and it keeps the
+            // checkpoint current without pulling the whole public event
+            // stream every hour for nothing.
+            let outcome = if ids.is_empty() {
+                FetchHourOutcome::Ready(HourBatch {
+                    archive_hour: hour,
+                    records_seen: 0,
+                    events: Vec::new(),
+                })
+            } else {
+                self.fetch_parse_hour(hour, ids).await?
+            };
+            match outcome {
                 FetchHourOutcome::Ready(batch) => {
                     let event_count = batch.events.len();
                     match self.sink.commit_hour(batch).await? {
@@ -1003,11 +1018,21 @@ mod tests {
         sink: Arc<MockSink>,
         sleeper: Arc<NoopSleeper>,
     ) -> GhArchiveHourlyFollower {
+        follower_tracking(config, BTreeSet::from([42]), fetcher, sink, sleeper)
+    }
+
+    fn follower_tracking(
+        config: HourlyFollowerConfig,
+        tracked: BTreeSet<i64>,
+        fetcher: Arc<MockFetcher>,
+        sink: Arc<MockSink>,
+        sleeper: Arc<NoopSleeper>,
+    ) -> GhArchiveHourlyFollower {
         GhArchiveHourlyFollower::with_sleeper(
             config,
             fetcher,
             Arc::new(IdentityDecoder),
-            Arc::new(StaticRepositories(BTreeSet::from([42]))),
+            Arc::new(StaticRepositories(tracked)),
             sink,
             sleeper,
         )
@@ -1325,6 +1350,46 @@ mod tests {
         assert_eq!(report.hours_already_committed, 1);
         assert_eq!(report.hours_committed, 1);
         assert_eq!(fetcher.calls.lock().unwrap().as_slice(), &[second]);
+        assert_eq!(report.next_hour, at(2026, 7, 19, 12, 0));
+    }
+
+    /// Once every series has moved to GitHub's star history the follower
+    /// tracks nothing, and must stop downloading the public event stream: the
+    /// hours still commit, empty, without a single fetch.
+    #[tokio::test]
+    async fn an_untracked_hour_commits_without_fetching() {
+        let first = at(2026, 7, 19, 10, 0);
+        let fetcher = Arc::new(MockFetcher::new(Vec::new()));
+        let sink = Arc::new(MockSink::default());
+        let follower = follower_tracking(
+            HourlyFollowerConfig {
+                max_hours_per_run: 2,
+                ..HourlyFollowerConfig::default()
+            },
+            BTreeSet::new(),
+            fetcher.clone(),
+            sink.clone(),
+            Arc::new(NoopSleeper::default()),
+        );
+
+        let report = follower
+            .catch_up(first, at(2026, 7, 19, 13, 0))
+            .await
+            .unwrap();
+
+        assert!(
+            fetcher.calls.lock().unwrap().is_empty(),
+            "nothing downloaded"
+        );
+        assert_eq!(report.hours_committed, 2);
+        assert_eq!(report.matching_events, 0);
+        assert!(
+            sink.batches
+                .lock()
+                .unwrap()
+                .iter()
+                .all(|batch| batch.events.is_empty())
+        );
         assert_eq!(report.next_hour, at(2026, 7, 19, 12, 0));
     }
 }

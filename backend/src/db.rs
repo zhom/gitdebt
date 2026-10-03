@@ -109,7 +109,9 @@ const SCHEMA_MIGRATION_LOCK_ID: i64 = 0x6769_7464_6562_7401;
 /// `spliced` branch of `active_repo_star_history`. Without the bump an already
 /// deployed v4 database skips the whole schema statement and every read of the
 /// new columns fails at runtime.
-const CURRENT_SCHEMA_VERSION: i32 = 5;
+///
+/// v6 adds `repo_star_days` and the `github_history` branch of the view.
+pub const CURRENT_SCHEMA_VERSION: i32 = 6;
 
 /// Attempts at the schema transaction before startup fails. The statements
 /// are idempotent; retrying absorbs a `lock_timeout` abort caused by a
@@ -179,6 +181,32 @@ END $$;
 -- for the whole build and stalls startup before /health can bind. They are
 -- created with CREATE INDEX CONCURRENTLY in a separate post-connect step —
 -- see `CONCURRENT_INDEXES` / `Db::ensure_concurrent_indexes`.
+
+-- GitHub's own star history (`GET /repos/{o}/{r}/stargazers/history`, public
+-- since September 2026): a repository's CURRENT stargazers counted by the
+-- calendar day they starred, complete back to its creation and net of unstars.
+-- One row per day with at least one star, so a decade-old repository with
+-- hundreds of thousands of stars is a few thousand rows that a refresh can
+-- replace whole. `active_repo_star_history` expands each day back into one row
+-- per star, so readers keep a single per-star shape across every source.
+--
+-- `starred_on` is midnight UTC of the calendar date GitHub reports. GitHub
+-- does not promise UTC day boundaries, so the date is the fact and the
+-- instant is only its carrier. `position_before` is the number of stars on
+-- every earlier day, written with the rows, so the view numbers a day's stars
+-- without a window function over the whole series at read time.
+CREATE TABLE IF NOT EXISTS repo_star_days (
+    repo            TEXT NOT NULL,
+    starred_on      TIMESTAMPTZ NOT NULL,
+    stars           INTEGER NOT NULL CHECK (stars > 0),
+    position_before BIGINT NOT NULL CHECK (position_before >= 0),
+    PRIMARY KEY (repo, starred_on)
+);
+-- Global windows ("stars in the last N days" across every repository) for the
+-- leaderboards and the activity pulse. Inline rather than concurrent: the
+-- table is new and small, one row per starred day rather than per star.
+CREATE INDEX IF NOT EXISTS idx_repo_star_days_starred_on
+    ON repo_star_days (starred_on, repo);
 
 CREATE TABLE IF NOT EXISTS repos (
     repo                  TEXT PRIMARY KEY NOT NULL,
@@ -419,7 +447,18 @@ CREATE OR REPLACE VIEW active_repo_star_history AS
     FROM repo_star_arrivals AS arrivals
     JOIN repos ON repos.repo = arrivals.repo
     WHERE repos.history_source = 'spliced'
-      AND arrivals.starred_at > repos.history_splice_at;
+      AND arrivals.starred_at > repos.history_splice_at
+    UNION ALL
+    -- GitHub's star history: each starred day expanded back into one row per
+    -- star, numbered from the day's `position_before`, so positions run
+    -- 1..N in day order exactly as the stargazer list's did.
+    SELECT days.repo,
+           days.position_before + star.n AS position,
+           days.starred_on AS starred_at
+    FROM repo_star_days AS days
+    JOIN repos ON repos.repo = days.repo
+    CROSS JOIN LATERAL generate_series(1::BIGINT, days.stars::BIGINT) AS star(n)
+    WHERE repos.history_source = 'github_history';
 
 -- Star-history fetch queue. Keyed by repo slug (owner/repo, lowercased).
 -- A repo is enqueued on a cold/stale/unknown lookup and drained by the
@@ -889,6 +928,7 @@ CREATE INDEX IF NOT EXISTS idx_login_repos_rank ON login_repos(login, rank);
 --     were incorrectly treated as repository-metadata 404s.
 -- v5: `history_splice_at` / `history_splice_position` and the `spliced`
 --     branch of `active_repo_star_history`.
+-- v6: `repo_star_days` and the `github_history` branch of the view.
 CREATE TABLE IF NOT EXISTS schema_version (
     id           INTEGER PRIMARY KEY,
     version      INTEGER NOT NULL,
@@ -987,8 +1027,8 @@ BEGIN
     END IF;
 END$$;
 UPDATE schema_version
-SET version = 5, applied_at = NOW()
-WHERE id = 1 AND version < 5;
+SET version = 6, applied_at = NOW()
+WHERE id = 1 AND version < 6;
 "#;
 
 /// Large-table indexes built with `CREATE INDEX CONCURRENTLY` *after* the
@@ -1881,6 +1921,38 @@ mod tests {
         // A required column added without bumping the revision leaves
         // already-deployed databases skipping the migration forever.
         const { assert!(CURRENT_SCHEMA_VERSION >= 5) };
+    }
+
+    /// GitHub's star history is stored one row per starred day, keyed so a
+    /// refresh replaces a repository's days whole, and holds counts only.
+    ///
+    /// The view must expand those days back into one row per star with
+    /// positions that run on from earlier days, or every reader that counts
+    /// rows (the leaderboards, the activity pulse, the day deltas) would count
+    /// days instead of stars. And because the table and the view branch are
+    /// new, an already-deployed v5 database must be made to run the DDL.
+    #[test]
+    fn star_days_are_day_rows_expanded_per_star_by_the_view() {
+        assert!(SCHEMA.contains("CREATE TABLE IF NOT EXISTS repo_star_days"));
+        assert!(SCHEMA.contains("PRIMARY KEY (repo, starred_on)"));
+        assert!(SCHEMA.contains("stars           INTEGER NOT NULL CHECK (stars > 0)"));
+        let table = SCHEMA
+            .split("CREATE TABLE IF NOT EXISTS repo_star_days")
+            .nth(1)
+            .and_then(|rest| rest.split(");").next())
+            .expect("day table body");
+        for forbidden in ["login", "actor", "user", "payload"] {
+            assert!(
+                !table.contains(forbidden),
+                "the day table stores counts, never {forbidden}"
+            );
+        }
+        assert!(SCHEMA.contains("repos.history_source = 'github_history'"));
+        assert!(SCHEMA.contains(
+            "CROSS JOIN LATERAL generate_series(1::BIGINT, days.stars::BIGINT) AS star(n)"
+        ));
+        assert!(SCHEMA.contains("days.position_before + star.n AS position"));
+        const { assert!(CURRENT_SCHEMA_VERSION >= 6) };
     }
 
     #[test]

@@ -346,7 +346,7 @@ function ProvenanceInline({
 }
 
 /**
- * The two-source key.
+ * The source key.
  *
  * It describes the system rather than any one repository, which is why its copy
  * lives here instead of in `history-freshness.ts` and why it is the correct
@@ -354,6 +354,11 @@ function ProvenanceInline({
  * wrong about a repository, because it makes no claim about one at all.
  */
 function ProvenanceExplainer({ className }: { className?: string }) {
+  const daily = historyFreshness({
+    history_complete: true,
+    history_kind: "daily_stargazers",
+    history_approximate: false,
+  });
   const exact = historyFreshness({
     history_complete: true,
     history_kind: "current_stargazers",
@@ -372,20 +377,27 @@ function ProvenanceExplainer({ className }: { className?: string }) {
 
   // Terms come from `sourceLabel`, so the key and the chart caption cannot drift
   // apart: one wording, one module, exactly as the fact rows use.
+  // GitHub's star history first: it is the source every series is moving
+  // onto. The other three describe series read before it existed, which stay
+  // on a chart only until gitdebt re-reads that repository.
   const rows: { freshness: HistoryFreshness; definition: string }[] = [
     {
-      freshness: exact,
-      // Says what the restriction does to gitdebt, not who it exempts. The key
-      // is read by owners too, and "served to admins" reads to an owner as a
-      // capability they have; they do not, because gitdebt reads GitHub with
-      // its own application credentials no matter who is signed in.
+      freshness: daily,
       definition:
-        "Exact — one point per star, with its own timestamp. Since July 2026 GitHub serves this list only to applications that administer the repository, and gitdebt is not one of them, so a series read this way stops on a fixed date and no sign-in restarts it.",
+        "Exact, by day — GitHub's own star history, from the week the repository was created to the latest read. Unstars are already taken out, and it is read again on a schedule, so it keeps flowing. Every public repository is moving onto it.",
+    },
+    {
+      freshness: exact,
+      // Says what the closure does to the series, not who GitHub still serves.
+      // The key is read by owners too, and "served to admins" reads to an
+      // owner as a capability they have, which signing in never gave them.
+      definition:
+        "Exact — one point per star, with its own timestamp. GitHub closed this list in July 2026, so a series read this way stops on a fixed date until gitdebt re-reads it from GitHub's star history.",
     },
     {
       freshness: archive,
       definition:
-        "Rebuilt from historical star data. Star actions are recorded and unstars are not, so it reads as an attention signal rather than a net star count. It keeps flowing for every public repository.",
+        "Rebuilt from historical star data. Star actions are recorded and unstars are not, so it reads as an attention signal rather than a net star count, until gitdebt re-reads it from GitHub's star history.",
     },
     {
       freshness: spliced,
@@ -400,12 +412,12 @@ function ProvenanceExplainer({ className }: { className?: string }) {
         Where a star series comes from
       </h2>
 
-      {/* Three parallel columns on one grid. The specimen-and-name row is a
-          shared row across all three, so the column whose source name runs to
-          two lines cannot push its neighbours' definitions out of step —
-          whatever the copy happens to be, every definition starts on the same
-          line. */}
-      <dl className="mt-6 grid gap-x-10 gap-y-8 md:grid-cols-3 md:grid-rows-[auto_1fr]">
+      {/* Two parallel columns, two rows of entries, on one grid. Each entry's
+          specimen-and-name row is shared with its neighbour, so the entry whose
+          source name runs to two lines cannot push its neighbour's definition
+          out of step — whatever the copy happens to be, the two definitions in
+          a row start on the same line. */}
+      <dl className="mt-6 grid gap-x-10 gap-y-8 md:grid-cols-2 md:grid-rows-[auto_1fr_auto_1fr]">
         {rows.map((row) => (
           <div
             key={row.freshness.state}

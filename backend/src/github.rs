@@ -8,17 +8,25 @@ use thiserror::Error;
 use tokio::sync::Semaphore;
 
 use crate::rate_limit::{RateLimitTracker, source_for_token};
+use crate::star_history::StarHistoryWeek;
 
 const USER_AGENT_STR: &str = concat!("gitdebt/", env!("CARGO_PKG_VERSION"));
 const API_BASE: &str = "https://api.github.com";
-type StargazerPageEvents = Vec<(i64, DateTime<Utc>)>;
 
-/// Pages of a repository's stargazer list fetched in parallel. 8 is high
-/// enough that TCP/TLS handshake cost amortizes across pages and low enough
-/// that we don't pile up rate-limit-tracker wakeups when GitHub momentarily
-/// slows. Raising it would not fetch a repository faster: the per-token
-/// GitHub budget, not round-trip latency, is what bounds this walk.
-const STARGAZER_FETCH_CONCURRENCY: usize = 8;
+/// Pages of a repository's star history fetched in parallel. Even the oldest
+/// repository on GitHub has under forty pages, so this mostly hides round-trip
+/// latency on those few; the per-token budget, not concurrency, is what bounds
+/// the walk.
+const STAR_HISTORY_FETCH_CONCURRENCY: usize = 8;
+
+/// Weeks per star-history page. GitHub's maximum, so the walk costs as few
+/// requests as the endpoint allows: one per thirty weeks of the repository's
+/// life.
+const STAR_HISTORY_PER_PAGE: u32 = 30;
+
+/// GitHub refuses any star-history page past this one (422, "Pagination is
+/// limited to 100 pages") — 3,000 weeks, longer than GitHub has existed.
+const STAR_HISTORY_MAX_PAGES: u32 = 100;
 
 /// Concurrent REST requests one client may have outstanding.
 ///
@@ -28,7 +36,7 @@ const STARGAZER_FETCH_CONCURRENCY: usize = 8;
 /// almost nothing. 64 keeps clear headroom under GitHub's line while sitting
 /// well above the worker's real peak — the star-fetch pool is deliberately
 /// small and each of its jobs fans out to at most
-/// [`STARGAZER_FETCH_CONCURRENCY`] pages, alongside single metadata lookups —
+/// [`STAR_HISTORY_FETCH_CONCURRENCY`] pages, alongside single metadata lookups —
 /// so the semaphore stays a backstop against a pathological fan-out and never
 /// the thing that paces normal ingestion. That pacing belongs to
 /// `RateLimitTracker`, which is aware of the actual remaining budget.
@@ -46,18 +54,15 @@ pub enum GithubError {
     InvalidToken,
     #[error("repo not found: {0}")]
     NotFound(String),
-    /// The stargazer-list endpoint returned 404. This does not prove the
-    /// repository itself is missing: GitHub can restrict this endpoint
-    /// independently of public repository metadata. The worker confirms
-    /// existence through `/repos/{owner}/{repo}` before deciding whether to
-    /// tombstone or park the history fetch as restricted.
-    #[error("stargazers unavailable: {0}")]
-    StargazersUnavailable(String),
-    /// A *durable* 403 with no rate-limit signal — access is denied for a
-    /// reason retrying can't fix (e.g. the 2026-06-30 stargazer restriction
-    /// serving 403 to non-admin callers). Distinct from [`Self::RateLimited`]
-    /// so the worker can park the repo `restricted` (not re-poll it every
-    /// view, and NOT tombstone it as `missing`).
+    /// The star-history endpoint returned 404. On its own this does not say
+    /// whether the repository is gone or merely private, and those have
+    /// opposite consequences, so the worker settles it through
+    /// `/repos/{owner}/{repo}` before tombstoning anything.
+    #[error("star history unavailable: {0}")]
+    StarHistoryUnavailable(String),
+    /// A 403 with no rate-limit signal: access denied rather than budget
+    /// spent. Distinct from [`Self::RateLimited`] so it never pauses the pool,
+    /// and from a 404 so it never tombstones a repository as `missing`.
     #[error("access forbidden: {0}")]
     Forbidden(String),
     #[error("rate limited; resets at {0:?}")]
@@ -144,6 +149,16 @@ impl GithubClient {
         now >= reset_at || remaining > 50
     }
 
+    /// Whether more than `share` of this client's hourly budget is still
+    /// unspent (or its window has already reset). Background work nobody is
+    /// waiting on asks this before it adds more, so it can never be the reason
+    /// a visitor's request finds the shared token at its reserve.
+    pub async fn has_spare_budget(&self, share: f64) -> bool {
+        let (remaining, limit, reset_at) = self.rate.snapshot(&self.source).await;
+        let now = Utc::now().timestamp();
+        now >= reset_at || remaining as f64 > limit as f64 * share.clamp(0.0, 1.0)
+    }
+
     /// Send a GET with rate-limit acquire/record bookkeeping, scoped to
     /// this client's source bucket. All public methods route through this
     /// to keep the per-token budget tracker consistent.
@@ -193,79 +208,52 @@ impl GithubClient {
         Ok(resp)
     }
 
-    /// Fetch an explicit set of stargazer pages (1-indexed, `per_page` =
-    /// 100) concurrently, returning non-identifying `(position, starred_at)`
-    /// events in the SAME order as `pages`. Used by the star-fetch
-    /// worker: GitHub paginates stargazers oldest-first, so fetching a
-    /// contiguous range of pages in parallel and concatenating in order
-    /// preserves the oldest-first ordering the cumulative series relies on.
-    /// Each page still routes through `RateLimitTracker::acquire` (inside
-    /// `send`), so the per-token GitHub budget is honored — concurrency
-    /// only reclaims TCP/TLS round-trip latency, not request quota.
-    pub async fn stargazers_pages(
+    /// A repository's whole star history, from GitHub's own star-history
+    /// endpoint: every week back to the creation week, as GitHub returns them
+    /// (newest first). See [`crate::star_history`] for what the records mean
+    /// and how they become a day series.
+    ///
+    /// Page 1 carries `Link: rel="last"`, so the remaining pages are known up
+    /// front and fetched concurrently; `buffered` keeps them in page order.
+    /// Every page still routes through `RateLimitTracker::acquire` (inside
+    /// `send`), so the per-token budget holds — concurrency only reclaims
+    /// round-trip latency. The walk is short: one request per thirty weeks of
+    /// the repository's life.
+    ///
+    /// A renamed or transferred repository answers with a redirect to
+    /// `/repositories/{id}/…`, which the HTTP client follows.
+    pub async fn star_history(
         &self,
         owner: &str,
         repo: &str,
-        pages: &[u32],
-    ) -> Result<Vec<Vec<(i64, DateTime<Utc>)>>, GithubError> {
-        let base = format!("{API_BASE}/repos/{owner}/{repo}/stargazers?per_page=100");
-        use futures::stream::{self, StreamExt};
-        let results: Vec<Result<StargazerPageEvents, GithubError>> =
-            stream::iter(pages.iter().copied())
-                .map(|p| {
-                    let url = format!("{base}&page={p}");
-                    let owner = owner.to_string();
-                    let repo = repo.to_string();
-                    let me = self.clone();
-                    async move {
-                        let resp = me
-                            .send(&url, Some("application/vnd.github.star+json"))
-                            .await?;
-                        let resp = check_status(resp, &format!("{owner}/{repo}")).await?;
-                        let page: Vec<Stargazer> = resp.json().await?;
-                        Ok::<_, GithubError>(
-                            page.into_iter()
-                                .enumerate()
-                                .map(|(index, s)| {
-                                    let position =
-                                        i64::from(p.saturating_sub(1)) * 100 + index as i64 + 1;
-                                    (position, s.starred_at)
-                                })
-                                .collect(),
-                        )
-                    }
-                })
-                // `buffered` preserves input order in the output stream.
-                .buffered(STARGAZER_FETCH_CONCURRENCY)
-                .collect()
-                .await;
-        // Propagate the first error; otherwise return ordered page items.
-        results.into_iter().collect()
-    }
+    ) -> Result<Vec<StarHistoryWeek>, GithubError> {
+        use futures::stream::{self, StreamExt, TryStreamExt};
 
-    /// Fetch a single page of the stargazers list (1-indexed, `per_page`
-    /// = 100). Returns the page's stargazers and the total last-page count
-    /// derived from page 1's `Link: rel="last"` header (`None` on later
-    /// pages, where GitHub omits `last`). Used by the incremental
-    /// refresh path in the worker: GitHub paginates stargazers
-    /// oldest-first, so the newest stars live on the last pages — the
-    /// worker walks backward from `last_page` and stops once it reaches
-    /// already-cached timestamps. Each call still routes through
-    /// `RateLimitTracker::acquire` so the per-token GitHub budget holds.
-    pub async fn stargazers_page(
-        &self,
-        owner: &str,
-        repo: &str,
-        page: u32,
-    ) -> Result<StargazerPage, GithubError> {
-        let url = format!("{API_BASE}/repos/{owner}/{repo}/stargazers?per_page=100&page={page}");
-        let resp = self
-            .send(&url, Some("application/vnd.github.star+json"))
+        let base = format!(
+            "{API_BASE}/repos/{owner}/{repo}/stargazers/history?per_page={STAR_HISTORY_PER_PAGE}"
+        );
+        let context = format!("{owner}/{repo}");
+        let resp = self.send(&format!("{base}&page=1"), None).await?;
+        let resp = check_status(resp, &context).await?;
+        let last_page = parse_last_page(&resp)
+            .unwrap_or(1)
+            .clamp(1, STAR_HISTORY_MAX_PAGES);
+        let mut weeks: Vec<StarHistoryWeek> = resp.json().await?;
+        let rest: Vec<Vec<StarHistoryWeek>> = stream::iter(2..=last_page)
+            .map(|page| {
+                let url = format!("{base}&page={page}");
+                let context = context.as_str();
+                async move {
+                    let resp = self.send(&url, None).await?;
+                    let resp = check_status(resp, context).await?;
+                    Ok::<_, GithubError>(resp.json::<Vec<StarHistoryWeek>>().await?)
+                }
+            })
+            .buffered(STAR_HISTORY_FETCH_CONCURRENCY)
+            .try_collect()
             .await?;
-        let resp = check_status(resp, &format!("{owner}/{repo}")).await?;
-        let last_page = parse_last_page(&resp);
-        let items: Vec<Stargazer> = resp.json().await?;
-        Ok(StargazerPage { items, last_page })
+        weeks.extend(rest.into_iter().flatten());
+        Ok(weeks)
     }
 
     /// Resolve `/users/{login}`. GitHub serves user accounts AND
@@ -500,17 +488,15 @@ fn repo_list_url(login: &str, kind: AccountKind) -> String {
 async fn check_status(resp: Response, ctx: &str) -> Result<Response, GithubError> {
     let status = resp.status();
     if status == 404 {
-        return Err(GithubError::StargazersUnavailable(ctx.to_string()));
+        return Err(GithubError::StarHistoryUnavailable(ctx.to_string()));
     }
     if status == 403 || status == 429 {
         // GitHub overloads 403 for both rate limiting and plain access
         // denial. Only treat it as a rate limit when we have positive
         // evidence: `x-ratelimit-remaining: 0` (primary) or a `Retry-After`
-        // (secondary/abuse), or a 429 (always a rate limit). A bare 403 —
-        // notably the 2026-06-30 stargazer restriction for non-admin
-        // callers — is a DURABLE forbidden: retrying can't fix it, so we
-        // surface it distinctly and let the worker park the repo instead of
-        // re-polling it on every view.
+        // (secondary/abuse), or a 429 (always a rate limit). A bare 403 is an
+        // access denial and is surfaced distinctly, so it neither pauses the
+        // worker pool nor tombstones the repository.
         let h = resp.headers();
         let primary_hit = h
             .get("x-ratelimit-remaining")
@@ -575,21 +561,6 @@ fn parse_link_rel(header: &str, want_rel: &str) -> Option<String> {
         }
     }
     None
-}
-
-/// One page of the stargazers list plus the total page count (from page
-/// 1's `Link: rel="last"`; `None` thereafter). Returned by
-/// [`GithubClient::stargazers_page`] for the incremental refresh walk.
-#[derive(Debug, Clone)]
-pub struct StargazerPage {
-    pub items: Vec<Stargazer>,
-    pub last_page: Option<u32>,
-}
-
-/// One entry from `/repos/{o}/{r}/stargazers` with the star+json accept header.
-#[derive(Debug, Clone, Serialize, Deserialize)]
-pub struct Stargazer {
-    pub starred_at: DateTime<Utc>,
 }
 
 /// Which GitHub account kind a login resolves to. Only `Organization` gets

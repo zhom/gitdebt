@@ -1272,6 +1272,7 @@ async fn build_report(
             crate::agent_report::ReportState::Ready(Box::new(crate::agent_report::ReadyReport {
                 stars: crate::agent_report::ReportStars {
                     total_stars: result.total_stars,
+                    kind: result.history_kind,
                     approximate: result.history_approximate,
                     event_count: result.history_event_count,
                     created_on: result.created_at.map(|at| at.date_naive()),
@@ -2027,6 +2028,7 @@ async fn build_star_export(
             .as_ref()
             .and_then(|value| value.history_source.as_deref())
         {
+            Some(crate::cache::HISTORY_SOURCE_DAILY) => "daily_stargazers",
             Some(crate::cache::HISTORY_SOURCE_ARCHIVE) => "public_star_actions",
             Some(crate::cache::HISTORY_SOURCE_SPLICED) => "stargazers_then_activity",
             _ => "current_stargazers",
@@ -3521,9 +3523,11 @@ struct PingBody {
     stars: Option<i64>,
 }
 
-/// Cache age past which a complete repo is considered stale and worth an
-/// incremental refresh ping. Matches `analyzer::STARGAZER_REFRESH_TTL`.
-const PING_STALE_TTL: chrono::Duration = chrono::Duration::hours(6);
+/// Cache age past which a complete repo is considered stale and worth a
+/// refresh ping. The extension pings every repository page its users open, so
+/// this is the long background TTL; a real count change still triggers a
+/// re-read sooner through [`ping_count_drifted`].
+const PING_STALE_TTL: chrono::Duration = crate::analyzer::EMBED_REFRESH_TTL;
 
 /// True when the client-reported star count diverges from the cached
 /// count by more than `max(50, 2% of cached)` — the "stale by count"
@@ -3603,11 +3607,9 @@ async fn ext_ping(
     let known = summary.as_ref().is_some_and(|value| {
         value.stargazers_complete && !value.missing && value.metadata_fetched_at.is_some()
     });
-    let exact = known
-        && summary
-            .as_ref()
-            .and_then(|value| value.history_source.as_deref())
-            == Some("github_api");
+    // Only a recent GitHub star history is fresh. A frozen stargazer-list
+    // snapshot or an archive series is never fresh, so a ping on one offers it
+    // to the worker, which moves it onto GitHub's star history.
     let fresh = summary
         .as_ref()
         .is_some_and(|value| value.stargazers_fresh_within(PING_STALE_TTL));
@@ -3622,9 +3624,9 @@ async fn ext_ping(
         // No reported count → no count-based drift (age-only freshness).
         _ => false,
     };
-    let stale = known && !exact && (!fresh || count_drifted);
+    let stale = known && (!fresh || count_drifted);
 
-    let enqueued = !exact && ping_should_enqueue(cached_stars, body.stars, fresh);
+    let enqueued = ping_should_enqueue(cached_stars, body.stars, fresh);
     if enqueued {
         // The worker decides full-vs-incremental from the cache state; we
         // just enqueue (idempotent dedup in the queue). The client's
@@ -3966,10 +3968,10 @@ fn star_data_revision(summary: Option<&crate::cache::RepoSummary>) -> String {
 /// Which physical history a repository's series comes from. Part of the memo
 /// key because it also selects the rendered metric label.
 ///
-/// All three sources are distinguished here even though only the archive one
-/// changes the label: a repository that migrates from `github` to `spliced`
-/// gets a different curve under the same slug, and a shared key would serve
-/// the pre-migration render until the rest of the key happened to move.
+/// Every source is distinguished here even though only the archive one
+/// changes the label: a repository that moves from `spliced` to `daily` gets
+/// a different curve under the same slug, and a shared key would serve the
+/// pre-move render until the rest of the key happened to move.
 ///
 /// A spliced chart is deliberately still labelled "stars", not "public star
 /// actions": most of that curve IS an exact stargazer count, and only its tail
@@ -3977,6 +3979,7 @@ fn star_data_revision(summary: Option<&crate::cache::RepoSummary>) -> String {
 /// where the boundary is — an axis label cannot.
 fn history_source_key(summary: Option<&crate::cache::RepoSummary>) -> &'static str {
     match summary.and_then(|value| value.history_source.as_deref()) {
+        Some(crate::cache::HISTORY_SOURCE_DAILY) => "daily",
         Some(crate::cache::HISTORY_SOURCE_ARCHIVE) => "archive",
         Some(crate::cache::HISTORY_SOURCE_SPLICED) => "spliced",
         _ => "github",
@@ -7895,6 +7898,8 @@ mod tests {
         assert_eq!(history_source_key(Some(&summary)), "archive");
         summary.history_source = Some("github_api".to_string());
         assert_eq!(history_source_key(Some(&summary)), "github");
+        summary.history_source = Some("github_history".to_string());
+        assert_eq!(history_source_key(Some(&summary)), "daily");
         assert_eq!(history_source_key(None), "github");
     }
 
@@ -8301,6 +8306,7 @@ mod tests {
         let like = format!("{prefix}%");
         for statement in [
             "DELETE FROM star_fetch_queue WHERE repo LIKE $1",
+            "DELETE FROM repo_star_days WHERE repo LIKE $1",
             "DELETE FROM repo_stargazers WHERE repo LIKE $1",
             "DELETE FROM repos WHERE repo LIKE $1",
         ] {
@@ -8735,7 +8741,7 @@ mod tests {
         cleanup_overlay_rows(&state, "gitdebt-test-overlay-").await;
         let warm = format!("{prefix}/warm");
         let cold = format!("{prefix}/cold");
-        let events: Vec<crate::cache::StargazerEvent> = (0..5)
+        let events: Vec<(i64, chrono::DateTime<chrono::Utc>)> = (0..5)
             .map(|i| {
                 (
                     i + 1,
@@ -8749,7 +8755,10 @@ mod tests {
         state
             .analyzer
             .cache
-            .put_repo_stargazers(&warm, &events)
+            .put_repo_star_days(
+                &warm,
+                &crate::star_history::days_of(events.iter().map(|(_, at)| *at)),
+            )
             .await
             .expect("seed warm repo");
 
@@ -8801,7 +8810,10 @@ mod tests {
         state
             .analyzer
             .cache
-            .put_repo_stargazers(&cold, &events)
+            .put_repo_star_days(
+                &cold,
+                &crate::star_history::days_of(events.iter().map(|(_, at)| *at)),
+            )
             .await
             .expect("complete cold repo");
         let card = ensure_multi_svg(&state, theme, &q)
@@ -9567,7 +9579,7 @@ mod tests {
         // completeness — `shared` stays incomplete, so it must come back
         // with no sparkline at all rather than a partial one.
         use chrono::TimeZone;
-        let events: Vec<crate::cache::StargazerEvent> = (0..6)
+        let events: Vec<(i64, chrono::DateTime<chrono::Utc>)> = (0..6)
             .map(|i| {
                 (
                     i + 1,
@@ -9580,7 +9592,10 @@ mod tests {
         state
             .analyzer
             .cache
-            .put_repo_stargazers(&solo, &events)
+            .put_repo_star_days(
+                &solo,
+                &crate::star_history::days_of(events.iter().map(|(_, at)| *at)),
+            )
             .await
             .expect("seed star history");
         // The writer denormalizes star_count from the events it just wrote;
@@ -9780,6 +9795,7 @@ mod tests {
         for repo in &repos {
             for statement in [
                 "DELETE FROM repo_author_stats WHERE repo = $1",
+                "DELETE FROM repo_star_days WHERE repo = $1",
                 "DELETE FROM repo_stargazers WHERE repo = $1",
                 "DELETE FROM repo_star_arrivals WHERE repo = $1",
                 "DELETE FROM repos WHERE repo = $1",
@@ -9796,7 +9812,7 @@ mod tests {
             (&breakout, 1001_i64, 200_usize),
             (&early, 512_i64, 20_usize),
         ] {
-            let events: Vec<crate::cache::StargazerEvent> = (0..current)
+            let events: Vec<(i64, chrono::DateTime<chrono::Utc>)> = (0..current)
                 .map(|index| {
                     (
                         index + 1,
@@ -9808,7 +9824,10 @@ mod tests {
             state
                 .analyzer
                 .cache
-                .put_repo_stargazers(repo, &events)
+                .put_repo_star_days(
+                    repo,
+                    &crate::star_history::days_of(events.iter().map(|(_, at)| *at)),
+                )
                 .await
                 .expect("seed complete history");
             sqlx::query(
@@ -9864,6 +9883,7 @@ mod tests {
         for repo in &repos {
             for statement in [
                 "DELETE FROM repo_author_stats WHERE repo = $1",
+                "DELETE FROM repo_star_days WHERE repo = $1",
                 "DELETE FROM repo_stargazers WHERE repo = $1",
                 "DELETE FROM repo_star_arrivals WHERE repo = $1",
                 "DELETE FROM repos WHERE repo = $1",

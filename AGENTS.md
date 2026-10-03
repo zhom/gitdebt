@@ -45,9 +45,19 @@ change can silently break.
 - Star history is the core product; repo-health charts are the differentiator.
 - Never add fake-star detection, suspicious-account labels, per-stargazer
   scoring, or name-and-shame features.
-- Store star timestamps plus the opaque GH Archive event ID needed for
-  idempotency. Do not collect actors, stargazer profiles, or event payloads.
-- Do not add another code path that paginates GitHub's stargazers endpoint.
+- Star history comes from GitHub's own star-history endpoint
+  (`GET /repos/{o}/{r}/stargazers/history`, public since September 2026):
+  current stargazers counted per calendar day, exact, net of unstars, and
+  complete back to the creation week. `star_history.rs` reduces it to
+  `repo_star_days` (one row per starred day; `history_source =
+  'github_history'`). Its days are not UTC-aligned, so store the date GitHub
+  reports and never invent an instant for a star.
+- Store star timestamps or day counts plus the opaque GH Archive event ID
+  needed for idempotency. Do not collect actors, stargazer profiles, or event
+  payloads.
+- Never read GitHub's stargazer list (`/stargazers` without `/history`). GitHub
+  limited it to a repository's own admins and collaborators in July 2026, it
+  names every stargazer, and gitdebt has no path that reads it any more.
   Star-series read surfaces must use Postgres.
 - Provenance copy states SOURCE, COVERAGE DATE, and STATE — never a count,
   percentage, completeness score, or any figure implying how many stars are
@@ -59,10 +69,11 @@ change can silently break.
   `SeriesProvenance.tsx` and `provenance-embed.ts` render them and add none of
   their own. Enforced by `history-freshness.test.mjs` and
   `provenance-embed.test.mjs`.
-- There is no repository connection flow. `repo_star_grants` exists in `db.rs`
-  with no reader, no writer, and no route, and its schema comment reads as
-  though the feature shipped. Until it does, no copy may offer connecting a
-  repository as a remedy for the July 2026 stargazer restriction.
+- There is no repository connection flow, and star history does not need one.
+  `repo_star_grants` exists in `db.rs` with no reader, no writer, and no
+  route, and its schema comment reads as though the feature shipped. No copy
+  may offer connecting a repository, or signing in, as a way to get star
+  history.
 
 ## Repository map
 
@@ -81,8 +92,11 @@ Read the relevant module before changing it. Important backend modules:
 
 - `db.rs`, `cache.rs`: schema and completeness contracts
 - `queue.rs`, `worker.rs`, `analyzer.rs`: non-blocking ingestion
-- `gh_archive.rs`, `archive_worker.rs`, `gh_archive_hourly.rs`: BigQuery
-  history and raw-hour forward ingestion
+- `star_history.rs`, `worker.rs`: GitHub star-history reads, the refresh sweep
+- `gh_archive.rs`, `archive_worker.rs`, `gh_archive_hourly.rs`: older
+  archive-backed series. The BigQuery coordinator is no longer started; the
+  hourly follower advances archive and spliced series until the sweep moves
+  them onto GitHub's star history, then stops downloading.
 - `chart.rs`, `repo_charts.rs`, `cards.rs`, `badge.rs`, `og.rs`: rendering
 - `export.rs`, `aggregate.rs`, `usage.rs`: Postgres-backed data surfaces
 - `repo_endpoints.rs`, `api.rs`: routing and response policy
@@ -116,9 +130,13 @@ npm --prefix extension run package
 - Readers must never serve partial cache data. A `*_complete` flag gates reads.
 - Writers replace entity data and flip completeness atomically in one
   transaction. Errors must leave data incomplete.
-- Exact GitHub-API snapshots are not re-fetched after completion. Approximate
-  GH Archive activity may refresh from later day/hour partitions.
-- GitHub 404/private/deleted entities are tombstoned.
+- A GitHub star history is re-read whole on every refresh (it is a few
+  requests per repository), so unstars of old stars leave the curve too. Only
+  a `github_history` series read within the TTL is fresh; frozen stargazer-list
+  snapshots and archive or spliced series are always stale, so views and the
+  background sweep move them onto GitHub's star history.
+- GitHub 404/deleted entities are tombstoned. Private ones are parked
+  `restricted`, never tombstoned.
 - Cold analysis requests enqueue durable work and return promptly; never
   paginate GitHub synchronously on a request path.
 - Queue jobs, GitHub budgets, and worker state remain durable in Postgres.

@@ -34,7 +34,7 @@ use std::time::{Duration, SystemTime};
 use chrono::{TimeZone, Utc};
 use gitdebt::{
     cache::Cache, db::Db, github::RepoMetadata, queue, repo_history::RepoStorage, repo_stats,
-    worker,
+    star_history::days_of, worker,
 };
 use sqlx::postgres::PgPoolOptions;
 use tokio::sync::Mutex;
@@ -87,6 +87,10 @@ async fn cleanup(db: &Db, prefix: &str) {
         .bind(&like)
         .execute(&db.pool)
         .await;
+    let _ = sqlx::query("DELETE FROM repo_star_days WHERE repo LIKE $1")
+        .bind(&like)
+        .execute(&db.pool)
+        .await;
     let _ = sqlx::query("DELETE FROM repo_star_arrivals WHERE repo LIKE $1")
         .bind(&like)
         .execute(&db.pool)
@@ -134,7 +138,7 @@ async fn metadata_backfill_sweep_heals_legacy_complete_repos() {
     // complete, but `metadata_fetched_at` never stamped.
     let legacy = format!("{prefix}legacy");
     cache
-        .put_repo_stargazers(&legacy, &[(1, at)])
+        .put_repo_star_days(&legacy, &days_of([at]))
         .await
         .unwrap();
     let state = cache
@@ -142,7 +146,6 @@ async fn metadata_backfill_sweep_heals_legacy_complete_repos() {
         .await
         .unwrap()
         .expect("repos row exists");
-    assert!(state.exact_history_complete);
     assert!(
         state.metadata_missing,
         "legacy rows must surface the missing public-metadata stamp \
@@ -152,7 +155,7 @@ async fn metadata_backfill_sweep_heals_legacy_complete_repos() {
     // Controls the sweep must NOT pick up.
     let healed = format!("{prefix}healed");
     cache
-        .put_repo_stargazers(&healed, &[(1, at)])
+        .put_repo_star_days(&healed, &days_of([at]))
         .await
         .unwrap();
     cache
@@ -161,7 +164,7 @@ async fn metadata_backfill_sweep_heals_legacy_complete_repos() {
         .unwrap();
     let tombstoned = format!("{prefix}tombstoned");
     cache
-        .put_repo_stargazers(&tombstoned, &[(1, at)])
+        .put_repo_star_days(&tombstoned, &days_of([at]))
         .await
         .unwrap();
     cache.mark_repo_missing(&tombstoned).await.unwrap();
@@ -173,7 +176,7 @@ async fn metadata_backfill_sweep_heals_legacy_complete_repos() {
         .unwrap();
     let parked = format!("{prefix}parked");
     cache
-        .put_repo_stargazers(&parked, &[(1, at)])
+        .put_repo_star_days(&parked, &days_of([at]))
         .await
         .unwrap();
     queue::enqueue(&db, &parked, 0).await.unwrap();
@@ -216,9 +219,8 @@ async fn metadata_backfill_sweep_heals_legacy_complete_repos() {
             .unwrap();
     assert_eq!(parked_status, "dead");
 
-    // Simulate the claim path's heal: both the archive coordinator and the
-    // fallback worker write metadata via `put_repo_metadata` before touching
-    // any history — no stargazer pagination involved.
+    // Simulate the claim path's heal: the star-history worker writes
+    // metadata via `put_repo_metadata` before touching any history.
     cache
         .put_repo_metadata(&legacy, &metadata(9001, 1))
         .await
@@ -228,7 +230,8 @@ async fn metadata_backfill_sweep_heals_legacy_complete_repos() {
     // Every gate opens.
     assert_eq!(
         cache.get_repo_stargazers(&legacy).await.unwrap().unwrap(),
-        vec![at]
+        vec![at.date_naive().and_hms_opt(0, 0, 0).unwrap().and_utc()],
+        "GitHub's star history is stored by day"
     );
     assert!(cache.repo_stargazers_complete(&legacy).await.unwrap());
     assert_eq!(cache.get_repo_star_count(&legacy).await.unwrap(), Some(1));

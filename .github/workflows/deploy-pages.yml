@@ -21,7 +21,7 @@ jobs:
     name: build and deploy
     if: github.repository == 'zhom/gitdebt'
     runs-on: ubuntu-latest
-    timeout-minutes: 40
+    timeout-minutes: 50
     # Per job, so a new run's deploy never waits for an older pre-render.
     concurrency:
       group: cloudflare-pages-production
@@ -67,6 +67,16 @@ jobs:
           --branch=main
           --commit-hash="${GITHUB_SHA}"
 
+      - name: List repository pages for the pre-render job
+        working-directory: frontend/dist
+        run: find . -mindepth 2 -maxdepth 2 -name '*.html' > ../../prewarm-pages.txt
+
+      - uses: actions/upload-artifact@v7
+        with:
+          name: prewarm-pages
+          path: prewarm-pages.txt
+          retention-days: 1
+
   # Warms the catalog after each deploy. A job of its own: it runs longer than the
   # deploy and must not hide the deploy's result.
   prewarm:
@@ -90,5 +100,11 @@ jobs:
       - name: Install dependencies
         run: pnpm install --frozen-lockfile
 
+      - uses: actions/download-artifact@v8
+        with:
+          name: prewarm-pages
+
       - name: Pre-collect and pre-render catalog repositories
+        env:
+          PREWARM_PAGES: ${{ github.workspace }}/prewarm-pages.txt
         run: pnpm --filter gitdebt-frontend prewarm

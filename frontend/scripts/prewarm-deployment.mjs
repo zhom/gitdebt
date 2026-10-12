@@ -1,4 +1,4 @@
-import { readdir } from "node:fs/promises";
+import { readdir, readFile } from "node:fs/promises";
 import path from "node:path";
 import { isReservedFirstSegment } from "../src/lib/static-routing.mjs";
 
@@ -67,15 +67,28 @@ const apiRepos = Array.isArray(catalog.repos)
   ? catalog.repos.map((row) => row?.slug).filter((slug) => typeof slug === "string")
   : [];
 const repos = new Set(apiRepos);
-const dist = path.resolve("dist");
-for (const owner of await readdir(dist, { withFileTypes: true })) {
-  if (!owner.isDirectory() || isReservedFirstSegment(owner.name)) continue;
-  for (const file of await readdir(path.join(dist, owner.name), { withFileTypes: true })) {
-    if (!file.isFile() || !file.name.endsWith(".html")) continue;
-    const repo = file.name.slice(0, -5);
-    if (/^[A-Za-z0-9._-]+$/.test(owner.name) && /^[A-Za-z0-9._-]+$/.test(repo)) {
-      repos.add(`${owner.name}/${repo}`.toLowerCase());
+// Repository pages: "owner/repo.html" paths, from PREWARM_PAGES (a list written by the deploy
+// job) or from dist/ itself.
+async function pagePaths() {
+  if (process.env.PREWARM_PAGES) {
+    return (await readFile(process.env.PREWARM_PAGES, "utf8")).split("\n").filter(Boolean);
+  }
+  const dist = path.resolve("dist");
+  const paths = [];
+  for (const owner of await readdir(dist, { withFileTypes: true })) {
+    if (!owner.isDirectory()) continue;
+    for (const file of await readdir(path.join(dist, owner.name), { withFileTypes: true })) {
+      if (file.isFile()) paths.push(`${owner.name}/${file.name}`);
     }
+  }
+  return paths;
+}
+for (const page of await pagePaths()) {
+  const [owner, file, ...rest] = page.replace(/^\.\//, "").split("/");
+  if (rest.length || !file?.endsWith(".html") || isReservedFirstSegment(owner)) continue;
+  const repo = file.slice(0, -5);
+  if (/^[A-Za-z0-9._-]+$/.test(owner) && /^[A-Za-z0-9._-]+$/.test(repo)) {
+    repos.add(`${owner}/${repo}`.toLowerCase());
   }
 }
 const catalogRepos = [...repos].sort();

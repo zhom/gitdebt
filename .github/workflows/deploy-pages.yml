@@ -10,10 +10,6 @@ on:
 permissions:
   contents: read
 
-concurrency:
-  group: cloudflare-pages-production
-  cancel-in-progress: true
-
 env:
   PUBLIC_API_BASE: https://api.gitdebt.com
   PUBLIC_SITE_URL: https://gitdebt.com
@@ -26,6 +22,10 @@ jobs:
     if: github.repository == 'zhom/gitdebt'
     runs-on: ubuntu-latest
     timeout-minutes: 40
+    # Per job, so a new run's deploy never waits for an older pre-render.
+    concurrency:
+      group: cloudflare-pages-production
+      cancel-in-progress: true
     environment:
       name: production
       url: https://gitdebt.com
@@ -74,6 +74,9 @@ jobs:
     needs: deploy
     runs-on: ubuntu-latest
     timeout-minutes: 110
+    concurrency:
+      group: gitdebt-prewarm
+      cancel-in-progress: true
     steps:
       - uses: actions/checkout@v7
 

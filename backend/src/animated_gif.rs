@@ -272,7 +272,7 @@ fn encode_wave_at_scale(
 /// against before the encoder ever sees it. Integer round-half-up math keeps
 /// the result byte-deterministic.
 fn flatten_onto(rgba: &mut [u8], backdrop: [u8; 3]) {
-    for px in rgba.chunks_exact_mut(4) {
+    for px in rgba.as_chunks_mut::<4>().0 {
         let a = px[3] as u32;
         if a == 255 {
             continue;
@@ -293,7 +293,7 @@ fn backdrop_rgb(hex: &str) -> [u8; 3] {
         return [0, 0, 0];
     }
     let mut out = [0u8; 3];
-    for (channel, pair) in out.iter_mut().zip(digits.as_bytes().chunks_exact(2)) {
+    for (channel, pair) in out.iter_mut().zip(digits.as_bytes().as_chunks::<2>().0) {
         let Ok(text) = std::str::from_utf8(pair) else {
             return [0, 0, 0];
         };
@@ -347,7 +347,7 @@ fn encode_frames(
             encoder.set_repeat(repeat).context("set GIF repeat")?;
         }
         encoder
-            .encode_frames(frames.into_iter())
+            .encode_frames(frames)
             .context("encode animated GIF")?;
     }
     let (width, height) = dimensions.context("GIF has at least one frame")?;

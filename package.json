@@ -27,7 +27,7 @@
     "db:logs": "scripts/db.sh logs"
   },
   "devDependencies": {
-    "concurrently": "^10.0.4"
+    "concurrently": "^10.0.6"
   },
-  "packageManager": "pnpm@11.14.0"
+  "packageManager": "pnpm@12.11.2"
 }

@@ -171,7 +171,7 @@ fn encode_webp(pixmap: &tiny_skia::Pixmap) -> Result<Vec<u8>> {
 fn demultiply(pixmap: &tiny_skia::Pixmap) -> Vec<u8> {
     let data = pixmap.data();
     let mut out = Vec::with_capacity(data.len());
-    for chunk in data.chunks_exact(4) {
+    for chunk in data.as_chunks::<4>().0 {
         let (r, g, b, a) = (chunk[0], chunk[1], chunk[2], chunk[3]);
         if a == 0 {
             out.extend_from_slice(&[0, 0, 0, 0]);
@@ -473,7 +473,7 @@ mod tests {
         let (rgba, width, height) = rasterize_rgba(&svg, 1.0).expect("embedded avatar");
         assert_eq!((width, height), (2, 2));
         assert!(
-            rgba.chunks_exact(4).all(|pixel| {
+            rgba.as_chunks::<4>().0.iter().all(|pixel| {
                 pixel[0] > 200 && pixel[1] < 40 && pixel[2] < 40 && pixel[3] == 255
             })
         );

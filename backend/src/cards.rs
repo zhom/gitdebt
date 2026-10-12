@@ -2014,7 +2014,9 @@ mod tests {
         // The sheet paints its own paper, so the dark print's ground is
         // #0c0f11 and only lettering clears this threshold.
         let lit = rgba
-            .chunks_exact(4)
+            .as_chunks::<4>()
+            .0
+            .iter()
             .filter(|px| {
                 let a = px[3] as u32;
                 (px[0] as u32 * a + 0x0c * (255 - a)) / 255 > 160

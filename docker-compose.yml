@@ -1,6 +1,6 @@
 services:
   postgres:
-    image: postgres:16-alpine
+    image: postgres:18-alpine
     container_name: gitdebt-postgres
     restart: unless-stopped
     environment:
@@ -13,8 +13,10 @@ services:
       - "5432:5432"
     volumes:
       # Named volume so Postgres' on-disk format is owned by the container's
-      # uid/gid, not the host user. Survives `docker compose down`.
-      - postgres-data:/var/lib/postgresql/data
+      # uid/gid, not the host user. Survives `docker compose down`. Postgres
+      # 18 images keep a versioned data directory under /var/lib/postgresql,
+      # so a major upgrade gets a fresh volume and the old one stays intact.
+      - postgres18-data:/var/lib/postgresql
     healthcheck:
       test: ["CMD-SHELL", "pg_isready -U ${POSTGRES_USER:-gitdebt} -d ${POSTGRES_DB:-gitdebt}"]
       interval: 5s
@@ -22,7 +24,7 @@ services:
       retries: 10
 
   redis:
-    image: redis:7-alpine
+    image: redis:8-alpine
     container_name: gitdebt-redis
     restart: unless-stopped
     ports:
@@ -36,4 +38,4 @@ services:
       retries: 10
 
 volumes:
-  postgres-data:
+  postgres18-data:

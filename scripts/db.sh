@@ -9,7 +9,7 @@
 #
 # Wiping the volume is intentionally NOT exposed here. If you really
 # need to drop the data, do it deliberately:
-#   docker compose down && docker volume rm gitdebt_postgres-data
+#   docker compose down && docker volume rm gitdebt_postgres18-data
 set -euo pipefail
 cd "$(dirname "$0")/.."
 

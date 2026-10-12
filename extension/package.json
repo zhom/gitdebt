@@ -5,7 +5,7 @@
   "license": "MIT",
   "author": "Internet Technology Services LLC",
   "type": "module",
-  "description": "gitdebt browser extension — star history & repo-debt analytics on GitHub repo pages. Chrome + Firefox (MV3).",
+  "description": "gitdebt browser extension \u2014 star history & repo-debt analytics on GitHub repo pages. Chrome + Firefox (MV3).",
   "engines": {
     "node": ">=20"
   },
@@ -17,14 +17,10 @@
     "test": "node --test test/*.test.mjs"
   },
   "devDependencies": {
-    "web-ext": "^10.5.0"
+    "web-ext": "^10.7.0"
   },
   "overrides": {
-    "adm-zip": "0.6.0",
-    "brace-expansion": "5.0.9",
-    "fast-uri": "3.1.4",
-    "minimatch": "10.2.6",
-    "multimatch": "8.0.0",
-    "shell-quote": "1.10.0"
+    "adm-zip": "0.6.1",
+    "shell-quote": "1.12.0"
   }
 }

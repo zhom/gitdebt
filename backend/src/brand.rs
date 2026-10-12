@@ -202,7 +202,11 @@ impl MarkBox {
         let (rgba, rw, rh) = crate::raster::rasterize_rgba(&svg, 1.0).expect("reference raster");
         assert_eq!((rw, rh), (w, h));
         let cut = (INK_COVERAGE * 255.0) as u8;
-        rgba.chunks_exact(4).map(|px| px[3] >= cut).collect()
+        rgba.as_chunks::<4>()
+            .0
+            .iter()
+            .map(|px| px[3] >= cut)
+            .collect()
     }
 
     /// The mark as it actually rasterizes out of a finished surface.

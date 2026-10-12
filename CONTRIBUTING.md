@@ -23,7 +23,7 @@ contributions elsewhere.
 
 Requirements:
 
-- Rust 1.94 (see `rust-toolchain.toml`)
+- Rust 1.99 (see `rust-toolchain.toml`)
 - Node.js 22.13+
 - pnpm
 - Docker

@@ -1,0 +1,234 @@
+---
+export const prerender = true;
+
+import { render } from "astro:content";
+import Sheet from "@/layouts/Sheet.astro";
+import ArticleBody from "@/components/ArticleBody.astro";
+import {
+  BODY,
+  BREADCRUMB,
+  CRUMB,
+  FIELD,
+  HEADING,
+  LEAD,
+  MEASURE,
+  SECTION_ACTION,
+  TITLE,
+} from "@/components/style-tokens";
+import { postDay, publishedPosts, type BlogPost } from "@/lib/blog";
+import { staticApiBase } from "@/lib/static-api-base";
+
+/**
+ * One article, from `src/content/blog/{slug}.md`.
+ *
+ * The title block states what the sheet is and when it was issued and
+ * revised; the body is the publisher's Markdown, set as prose; the front
+ * matter's `faq` becomes a ruled question register with its FAQPage data.
+ * Nothing here is measured, so nothing here is drawn in drafting red.
+ */
+
+export async function getStaticPaths() {
+  const posts = await publishedPosts();
+  return posts.map((post) => ({ params: { slug: post.id }, props: { post } }));
+}
+
+interface Props {
+  post: BlogPost;
+}
+
+const { post } = Astro.props;
+const { Content } = await render(post);
+const { data } = post;
+
+const apiBase = staticApiBase();
+const site = (Astro.site ?? new URL("https://gitdebt.com")).href.replace(
+  /\/$/,
+  "",
+);
+
+const canonicalPath = `/blog/${post.id}`;
+const canonical = `${site}${canonicalPath}`;
+const ogImage = `${apiBase}/api/og.png`;
+const published = data.publishDate;
+const updated =
+  data.updatedDate && data.updatedDate !== data.publishDate
+    ? data.updatedDate
+    : undefined;
+const faq = (data.faq ?? []).filter(
+  (item) => item.question.trim() && item.answer.trim(),
+);
+// Not part of the schema; a publisher that sends a byline gets it credited.
+const author =
+  typeof data.author === "string" && data.author.trim()
+    ? { "@type": "Person", name: data.author.trim() }
+    : { "@type": "Organization", name: "gitdebt", url: `${site}/` };
+
+const jsonLd: Record<string, unknown>[] = [
+  {
+    "@context": "https://schema.org",
+    "@type": "BlogPosting",
+    "@id": `${canonical}#article`,
+    headline: data.title,
+    description: data.description,
+    url: canonical,
+    mainEntityOfPage: { "@type": "WebPage", "@id": canonical },
+    datePublished: published,
+    dateModified: updated ?? published,
+    inLanguage: "en",
+    image: ogImage,
+    ...(data.tags.length > 0 ? { keywords: data.tags.join(", ") } : {}),
+    author,
+    publisher: {
+      "@type": "Organization",
+      name: "gitdebt",
+      url: `${site}/`,
+      logo: { "@type": "ImageObject", url: `${site}/icon-512.png` },
+    },
+    isPartOf: {
+      "@type": "Blog",
+      "@id": `${site}/blog#blog`,
+      name: "gitdebt blog",
+      url: `${site}/blog`,
+    },
+  },
+  {
+    "@context": "https://schema.org",
+    "@type": "BreadcrumbList",
+    itemListElement: [
+      { "@type": "ListItem", position: 1, name: "gitdebt", item: `${site}/` },
+      { "@type": "ListItem", position: 2, name: "Blog", item: `${site}/blog` },
+      { "@type": "ListItem", position: 3, name: data.title, item: canonical },
+    ],
+  },
+  ...(faq.length > 0
+    ? [
+        {
+          "@context": "https://schema.org",
+          "@type": "FAQPage",
+          "@id": `${canonical}#faq`,
+          mainEntity: faq.map((item) => ({
+            "@type": "Question",
+            name: item.question.trim(),
+            acceptedAnswer: { "@type": "Answer", text: item.answer.trim() },
+          })),
+        },
+      ]
+    : []),
+];
+---
+
+<Sheet
+  title={`${data.title} · gitdebt`}
+  description={data.description}
+  canonicalPath={canonicalPath}
+  ogImage={ogImage}
+  ogType="article"
+  jsonLd={jsonLd}
+>
+  <Fragment slot="head">
+    <meta property="article:published_time" content={published} />
+    {updated && <meta property="article:modified_time" content={updated} />}
+    {data.tags.map((tag) => <meta property="article:tag" content={tag} />)}
+  </Fragment>
+
+  <article>
+    {/* ── The title block ────────────────────────────────────────────────── */}
+    <header class="registered border-b border-rule bg-paper">
+      <div class="mx-auto w-full max-w-6xl px-6 pt-8 pb-14">
+        <nav aria-label="Breadcrumb" class={BREADCRUMB}>
+          <a href="/" class={CRUMB}>gitdebt</a>
+          <span class="px-1.5 text-rule-strong" aria-hidden="true">/</span>
+          <a href="/blog" class={CRUMB}>blog</a>
+          <span class="px-1.5 text-rule-strong" aria-hidden="true">/</span>
+          <span class="break-all text-ink">{post.id}</span>
+        </nav>
+
+        <div
+          class="mt-6 grid gap-x-12 gap-y-6 lg:grid-cols-[minmax(0,1fr)_auto] lg:items-end"
+        >
+          <h1 class:list={[TITLE, "break-words"]}>{data.title}</h1>
+          <dl class="grid grid-cols-[auto_auto] justify-start gap-x-6 gap-y-3 lg:justify-end lg:text-right">
+            <div>
+              <dt class={FIELD}>Published</dt>
+              <dd class="mt-2 font-mono text-[0.8125rem] tabular-nums text-ink">
+                <time datetime={published}>{postDay(published)}</time>
+              </dd>
+            </div>
+            {
+              updated && (
+                <div>
+                  <dt class={FIELD}>Revised</dt>
+                  <dd class="mt-2 font-mono text-[0.8125rem] tabular-nums text-ink">
+                    <time datetime={updated}>{postDay(updated)}</time>
+                  </dd>
+                </div>
+              )
+            }
+          </dl>
+        </div>
+
+        <p class:list={["mt-6", LEAD, MEASURE]}>{data.description}</p>
+
+        {
+          data.tags.length > 0 && (
+            <ul
+              role="list"
+              aria-label="Tags"
+              class="mt-5 flex flex-wrap gap-x-4 gap-y-1 font-mono text-[0.75rem] text-ink-3"
+            >
+              {data.tags.map((tag) => (
+                <li>{tag}</li>
+              ))}
+            </ul>
+          )
+        }
+      </div>
+    </header>
+
+    {/* ── The body ───────────────────────────────────────────────────────── */}
+    <div class="border-b border-rule bg-paper">
+      <div class="mx-auto w-full max-w-6xl px-6 py-14">
+        <ArticleBody title={data.title} class={MEASURE}>
+          <Content />
+        </ArticleBody>
+      </div>
+    </div>
+
+    {/* ── Questions ──────────────────────────────────────────────────────── */}
+    {
+      faq.length > 0 && (
+        <section
+          id="post-faq"
+          aria-labelledby="post-faq-heading"
+          class="border-b border-rule bg-table"
+        >
+          <div class="mx-auto w-full max-w-6xl px-6 py-16">
+            <h2 id="post-faq-heading" class={HEADING}>
+              Frequently asked questions
+            </h2>
+            <dl class="mt-8 grid grid-cols-1 gap-px border border-rule-strong bg-rule">
+              {faq.map((item) => (
+                <div class="bg-paper p-5 sm:p-6">
+                  <dt class="font-draft text-[1.0625rem] leading-[1.2] text-ink">
+                    {item.question.trim()}
+                  </dt>
+                  <dd
+                    class:list={["mt-2.5 whitespace-pre-line", BODY, MEASURE]}
+                  >
+                    {item.answer.trim()}
+                  </dd>
+                </div>
+              ))}
+            </dl>
+          </div>
+        </section>
+      )
+    }
+  </article>
+
+  <nav aria-label="Blog" class="bg-paper">
+    <div class="mx-auto w-full max-w-6xl px-6 py-10">
+      <a href="/blog" class={SECTION_ACTION}>All articles</a>
+    </div>
+  </nav>
+</Sheet>

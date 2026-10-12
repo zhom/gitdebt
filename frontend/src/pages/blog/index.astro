@@ -1,0 +1,170 @@
+---
+export const prerender = true;
+
+import Sheet from "@/layouts/Sheet.astro";
+import {
+  BODY,
+  BREADCRUMB,
+  CRUMB,
+  FIELD,
+  HEADING,
+  LEAD,
+  MEASURE,
+  PROSE_LINK,
+  TITLE,
+} from "@/components/style-tokens";
+import { postDay, publishedPosts } from "@/lib/blog";
+import { staticApiBase } from "@/lib/static-api-base";
+
+/**
+ * The blog index: a register of every published article, newest first.
+ *
+ * Articles arrive as Markdown files committed to `src/content/blog/`, so the
+ * index has to read well with none of them. An empty register is `noindex`;
+ * the sitemap still names `/blog`, and the post-build SEO pass prunes it until
+ * the first article exists.
+ */
+
+const apiBase = staticApiBase();
+const site = (Astro.site ?? new URL("https://gitdebt.com")).href.replace(
+  /\/$/,
+  "",
+);
+
+const posts = await publishedPosts();
+
+const title = "Blog · gitdebt";
+const description =
+  "Articles on GitHub star history, repository health, and what a project's git history can and cannot tell you.";
+const ogImage = `${apiBase}/api/og.png`;
+const canonical = `${site}/blog`;
+
+const jsonLd: Record<string, unknown>[] = [
+  {
+    "@context": "https://schema.org",
+    "@type": "Blog",
+    "@id": `${canonical}#blog`,
+    name: "gitdebt blog",
+    url: canonical,
+    description,
+    inLanguage: "en",
+    publisher: { "@type": "Organization", name: "gitdebt", url: `${site}/` },
+    blogPost: posts.map((post) => ({
+      "@type": "BlogPosting",
+      headline: post.data.title,
+      description: post.data.description,
+      url: `${site}/blog/${post.id}`,
+      datePublished: post.data.publishDate,
+      dateModified: post.data.updatedDate ?? post.data.publishDate,
+    })),
+  },
+  {
+    "@context": "https://schema.org",
+    "@type": "BreadcrumbList",
+    itemListElement: [
+      { "@type": "ListItem", position: 1, name: "gitdebt", item: `${site}/` },
+      { "@type": "ListItem", position: 2, name: "Blog", item: canonical },
+    ],
+  },
+];
+---
+
+<Sheet
+  title={title}
+  description={description}
+  canonicalPath="/blog"
+  ogImage={ogImage}
+  noindex={posts.length === 0}
+  jsonLd={jsonLd}
+>
+  {/* ── The title block ──────────────────────────────────────────────────── */}
+  <section class="registered border-b border-rule bg-paper">
+    <div class="mx-auto w-full max-w-6xl px-6 pt-8 pb-14">
+      <nav aria-label="Breadcrumb" class={BREADCRUMB}>
+        <a href="/" class={CRUMB}>gitdebt</a>
+        <span class="px-1.5 text-rule-strong" aria-hidden="true">/</span>
+        <span class="text-ink">blog</span>
+      </nav>
+
+      <div
+        class="mt-6 grid gap-x-12 gap-y-6 lg:grid-cols-[minmax(0,1fr)_auto] lg:items-end"
+      >
+        <h1 class={TITLE}>Blog</h1>
+        <div class="lg:text-right">
+          <p class={FIELD}>Articles</p>
+          <p class="mt-2 font-mono text-[0.8125rem] tabular-nums text-ink">
+            {posts.length}
+          </p>
+        </div>
+      </div>
+
+      <p class:list={["mt-6", LEAD, MEASURE]}>
+        Articles on GitHub star history, repository health, and what a
+        project's git history can and cannot tell you.
+      </p>
+    </div>
+  </section>
+
+  {/* ── The register ─────────────────────────────────────────────────────── */}
+  <section class="bg-table">
+    <div class="mx-auto w-full max-w-6xl px-6 py-16">
+      {
+        posts.length === 0 ? (
+          <div class="border border-rule-strong bg-paper p-5 sm:p-8">
+            <h2 class="font-draft text-[1.0625rem] leading-[1.2] text-ink">
+              No articles yet
+            </h2>
+            <p class:list={["mt-2.5", BODY, MEASURE]}>
+              Nothing is published here so far. Until the first article
+              arrives, <a href="/#lookup" class={PROSE_LINK}>look up a
+              repository</a> to read its star history and health signals.
+            </p>
+          </div>
+        ) : (
+          <>
+            <h2 class="sr-only">All articles</h2>
+            <ol
+              role="list"
+              class="grid gap-px border border-rule-strong bg-rule"
+            >
+              {posts.map((post) => (
+                <li class="bg-paper">
+                  <a
+                    href={`/blog/${post.id}`}
+                    class="grid gap-x-10 gap-y-2 p-5 text-ink-2 outline-none transition-colors duration-[--duration-ui] hover:bg-table hover:text-ink focus-visible:outline-2 focus-visible:-outline-offset-2 focus-visible:outline-signal sm:grid-cols-[7.5rem_minmax(0,1fr)] sm:p-6"
+                  >
+                    <time
+                      datetime={post.data.publishDate}
+                      class="pt-1 font-mono text-[0.8125rem] tabular-nums text-ink-3"
+                    >
+                      {postDay(post.data.publishDate)}
+                    </time>
+                    <div class="min-w-0">
+                      <h3 class:list={[HEADING, "text-ink"]}>
+                        {post.data.title}
+                      </h3>
+                      <p class:list={["mt-2.5", BODY, MEASURE]}>
+                        {post.data.description}
+                      </p>
+                      {post.data.tags.length > 0 && (
+                        <ul
+                          role="list"
+                          aria-label="Tags"
+                          class="mt-3 flex flex-wrap gap-x-4 gap-y-1 font-mono text-[0.75rem] text-ink-3"
+                        >
+                          {post.data.tags.map((tag) => (
+                            <li>{tag}</li>
+                          ))}
+                        </ul>
+                      )}
+                    </div>
+                  </a>
+                </li>
+              ))}
+            </ol>
+          </>
+        )
+      }
+    </div>
+  </section>
+</Sheet>

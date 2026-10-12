@@ -29,6 +29,7 @@ export const RESERVED_FIRST_SEGMENTS = Object.freeze(
     "about",
     "api",
     "badges",
+    "blog",
     "compare",
     "favicon.ico",
     "leaderboard",

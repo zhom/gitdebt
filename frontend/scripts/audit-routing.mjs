@@ -8,6 +8,7 @@ import { profileLogin } from "../src/lib/static-routing.mjs";
 const REQUIRED_FILE_ROUTES = [
   "about.html",
   "badges.html",
+  "blog.html",
   "compare.html",
   "leaderboard.html",
   "privacy.html",
@@ -19,6 +20,7 @@ const REQUIRED_FILE_ROUTES = [
 const CANONICAL_SLASH_ROUTES = [
   ["/about/", "/about"],
   ["/badges/", "/badges"],
+  ["/blog/", "/blog"],
   ["/compare/", "/compare"],
   ["/leaderboard/", "/leaderboard"],
   ["/privacy/", "/privacy"],

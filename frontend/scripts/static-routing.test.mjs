@@ -53,6 +53,7 @@ function validOutput(directory, redirects = null) {
   for (const route of [
     "about",
     "badges",
+    "blog",
     "compare",
     "leaderboard",
     "privacy",
@@ -98,6 +99,7 @@ function validOutput(directory, redirects = null) {
     redirects ??
       `/about/ /about 301
 /badges/ /badges 301
+/blog/ /blog 301
 /compare/ /compare 301
 /leaderboard/ /leaderboard 301
 /report/ /report 301
@@ -193,6 +195,7 @@ test("application, legal, malformed, and non-repo routes stay on the 404", () =>
     "/profile/zhom",
     "/terms/archive",
     "/compare/frontend-frameworks",
+    "/blog/some-article",
     "/u/zhom",
     "/vs/a/b/c/d",
     "/only-one-segment",
@@ -220,6 +223,7 @@ test("reserved first segments are never published or resolved as profiles", () =
   for (const segment of [
     "about",
     "badges",
+    "blog",
     "compare",
     "leaderboard",
     "privacy",

@@ -52,6 +52,7 @@ function apiBaseForRedirects() {
 function pagesRedirects(apiBase) {
   return `/about/ /about 301
 /badges/ /badges 301
+/blog/ /blog 301
 /compare/ /compare 301
 /leaderboard/ /leaderboard 301
 /report/ /report 301

@@ -1,0 +1,257 @@
+---
+/**
+ * A blog article's Markdown body, set as prose.
+ *
+ * The page letters the article's title as the sheet's one `h1`, from the front
+ * matter. A body that opens with that same title as an `# H1` would print it
+ * twice, so that heading is dropped; any other `h1` in a body becomes an `h2`.
+ * Without this, one post whose body carries an H1 fails the SEO audit's
+ * one-h1 rule, and with it every deploy of the site.
+ *
+ * The body is rendered first and its headings adjusted as HTML, because the
+ * site's Markdown processor runs no per-site plugins. Code is escaped by the
+ * time it reaches this point, so a literal `<h1>` inside a code block is text
+ * and is never touched.
+ */
+
+interface Props {
+  title: string;
+  class?: string;
+}
+
+const { title, class: className } = Astro.props;
+
+function plainText(html: string): string {
+  return html
+    .replace(/<[^>]*>/g, "")
+    .replace(/&nbsp;/g, " ")
+    .replace(/&amp;/g, "&")
+    .replace(/&lt;/g, "<")
+    .replace(/&gt;/g, ">")
+    .replace(/&quot;/g, '"')
+    .replace(/&#39;|&#x27;/g, "'")
+    .replace(/\s+/g, " ")
+    .trim()
+    .toLowerCase();
+}
+
+const rendered = await Astro.slots.render("default");
+const leading = /^\s*<h1\b[^>]*>([\s\S]*?)<\/h1>/i.exec(rendered);
+const body = (
+  leading && plainText(leading[1]) === plainText(title)
+    ? rendered.slice(leading[0].length)
+    : rendered
+).replace(/<(\/?)h1\b/gi, "<$1h2");
+---
+
+<div class:list={["post-body", className]}>
+  <Fragment set:html={body} />
+</div>
+
+<style>
+  /* The publisher's Markdown, set as prose.
+
+     Prose is system-ui in ink-2; headings inside it are lettered in the
+     drawing's hand like every other heading on the site. A link carries its
+     rule-coloured underline at rest and takes the signal only under the
+     pointer, exactly as `PROSE_LINK` does. Rules separate real regions only:
+     a quotation from the text around it, a table cell from its neighbour. */
+  .post-body {
+    color: var(--ink-2);
+    font-size: 1rem;
+    line-height: 1.7;
+    overflow-wrap: break-word;
+    text-wrap: pretty;
+  }
+
+  .post-body > :global(* + *) {
+    margin-top: 1.25em;
+  }
+
+  .post-body :global(:is(h2, h3, h4, h5, h6)) {
+    color: var(--ink);
+    text-wrap: balance;
+  }
+
+  .post-body :global(h2) {
+    margin-top: 2.75rem;
+    font-size: 1.375rem;
+    line-height: 1.1;
+  }
+
+  .post-body :global(h3) {
+    margin-top: 2.25rem;
+    font-size: 1.0625rem;
+    line-height: 1.2;
+  }
+
+  .post-body :global(:is(h4, h5, h6)) {
+    margin-top: 2rem;
+    font-size: 1rem;
+    font-weight: 600;
+    line-height: 1.4;
+  }
+
+  .post-body > :global(:is(h2, h3, h4, h5, h6) + *) {
+    margin-top: 0.85em;
+  }
+
+  .post-body > :global(:first-child) {
+    margin-top: 0;
+  }
+
+  .post-body :global(a) {
+    color: inherit;
+    text-decoration-line: underline;
+    text-decoration-color: var(--rule-strong);
+    text-underline-offset: 3px;
+    overflow-wrap: anywhere;
+    transition:
+      color var(--duration-ui),
+      text-decoration-color var(--duration-ui);
+  }
+
+  .post-body :global(a:hover) {
+    color: var(--signal);
+    text-decoration-color: var(--signal);
+  }
+
+  .post-body :global(:is(strong, b)) {
+    color: var(--ink);
+    font-weight: 600;
+  }
+
+  .post-body :global(:is(ul, ol)) {
+    padding-left: 1.4em;
+  }
+
+  .post-body :global(ul) {
+    list-style-type: square;
+  }
+
+  .post-body :global(ol) {
+    list-style-type: decimal;
+  }
+
+  .post-body :global(li + li),
+  .post-body :global(li > :is(ul, ol)) {
+    margin-top: 0.45em;
+  }
+
+  .post-body :global(li > p + p) {
+    margin-top: 0.75em;
+  }
+
+  .post-body :global(li::marker) {
+    color: var(--ink-3);
+  }
+
+  .post-body :global(ol > li::marker) {
+    font-family: var(--font-mono);
+    font-size: 0.8125em;
+    font-variant-numeric: tabular-nums;
+  }
+
+  /* `## Sources` closes most articles with a list of links. It is a reference
+     list, so it is set a step smaller, and a bare URL breaks wherever it must
+     rather than pushing the sheet sideways. */
+  .post-body :global(:is(#sources, #references) + :is(ul, ol)) {
+    font-size: 0.875rem;
+    line-height: 1.6;
+  }
+
+  .post-body :global(:is(#sources, #references) + :is(ul, ol) > li + li) {
+    margin-top: 0.6em;
+  }
+
+  .post-body :global(blockquote) {
+    border-left: var(--line-medium) solid var(--rule-strong);
+    padding-left: 1.1em;
+    color: var(--ink-2);
+  }
+
+  .post-body :global(blockquote > * + *) {
+    margin-top: 0.75em;
+  }
+
+  .post-body :global(:not(pre) > code) {
+    border: var(--line-medium) solid var(--rule);
+    background-color: var(--table);
+    padding: 0.05em 0.3em;
+    font-family: var(--font-mono);
+    font-size: 0.875em;
+    overflow-wrap: anywhere;
+  }
+
+  .post-body :global(pre) {
+    overflow-x: auto;
+    border: var(--line-medium) solid var(--rule-strong);
+    background-color: var(--table);
+    padding: 1rem 1.1rem;
+    color: var(--ink);
+    font-family: var(--font-mono);
+    font-size: 0.8125rem;
+    line-height: 1.6;
+  }
+
+  .post-body :global(pre code) {
+    font-family: inherit;
+    font-size: inherit;
+  }
+
+  .post-body :global(hr) {
+    margin-block: 2.75rem;
+    height: var(--line-medium);
+    border: 0;
+    background-color: var(--rule);
+  }
+
+  .post-body :global(:is(img, video)) {
+    display: block;
+    max-width: 100%;
+    height: auto;
+    border: var(--line-medium) solid var(--rule);
+  }
+
+  .post-body :global(iframe) {
+    display: block;
+    width: 100%;
+    max-width: 100%;
+    aspect-ratio: 16 / 9;
+    height: auto;
+    border: var(--line-medium) solid var(--rule);
+  }
+
+  .post-body :global(table) {
+    display: block;
+    max-width: 100%;
+    overflow-x: auto;
+    border-collapse: collapse;
+    font-size: 0.875rem;
+    line-height: 1.5;
+  }
+
+  .post-body :global(:is(th, td)) {
+    border: var(--line-medium) solid var(--rule);
+    padding: 0.5rem 0.75rem;
+    text-align: left;
+    vertical-align: top;
+  }
+
+  .post-body :global(th) {
+    color: var(--ink-3);
+    font-family: var(--font-draft);
+    font-size: 0.75rem;
+    font-weight: 400;
+    letter-spacing: 0.09em;
+    text-transform: uppercase;
+  }
+
+  .post-body :global(.footnotes) {
+    margin-top: 3rem;
+    border-top: var(--line-medium) solid var(--rule);
+    padding-top: 1.5rem;
+    font-size: 0.875rem;
+    line-height: 1.6;
+  }
+</style>

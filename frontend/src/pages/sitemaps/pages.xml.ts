@@ -1,5 +1,6 @@
 import type { APIRoute } from "astro";
 import { CATEGORIES } from "@/data/categories";
+import { postDay, publishedPosts } from "@/lib/blog";
 import {
   staticComparisonPaths,
   staticLogins,
@@ -16,11 +17,21 @@ function resolveSite(astroSite: URL | undefined): string {
   return base.replace(/\/$/, "");
 }
 
-const PAGES: { path: string; changefreq: string; priority: string }[] = [
+type SitemapPage = {
+  path: string;
+  changefreq: string;
+  priority: string;
+  lastmod?: string;
+};
+
+const PAGES: SitemapPage[] = [
   { path: "/", changefreq: "weekly", priority: "1.0" },
   { path: "/compare", changefreq: "weekly", priority: "0.8" },
   { path: "/leaderboard", changefreq: "daily", priority: "0.8" },
   { path: "/badges", changefreq: "weekly", priority: "0.8" },
+  // Listed even while the blog is empty: the empty index is `noindex`, and the
+  // post-build SEO pass prunes it from the sitemap until a post exists.
+  { path: "/blog", changefreq: "weekly", priority: "0.6" },
   { path: "/about", changefreq: "monthly", priority: "0.5" },
   { path: "/privacy", changefreq: "yearly", priority: "0.3" },
   { path: "/terms", changefreq: "yearly", priority: "0.3" },
@@ -43,11 +54,18 @@ export const GET: APIRoute = async ({ site }) => {
     changefreq: "daily",
     priority: "0.6",
   }));
-  const pages = [...PAGES, ...loginPages];
+  // Drafts have no page, so they have no entry either.
+  const postPages: SitemapPage[] = (await publishedPosts()).map((post) => ({
+    path: `/blog/${post.id}`,
+    changefreq: "monthly",
+    priority: "0.6",
+    lastmod: postDay(post.data.updatedDate ?? post.data.publishDate),
+  }));
+  const pages: SitemapPage[] = [...PAGES, ...postPages, ...loginPages];
 
   const urls = pages.map(
     (p) => `  <url>
-    <loc>${SITE}${p.path}</loc>
+    <loc>${SITE}${p.path}</loc>${p.lastmod ? `\n    <lastmod>${p.lastmod}</lastmod>` : ""}
     <changefreq>${p.changefreq}</changefreq>
     <priority>${p.priority}</priority>
   </url>`,

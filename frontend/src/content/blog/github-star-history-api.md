@@ -1,14 +1,16 @@
 ---
-description: "GitHub's star history API returns daily star counts for any public repo, with no token. Learn what changed in 2026, how the endpoint works, and how to chart it."
+description: "Is there a star history API? Yes: GitHub's new endpoint returns star counts with timestamps and no stargazer names. Learn how to call it and migrate old code."
 faq:
-  - answer: "You don't need one for public repositories. GitHub's docs say the endpoint can be used without authentication when only public resources are requested. A token still helps at volume: unauthenticated requests share a limit of 60 per hour, while a personal token gets a rate limit of 5,000 requests per hour."
-    question: "Do I need a token to call GitHub's star history API?"
-  - answer: "Only if you're an admin or collaborator on it, because the stargazer list still answers for those roles. Everyone else gets counts without names. GitHub built the history endpoint so tools can track star growth without exposing stargazer identities, which is the privacy line the 2026 restriction drew."
-    question: Can I still see who starred my repository?
-  - answer: It goes all the way to the week the repository was created. Pages walk backward from the newest week toward the creation week, and empty weeks come back as zeros, so a quiet stretch from years ago stays in the series. At 30 weeks per page and 100 pages, every GitHub repository fits.
-    question: How far back does the star history go?
-  - answer: "Two causes cover most cases. A chart that stopped moving in July 2026 has the frozen-curve problem: it was read from the stargazer list and never re-read. A chart that runs above the total was likely built from star actions, which count re-stars. Check the source line under the chart first."
-    question: "Why doesn't my star chart match the count on GitHub?"
+  - answer: Yes, GitHub announced an official star history API in its Sep 4, 2026 changelog. It is a REST endpoint that returns historical star counts with timestamps and no stargazer identities. Check the GitHub REST docs for current parameters and limits before using it.
+    question: Is there an official GitHub API for star history?
+  - answer: "GitHub restricted stargazer listing endpoints to admins and collaborators earlier in 2026 to protect user privacy. The old list exposed each stargazer's username, avatar, and profile URL, which spammers had used, and that exposure is why non-collaborators lost access to it."
+    question: Why did the old stargazers endpoint stop working for non-collaborators?
+  - answer: "GitHub's changelog doesn't say whether authentication is required or which scope applies, so you cannot assume either way. Read the REST docs for the current rule before you ship, and test one request against a public repository to confirm the behavior."
+    question: Does the star history endpoint need a token?
+  - answer: The Sep 4, 2026 changelog only promises historical star counts with timestamps, so it does not explicitly include a cumulative star count. If the docs show per-period entries, add them from oldest to newest yourself to get a running total.
+    question: Does the response include a cumulative star count?
+  - answer: "You should not give a third-party site write access to your repository for data alone; read it from GitHub's endpoint instead. starhistory.io calls itself the only tool that works after the June 2026 restriction, a self-reported claim, while star-history.com says it adopted GitHub's new API on Sep 5, 2026."
+    question: Should I give a third-party site write access to my repository?
 publishDate: "2026-10-12"
 tags:
   - star history
@@ -19,198 +21,289 @@ title: "GitHub star history API: what changed and how to use it"
 updatedDate: "2026-10-13"
 ---
 
-**The GitHub star history API is `GET /repos/{owner}/{repo}/stargazers/history`, a REST endpoint GitHub announced on September 4, 2026. It returns a repository's stars grouped by calendar week, with a count for each day of the week. Public repositories need no token, and the response never names a stargazer. It replaced the stargazer list, which GitHub restricted to admins and collaborators.**
+**Yes, there's an official star history API: [GitHub's Sep 4, 2026 changelog](https://github.blog/changelog/2026-09-04-new-api-endpoint-provides-privacy-safe-star-history-data/) introduced `GET /repos/{owner}/{repo}/stargazers/history`, which returns privacy-safe weekly star data with no stargazer identities. It replaces the stargazers list for this job. A token-light script can page back to the repository's creation week and rebuild the star curve.**
 
-Take Maya, a made-up but typical maintainer of a small Rust CLI. In August 2026 she opens her README and sees the star-history chart flat since early July, even though new stars arrive every week. Her project is fine. The data under her chart, and under most star-history tools, had closed, and its replacement is the GitHub star history API.
+A script, README chart or dashboard that read the stargazers list for timestamps may have stopped returning usable data. GitHub restricted those listing endpoints to admins and collaborators, and the star history API is the privacy-safe replacement.
 
-For years, star history came from one place: the list of stargazers. A tool paged through it, read each star's timestamp, and counted the stars into a curve. When GitHub closed that list to outsiders in July 2026, every series read that way stopped on a fixed date. That's what happened to Maya's chart.
-
-You probably know the old method. This guide gives you a working picture of the new one: what changed and when, how the endpoint's response is shaped, how to turn it into a cumulative curve, what the aggregate data can't tell you, and how to chart, compare and embed star history without code.
-
-Every endpoint detail below comes from GitHub's changelog and REST documentation. gitdebt reads its own charts from this same source, day by day back to each repository's creation.
+By the end, you'll know what changed and when, how to call the new endpoint, how to build a cumulative curve, how to choose between tools, and how to migrate old code. Each step is something you can run against your own repository.
 
 > **Key Takeaways**
-> - On June 30, 2026, GitHub announced the stargazer list would be limited to admins and collaborators, because these lists were being misused to collect user data for spam.
-> - The replacement endpoint, announced September 4, 2026, returns stars grouped by calendar week with a per-day count array.
-> - Public repositories need no authentication, and no stargazer identity comes back.
-> - A day is the finest unit the new endpoint reports.
-> - Star counts alone shouldn't drive high-stakes decisions.
+> - The new endpoint returns timestamped star counts, not stargazer identities, so per-user `starred_at` data is gone ([GitHub changelog](https://github.blog/changelog/2026-09-04-new-api-endpoint-provides-privacy-safe-star-history-data/)).
+> - If a page holds 30 weeks, a 200-week-old repository needs 7 requests (200 ÷ 30 = 6.67, rounded up).
+> - Check the weekday the `days` array starts on before converting week timestamps to calendar dates.
+> - Claims that star-history.com is permanently broken predate [GitHub's Sep 4 changelog](https://www.star-history.com/blog/new-github-star-history-api/).
 
-## What changed in GitHub's stargazer API in 2026?
+## What changed with GitHub's stargazers endpoint, and when?
 
-GitHub limited its stargazer list to admins and collaborators in July 2026, and that created the frozen-curve problem: a star-history chart built from the list stops on the day access closed, while the repository keeps collecting stars the chart never sees. Nothing about the project changed. Only the data source did.
+GitHub changed its star data in two steps: it first limited the stargazer list to admins and collaborators, then on September 4, 2026 it added a star history endpoint that returns counts without identities.
 
-### What GitHub restricted, and why
+![Image generated](https://api.birchseek.com/m/fPortwt_YhkEB1rnLzbzLU5PGOHAr2us.webp)
 
-GitHub announced the change on June 30, 2026. Access to two public endpoints became limited to admins and collaborators: List stargazers (`/repos/{owner}/{repo}/stargazers`) and List watchers (`/repos/{owner}/{repo}/subscribers`). Some users would now get empty responses or a 403 Forbidden status, on those endpoints and on the `/stargazers` and `/watchers` pages.
+- **Earlier in 2026:** GitHub's changelog says stargazer listing endpoints "were restricted to admins and collaborators to protect user privacy." The quoted text gives no day.
+- **Sep 4, 2026:** GitHub announced a new star history REST API endpoint that returns historical star counts with timestamps "without exposing individual stargazer data."
+- **Sep 5, 2026:** Tianzhou of star-history.com wrote that "GitHub just introduced a privacy-safe API for star history data" and that Star History "adopted it immediately."
 
-The stated reason was spam. GitHub said these lists had increasingly been misused to collect user data for spam activities. The REST docs now carry the same note: access to the stargazers listing endpoints is limited to admins and collaborators.
+The old approach explains why charts broke. According to the star-history.com post, it used the list stargazers endpoint, which returns a `starred_at` timestamp for each stargazer. "Sort the timestamps and you have the curve."
 
-### Why star-history charts broke
+The same response carried each stargazer's username, avatar and profile URL. The post says starring a popular repo "effectively adds you to a public mailing list." A tool that rebuilt its curve from that list was reading personal data to get a count.
 
-The stargazer list was the raw material for star-history charts. With the `application/vnd.github.star+json` media type, each entry included a timestamp of when the star was created, so a tool could sort the stars and count them into a curve. The list had a ceiling even before 2026: it returned up to 100 stargazers per page and stopped at page 400, so nothing beyond 40,000 stars came back.
+### Fact-check: "the only tool that works"
 
-After July, a tool could read the list only for repositories it administered or collaborated on. Everyone else's chart froze. gitdebt hit the frozen-curve problem too: a series it read from the stargazer list stops on a fixed date until it's re-read from GitHub's star history. Every gitdebt chart names its source and its coverage date, so you can tell a frozen curve from a quiet repository. If one of your charts looks stuck, check [how gitdebt sources each star series](https://gitdebt.com/about).
+The starhistory.io homepage says it is "The only tool that works after June 2026 API restriction." Set that beside the dated sources. GitHub's Sep 4 changelog announces a replacement endpoint, and the Sep 5 star-history.com post says "If a chart broke in the past two months, it should now work again."
 
-A guide written before July 2026 that pages through `/stargazers` with the star+json media type now works only where you're an admin or collaborator.
+The starhistory.io claim appears to predate the new endpoint, and its status is self-reported. Don't pick a tool from it. Open the two dated pages, then check whether a chart renders for a repository you know.
 
 ## How does the GitHub star history API endpoint work?
 
-The GitHub star history API is the REST endpoint `GET /repos/{owner}/{repo}/stargazers/history`. It returns a repository's stars grouped by calendar week, most recent first, and each week carries a seven-day array of per-day counts that starts on Sunday. Public repositories can be read without a token, and no stargazer is ever named.
+The GitHub star history API is a REST endpoint, `GET /repos/{owner}/{repo}/stargazers/history`, that returns star counts over time without naming who starred. GitHub's changelog says it lets you track repository star growth "without exposing stargazer identities." Think of it as a ledger of totals, not a guest book.
 
-### The request
+The difference matters for your code. The older list stargazers endpoint, according to the star-history.com post, "returns a `starred_at` timestamp for each stargazer" and also each stargazer's "username, avatar, and profile URL." That's a guest book: every name, with a time. A history endpoint gives you how many people signed and when. You can still draw a growth curve, but you can't ask who signed.
 
-```bash
-curl -L \
- -H "Accept: application/vnd.github+json" \
- -H "X-GitHub-Api-Version: 2026-03-10" \
- "https://api.github.com/repos/OWNER/REPO/stargazers/history?per_page=30&page=1"
-```
+GitHub restricted the older route first. Its changelog says, "Earlier this year, stargazer listing endpoints were restricted to admins and collaborators to protect user privacy." The star history endpoint is the replacement for tools that only need counts.
 
-GitHub's own example adds an `Authorization: Bearer` header. You can skip it: the endpoint can be used without authentication when only public resources are requested. If you do send a fine-grained token, it needs read access to repository Metadata.
+The announcement is short. It doesn't publish response fields, page size, page limit or rate limits, and it sends readers to the GitHub REST API docs for details. Use that docs page as your reference for field names before you write a parser.
 
-### The response
+### Check the details before you build on them
 
-Each element of the JSON array is one week. This is GitHub's documented example:
-
-```json
-[
- { "week": 1754784000, "total": 19, "days": [0, 12, 7, 0, 0, 0, 0] }
-]
-```
-
-- `week`: a Unix timestamp for the start of the week.
-- `total`: that week's star count.
-- `days`: the number of stars created on each day of the week, starting on Sunday.
-
-Weeks without stars come back with zero counts instead of disappearing, so the series has no holes. If you've parsed `GET /repos/{owner}/{repo}/stats/commit_activity`, the shape will look familiar.
-
-### Paging and limits
-
-Pages move backward toward the repository's creation week, and weeks inside a page run newest to oldest. Concatenate the pages in order and you get one continuous series. `per_page` tops out at 30 weeks and `page` at 100. The page count depends on a repository's age, not its popularity: a year of history fits in two pages. A request that fails validation, or one GitHub treats as spam, gets a `422`.
-
-One detail trips up careful code: week and day boundaries are not guaranteed to align with UTC. Treat each day as the calendar day GitHub reports, not as midnight UTC.
-
-### The companion count endpoint
-
-`GET /repos/{owner}/{repo}/stargazers/count` returns a single `count`: the current number of users who have starred the repository. People who removed their star aren't included. It's the fastest way to check a total without walking the whole history.
-
-## How do you build a cumulative curve from the star history API?
-
-The endpoint gives you weekly deltas, newest first. A chart needs a running total, oldest first. Getting from one to the other takes four steps:
-
-1. **Fetch every page.** Start at page 1 and keep going until a page comes back with fewer than 30 weeks.
-2. **Concatenate and reverse.** Pages already join into one continuous series, newest to oldest. Reverse it once so the creation week comes first.
-3. **Expand each week into days.** The `days` array starts on Sunday, so day `i` is the week's start date plus `i` days.
-4. **Add as you go.** Each day's running total is one point on the curve.
-
-Here's a minimal version that needs only `curl` and `jq`:
+Two requests tell you more than any summary. Run one with a token and one without, and keep the full headers.
 
 ```bash
-OWNER=vitejs REPO=vite
-for page in $(seq 1 100); do
- batch=$(curl -s -H "Accept: application/vnd.github+json" \
- "https://api.github.com/repos/$OWNER/$REPO/stargazers/history?per_page=30&page=$page")
- echo "$batch"
- [ "$(echo "$batch" | jq length)" -lt 30 ] && break
-done | jq -s -r '
- add | reverse
- | [.[] | .week as $w | .days | to_entries[]
- | {date: ($w + .key * 86400 | todate[0:10]), stars: .value}]
- | foreach .[] as $d (0; . + $d.stars; "\($d.date),\(.)")'
+curl -i -H "Accept: application/vnd.github+json" \
+  https://api.github.com/repos/OWNER/REPO/stargazers/history
+
+curl -i -H "Accept: application/vnd.github+json" \
+  -H "Authorization: Bearer $GITHUB_TOKEN" \
+  https://api.github.com/repos/OWNER/REPO/stargazers/history
 ```
 
-The output is one `date,total` line per day, oldest first, ready for a spreadsheet or a plotting library. The current week's later days come back as zeros, so the last few lines repeat today's total.
+Record these from the real responses:
 
-### Three things to get right
+- The status code with and without a token, which shows whether authentication is required.
+- The field names and types in each entry.
+- Whether entries run oldest first or newest first.
+- How many entries one page returns, and whether `page` and `per_page` change that.
+- The `x-ratelimit-remaining` header after each call.
 
-- **Keep GitHub's calendar days.** Week and day boundaries aren't guaranteed to line up with UTC, so don't spread a day's stars across invented timestamps. The script adds whole days to each week's start, which keeps every star on the day GitHub put it.
-- **Budget your requests.** Unauthenticated calls share a limit of 60 requests per hour. A repository with ten years of history needs 18 pages, so add a token when you chart more than a few repositories at once.
-- **Check the total.** Compare your last running total with `GET /repos/{owner}/{repo}/stargazers/count`. If the gap is bigger than the stars a repository could gain between your two requests, fetch again.
+Write the results into a comment in your script, with the date. Docs change, and a dated note tells the next reader what you checked.
 
-Want the curve without maintaining a script? The next sections cover what this data can't show, then the no-code route.
+If you only want the curve, enter `owner/repo` on [gitdebt](https://gitdebt.com/) instead of writing code.
 
-## What does the new star history data lose compared with the stargazer list?
+## How do you pull a full star history with curl, Python and JavaScript?
 
-The new endpoint trades detail for privacy. You get exact daily counts for any public repository, and you lose everything that tied a star to a person or a moment.
+You pull a full star history by requesting the history endpoint page by page until it returns nothing, sorting the weeks oldest-first, and adding each week's count to a running total. GitHub's changelog says the endpoint lets you "Retrieve historical star counts with timestamps without exposing individual stargazer data."
 
-| | Stargazer list | Star history endpoint |
-|---|---|---|
-| Who can read it | Admins and collaborators only, since July 2026 | Anyone, for public repositories |
-| Identities | One entry per stargazer | None returned |
-| Time resolution | A timestamp per star | One count per day |
-| Size limit | Nothing beyond 40,000 stars | Up to 100 pages of 30 weeks |
+The code below assumes the response shape from the endpoint reference earlier in this article: a list of entries with `week` (a Unix timestamp), `total` (stars gained that week) and `days` (seven daily values). Check it against the GitHub REST docs before you rely on it.
 
-### What you can no longer chart
+1. **Request page 1.** Send one request and confirm you get a JSON list. Add a token header if you hit rate limits, and add the API version header only if the endpoint docs ask for it.
 
-Per-star timestamps made hour-by-hour launch charts possible. With one count per day, a launch spike shows up as one tall day instead of an hourly climb. And because no identities come back, any analysis of who starred (account age, overlap with other repositories) is off the table for anyone outside the repository. For most questions people ask of a star curve, daily resolution is enough.
+```bash
+curl -s -H "Accept: application/vnd.github+json" \
+  -H "Authorization: Bearer $GITHUB_TOKEN" \
+  "https://api.github.com/repos/vitejs/vite/stargazers/history?page=1"
+```
 
-### Why two charts of one repository can disagree
+2. **Keep requesting pages.** Each page goes further back in time. Stop on an empty list, which is the signal that you've passed the creation week. Don't stop after a short page without checking the next one.
 
-Take Priya, a hypothetical developer-relations lead building a quarterly report. She pulls two star charts for the same repository and finds one running well above the other. Neither tool is broken. One reads GitHub's star history, where unstars are already taken out. The other was rebuilt from historical star data, where star actions are recorded and unstars are not, so it reads as an attention signal rather than a net star count.
+3. **Sort ascending by `week`.** Pages arrive newest-first. If you skip this sort, the running total counts backward and the curve is wrong.
 
-The gap is real and it can be large. A series built from star actions counts re-stars, and it can exceed the repository's own star total. Priya's fix took five minutes: she used the net series for the report and noted the source under the chart.
+4. **Accumulate and convert.** Add each `total` to a running sum. Convert `week` to a date in UTC, because a local time zone can shift the label by a day.
 
-gitdebt labels the source on every chart and moves older series onto GitHub's star history as it re-reads them. When two charts disagree, check the source line before you check the math.
+```python
+import requests, datetime as dt
 
-## How do you chart, compare and embed GitHub star history without code?
+url = "https://api.github.com/repos/vitejs/vite/stargazers/history"
+hdr = {"Accept": "application/vnd.github+json"}
+rows, page = [], 1
+while True:
+    r = requests.get(url, params={"page": page}, headers=hdr, timeout=30)
+    r.raise_for_status()
+    batch = r.json()
+    if not batch:
+        break
+    rows += batch
+    page += 1
 
-You don't need a script to read, compare or publish a star curve. gitdebt does the fetching, the cumulative math and the rendering, and every public repository report works without an account.
+rows.sort(key=lambda w: w["week"])
+running = 0
+for w in rows:
+    running += w["total"]
+    day = dt.datetime.fromtimestamp(w["week"], dt.timezone.utc).date()
+    print(day, running)
+```
 
-### Read one repository
+The Node version (save it as `.mjs` for top-level `await`) does the same:
 
-Open [the repository lookup](https://gitdebt.com/report) and enter `owner/repo`. The report draws the full star history and names the source and coverage date under the chart. A repository nobody has read yet renders a placeholder frame and queues the work, then fills in at the same URL.
+```javascript
+const url = "https://api.github.com/repos/vitejs/vite/stargazers/history";
+const rows = [];
+for (let page = 1; ; page++) {
+  const res = await fetch(`${url}?page=${page}`, {
+    headers: { Accept: "application/vnd.github+json" },
+  });
+  if (!res.ok) throw new Error(`HTTP ${res.status}`);
+  const batch = await res.json();
+  if (batch.length === 0) break;
+  rows.push(...batch);
+}
+rows.sort((a, b) => a.week - b.week);
+let running = 0;
+for (const w of rows) {
+  running += w.total;
+  console.log(new Date(w.week * 1000).toISOString().slice(0, 10), running);
+}
+```
 
-### Compare up to eight
+If you run either script against `vitejs/vite`, success looks like a date column that starts in the repository's creation week and a second column that never decreases. This is a hypothetical walk-through, not a captured run, so no star counts are quoted here. Print the first and last rows with today's date beside them if you want a record.
 
-[The comparison builder](https://gitdebt.com/compare) puts up to eight star histories on one drawing. Plot by calendar date or by days since each repository's first star, so a project launched last year can be read against one launched in 2015. Switch to log scale when one curve dwarfs the rest, narrow the date window, and export the series as CSV or JSON for your own analysis.
+The curve is built from weekly buckets, so it is exact only at week granularity. For finer detail, use the `days` array, which splits each week into daily counts. Weeks start on Sunday, so don't label them Monday.
 
-### Embed it in a README
+If you'd rather not page the API, gitdebt publishes the same kind of series as JSON at `https://api.gitdebt.com/api/repos/{owner}/{repo}/stars.json`.
 
-Every asset is a plain image URL served from gitdebt's own database, with no account and no token. One snippet carries a light and a dark drawing, so the chart follows the reader's theme:
+## Do you need a token, and how many requests does a repository cost?
+
+A token isn't clearly required for the history endpoint, but one raises your hourly request budget a lot. GitHub's changelog announcing the endpoint doesn't say whether public repositories need authentication or which scope applies, so check the endpoint's reference page before you ship. That detail is not published in the changelog.
+
+The budget is documented elsewhere. GitHub's REST rate limit docs say the primary limit for unauthenticated requests is [60 requests per hour](https://docs.github.com/en/rest/using-the-rest-api/rate-limits-for-the-rest-api), and that authenticated requests get [5,000 requests per hour](https://docs.github.com/en/rest/using-the-rest-api/rate-limits-for-the-rest-api).
+
+### What one repository costs
+
+Each request returns one page. These figures are calculations, not measurements. They assume 30 weeks per page and a 100-page ceiling, as in the endpoint reference above.
+
+`pages = ceil(weeks since creation / 30)`
+
+- **1-year-old repository:** 52 weeks, so ceil(52 / 30) = 2 requests.
+- **10-year-old repository:** 520 weeks, so ceil(520 / 30) = 18 requests.
+- **Ceiling:** 100 pages × 30 weeks = 3,000 weeks, about 57 years of history.
+
+Eighteen requests fits inside an unauthenticated hour. Ten such repositories (180 requests) does not.
+
+### Cache it
+
+The endpoint returns weekly counts, not a running total, so you have to build the cumulative curve yourself. Store the sums with each page.
+
+1. Fetch every page once and save each completed older page. Past weeks don't change.
+2. On a schedule, re-fetch only the first page, since pages run newest first. That's 1 request per repository per refresh.
+3. Recompute the running total from your stored pages.
+
+### Sample when a trend is enough
+
+For a sparkline, fetch every 3rd page. You then see 30-week windows with 60-week gaps between them. You keep weekly growth rates inside each window, but you lose absolute totals, because skipped pages hide the stars gained in between.
+
+If you'd rather skip the plumbing, you can read the same history on [gitdebt](https://gitdebt.com/).
+
+## Star history API options compared: which one should you use?
+
+| | Official endpoint | star-history.com | starhistory.io | gitdebt |
+| --- | --- | --- | --- | --- |
+| Access needed | Not published | Hosted chart | GitHub App install | No account |
+| User data exposed | None, counts only | Not published | Not published | Day counts only |
+| Maintenance you carry | Your script and paging | None, hosted | None, hosted | None, hosted image |
+| Trust check | GitHub itself | Adopted the new endpoint | Self-reported claims | Open source |
+
+For a data series, use the official endpoint; for a ready-made chart, pick a hosted tool only after checking what it asks for.
+
+The old stargazers endpoint is no longer an option for most people. GitHub's changelog says [stargazer listing endpoints were restricted to admins and collaborators](https://github.blog/changelog/2026-09-04-new-api-endpoint-provides-privacy-safe-star-history-data/), and the new endpoint works "without exposing stargazer identities." The old one returned each stargazer's username, avatar and profile URL, [according to the star-history.com author](https://www.star-history.com/blog/new-github-star-history-api/).
+
+Stale marketing is the main hazard. starhistory.io's page says it is "The only tool that works after June 2026 API restriction," yet star-history.com says it [adopted the new endpoint immediately](https://www.star-history.com/blog/new-github-star-history-api/) and that broken charts "should now work again."
+
+### Case study: starhistory.io and write access
+
+starhistory.io's connect flow tells you to [install the starhistory-io GitHub App on your organization or account](https://starhistory.io/) and select the repositories to track. The same page has a section titled "Why does the App request write access?" Its answers are self-reported. Its open-source and permission claims aren't independently verified here.
+
+Before you install any star history app, check:
+
+- Which permissions it requests, and which of them are write.
+- Why a read-only chart needs each one.
+- Whether you can verify the repository behind the service.
+- Whether the code is public.
+- Whether the official endpoint gives you the same series with no install.
+
+gitdebt is a neutral row only in the sense that we make it. Its curves come from [GitHub's own star history](https://gitdebt.com/about), no account is needed, and the [compare page](https://gitdebt.com/compare) overlays up to eight repositories. It is not affiliated with GitHub, and [gitdebt does not flag stars as fake, real or suspicious](https://gitdebt.com/about).
+
+**Best for:**
+
+- **Official endpoint:** scripts and dashboards that only need numbers.
+- **star-history.com:** a hosted chart you embed without writing code.
+- **starhistory.io:** only if the checklist above passes for you.
+- **[gitdebt](https://gitdebt.com/):** README charts and multi-repository comparisons without sign-in.
+
+## How do you migrate a script built on the old stargazers endpoint?
+
+Migrating means swapping one endpoint, accepting weekly data instead of per-user data, and deleting whatever stored identities. Work through these seven steps.
+
+1. **Swap the endpoint and header.** Replace the stargazers list call, and the custom Accept header the old code sent, with `GET /repos/{owner}/{repo}/stargazers/history`.
+2. **Parse weeks, not users.** Drop the per-user `starred_at` parsing and read the weekly entries instead.
+3. **Drop stargazer storage.** GitHub says the endpoint returns counts "without exposing individual stargazer data", so there's nothing identifying to keep.
+4. **Rebuild cumulative sums.** Sort the weeks oldest-first and keep a running total.
+5. **Move date logic to weeks.** Check the REST docs for the week-start day and time zone before you compare against old daily numbers.
+6. **Cache completed pages.** Store finished pages and refetch only the newest one.
+7. **Add a fallback path.** Handle the 404 and 403 responses the docs list.
+
+**What you lose:** who starred and when. A list of notable stargazers has no replacement here.
+
+Don't treat "write access is the only route" as settled. GitHub's changelog says only that the listing endpoints "were restricted to admins and collaborators".
+
+## How do you put a star history chart in your README?
+
+A star history chart goes in your README as a plain image URL inside a link, and gitdebt's embed needs no account, token, API key, build step or GitHub Action.
+
+1. Open the [gitdebt README embeds page](https://gitdebt.com/badges) and copy the star-history snippet.
+2. Swap `OWNER/REPO` for your repository in all four places. Missing one is the usual mistake.
+3. Paste it into `README.md` and commit. Keep `?ref=readme` on the link only, never on the image URL.
+4. Preview the README. A repository nobody has analyzed yet shows a placeholder and queues the work. The real chart replaces it at the same URL, so you don't edit anything.
 
 ```html
 <a href="https://gitdebt.com/OWNER/REPO?ref=readme">
- <picture>
- <source media="(prefers-color-scheme: dark)" srcset="https://api.gitdebt.com/api/repos/OWNER/REPO/chart.svg?theme=dark" />
- <img alt="OWNER/REPO star history" src="https://api.gitdebt.com/api/repos/OWNER/REPO/chart.svg?theme=light" />
- </picture>
+  <picture>
+    <source media="(prefers-color-scheme: dark)" srcset="https://api.gitdebt.com/api/repos/OWNER/REPO/chart.svg?theme=dark">
+    <source media="(prefers-color-scheme: light)" srcset="https://api.gitdebt.com/api/repos/OWNER/REPO/chart.svg?theme=light">
+    <img alt="Star history chart" src="https://api.gitdebt.com/api/repos/OWNER/REPO/chart.svg?theme=light">
+  </picture>
 </a>
 ```
 
-Replace `OWNER/REPO` with your repository and paste it under a `## Star history` heading. There's no GitHub App to install and no token to renew. [The badge and embed catalog](https://gitdebt.com/badges) has the same snippet ready to copy, plus cards, badges and health charts.
+Every embed is a public image URL that renders without JavaScript and can be cached. Add `animate=1` to opt an SVG into motion, or swap in `chart.gif`.
 
-If your README has the frozen-curve problem, swapping in this snippet takes two minutes.
+Hosted chart services from other providers, such as starhistory.io, can also be embedded in a README as images.
 
-## What can't a star history chart tell you?
+To overlay up to eight repositories, use [gitdebt's compare page](https://gitdebt.com/compare). The project is [open source under the MIT licence](https://github.com/zhom/gitdebt) and has no affiliation with GitHub.
 
-A star curve records attention. It doesn't measure code quality, real usage, or whether anyone still maintains the project, and it can be gamed. Researchers who scanned GitHub event data from July 2019 to December 2024 identified 6.0 million suspected fake stars and 18,617 repositories with fake star campaigns. Their advice: star counts should not be used for high-stakes decisions by themselves.
+**Try it:** copy the star-history snippet from [gitdebt.com/badges](https://gitdebt.com/badges).
 
-gitdebt does not flag stars as fake, real, or suspicious, and it doesn't score individual accounts. That can't be done correctly without privileged access to GitHub's full dataset. The useful move is to read a second, independent source next to the stars.
+## Frequently asked questions
 
-### Pair the curve with the commit history
+### Is there an official GitHub API for star history?
 
-Stars are what the crowd did. The commit history is what the maintainers did. [gitdebt's repository lookup](https://gitdebt.com/) puts four readings from the commit history next to the star curve:
+GitHub announced one in its Sep 4, 2026 changelog: a REST endpoint that returns historical star counts with timestamps and no stargazer identities. Check the GitHub REST docs for current parameters and limits.
 
-- **Maintenance:** commit cadence, or how regularly work actually lands.
-- **Ownership:** whether the work is spread across a team or resting on one person.
-- **Repair load:** how much of recent work is fixing rather than building.
-- **Debt markers:** whether TODO and FIXME markers are being cleared or piling up.
+### Why did the old stargazers endpoint stop working for non-collaborators?
 
-None of these come from stars, which is why they can disagree with the curve. A steep star curve beside a falling commit cadence tells a different story than the same curve beside steady upkeep. The [apache/airflow report](https://gitdebt.com/apache/airflow) shows both on one page, so it's a good place to practice before you judge a repository you depend on.
+GitHub restricted stargazer listing endpoints to admins and collaborators earlier in 2026 to protect user privacy. The old list exposed each stargazer's username, avatar and profile URL, which spammers had used.
 
-Treat each reading as a directional signal, not a verdict.
+### Does the star history endpoint need a token?
 
-## What to do next with your repository's star history
+GitHub's changelog doesn't say whether authentication is required or which scope applies. Read the REST docs for the current rule before you ship, and test one request against a public repository.
 
-The stargazer list isn't coming back for outsiders, and you don't need it. GitHub's star history endpoint gives daily counts for any public repository, and moving over takes an afternoon.
+### Does the response include a cumulative star count?
 
-- **Today:** check every chart and script that touches star data. Anything that pages `/stargazers` for a repository you don't administer has the frozen-curve problem.
-- **This week:** point those scripts at `/stargazers/history`, and keep each star on the calendar day GitHub reports.
-- **Before your next release:** put a live chart in your README, and read it next to the commit history before you quote it in a pitch or a review.
+The Sep 4, 2026 changelog only promises historical star counts with timestamps. If the docs show per-period entries, add them from oldest to newest yourself to get a running total.
 
-The quickest way to do all three is to [open your repository's report on gitdebt](https://gitdebt.com/report). Enter `owner/repo`, check the source line under the curve, compare it with up to seven other repositories, then copy the README snippet. gitdebt is MIT-licensed and open source, and the report needs no account.
+### Should I give a third-party site write access to my repository?
+
+Not for data alone: read it from GitHub's endpoint instead. starhistory.io calls itself the only tool that works after the June 2026 restriction, a self-reported claim, while star-history.com says it adopted GitHub's new API on Sep 5, 2026.
+
+## What should you do next?
+
+**Today:** Run the curl call from the walkthrough against one of your own repositories. Then check each response field against the GitHub REST docs.
+
+**This week:** Add paging, a running cumulative sum and a cache of completed pages. Then delete any code that still reads the old stargazers list, since GitHub restricted those listing endpoints to admins and collaborators.
+
+**This month:** If all you need is a chart, skip the code and use a plain image embed. To see which repositories are gaining fastest, check the [star velocity leaderboard](https://gitdebt.com/leaderboard).
+
+The star history API suits scripts that need raw weekly counts. For everything else, [look up any public repository at gitdebt](https://gitdebt.com/) to read its star history beside four repository health readings from commits. Or copy a README snippet from the [embeds page](https://gitdebt.com/badges).
+
+Every public repository report [works without an account](https://gitdebt.com/about).
 
 ## Sources
 
-[New API endpoint provides privacy-safe star history data…](https://github.blog/changelog/2026-09-04-new-api-endpoint-provides-privacy-safe-star-history-data/) · [REST API endpoints for starring - GitHub Docs](https://docs.github.com/en/rest/activity/starring) · [About & methodology · gitdebt](https://gitdebt.com/about) · [Upcoming access restrictions to public API endpoints and UI…](https://github.blog/changelog/2026-06-30-upcoming-access-restrictions-to-public-api-endpoints-and-ui-views/) · [Six Million (Suspected) Fake Stars on GitHub: A Growing…](https://arxiv.org/html/2412.13459v2) · [The New GitHub Star History API - Star History](https://www.star-history.com/blog/new-github-star-history-api/) · [Rate limits for the REST API - GitHub Docs](https://docs.github.com/en/rest/using-the-rest-api/rate-limits-for-the-rest-api) · [zhom/gitdebt on GitHub](https://github.com/zhom/gitdebt). Every other source is linked where the article cites it.
+[New API endpoint provides privacy-safe star history data](https://github.blog/changelog/2026-09-04-new-api-endpoint-provides-privacy-safe-star-history-data/) · [The New GitHub Star History API](https://www.star-history.com/blog/new-github-star-history-api/) · [starhistory.io — Professional GitHub Star Charts](https://starhistory.io/) · [Rate limits for the REST API - GitHub Docs](https://docs.github.com/en/rest/using-the-rest-api/rate-limits-for-the-rest-api) · [Analyze a GitHub repository](https://gitdebt.com/about) · [gitdebt: GitHub star history and repository health](https://gitdebt.com/) · [README badges, star-history charts and embeds](https://gitdebt.com/badges)

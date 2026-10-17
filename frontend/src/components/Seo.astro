@@ -17,6 +17,12 @@ interface Props {
   imageWidth?: number;
   imageHeight?: number;
   jsonLd?: JsonLd | JsonLd[];
+  /**
+   * An X player card in place of the large-image card. X frames `url` inside
+   * the post; it must be HTTPS and must be the one route whose headers allow
+   * x.com to frame it. Exactly one `twitter:card` is emitted either way.
+   */
+  twitterPlayer?: { url: string; width: number; height: number };
 }
 
 const {
@@ -32,6 +38,7 @@ const {
   imageWidth = 1200,
   imageHeight = 630,
   jsonLd,
+  twitterPlayer,
 } = Astro.props;
 
 const site = Astro.site ?? new URL("https://gitdebt.com");
@@ -56,6 +63,12 @@ if (canonicalUrl.pathname !== "/" && canonicalUrl.pathname.endsWith("/")) {
 }
 
 const socialImageUrl = httpUrl(ogImage, site, "ogImage");
+const playerUrl = twitterPlayer
+  ? httpUrl(twitterPlayer.url, site, "twitterPlayer.url")
+  : null;
+if (playerUrl && playerUrl.protocol !== "https:" && import.meta.env.PROD) {
+  throw new Error("twitterPlayer.url must use https");
+}
 if (!Number.isInteger(imageWidth) || imageWidth <= 0) {
   throw new Error("imageWidth must be a positive integer");
 }
@@ -158,7 +171,7 @@ if (Astro.csp) {
 <meta property="og:image:height" content={String(imageHeight)} />
 <meta property="og:image:alt" content={alt} />
 
-<meta name="twitter:card" content="summary_large_image" />
+<meta name="twitter:card" content={playerUrl ? "player" : "summary_large_image"} />
 <meta name="twitter:title" content={metaTitle} />
 <meta name="twitter:description" content={metaDescription} />
 <meta name="twitter:image" content={socialImage} />
@@ -166,6 +179,15 @@ if (Astro.csp) {
 <meta name="twitter:image:width" content={String(imageWidth)} />
 <meta name="twitter:image:height" content={String(imageHeight)} />
 <meta name="twitter:image:alt" content={alt} />
+{
+  playerUrl && twitterPlayer && (
+    <>
+      <meta name="twitter:player" content={playerUrl.href} />
+      <meta name="twitter:player:width" content={String(twitterPlayer.width)} />
+      <meta name="twitter:player:height" content={String(twitterPlayer.height)} />
+    </>
+  )
+}
 
 {
   serializedJsonLd.map((entry) => (

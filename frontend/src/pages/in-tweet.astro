@@ -1,0 +1,104 @@
+---
+export const prerender = true;
+
+import Sheet from "@/layouts/Sheet.astro";
+import { ButtonLink } from "@/components/ButtonLink";
+import { LandingRepoLookup } from "@/components/LandingRepoLookup";
+import { StarSheet } from "@/components/StarSheet";
+import {
+  FIELD,
+  LEAD,
+  SECTION_ACTION,
+  SECTION_HEADER,
+  TITLE,
+} from "@/components/style-tokens";
+import { loadBuildRepoSnapshot } from "@/lib/build-repo-snapshot";
+import {
+  coverageLabel,
+  historyFreshness,
+  sourceLabel,
+  stateLabel,
+} from "@/lib/history-freshness";
+import { staticApiBase } from "@/lib/static-api-base";
+
+/**
+ * gitdebt inside a post on X.
+ *
+ * This route is both the URL that gets posted and the URL X frames: its card
+ * is an X player card that points back at this same page. It is the only route
+ * whose headers let x.com and twitter.com frame it (`public/_headers`), so it
+ * must never become the homepage or carry anything a frame cannot do. It is a
+ * second copy of the homepage's first viewport, so it is `noindex` and its
+ * canonical is the homepage.
+ */
+
+const apiBase = staticApiBase();
+const site = (Astro.site ?? new URL("https://gitdebt.com")).href.replace(/\/$/, "");
+
+const HERO_REPO = "facebook/react";
+const heroSnapshot = await loadBuildRepoSnapshot(HERO_REPO);
+const heroHistory = heroSnapshot.data?.history ?? [];
+const heroFreshness = historyFreshness(heroSnapshot.data);
+const heroProvenance =
+  heroHistory.length > 1
+    ? {
+        source: sourceLabel(heroFreshness),
+        coverage: coverageLabel(heroFreshness),
+        state: stateLabel(heroFreshness),
+      }
+    : undefined;
+---
+
+<Sheet
+  title="Star history for any GitHub repository, in a post | gitdebt"
+  description="Look up any public GitHub repository and read its star history and repository health without leaving the post."
+  canonicalPath="/"
+  ogImage={`${apiBase}/api/og.png`}
+  robots="noindex,follow"
+  noindex
+  twitterPlayer={{ url: `${site}/in-tweet`, width: 640, height: 480 }}
+  embed
+>
+  <section class="border-b border-rule bg-paper">
+    <div class="mx-auto max-w-6xl px-6 pt-8 pb-8">
+      <h1 class={TITLE}>
+        Stars say a repository is popular<br />
+        Its commits say whether it is alive
+      </h1>
+      <div class="mt-6 max-w-xl">
+        <p class={FIELD}>Repository</p>
+        <div class="mt-2.5">
+          <LandingRepoLookup client:load />
+        </div>
+      </div>
+      <p class:list={["mt-6", LEAD]}>
+        Each report opens on gitdebt.com in a new tab.
+      </p>
+    </div>
+
+    {
+      heroHistory.length > 1 && (
+        <div class="mx-auto max-w-6xl px-6 pb-10">
+          <div class={SECTION_HEADER}>
+            <p class={FIELD}>Drawing of — {HERO_REPO}</p>
+            <a href={`/${HERO_REPO}`} class={SECTION_ACTION}>
+              open the full report
+            </a>
+          </div>
+          <div class="mt-4">
+            <StarSheet
+              client:load
+              repo={HERO_REPO}
+              history={heroHistory}
+              provenance={heroProvenance}
+            />
+          </div>
+        </div>
+      )
+    }
+
+    <div class="mx-auto max-w-6xl px-6 pb-10">
+      <ButtonLink href="/" variant="primary">Open gitdebt</ButtonLink>
+    </div>
+  </section>
+</Sheet>

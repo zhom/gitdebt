@@ -32,6 +32,7 @@ export const RESERVED_FIRST_SEGMENTS = Object.freeze(
     "blog",
     "compare",
     "favicon.ico",
+    "in-tweet",
     "leaderboard",
     "privacy",
     "profile",

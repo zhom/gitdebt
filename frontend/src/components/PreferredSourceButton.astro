@@ -1,0 +1,38 @@
+---
+import { buttonVariants } from "@/components/ui/button";
+import { preferredSourceCopy } from "@/lib/preferred-source";
+
+/**
+ * The reader's way to mark gitdebt as a preferred source in Google.
+ *
+ * A secondary action wherever it sits, so it takes the `quiet` treatment and
+ * never the drafting red. The button is in the markup at first paint; the
+ * script only loads Google's library and wires the click. Astro emits the
+ * script once per page, however many buttons the page carries.
+ */
+
+interface Props {
+  class?: string;
+}
+
+const { class: className } = Astro.props;
+const copy = preferredSourceCopy("en");
+---
+
+<button
+  type="button"
+  data-prefer-on-google
+  class={buttonVariants({ variant: "quiet", size: "sm", className })}
+>
+  {copy.button}
+</button>
+
+<script>
+  import { installPreferredSource } from "@/lib/preferred-source";
+
+  installPreferredSource(
+    window as unknown as Parameters<typeof installPreferredSource>[0],
+    document as unknown as Parameters<typeof installPreferredSource>[1],
+    (onChange) => new MutationObserver(onChange),
+  );
+</script>

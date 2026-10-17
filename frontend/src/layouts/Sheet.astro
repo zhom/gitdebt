@@ -4,6 +4,8 @@ import BaseHead from "@/components/BaseHead.astro";
 import Seo from "@/components/Seo.astro";
 import SiteHeader from "@/components/SiteHeader.astro";
 import SiteFooter from "@/components/SiteFooter.astro";
+import EmbedMode from "@/components/EmbedMode.astro";
+import { organizationJsonLd } from "@/lib/organization";
 
 /**
  * The one root layout.
@@ -32,6 +34,13 @@ interface Props {
   jsonLd?: JsonLd | JsonLd[];
   /** Extra attributes for the `<main>` element, e.g. a scroll anchor class. */
   mainClass?: string;
+  /** Replaces the large-image card with an X player card. */
+  twitterPlayer?: { url: string; width: number; height: number };
+  /**
+   * The page is built to run framed inside a post on X: links leave the frame,
+   * the sheet scrolls inside itself, and the footer drops its Google action.
+   */
+  embed?: boolean;
 }
 
 const {
@@ -45,7 +54,13 @@ const {
   imageAlt,
   jsonLd,
   mainClass,
+  twitterPlayer,
+  embed = false,
 } = Astro.props;
+
+const site = (Astro.site ?? new URL("https://gitdebt.com")).href.replace(/\/$/, "");
+const pageJsonLd = jsonLd ? (Array.isArray(jsonLd) ? jsonLd : [jsonLd]) : [];
+const allJsonLd = [organizationJsonLd(site), ...pageJsonLd];
 ---
 
 <!doctype html>
@@ -61,7 +76,8 @@ const {
       noindex={noindex}
       robots={robots}
       imageAlt={imageAlt}
-      jsonLd={jsonLd}
+      jsonLd={allJsonLd}
+      twitterPlayer={twitterPlayer}
     />
     <slot name="head" />
   </head>
@@ -85,12 +101,13 @@ const {
       FINISH: unreviewed and undocumented is unfinished; this build ends with
       the finish review, the verdict, and DESIGN.md
     -->
-    <div class="flex min-h-dvh flex-col">
+    <div class="flex min-h-dvh flex-col" data-sheet-scroll>
       <SiteHeader />
       <main id="main-content" class:list={["flex-1", mainClass]}>
         <slot />
       </main>
-      <SiteFooter />
+      <SiteFooter embed={embed} />
     </div>
+    {embed && <EmbedMode />}
   </body>
 </html>

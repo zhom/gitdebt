@@ -2,6 +2,7 @@ import { useRef, useState } from "react";
 
 import { CAPTION } from "@/components/style-tokens";
 import { Terminator } from "@/components/ui/marks";
+import { isFramed } from "@/lib/embed-mode";
 import { cn } from "@/lib/utils";
 
 /**
@@ -39,9 +40,10 @@ export function LandingRepoLookup() {
       inputRef.current?.focus();
       return;
     }
-    window.location.assign(
-      `/${encodeURIComponent(match[1].toLowerCase())}/${encodeURIComponent(match[2].toLowerCase())}`,
-    );
+    const report = `/${encodeURIComponent(match[1].toLowerCase())}/${encodeURIComponent(match[2].toLowerCase())}`;
+    // Inside X's frame the report would be refused framing; it opens in a tab.
+    if (isFramed(window)) window.open(report, "_blank", "noopener");
+    else window.location.assign(report);
   }
 
   function submit(event: React.SubmitEvent<HTMLFormElement>) {

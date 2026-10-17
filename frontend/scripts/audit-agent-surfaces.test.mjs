@@ -39,6 +39,11 @@ test("accepts pages whose alternates name the API's Markdown route", () => {
     path.join(directory, "index.html"),
     '<link rel="alternate" type="text/markdown" href="https://api.gitdebt.com/api/md/">',
   );
+  // A canonical alias of the home page names the home page's Markdown.
+  fs.writeFileSync(
+    path.join(directory, "in-tweet.html"),
+    '<link rel="alternate" type="text/markdown" href="https://api.gitdebt.com/api/md/">',
+  );
 
   assert.deepEqual(auditAgentSurfaces({ distDir: directory }).errors, []);
 });

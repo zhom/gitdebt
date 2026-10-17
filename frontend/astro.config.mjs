@@ -54,6 +54,7 @@ function pagesRedirects(apiBase) {
 /badges/ /badges 301
 /blog/ /blog 301
 /compare/ /compare 301
+/in-tweet/ /in-tweet 301
 /leaderboard/ /leaderboard 301
 /report/ /report 301
 /privacy/ /privacy 301
@@ -114,16 +115,30 @@ export default defineConfig({
         "connect-src 'self' https:",
         "font-src 'self' data:",
         "form-action 'self'",
-        "frame-src 'none'",
+        // Google's preferred-source library talks to its own service frame.
+        "frame-src https://news.google.com",
         "img-src 'self' data: https:",
         "manifest-src 'self'",
         "object-src 'none'",
         "worker-src 'self' blob:",
       ],
+      // Google's publisher library for the preferred-source button
+      // (`src/lib/preferred-source.ts`), loaded by the page's own script.
+      scriptDirective: {
+        resources: ["'self'", "https://news.google.com"],
+      },
       styleDirective: {
         resources: [
           { resource: "'self'", kind: "element" },
           { resource: "'unsafe-inline'", kind: "attribute" },
+        ],
+        // The one `<style>` Google's preferred-source library injects. A new
+        // library version that changes it is blocked again, not loosened.
+        hashes: [
+          {
+            hash: "sha256-GQqnzKT9w4tArvOPYMM0nzZITOXER32bX5Du8FZRAqg=",
+            kind: "element",
+          },
         ],
       },
     },

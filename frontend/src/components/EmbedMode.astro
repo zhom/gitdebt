@@ -1,0 +1,13 @@
+---
+/**
+ * Embed mode for a page that X frames inside a post. Renders nothing; the
+ * script marks the root `framed` when the page is in a frame, which lets the
+ * sheet scroll inside itself, and sends every link to a new tab.
+ */
+---
+
+<script>
+  import { installEmbedMode } from "@/lib/embed-mode";
+
+  installEmbedMode(window, document);
+</script>

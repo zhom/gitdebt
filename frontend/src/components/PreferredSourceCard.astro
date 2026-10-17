@@ -1,0 +1,29 @@
+---
+import PreferredSourceButton from "@/components/PreferredSourceButton.astro";
+import { BODY, HEADING, MEASURE, PANEL } from "@/components/style-tokens";
+import { preferredSourceCopy } from "@/lib/preferred-source";
+
+/**
+ * The end-of-article ask: a panel with a heading, one sentence and the same
+ * button the footer carries.
+ */
+
+const copy = preferredSourceCopy("en");
+---
+
+<section aria-labelledby="preferred-source-heading" class="border-b border-rule bg-table">
+  <div class="mx-auto w-full max-w-6xl px-6 py-10">
+    <div
+      class:list={[
+        PANEL,
+        "flex flex-col gap-5 sm:flex-row sm:items-center sm:justify-between sm:p-6",
+      ]}
+    >
+      <div>
+        <h2 id="preferred-source-heading" class={HEADING}>{copy.heading}</h2>
+        <p class:list={["mt-2", BODY, MEASURE]}>{copy.description}</p>
+      </div>
+      <PreferredSourceButton class="shrink-0 self-start sm:self-center" />
+    </div>
+  </div>
+</section>

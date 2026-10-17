@@ -3,6 +3,7 @@
 import fs from "node:fs";
 import path from "node:path";
 import { pathToFileURL } from "node:url";
+import { CANONICAL_ALIASES } from "./audit-seo.mjs";
 
 const DEFAULT_SITE = "https://gitdebt.com";
 // `astro build` refuses to run in production without PUBLIC_API_BASE, so a
@@ -60,8 +61,10 @@ export function auditAgentSurfaces({
 
   for (const file of htmlFiles) {
     const route = routeForHtml(absoluteDist, file);
+    // A canonical alias is a copy of another page, and so is its Markdown.
+    const source = CANONICAL_ALIASES.get(route) ?? route;
     // The home page is the empty path, not a segment named `index`.
-    const expectedPath = route === "/" ? "/api/md/" : `/api/md${route}`;
+    const expectedPath = source === "/" ? "/api/md/" : `/api/md${source}`;
     const html = fs.readFileSync(file, "utf8");
     const alternate = markdownAlternate(html);
     if (!alternate) {

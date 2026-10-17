@@ -38,6 +38,12 @@ function write(directory, relative, contents = "") {
 
 const HEADERS = `/*
   Content-Security-Policy: frame-ancestors 'none'
+  X-Frame-Options: DENY
+
+/in-tweet
+  ! Content-Security-Policy
+  ! X-Frame-Options
+  Content-Security-Policy: frame-ancestors 'self' https://x.com https://*.x.com https://twitter.com https://*.twitter.com
 
 /badges
   Cache-Control: public, max-age=0, must-revalidate
@@ -48,6 +54,16 @@ const HEADERS = `/*
 /profile
   X-Robots-Tag: noindex, follow
 `;
+
+const PLAYER_PAGE = `<!doctype html><html lang="en"><head>
+<meta name="robots" content="noindex,follow">
+<link rel="canonical" href="https://gitdebt.com/">
+<meta name="twitter:card" content="player">
+<meta name="twitter:image" content="https://api.gitdebt.com/api/og.png">
+<meta name="twitter:player" content="https://gitdebt.com/in-tweet">
+<meta name="twitter:player:width" content="640">
+<meta name="twitter:player:height" content="480">
+</head><body></body></html>`;
 
 function validOutput(directory, redirects = null) {
   for (const route of [
@@ -62,6 +78,7 @@ function validOutput(directory, redirects = null) {
   ]) {
     write(directory, `${route}.html`, "<html></html>");
   }
+  write(directory, "in-tweet.html", PLAYER_PAGE);
   write(
     directory,
     "badges.html",
@@ -101,6 +118,7 @@ function validOutput(directory, redirects = null) {
 /badges/ /badges 301
 /blog/ /blog 301
 /compare/ /compare 301
+/in-tweet/ /in-tweet 301
 /leaderboard/ /leaderboard 301
 /report/ /report 301
 /privacy/ /privacy 301
@@ -225,6 +243,7 @@ test("reserved first segments are never published or resolved as profiles", () =
     "badges",
     "blog",
     "compare",
+    "in-tweet",
     "leaderboard",
     "privacy",
     "profile",
@@ -453,6 +472,62 @@ test("rejects incomplete badges social metadata and duplicate header blocks", ()
   );
   assert.ok(
     errors.includes("Duplicate _headers block: /badges"),
+    errors.join("\n"),
+  );
+});
+
+test("only /in-tweet may be framed, and only by X", () => {
+  const directory = fixture();
+  validOutput(directory);
+  assert.deepEqual(auditPagesRouting({ distDir: directory }), []);
+
+  // Without the detach, Cloudflare joins the two policies and 'none' still wins.
+  write(
+    directory,
+    "_headers",
+    HEADERS.replace("  ! Content-Security-Policy\n", "").replace(
+      "  ! X-Frame-Options\n",
+      "",
+    ),
+  );
+  let errors = auditPagesRouting({ distDir: directory });
+  assert.ok(errors.includes("/in-tweet must detach the inherited content-security-policy"), errors.join("\n"));
+  assert.ok(errors.includes("/in-tweet must detach the inherited x-frame-options"), errors.join("\n"));
+
+  write(
+    directory,
+    "_headers",
+    HEADERS.replace("https://*.twitter.com", "https://*.twitter.com https://evil.example"),
+  );
+  errors = auditPagesRouting({ distDir: directory });
+  assert.ok(errors.includes("/in-tweet allows framing by https://evil.example"), errors.join("\n"));
+
+  write(
+    directory,
+    "_headers",
+    HEADERS.replace("frame-ancestors 'none'\n  X-Frame-Options: DENY", "frame-ancestors 'self'"),
+  );
+  errors = auditPagesRouting({ distDir: directory });
+  assert.ok(
+    errors.includes("/* must deny framing with frame-ancestors 'none' and X-Frame-Options DENY"),
+    errors.join("\n"),
+  );
+});
+
+test("the X player page carries exactly one player card", () => {
+  const directory = fixture();
+  validOutput(directory);
+  write(
+    directory,
+    "in-tweet.html",
+    PLAYER_PAGE.replace(
+      '<meta name="twitter:card" content="player">',
+      '<meta name="twitter:card" content="player"><meta name="twitter:card" content="summary_large_image">',
+    ),
+  );
+  const errors = auditPagesRouting({ distDir: directory });
+  assert.ok(
+    errors.some((error) => error.includes("exactly one twitter:card=player")),
     errors.join("\n"),
   );
 });

@@ -30,6 +30,7 @@ import {
   stateLabel,
 } from "@/lib/history-freshness";
 import { repoEmbedAssets } from "@/lib/readme-embeds";
+import { ORGANIZATION_SAME_AS, organizationId } from "@/lib/organization";
 import { staticApiBase } from "@/lib/static-api-base";
 
 const apiBase = staticApiBase();
@@ -54,6 +55,9 @@ const jsonLd = [
     isAccessibleForFree: true,
     license: "https://opensource.org/license/mit",
     codeRepository: "https://github.com/zhom/gitdebt",
+    image: `${site}/icon-512.png`,
+    sameAs: [...ORGANIZATION_SAME_AS],
+    publisher: { "@id": organizationId(site) },
     isPartOf: { "@id": `${site}/#website` },
     author: {
       "@type": "Organization",
@@ -68,6 +72,7 @@ const jsonLd = [
     name: "gitdebt",
     url: `${site}/`,
     description,
+    publisher: { "@id": organizationId(site) },
   },
 ];
 

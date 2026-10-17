@@ -1,5 +1,6 @@
 ---
 import Brand from "@/components/Brand.astro";
+import PreferredSourceButton from "@/components/PreferredSourceButton.astro";
 
 /**
  * The footer is the sheet's title block.
@@ -17,6 +18,16 @@ import Brand from "@/components/Brand.astro";
  * wearing a footer's clothes.
  */
 
+interface Props {
+  /**
+   * The page runs framed inside a post on X. Google's dialog is an account
+   * action that does not belong in someone else's timeline, so the
+   * preferred-source button and its script stay off that page.
+   */
+  embed?: boolean;
+}
+
+const { embed = false } = Astro.props;
 const year = new Date().getFullYear();
 
 const explore = [
@@ -55,6 +66,7 @@ const legal = [
         <p class="mt-2 text-[0.8125rem] leading-[1.55] text-ink-2 [text-wrap:pretty]">
           Star history and repository health for any public GitHub repository.
         </p>
+        {!embed && <PreferredSourceButton class="mt-4" />}
       </section>
 
       <nav class="p-5" aria-label="Explore">

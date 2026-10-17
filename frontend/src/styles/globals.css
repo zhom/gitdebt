@@ -156,6 +156,21 @@
     -webkit-tap-highlight-color: transparent;
   }
 
+  /* Embed mode (`lib/embed-mode.ts`): X frames the page without letting the
+     document scroll, so the document is locked and the sheet scrolls inside
+     itself, which still takes the wheel and touch. */
+  html.framed,
+  html.framed body {
+    height: 100%;
+    overflow: hidden;
+  }
+
+  html.framed [data-sheet-scroll] {
+    height: 100dvh;
+    overflow-y: auto;
+    overscroll-behavior: contain;
+  }
+
   /* The drawing's hand never needs anti-aliasing softened, and it is always
      set tight: it was drawn from modules, so it sets evenly at any size. */
   :is(h1, h2, h3) {

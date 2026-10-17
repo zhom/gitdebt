@@ -10,6 +10,7 @@ const REQUIRED_FILE_ROUTES = [
   "badges.html",
   "blog.html",
   "compare.html",
+  "in-tweet.html",
   "leaderboard.html",
   "privacy.html",
   "profile.html",
@@ -22,6 +23,7 @@ const CANONICAL_SLASH_ROUTES = [
   ["/badges/", "/badges"],
   ["/blog/", "/blog"],
   ["/compare/", "/compare"],
+  ["/in-tweet/", "/in-tweet"],
   ["/leaderboard/", "/leaderboard"],
   ["/privacy/", "/privacy"],
   ["/profile/", "/profile"],
@@ -197,11 +199,16 @@ function headerRules(contents) {
     const line = rawLine.replace(/(?:^|\s+)#.*$/, "");
     if (!line.trim()) continue;
     if (!/^\s/.test(line)) {
-      current = { source: line.trim(), headers: new Map() };
+      current = { source: line.trim(), headers: new Map(), detached: new Set() };
       rules.push(current);
       continue;
     }
     if (!current) continue;
+    const detach = line.trim().match(/^!\s*(\S+)$/);
+    if (detach) {
+      current.detached.add(detach[1].toLowerCase());
+      continue;
+    }
     const separator = line.indexOf(":");
     if (separator === -1) continue;
     const name = line.slice(0, separator).trim().toLowerCase();
@@ -209,6 +216,100 @@ function headerRules(contents) {
     current.headers.set(name, value);
   }
   return rules;
+}
+
+/**
+ * The X player card: exactly one `twitter:card`, and it is `player`, because
+ * with a second card on the page X picks one of them. The player URL is
+ * absolute HTTPS and is the page itself.
+ */
+export function playerCardErrors(html) {
+  const errors = [];
+  const cards = [
+    ...html.matchAll(/<meta\b[^>]*\bname="twitter:card"[^>]*>/gi),
+  ].map((match) => match[0].match(/content="([^"]*)"/)?.[1]);
+  if (cards.length !== 1 || cards[0] !== "player") {
+    errors.push(`in-tweet.html must carry exactly one twitter:card=player (found ${JSON.stringify(cards)})`);
+  }
+  const player = html.match(/<meta\b[^>]*\bname="twitter:player"[^>]*\bcontent="([^"]*)"/i)?.[1];
+  let playerUrl = null;
+  try {
+    playerUrl = player ? new URL(player) : null;
+  } catch {}
+  if (!playerUrl || playerUrl.protocol !== "https:" || playerUrl.pathname !== "/in-tweet") {
+    errors.push("in-tweet.html twitter:player must be the absolute HTTPS /in-tweet URL");
+  }
+  for (const name of ["twitter:player:width", "twitter:player:height", "twitter:image"]) {
+    if (!new RegExp(`name="${name}"`).test(html)) {
+      errors.push(`in-tweet.html is missing ${name}`);
+    }
+  }
+  if (/name="twitter:player:stream"/.test(html)) {
+    errors.push("in-tweet.html must not carry twitter:player:stream");
+  }
+  if (!hasRobotsNoindex(html)) {
+    errors.push("in-tweet.html must be noindex");
+  }
+  return errors;
+}
+
+/** The origins X frames a player card from. */
+const X_FRAME_ANCESTORS = [
+  "https://x.com",
+  "https://*.x.com",
+  "https://twitter.com",
+  "https://*.twitter.com",
+];
+
+/**
+ * Only `/in-tweet` may be framed, and only by X. Every other route keeps
+ * `frame-ancestors 'none'` and `X-Frame-Options: DENY` from `/*`. The player
+ * route has to detach both before it sets its own policy: Cloudflare joins a
+ * header set by two matching rules, and a joined `'none'` would still refuse
+ * X, as would an inherited `DENY`.
+ */
+function framingErrors(rules) {
+  const errors = [];
+  const all = rules.find(({ source }) => source === "/*");
+  if (
+    all?.headers.get("content-security-policy") !== "frame-ancestors 'none'" ||
+    all?.headers.get("x-frame-options") !== "DENY"
+  ) {
+    errors.push("/* must deny framing with frame-ancestors 'none' and X-Frame-Options DENY");
+  }
+  const player = rules.find(({ source }) => source === "/in-tweet");
+  if (!player) {
+    errors.push("/in-tweet must have its own _headers block for X framing");
+    return errors;
+  }
+  for (const name of ["content-security-policy", "x-frame-options"]) {
+    if (!player.detached.has(name)) {
+      errors.push(`/in-tweet must detach the inherited ${name}`);
+    }
+  }
+  if (player.headers.has("x-frame-options")) {
+    errors.push("/in-tweet must not send X-Frame-Options");
+  }
+  const policy = player.headers.get("content-security-policy") ?? "";
+  const ancestors = policy.match(/frame-ancestors\s+([^;]+)/)?.[1].split(/\s+/) ?? [];
+  if (
+    ancestors.includes("'none'") ||
+    !X_FRAME_ANCESTORS.every((origin) => ancestors.includes(origin))
+  ) {
+    errors.push("/in-tweet must allow framing by x.com and twitter.com only");
+  }
+  for (const origin of ancestors) {
+    if (origin !== "'self'" && !X_FRAME_ANCESTORS.includes(origin)) {
+      errors.push(`/in-tweet allows framing by ${origin}`);
+    }
+  }
+  for (const { source, headers } of rules) {
+    if (source === "/in-tweet") continue;
+    if (/frame-ancestors(?![^;]*'none')/.test(headers.get("content-security-policy") ?? "")) {
+      errors.push(`${source} must not relax frame-ancestors`);
+    }
+  }
+  return errors;
 }
 
 // Cloudflare's own rule compiler, transcribed from wrangler's
@@ -613,6 +714,8 @@ export function auditPagesRouting({ distDir, apiBase }) {
       );
     }
 
+    errors.push(...framingErrors(rules));
+
     // The site emits no Markdown, so a `/*.md` block types nothing but the
     // HTML 404 fallback Cloudflare serves for an unmatched `.md` path — and
     // `nosniff` then makes that mislabel unrecoverable for the client.
@@ -621,6 +724,11 @@ export function auditPagesRouting({ distDir, apiBase }) {
         "/*.md headers mislabel the HTML 404 fallback; Markdown is served by the API",
       );
     }
+  }
+
+  const playerPath = path.join(absoluteDist, "in-tweet.html");
+  if (fs.existsSync(playerPath)) {
+    errors.push(...playerCardErrors(fs.readFileSync(playerPath, "utf8")));
   }
 
   const badgesPath = path.join(absoluteDist, "badges.html");

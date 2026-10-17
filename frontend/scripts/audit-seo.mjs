@@ -15,6 +15,13 @@ const DEFAULT_SITE = "https://gitdebt.com";
  * plain `.mjs` under `node` with no type stripping, so it cannot import the
  * module the pages use. `repo-indexability.test.mjs` asserts the two agree.
  */
+/**
+ * Routes that are a second copy of another page and say so: `noindex`, with a
+ * canonical that names the original. `/in-tweet` is the homepage's first
+ * viewport, built to run framed inside a post on X.
+ */
+export const CANONICAL_ALIASES = new Map([["/in-tweet", "/"]]);
+
 export const BUILD_DEFECT_META = {
   name: "gitdebt:build-defect",
   unreachable: "snapshot-unreachable",
@@ -401,12 +408,16 @@ export function auditSeo({
             `${prefix}: canonical origin is ${canonical.origin}, expected ${siteOrigin}`,
           );
         }
+        const expected = CANONICAL_ALIASES.get(page.route) ?? page.route;
+        if (CANONICAL_ALIASES.has(page.route) && !page.noindex) {
+          errors.push(`${prefix}: a canonical alias must be noindex`);
+        }
         if (
           normalizePathname(canonical.pathname) !==
-          normalizePathname(page.route)
+          normalizePathname(expected)
         ) {
           errors.push(
-            `${prefix}: canonical path is ${canonical.pathname}, expected ${page.route}`,
+            `${prefix}: canonical path is ${canonical.pathname}, expected ${expected}`,
           );
         }
         if (canonical.search || canonical.hash) {
@@ -461,7 +472,12 @@ export function auditSeo({
 
   pushDuplicateErrors(pages, "title", "title", errors);
   pushDuplicateErrors(pages, "description", "meta description", errors);
-  pushDuplicateErrors(pages, "canonical", "canonical", errors);
+  pushDuplicateErrors(
+    pages.filter((page) => !CANONICAL_ALIASES.has(page.route)),
+    "canonical",
+    "canonical",
+    errors,
+  );
 
   const robotsPath = path.join(absoluteDist, "robots.txt");
   let sitemapUrls = [];

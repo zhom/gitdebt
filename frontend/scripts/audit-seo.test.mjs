@@ -221,3 +221,29 @@ test("detects duplicate metadata and missing image alternatives", () => {
   );
   assert.ok(result.errors.includes("/second: image missing alt"));
 });
+
+test("a canonical alias names its original and must be noindex", () => {
+  const directory = fixture();
+  write(
+    directory,
+    "index.html",
+    page({ route: "/", title: "Home", description: "GitHub repository analytics" }),
+  );
+  const alias = (robots) =>
+    page({
+      route: "/",
+      title: "Home, in a post",
+      description: "GitHub repository analytics inside a post",
+      robots,
+    });
+  write(directory, "in-tweet.html", alias("noindex,follow"));
+  sitemaps(directory, ["/"]);
+  assert.deepEqual(auditSeo({ distDir: directory, site: SITE }).errors, []);
+
+  write(directory, "in-tweet.html", alias("index,follow"));
+  const { errors } = auditSeo({ distDir: directory, site: SITE });
+  assert.ok(
+    errors.includes("/in-tweet: a canonical alias must be noindex"),
+    errors.join("\n"),
+  );
+});

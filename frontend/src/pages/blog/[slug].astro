@@ -4,6 +4,7 @@ export const prerender = true;
 import { render } from "astro:content";
 import Sheet from "@/layouts/Sheet.astro";
 import ArticleBody from "@/components/ArticleBody.astro";
+import PreferredSourceCard from "@/components/PreferredSourceCard.astro";
 import {
   BODY,
   BREADCRUMB,
@@ -225,6 +226,8 @@ const jsonLd: Record<string, unknown>[] = [
       )
     }
   </article>
+
+  <PreferredSourceCard />
 
   <nav aria-label="Blog" class="bg-paper">
     <div class="mx-auto w-full max-w-6xl px-6 py-10">

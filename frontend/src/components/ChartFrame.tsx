@@ -147,6 +147,18 @@ export function pathData(points: Vertex[]): string {
     .join(" ");
 }
 
+/**
+ * The most vertices a drawn trace may have.
+ *
+ * A plot resolves at the pixel, not at the sample, so 200 is already finer
+ * than any sheet needs. It is also a hard ceiling: WebKit places the dash of
+ * a stroke wrongly on a path of more than about 250 segments, so a trace that
+ * inks in by its dash offset showed pieces of itself ahead of the pen for the
+ * whole draw in Safari. Only the drawn path is thinned; probes, leaders and
+ * the screen-reader tables still read the full series.
+ */
+export const MAX_DRAWN_VERTICES = 200;
+
 /** Even-stride sample that always keeps the first and last real readings. */
 export function stride<T>(items: T[], limit: number): T[] {
   if (items.length <= limit) return items;

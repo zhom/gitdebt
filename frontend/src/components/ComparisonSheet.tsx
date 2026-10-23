@@ -2,6 +2,7 @@ import { useId, useMemo, useRef, useState } from "react";
 
 import {
   ChartFrame,
+  MAX_DRAWN_VERTICES,
   DATE_RE,
   clamp01,
   fullDate,
@@ -347,7 +348,7 @@ function ComparisonPlot({
 
   const traces = useMemo(() => {
     return parsed.map((item) => {
-      const vertices = stride(item.points, 400).map((point, index, all) => ({
+      const vertices = stride(item.points, MAX_DRAWN_VERTICES).map((point, index, all) => ({
         x:
           PAD_L +
           (axis === "timeline"

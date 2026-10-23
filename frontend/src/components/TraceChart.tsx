@@ -1,6 +1,7 @@
 import { useCallback, useId, useMemo, useRef, useState } from "react";
 
 import {
+  MAX_DRAWN_VERTICES,
   clamp01,
   fullDate,
   pathData,
@@ -70,9 +71,6 @@ const PAD_T = 30;
 /** Clears the baseline, its extension ticks, and the span dimension below. */
 const PAD_B = 46;
 
-/** Cap the drawn polyline. A plot resolves at the pixel, not at the sample. */
-const MAX_VERTICES = 400;
-
 /** Cap the readable table. Every reading is still a real one. */
 const MAX_ROWS = 240;
 
@@ -136,7 +134,7 @@ export function TraceChart({
     const t0 = parsed[0].at;
     const t1 = parsed[parsed.length - 1].at;
     const spanT = Math.max(1, t1 - t0);
-    const drawn = stride(parsed, MAX_VERTICES);
+    const drawn = stride(parsed, MAX_DRAWN_VERTICES);
 
     const vertices: Vertex[] = drawn.map((point, index) => ({
       x:

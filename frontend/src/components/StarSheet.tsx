@@ -5,7 +5,12 @@ import {
   formatFullDate,
   formatMonthYear,
 } from "@/lib/star-insights";
-import { setTextNode, useLeaderFollow, usePlotWidth } from "@/components/ChartFrame";
+import {
+  MAX_DRAWN_VERTICES,
+  setTextNode,
+  useLeaderFollow,
+  usePlotWidth,
+} from "@/components/ChartFrame";
 import {
   calendarEasing,
   segmentAtX,
@@ -73,8 +78,8 @@ const PAD_L = 16;
 const PAD_T = 28;
 const PAD_B = 44; // clears the baseline dimension line and its span value
 
-/** Cap the drawn polyline. A plot resolves at the pixel, not at the sample. */
-const MAX_SAMPLES = 240;
+/** Cap the drawn polyline (see `MAX_DRAWN_VERTICES`). */
+const MAX_SAMPLES = MAX_DRAWN_VERTICES;
 
 /**
  * The trace draws in calendar time over this long: the pen crosses the sheet

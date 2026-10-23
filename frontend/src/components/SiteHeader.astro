@@ -140,6 +140,7 @@ const NAV_LINK =
       enough for a reader to lose their place in it. */}
   <div class="reading-index" data-reading-index hidden aria-hidden="true">
     <span class="reading-index-line"></span>
+    <span class="reading-index-head"></span>
   </div>
 </header>
 
@@ -216,16 +217,36 @@ const NAV_LINK =
     width: 1px;
     height: 5px;
     background-color: var(--rule-strong);
-    transition: background-color var(--duration-ui) linear;
+    transition:
+      background-color var(--duration-ui) linear,
+      height var(--duration-ui) var(--ease-land);
   }
 
   .reading-index :global(.reading-index-tick[data-passed]) {
+    height: 7px;
+    background-color: var(--ink);
+  }
+
+  /* The line's terminator: it stands where the reader is, so the dimension
+     ends on the one point it measures. */
+  .reading-index-head {
+    position: absolute;
+    bottom: 0;
+    left: calc(var(--read, 0) * 100% - 1px);
+    width: 2px;
+    height: 9px;
     background-color: var(--ink);
   }
 
   @media print {
     .reading-index {
       display: none;
+    }
+  }
+
+  @media (prefers-reduced-motion: reduce) {
+    .reading-index :global(.reading-index-tick) {
+      transition: none;
     }
   }
 </style>

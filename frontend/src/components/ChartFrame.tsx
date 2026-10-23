@@ -221,27 +221,29 @@ export function usePlotWidth(
 }
 
 /**
- * The leader follows the pointer the way a hand moves a pen: it travels to the
- * next datum instead of teleporting there.
+ * The leader follows the pointer the way a hand moves a pen: it travels along
+ * the trace to the next datum instead of teleporting there.
+ *
+ * Only the station `x` is sprung. The caller puts the terminator back ON the
+ * trace at every frame and states the reading there, so the leader never cuts
+ * a chord across the curve and the value it carries always matches its own
+ * height — every line keeps terminating on something real while it moves.
  *
  * React renders the leader at its target, so the markup, the first paint and
- * the settled state are always the true reading. When the target moves, this
- * puts the drawn leader back where it was before that frame paints and springs
- * it to the target, writing attributes directly so a 240-row table is not
- * re-rendered sixty times a second. The last frame writes exactly what React
- * rendered, so the two agree the moment it settles. Reduced motion jumps.
+ * the settled state are always the true reading. `draw(x, false)` writes an
+ * in-transit frame directly to the DOM, so a 240-row table is not re-rendered
+ * sixty times a second; `draw(x, true)` writes exactly what React rendered, and
+ * is called whenever the motion ends, is cut short, or is skipped. Reduced
+ * motion jumps.
  */
 export function useLeaderFollow(
   x: number,
-  y: number,
-  draw: (x: number, y: number) => void,
+  draw: (x: number, settled: boolean) => void,
   /** Changes when the sheet itself is redrawn (a resize, a new range). The
    *  leader then moves with the drawing instead of chasing it. */
   layoutKey: string | number = "",
 ) {
-  const state = useRef<{ x: number; y: number; vx: number; vy: number } | null>(
-    null,
-  );
+  const state = useRef<{ x: number; v: number } | null>(null);
   const layout = useRef(layoutKey);
   const drawRef = useRef(draw);
   drawRef.current = draw;
@@ -254,15 +256,15 @@ export function useLeaderFollow(
       typeof window.matchMedia === "function" &&
       window.matchMedia("(prefers-reduced-motion: reduce)").matches;
     if (!current || reduced || relaid) {
-      state.current = { x, y, vx: 0, vy: 0 };
+      state.current = { x, v: 0 };
       // A spring cut short leaves attributes React will not rewrite, because
       // their props did not change. Put every drawn part on the target.
-      drawRef.current(x, y);
+      drawRef.current(x, true);
       return;
     }
-    if (current.x === x && current.y === y) return;
+    if (current.x === x) return;
 
-    drawRef.current(current.x, current.y);
+    drawRef.current(current.x, false);
     const { stiffness, damping, mass } = SPRING.follow;
     let frame = 0;
     let last = performance.now();
@@ -274,26 +276,30 @@ export function useLeaderFollow(
       while (remaining > 0) {
         const dt = Math.min(remaining, 1 / 240);
         remaining -= dt;
-        current.vx += ((-stiffness * (current.x - x) - damping * current.vx) / mass) * dt;
-        current.vy += ((-stiffness * (current.y - y) - damping * current.vy) / mass) * dt;
-        current.x += current.vx * dt;
-        current.y += current.vy * dt;
+        current.v += ((-stiffness * (current.x - x) - damping * current.v) / mass) * dt;
+        current.x += current.v * dt;
       }
-      const settled =
-        Math.abs(current.x - x) < 0.05 &&
-        Math.abs(current.y - y) < 0.05 &&
-        Math.abs(current.vx) + Math.abs(current.vy) < 1;
-      if (settled) {
-        Object.assign(current, { x, y, vx: 0, vy: 0 });
-        drawRef.current(x, y);
+      if (Math.abs(current.x - x) < 0.05 && Math.abs(current.v) < 1) {
+        Object.assign(current, { x, v: 0 });
+        drawRef.current(x, true);
         return;
       }
-      drawRef.current(current.x, current.y);
+      drawRef.current(current.x, false);
       frame = requestAnimationFrame(step);
     };
     frame = requestAnimationFrame(step);
     return () => cancelAnimationFrame(frame);
-  }, [x, y, layoutKey]);
+  }, [x, layoutKey]);
+}
+
+/** Replace the text of a `<text>` whose only child is the string React
+ *  rendered. Writing the node React owns, never `textContent`, keeps React's
+ *  reference to it alive for its next update. */
+export function setTextNode(element: Element | null, value: string) {
+  const node = element?.firstChild;
+  if (node && node.nodeType === Node.TEXT_NODE && node.nodeValue !== value) {
+    node.nodeValue = value;
+  }
 }
 
 /* ── The sheet ───────────────────────────────────────────────────────────── */

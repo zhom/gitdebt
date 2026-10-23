@@ -17,7 +17,9 @@ import {
 } from "@/components/ChartFrame";
 import { EmbedSnippet } from "@/components/EmbedSnippet";
 import { CAPTION } from "@/components/style-tokens";
+import { comparisonPenIndices } from "@/lib/pens";
 import { formatCompact } from "@/lib/star-insights";
+import { calendarEasing, traceCrossings } from "@/lib/trace-marks";
 
 /**
  * Several series on one sheet, drawn as an overlay of plotted traces.
@@ -71,6 +73,17 @@ const LABEL_PITCH = 28;
 const MAX_ROWS = 80;
 
 /**
+ * The time the pens take to cross the whole sheet.
+ *
+ * Every pen moves at the same pace through time and starts when time reaches
+ * its first star, so at any instant all the pens stand on the same date: the
+ * draw is the race itself, and who leads at each moment is visible while it is
+ * being drawn. On the timeline axis every series starts together, so it races
+ * by age instead.
+ */
+const RACE_MS = 1800;
+
+/**
  * The plotter set: eight pens, each with its own dash. The sRGB triplets are
  * the exact colours of `--pen-1` … `--pen-8` in globals.css, converted once so
  * that a canvas fill and a stroked path are the same ink rather than two
@@ -87,34 +100,6 @@ const PENS: { stroke: string; rgb: RGB; dash?: string }[] = [
   { stroke: "var(--pen-8)", rgb: [123, 111, 102], dash: "6 3 1.5 3 1.5 3" },
 ];
 
-/** FNV-1a over the slug. The assignment must not move between renders, or a
- *  repository changes pen when an unrelated one is added to the sheet. */
-function hashSlug(slug: string): number {
-  let h = 0x811c9dc5;
-  for (let i = 0; i < slug.length; i += 1) {
-    h ^= slug.charCodeAt(i);
-    h = Math.imul(h, 0x01000193);
-  }
-  return h >>> 0;
-}
-
-/** Stable within a comparison and collision-free until the pen set is full. */
-function comparisonPens(slugs: string[]): Map<string, number> {
-  const pens = new Map<string, number>();
-  const occupied = new Set<number>();
-  for (const slug of [...new Set(slugs)].sort()) {
-    const preferred = hashSlug(slug.toLowerCase()) % PENS.length;
-    let index = preferred;
-    for (let attempt = 0; attempt < PENS.length; attempt += 1) {
-      index = (preferred + attempt) % PENS.length;
-      if (!occupied.has(index)) break;
-    }
-    occupied.add(index);
-    pens.set(slug, index);
-  }
-  return pens;
-}
-
 /**
  * Consumed at build time by the vs and compare pages, which hand the triplet to
  * `SeriesProvenance` so the provenance mark takes the same hue as the trace.
@@ -122,7 +107,7 @@ function comparisonPens(slugs: string[]): Map<string, number> {
  */
 export function comparisonColors(slugs: string[]): Map<string, RGB> {
   const colors = new Map<string, RGB>();
-  for (const [slug, index] of comparisonPens(slugs)) {
+  for (const [slug, index] of comparisonPenIndices(slugs)) {
     colors.set(slug, PENS[index].rgb);
   }
   return colors;
@@ -324,7 +309,7 @@ function ComparisonPlot({
   const [probe, setProbe] = useState<number | null>(null);
 
   const parsed = useMemo<ParsedSeries[]>(() => {
-    const pens = comparisonPens(series.map((item) => item.slug));
+    const pens = comparisonPenIndices(series.map((item) => item.slug));
     return series
       .map((item) => ({
         slug: item.slug,
@@ -372,18 +357,39 @@ function ComparisonPlot({
         y:
           PAD_T + plotH - valueFraction(point.value, maxValue, logScale) * plotH,
       }));
+      const start = vertices[0];
+      const end = vertices[vertices.length - 1];
+      const begins = ((start.x - PAD_L) / plotW) * RACE_MS;
       return {
         slug: item.slug,
         pen: PENS[item.pen],
         points: item.points,
+        vertices,
         d: pathData(vertices),
         length: polylineLength(vertices),
+        easing: calendarEasing(vertices),
+        /** When this pen starts, and how long it takes, at the shared pace. */
+        begins: Math.round(begins),
+        lasts: Math.max(120, Math.round(((end.x - start.x) / plotW) * RACE_MS)),
         start: vertices[0],
         end: vertices[vertices.length - 1],
         last: item.points[item.points.length - 1],
       };
     });
   }, [axis, dateSpan, logScale, maxValue, minDate, parsed, plotH, plotW]);
+
+  // Crossings are dates, so they are marked on the calendar axis only: on the
+  // timeline axis two lines meeting say nothing about when anything happened.
+  const crossings = useMemo(
+    () =>
+      axis === "date"
+        ? traceCrossings(
+            traces.map((trace) => trace.vertices),
+            { baselineY, plotH, xMax: plotR },
+          )
+        : [],
+    [axis, traces, baselineY, plotH, plotR],
+  );
 
   const labelY = spreadLabels(
     traces.map((trace) => ({ key: trace.slug, y: trace.end.y })),
@@ -445,11 +451,13 @@ function ComparisonPlot({
     );
   }
 
-  /** The plotter changes pens between series: each one starts a beat after
-   *  the one before, in pen order, and is labelled when it lands. */
-  const PEN_STAGGER = 150;
   /** A new scale or axis is a new drawing, so the pens draw it again. */
   const drawing = `${axis}:${logScale}:${minDate}:${maxDate}`;
+  const drawStyle = (trace: (typeof traces)[number]) => ({
+    ["--draw-delay" as string]: `${trace.begins}ms`,
+    ["--duration-draw" as string]: `${trace.lasts}ms`,
+    ["--ease-draw" as string]: trace.easing,
+  });
 
   return (
     <div ref={rootRef} data-draw>
@@ -554,7 +562,7 @@ function ComparisonPlot({
                 className="inks-in"
                 style={{
                   ["--draw-length" as string]: String(trace.length),
-                  ["--draw-delay" as string]: `${index * PEN_STAGGER}ms`,
+                  ...drawStyle(trace),
                 }}
               />
             </mask>
@@ -576,13 +584,13 @@ function ComparisonPlot({
           />
         ))}
 
-        {traces.map((trace, index) => (
+        {traces.map((trace) => (
           <g
             key={`${drawing}:${trace.slug}`}
             className="pen"
             style={{
               offsetPath: `path("${trace.d}")`,
-              ["--draw-delay" as string]: `${index * PEN_STAGGER}ms`,
+              ...drawStyle(trace),
             }}
             aria-hidden="true"
           >
@@ -590,6 +598,60 @@ function ComparisonPlot({
             <circle r="1.75" fill={trace.pen.stroke} />
           </g>
         ))}
+
+        {/* ── Where one line overtakes another. The crossing is marked the
+            moment the two pens reach it together, and the month it happened
+            is lettered above it on a short leader. Ink, never red: it is a
+            datum on two series, not the reading the sheet delivers. ────── */}
+        {crossings.map((crossing) => {
+          const at = ((crossing.x - PAD_L) / plotW) * RACE_MS;
+          const month = shortDate(minDate + ((crossing.x - PAD_L) / plotW) * dateSpan);
+          return (
+            <g
+              key={`${drawing}:${crossing.a}:${crossing.b}:${Math.round(crossing.x)}`}
+              style={{ ["--draw-delay" as string]: `${Math.round(at)}ms` }}
+              aria-hidden="true"
+            >
+              <line
+                x1={crossing.x}
+                y1={crossing.y - 4}
+                x2={crossing.x}
+                y2={crossing.y - 16}
+                stroke="var(--ink-3)"
+                strokeWidth="0.75"
+                className="rises"
+                style={{
+                  ["--draw-length" as string]: "13",
+                  animationDelay: "calc(var(--draw-delay) + 60ms)",
+                }}
+              />
+              <circle
+                cx={crossing.x}
+                cy={crossing.y}
+                r="2.5"
+                fill="var(--ink)"
+                className="settles"
+              />
+              <text
+                x={crossing.x}
+                y={crossing.y - 20}
+                textAnchor="middle"
+                className="font-mono tnum"
+                fontSize="10"
+                fill="var(--ink-3)"
+              >
+                <tspan
+                  stroke="var(--paper)"
+                  strokeWidth="4"
+                  paintOrder="stroke"
+                  strokeLinejoin="round"
+                >
+                  {month.toUpperCase()}
+                </tspan>
+              </text>
+            </g>
+          );
+        })}
 
         {/* ── The section line: where the sheet is being read. It terminates
             on the baseline, and the value it measures is lettered on the
@@ -640,7 +702,7 @@ function ComparisonPlot({
                 key={drawing}
                 className="measures"
                 style={{
-                  ["--draw-delay" as string]: `calc(${index * PEN_STAGGER}ms + var(--duration-draw))`,
+                  ["--draw-delay" as string]: `${trace.begins + trace.lasts}ms`,
                 }}
               >
                 <path

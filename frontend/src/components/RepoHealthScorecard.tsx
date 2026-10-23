@@ -293,52 +293,83 @@ export function CommitColumns({
   points: { date: string; value: number }[];
   height?: number;
 }) {
+  if (points.length === 0) return null;
   const max = Math.max(1, ...points.map((point) => point.value));
   const width = Math.max(1, points.length);
+  const peak = points.reduce(
+    (best, point, index) => (point.value > points[best].value ? index : best),
+    0,
+  );
+  const peakTop = ((99 - (points[peak].value / max) * 88) / 100) * height;
+  const peakDelay = peak * 22;
   return (
-    <svg
-      viewBox={`0 0 ${width} 100`}
-      preserveAspectRatio="none"
-      width="100%"
-      height={height}
-      aria-hidden="true"
-      focusable="false"
-      className="block"
-      data-draw
-    >
-      {points.map((point, index) => {
-        const extent = (point.value / max) * 88;
-        if (extent <= 0) return null;
-        return (
-          <line
-            key={point.date}
-            x1={index + 0.5}
-            y1={99}
-            x2={index + 0.5}
-            y2={99 - extent}
-            stroke="var(--ink-2)"
-            strokeWidth="3"
-            strokeLinecap="butt"
-            vectorEffect="non-scaling-stroke"
-            className="rises"
-            style={{
-              // Host pixels: the sheet is `height` px tall over 100 units.
-              ["--draw-length" as string]: String(Math.ceil((extent * height) / 100) + 1),
-              ["--draw-delay" as string]: `${index * 22}ms`,
-            }}
+    // The top padding is the room the busiest month's value is lettered in.
+    <div className="relative pt-6" data-draw>
+      <svg
+        viewBox={`0 0 ${width} 100`}
+        preserveAspectRatio="none"
+        width="100%"
+        height={height}
+        aria-hidden="true"
+        focusable="false"
+        className="block"
+      >
+        {points.map((point, index) => {
+          const extent = (point.value / max) * 88;
+          if (extent <= 0) return null;
+          return (
+            <line
+              key={point.date}
+              x1={index + 0.5}
+              y1={99}
+              x2={index + 0.5}
+              y2={99 - extent}
+              stroke="var(--ink-2)"
+              strokeWidth="3"
+              strokeLinecap="butt"
+              vectorEffect="non-scaling-stroke"
+              className="rises"
+              style={{
+                // Host pixels: the sheet is `height` px tall over 100 units.
+                ["--draw-length" as string]: String(Math.ceil((extent * height) / 100) + 1),
+                ["--draw-delay" as string]: `${index * 22}ms`,
+              }}
+            />
+          );
+        })}
+        <line
+          x1="0"
+          y1="99.5"
+          x2={width}
+          y2="99.5"
+          stroke="var(--rule-strong)"
+          strokeWidth="1"
+          vectorEffect="non-scaling-stroke"
+        />
+      </svg>
+
+      {/* The reading this plot delivers: the busiest month, measured on its
+          own column. The figure is lettered at first paint; its leader drops
+          onto the column once that column has been drawn up to meet it. */}
+      {points[peak].value > 0 && (
+        <div
+          aria-hidden="true"
+          className="pointer-events-none absolute"
+          style={{
+            left: `${((peak + 0.5) / width) * 100}%`,
+            top: `calc(1.5rem + ${peakTop.toFixed(1)}px)`,
+          }}
+        >
+          <span
+            className="measures absolute bottom-[3px] left-0 h-2.5 w-px -translate-x-1/2 bg-signal"
+            style={{ ["--draw-delay" as string]: `${peakDelay + 260}ms` }}
           />
-        );
-      })}
-      <line
-        x1="0"
-        y1="99.5"
-        x2={width}
-        y2="99.5"
-        stroke="var(--rule-strong)"
-        strokeWidth="1"
-        vectorEffect="non-scaling-stroke"
-      />
-    </svg>
+          <span className="measured absolute bottom-[15px] left-0 -translate-x-1/2 text-[0.8125rem] leading-none whitespace-nowrap">
+            {points[peak].value.toLocaleString("en-US")}
+          </span>
+        </div>
+      )}
+    </div>
   );
 }
 

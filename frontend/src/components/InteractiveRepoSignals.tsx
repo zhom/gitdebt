@@ -200,8 +200,9 @@ function BarList({ rows }: { rows: BarRow[] }) {
                 )}
                 style={{
                   left: `max(0px, calc(${pct}% - 1px))`,
+                  // Lands as the extent arrives, never ahead of it.
                   animationDelay:
-                    "calc(var(--draw-delay) + var(--duration-measure) - var(--duration-land))",
+                    "calc(var(--draw-delay) + var(--duration-measure) - 40ms)",
                 }}
               />
             </div>

@@ -71,6 +71,59 @@ export function arcFractions(points: { x: number; y: number }[]): number[] {
   return total > 0 ? out.map((length) => length / total) : out.map(() => 0);
 }
 
+/**
+ * Where a polyline is at `x`: the segment that spans it and how far along that
+ * segment `x` falls. A time series never runs backwards in x, so this is the
+ * one point of the trace above that station.
+ */
+export function segmentAtX(
+  points: { x: number }[],
+  x: number,
+): { index: number; fraction: number } {
+  const last = points.length - 1;
+  if (last < 1 || x <= points[0].x) return { index: 0, fraction: 0 };
+  if (x >= points[last].x) return { index: Math.max(0, last - 1), fraction: 1 };
+  let lo = 0;
+  let hi = last;
+  while (hi - lo > 1) {
+    const mid = (lo + hi) >> 1;
+    if (points[mid].x <= x) lo = mid;
+    else hi = mid;
+  }
+  const span = points[hi].x - points[lo].x;
+  return { index: lo, fraction: span > 0 ? (x - points[lo].x) / span : 0 };
+}
+
+/**
+ * The easing that draws a trace in calendar time.
+ *
+ * `inks-in` advances the dash along the trace's LENGTH, so a steep climb — the
+ * very moment a repository went viral — took most of the draw and a flat decade
+ * flew past. Sampling the arc length at equal steps in x and handing them to a
+ * CSS `linear()` makes the pen cross the sheet at an even pace through time
+ * instead, so its climb rate IS the star rate: a launch or a spike is a visible
+ * leap. `x` is time on every sheet that uses this, including the timeline axis
+ * (time since the first star).
+ */
+export function calendarEasing(
+  points: { x: number; y: number }[],
+  steps = 24,
+): string {
+  if (points.length < 2) return "linear";
+  const cumulative = arcFractions(points);
+  const x0 = points[0].x;
+  const x1 = points[points.length - 1].x;
+  if (x1 <= x0) return "linear";
+  const stops: string[] = [];
+  for (let k = 0; k <= steps; k += 1) {
+    const { index, fraction } = segmentAtX(points, x0 + ((x1 - x0) * k) / steps);
+    const next = Math.min(points.length - 1, index + 1);
+    const at = cumulative[index] + (cumulative[next] - cumulative[index]) * fraction;
+    stops.push((k === 0 ? 0 : k === steps ? 1 : at).toFixed(4));
+  }
+  return `linear(${stops.join(", ")})`;
+}
+
 export function thresholdLabel(threshold: number): string {
   if (threshold >= 1_000_000) return `${threshold / 1_000_000}M`;
   if (threshold >= 1_000) return `${threshold / 1_000}K`;
@@ -100,10 +153,16 @@ export function traceMilestones(
     fontSize: number;
     avoid?: Box[];
     duration?: number;
+    /** The trace draws in calendar time (`calendarEasing`), so the pen
+     *  reaches a point when the draw has covered its share of x. */
+    calendar?: boolean;
   },
 ): TraceMilestone[] {
   if (points.length < 3) return [];
-  const { baselineY, fontSize, avoid = [], duration } = options;
+  const { baselineY, fontSize, avoid = [], duration, calendar = false } = options;
+  const x0 = points[0].x;
+  const xSpan = Math.max(1, points[points.length - 1].x - x0);
+  const draw = duration ?? DURATION.draw * 1000;
   const fractions = arcFractions(points);
   const last = points[points.length - 1];
   const kept: TraceMilestone[] = [];
@@ -145,10 +204,106 @@ export function traceMilestones(
       label,
       x: point.x,
       y: point.y,
-      delay: drawDelayAt(fractions[index], duration),
+      delay: calendar
+        ? Math.round(((point.x - x0) / xSpan) * draw)
+        : drawDelayAt(fractions[index], duration),
       labelX,
       labelY,
     });
   }
   return kept;
+}
+
+export type TraceCrossing = {
+  x: number;
+  y: number;
+  /** Indices of the two traces, in the caller's order. */
+  a: number;
+  b: number;
+};
+
+function yAtX(points: { x: number; y: number }[], x: number): number {
+  const { index, fraction } = segmentAtX(points, x);
+  const next = points[Math.min(points.length - 1, index + 1)];
+  return points[index].y + (next.y - points[index].y) * fraction;
+}
+
+/**
+ * Where one trace overtakes another, worth marking on a comparison.
+ *
+ * A crossing counts only where it means a change of order: both lines are
+ * clear of the baseline tangle (above `minHeight` of the plot), and the new
+ * order holds for `hold` px on both sides rather than flickering where two
+ * lines run together. The highest crossings win, at most `limit`, no two
+ * closer than `spacing` px so their stamps never collide.
+ */
+export function traceCrossings(
+  traces: { x: number; y: number }[][],
+  options: {
+    baselineY: number;
+    plotH: number;
+    xMax: number;
+    limit?: number;
+    spacing?: number;
+    hold?: number;
+    minHeight?: number;
+    step?: number;
+  },
+): TraceCrossing[] {
+  const {
+    baselineY,
+    plotH,
+    xMax,
+    limit = 3,
+    spacing = 90,
+    hold = 24,
+    minHeight = 0.08,
+    step = 3,
+  } = options;
+  const found: TraceCrossing[] = [];
+  for (let a = 0; a < traces.length; a += 1) {
+    for (let b = a + 1; b < traces.length; b += 1) {
+      const A = traces[a];
+      const B = traces[b];
+      if (A.length < 2 || B.length < 2) continue;
+      const from = Math.max(A[0].x, B[0].x);
+      const to = Math.min(A[A.length - 1].x, B[B.length - 1].x, xMax - hold);
+      if (to - from < hold * 2) continue;
+      const flips: number[] = [];
+      let sign = 0;
+      let prev = from;
+      let prevGap = 0;
+      for (let x = from; x <= to; x += step) {
+        const gap = yAtX(A, x) - yAtX(B, x);
+        const now = Math.abs(gap) < 0.5 ? 0 : Math.sign(gap);
+        if (now !== 0 && sign !== 0 && now !== sign) {
+          // Linear interpolation of the zero between the two samples.
+          flips.push(prev + (x - prev) * (prevGap / (prevGap - gap)));
+        }
+        if (now !== 0) {
+          sign = now;
+          prev = x;
+          prevGap = gap;
+        }
+      }
+      for (let i = 0; i < flips.length; i += 1) {
+        const x = flips[i];
+        const isolated =
+          (i === 0 || x - flips[i - 1] >= hold) &&
+          (i === flips.length - 1 || flips[i + 1] - x >= hold) &&
+          x - from >= hold;
+        if (!isolated) continue;
+        const y = yAtX(A, x);
+        if (baselineY - y < plotH * minHeight) continue;
+        found.push({ x, y, a, b });
+      }
+    }
+  }
+  const kept: TraceCrossing[] = [];
+  for (const crossing of found.sort((p, q) => p.y - q.y)) {
+    if (kept.length >= limit) break;
+    if (kept.some((other) => Math.abs(other.x - crossing.x) < spacing)) continue;
+    kept.push(crossing);
+  }
+  return kept.sort((p, q) => p.x - q.x);
 }

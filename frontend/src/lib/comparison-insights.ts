@@ -52,7 +52,15 @@ export type ComparisonRepo = {
   stats: ComparisonStats | null;
   usage: ComparisonUsage | null;
   analysisPending?: boolean;
+  /** The live stats read has not answered yet. Until it does, a missing
+   *  figure is unread, not unavailable, and the cell says so. */
+  statsLoading?: boolean;
+  /** The same, for the usage read that supplies forks and downloads. */
+  usageLoading?: boolean;
 };
+
+/** A figure the live read has not returned yet. */
+export const READING = "Reading…";
 
 export type ComparisonMetricValue = {
   display: string;
@@ -78,7 +86,11 @@ function compact(value: number): string {
 
 function unavailable(repo: ComparisonRepo): ComparisonMetricValue {
   return {
-    display: repo.analysisPending ? "Analysis running" : "Not available",
+    display: repo.analysisPending
+      ? "Analysis running"
+      : repo.statsLoading
+        ? READING
+        : "Not available",
     numeric: null,
   };
 }
@@ -273,7 +285,7 @@ export function buildComparisonMetrics(
               display: repo.usage.forks.toLocaleString("en"),
               numeric: repo.usage.forks,
             }
-          : { display: "Not available", numeric: null },
+          : { display: repo.usageLoading ? READING : "Not available", numeric: null },
       ),
     },
     {
@@ -289,7 +301,10 @@ export function buildComparisonMetrics(
               numeric: reach.total,
               note: reach.label,
             }
-          : { display: "No resolved package", numeric: null };
+          : {
+              display: repo.usageLoading ? READING : "No resolved package",
+              numeric: null,
+            };
       }),
     },
     {

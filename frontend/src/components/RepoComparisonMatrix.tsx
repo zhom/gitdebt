@@ -76,6 +76,10 @@ function emptyRepo(
     stats: null,
     usage: null,
     analysisPending: initial?.pending || initial?.backfilling,
+    // Both reads happen in the browser, so the static page and the first
+    // client render state that they have not answered yet.
+    statsLoading: true,
+    usageLoading: true,
   };
 }
 
@@ -135,7 +139,8 @@ export function RepoComparisonMatrix({
           if (!response.ok) return;
           update(slug, { usage: (await response.json()) as ComparisonUsage });
         })
-        .catch(() => undefined);
+        .catch(() => undefined)
+        .finally(() => update(slug, { usageLoading: false }));
     }
 
     let statsTimer = 0;
@@ -165,10 +170,13 @@ export function RepoComparisonMatrix({
           update(result.slug, {
             stats: result.stats,
             analysisPending: false,
+            statsLoading: false,
           });
         } else if (result.pending) {
           retry = true;
-          update(result.slug, { analysisPending: true });
+          update(result.slug, { analysisPending: true, statsLoading: false });
+        } else {
+          update(result.slug, { statsLoading: false });
         }
       }
       if (retry) statsTimer = window.setTimeout(readStats, 4_000);

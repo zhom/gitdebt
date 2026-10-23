@@ -5,8 +5,13 @@ import {
   formatFullDate,
   formatMonthYear,
 } from "@/lib/star-insights";
-import { useLeaderFollow, usePlotWidth } from "@/components/ChartFrame";
-import { traceMilestones, type Box } from "@/lib/trace-marks";
+import { setTextNode, useLeaderFollow, usePlotWidth } from "@/components/ChartFrame";
+import {
+  calendarEasing,
+  segmentAtX,
+  traceMilestones,
+  type Box,
+} from "@/lib/trace-marks";
 
 /**
  * The signature artifact: a repository's star history drawn as a dimensioned
@@ -70,6 +75,14 @@ const PAD_B = 44; // clears the baseline dimension line and its span value
 
 /** Cap the drawn polyline. A plot resolves at the pixel, not at the sample. */
 const MAX_SAMPLES = 240;
+
+/**
+ * The trace draws in calendar time over this long: the pen crosses the sheet
+ * at an even pace through the years, so how fast it climbs is how fast the
+ * stars came. Long enough that a decade reads as a decade and a viral week as
+ * a leap; the measured value lands when the pen does.
+ */
+const DRAW_MS = 1400;
 
 type Pt = { x: number; y: number; date: string; stars: number };
 
@@ -189,6 +202,7 @@ export function StarSheet({
       points,
       d: points.map((p, i) => `${i === 0 ? "M" : "L"}${p.x.toFixed(2)} ${p.y.toFixed(2)}`).join(" "),
       length: polylineLength(points),
+      easing: calendarEasing(points),
       plotH,
       baselineY: PAD_T + plotH,
       first: points[0],
@@ -237,7 +251,13 @@ export function StarSheet({
     ];
     return traceMilestones(
       points.map((p) => ({ x: p.x, y: p.y, value: p.stars })),
-      { baselineY, fontSize: dateSize, avoid: reserved },
+      {
+        baselineY,
+        fontSize: dateSize,
+        avoid: reserved,
+        duration: DRAW_MS,
+        calendar: true,
+      },
     );
   }, [geometry, dateSize, viewW, padR, height]);
 
@@ -247,18 +267,40 @@ export function StarSheet({
       : geometry.points[probe]
     : null;
 
-  useLeaderFollow(active?.x ?? 0, active?.y ?? 0, (x, y) => {
-    const base = geometry?.baselineY ?? 0;
-    dropRef.current?.setAttribute("x1", String(x));
-    dropRef.current?.setAttribute("x2", String(x));
-    dropRef.current?.setAttribute("y1", String(y));
-    leaderRef.current?.setAttribute("x1", String(x));
-    leaderRef.current?.setAttribute("y1", String(y));
-    leaderRef.current?.setAttribute("y2", String(y));
-    headRef.current?.setAttribute("transform", `translate(${x} ${y})`);
-    valueRef.current?.setAttribute("y", String(y));
-    stampRef.current?.setAttribute("y", String(Math.min(base + 6, y + 15)));
-  }, `${viewW}:${height}`);
+  useLeaderFollow(
+    active?.x ?? 0,
+    (x, settled) => {
+      if (!geometry || !active) return;
+      const { points, baselineY } = geometry;
+      // Settled, the leader states the sampled datum React rendered. In
+      // transit it states the trace where it actually stands, so the value
+      // always matches the height it is lettered at.
+      let y = active.y;
+      let value = formatCompact(active.stars);
+      let stamp = stampDate(active.date);
+      if (!settled) {
+        const { index, fraction } = segmentAtX(points, x);
+        const a = points[index];
+        const b = points[Math.min(points.length - 1, index + 1)];
+        const at = Date.parse(a.date) + (Date.parse(b.date) - Date.parse(a.date)) * fraction;
+        y = a.y + (b.y - a.y) * fraction;
+        value = `≈${formatCompact(a.stars + (b.stars - a.stars) * fraction)}`;
+        stamp = stampDate(new Date(at).toISOString());
+      }
+      dropRef.current?.setAttribute("x1", String(x));
+      dropRef.current?.setAttribute("x2", String(x));
+      dropRef.current?.setAttribute("y1", String(y));
+      leaderRef.current?.setAttribute("x1", String(x));
+      leaderRef.current?.setAttribute("y1", String(y));
+      leaderRef.current?.setAttribute("y2", String(y));
+      headRef.current?.setAttribute("transform", `translate(${x} ${y})`);
+      valueRef.current?.setAttribute("y", String(y));
+      stampRef.current?.setAttribute("y", String(Math.min(baselineY + 6, y + 15)));
+      setTextNode(valueRef.current, value);
+      setTextNode(stampRef.current, stamp);
+    },
+    `${viewW}:${height}`,
+  );
 
   if (!geometry || !active) {
     return (
@@ -268,12 +310,17 @@ export function StarSheet({
     );
   }
 
-  const { points, d, length, baselineY, first, last } = geometry;
+  const { points, d, length, easing, baselineY, first, last } = geometry;
   const isProbing = probe !== null;
   const span = spanLabel(first.date, last.date);
 
   return (
-    <figure ref={frameRef} className={className} data-draw>
+    <figure
+      ref={frameRef}
+      className={className}
+      style={{ ["--duration-draw" as string]: `${DRAW_MS}ms` }}
+      data-draw
+    >
       <svg
         ref={svgRef}
         viewBox={`0 0 ${viewW} ${height}`}
@@ -350,7 +397,10 @@ export function StarSheet({
           strokeLinejoin="round"
           strokeLinecap="round"
           className="inks-in"
-          style={{ ["--draw-length" as string]: String(length) }}
+          style={{
+            ["--draw-length" as string]: String(length),
+            ["--ease-draw" as string]: easing,
+          }}
           vectorEffect="non-scaling-stroke"
         />
 
@@ -404,10 +454,14 @@ export function StarSheet({
         ))}
 
         {/* ── The pen. It rides the leading edge of the ink on the trace's
-            own path and lifts when the trace is finished. ─────────────── */}
+            own path, at the same calendar pace, and lifts when the trace is
+            finished. ──────────────────────────────────────────────────── */}
         <g
           className="pen"
-          style={{ offsetPath: `path("${d}")` }}
+          style={{
+            offsetPath: `path("${d}")`,
+            ["--ease-draw" as string]: easing,
+          }}
           aria-hidden="true"
         >
           <circle r="6" fill="var(--paper)" stroke="var(--ink)" strokeWidth="1" />

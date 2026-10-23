@@ -152,17 +152,34 @@ both. `cut` remains, separately, for solid-filled things that clip themselves.
   `offset-path`, lifting when the trace is finished. It is the one mark that
   exists only while it moves; a pen at rest would measure nothing.
 
-Marks on a trace wait for the pen. `traceMilestones` places the 100, 1K, 10K,
-100K and 1M crossings of a cumulative series and `drawDelayAt` solves the draw
-easing for the moment the pen reaches each one, so the drop line falls exactly
-as the ink arrives. A dashed series inks in through a mask whose solid twin
-draws along the same path, because its dash is its identity. A comparison
-changes pens in order, 150ms apart, and each series is labelled when it lands.
+A time series draws in calendar time. `calendarEasing` hands the trace and its
+pen a CSS `linear()` sampled from the arc length at equal steps in x, so the pen
+crosses the sheet at an even pace through the years and its climb rate is the
+star rate: a launch or a viral week is a visible leap. Star sheets take 1400ms.
+Marks on a trace wait for the pen: `traceMilestones` places the 100, 1K, 10K,
+100K and 1M crossings of a cumulative series and times each to the moment the
+pen reaches it, so the drop line falls exactly as the ink arrives.
+
+A comparison is a race. Every pen moves at one pace through time (1800ms across
+the sheet) and starts when time reaches its first star, so at any instant all
+pens stand on the same date and the lead is visible while it is drawn. A dashed
+series inks in through a mask whose solid twin draws along the same path,
+because its dash is its identity. Where one line overtakes another
+(`traceCrossings`), an ink dot settles as the two pens meet and the month is
+lettered on a short leader. Series are labelled when their pen lands. Pens are
+allocated by the backend's own rule (`lib/pens.ts`), so a series has the same
+ink as in its README overlay and never takes the drafting red.
+
+The busiest month of a commit-columns plot is measured on its own column: the
+figure in red at first paint, its leader dropping once the column is drawn.
+
 A new scale, axis or range is a new drawing and is drawn again.
 
-The leader follows the pointer as a hand moves a pen (`useLeaderFollow`): it
-springs to the next datum, writing attributes directly, and its last frame is
-exactly what React rendered.
+The leader follows the pointer as a hand moves a pen (`useLeaderFollow`). Only
+its station along x is sprung; at every frame the terminator is put back on the
+trace and states the reading there, so it never cuts a chord across the curve
+and its value always matches its height. Its last frame is exactly what React
+rendered.
 
 The absolute rule: **nothing is invisible until an animation runs.** No
 `opacity: 0` initial state, anywhere. Content is in the markup and painted at
@@ -177,8 +194,9 @@ printing finishes it. A crawler, a screenshot pass or a reader who never
 scrolls sees every drawing finished.
 
 The reading index is the one motion not on a timer: on a long page the
-header's frame line carries a tick per section heading and is measured out to
-the reader's position as they scroll.
+header's frame line carries a tick per section heading and is measured out to a
+terminator at the reader's position as they scroll; a passed section's tick
+stands taller.
 
 Charts letter at 1:1 — the viewBox width is the **measured** width
 (`usePlotWidth`). A fixed viewBox stretched to fit condenses every label to a

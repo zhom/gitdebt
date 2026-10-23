@@ -8,6 +8,7 @@ import {
   sampleAt,
   shortDate,
   spanLabel,
+  setTextNode,
   stride,
   useLeaderFollow,
   usePlotWidth,
@@ -15,7 +16,11 @@ import {
   type ChartAxis,
 } from "@/components/ChartFrame";
 import { formatCompact } from "@/lib/star-insights";
-import { traceMilestones } from "@/lib/trace-marks";
+import {
+  calendarEasing,
+  segmentAtX,
+  traceMilestones,
+} from "@/lib/trace-marks";
 
 /**
  * One measured series, drawn as a dimensioned trace.
@@ -70,6 +75,12 @@ const MAX_VERTICES = 400;
 
 /** Cap the readable table. Every reading is still a real one. */
 const MAX_ROWS = 240;
+
+/** A star history draws over longer than a small series: in calendar time
+ *  (`calendarEasing`) its pen climb is the star rate, and a launch or a viral
+ *  week needs the time to read as the leap it was. */
+const STAR_DRAW_MS = 1400;
+const DRAW_MS = 900;
 
 type Parsed = { at: number; value: number; date: string };
 type Vertex = { x: number; y: number; at: number; value: number };
@@ -144,6 +155,7 @@ export function TraceChart({
       vertices,
       d: pathData(vertices),
       length: polylineLength(vertices),
+      easing: calendarEasing(vertices),
       first: vertices[0],
       last: vertices[vertices.length - 1],
       span: spanLabel(t0, t1),
@@ -182,6 +194,8 @@ export function TraceChart({
         // The value column at the right margin.
         { x0: plotR - 4, y0: 0, x1: width, y1: height },
       ],
+      duration: STAR_DRAW_MS,
+      calendar: true,
     });
   }, [geometry, milestones, baselineY, plotR, width, height]);
 
@@ -207,8 +221,23 @@ export function TraceChart({
 
   useLeaderFollow(
     activeX,
-    activeY,
-    (x, y) => {
+    (x, settled) => {
+      if (!geometry || !reading) return;
+      // Settled, the leader states the reading React rendered. In transit it
+      // states the trace where it actually stands, so the terminator stays on
+      // the line and the value always matches its own height.
+      let y = activeY;
+      let value = `${reading.approximate ? "≈" : ""}${formatCompact(reading.value)}`;
+      let stamp = shortDate(reading.at).toUpperCase();
+      if (!settled) {
+        const { vertices } = geometry;
+        const { index, fraction } = segmentAtX(vertices, x);
+        const a = vertices[index];
+        const b = vertices[Math.min(vertices.length - 1, index + 1)];
+        y = a.y + (b.y - a.y) * fraction;
+        value = `≈${formatCompact(a.value + (b.value - a.value) * fraction)}`;
+        stamp = shortDate(a.at + (b.at - a.at) * fraction).toUpperCase();
+      }
       dropRef.current?.setAttribute("x1", String(x));
       dropRef.current?.setAttribute("x2", String(x));
       dropRef.current?.setAttribute("y1", String(y));
@@ -218,6 +247,8 @@ export function TraceChart({
       headRef.current?.setAttribute("transform", `translate(${x} ${y})`);
       valueRef.current?.setAttribute("y", String(y));
       stampRef.current?.setAttribute("y", String(Math.min(height - 8, y + 15)));
+      setTextNode(valueRef.current, value);
+      setTextNode(stampRef.current, stamp);
     },
     `${width}:${height}:${axis}:${logScale}:${geometry?.first.at}:${geometry?.last.at}`,
   );
@@ -235,7 +266,7 @@ export function TraceChart({
     );
   }
 
-  const { max, d, length, first, last, span } = geometry;
+  const { max, d, length, easing, first, last, span } = geometry;
   const isProbing = probe !== null && interactive;
   /** A new scale, axis or range is a new drawing, so the pen draws it. */
   const drawing = `${axis}:${logScale}:${first.at}:${last.at}`;
@@ -246,7 +277,14 @@ export function TraceChart({
   const rows = stride(parsed, MAX_ROWS);
 
   return (
-    <div ref={rootRef} className={className} data-draw>
+    <div
+      ref={rootRef}
+      className={className}
+      style={{
+        ["--duration-draw" as string]: `${milestones ? STAR_DRAW_MS : DRAW_MS}ms`,
+      }}
+      data-draw
+    >
       <svg
         ref={svgRef}
         viewBox={`0 0 ${width} ${height}`}
@@ -339,7 +377,10 @@ export function TraceChart({
             strokeLinejoin="round"
             strokeLinecap="round"
             className="inks-in"
-            style={{ ["--draw-length" as string]: String(length) }}
+            style={{
+              ["--draw-length" as string]: String(length),
+              ["--ease-draw" as string]: easing,
+            }}
             vectorEffect="non-scaling-stroke"
           />
 
@@ -393,7 +434,10 @@ export function TraceChart({
           {/* The pen rides the leading edge of the ink and lifts at the end. */}
           <g
             className="pen"
-            style={{ offsetPath: `path("${d}")` }}
+            style={{
+              offsetPath: `path("${d}")`,
+              ["--ease-draw" as string]: easing,
+            }}
             aria-hidden="true"
           >
             <circle r="6" fill="var(--paper)" stroke="var(--ink)" strokeWidth="1" />
@@ -480,7 +524,17 @@ export function TraceChart({
             letterSpacing="0.08em"
             fill="var(--ink-3)"
           >
-            {shortDate(first.at).toUpperCase()}
+            {/* A series that climbs at once runs straight through its own
+                origin stamp, so the stamp opens a paper gap in the trace, the
+                same cut the span dimension makes in its rule. */}
+            <tspan
+              stroke="var(--paper)"
+              strokeWidth="5"
+              paintOrder="stroke"
+              strokeLinejoin="round"
+            >
+              {shortDate(first.at).toUpperCase()}
+            </tspan>
           </text>
         </g>
       </svg>

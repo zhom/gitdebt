@@ -104,3 +104,30 @@ test("comparison metrics expose unavailable states instead of invented zeroes", 
     "npm",
   );
 });
+
+test("a figure the live read has not returned is unread, not unavailable", () => {
+  const unread = {
+    slug: "c/unread",
+    totalStars: 10,
+    createdAt: null,
+    history: [],
+    stats: null,
+    usage: null,
+    statsLoading: true,
+    usageLoading: true,
+  };
+  const metrics = buildComparisonMetrics([unread]);
+  const display = (label) =>
+    metrics.find((metric) => metric.label === label).values[0].display;
+  assert.equal(display("Dominant language"), "Reading…");
+  assert.equal(display("Forks"), "Reading…");
+  assert.equal(display("Largest package audience"), "Reading…");
+  // Once both reads answer with nothing, the cells say so.
+  const answered = buildComparisonMetrics([
+    { ...unread, statsLoading: false, usageLoading: false },
+  ]);
+  assert.equal(
+    answered.find((metric) => metric.label === "Forks").values[0].display,
+    "Not available",
+  );
+});

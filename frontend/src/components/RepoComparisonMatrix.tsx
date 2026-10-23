@@ -247,7 +247,10 @@ function MetricGroup({
   repos: string[];
 }) {
   return (
-    <section>
+    // `min-w-0`: as a grid item this section would otherwise take its
+    // table's 42rem minimum and push past a phone's edge instead of letting
+    // the table scroll inside its own frame.
+    <section className="min-w-0">
       <div className="flex flex-wrap items-baseline justify-between gap-x-6 gap-y-1">
         <h3 className="font-draft text-[1.125rem] leading-tight text-ink">
           {group}

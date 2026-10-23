@@ -11,6 +11,7 @@ import {
 import { BODY, CAPTION, FIELD, MEASURE, PANEL } from "@/components/style-tokens";
 import { warmRepos } from "@/components/WarmRepos";
 import { CATEGORIES } from "@/data/categories";
+import { parseRepoSlug } from "@/lib/repo-slug";
 import { cn } from "@/lib/utils";
 
 /**
@@ -31,7 +32,6 @@ type Props = {
   initialRepos?: string[];
 };
 
-const SLUG_RE = /^[A-Za-z0-9._-]+\/[A-Za-z0-9._-]+$/;
 const MIN_ROWS = 2;
 const MAX_REPOS = 8;
 const STATIC_PAIRS = new Set(
@@ -68,9 +68,10 @@ export function CompareBuilder({ apiBase, initialRepos = [] }: Props) {
   const [rows, setRows] = useState<CompareRow[]>(() => seedRows(seed, idPrefix));
   const [error, setError] = useState<string | null>(null);
   const [active, setActive] = useState<string[] | null>(() => {
-    const valid = seed
-      .map((s) => s.trim().toLowerCase())
-      .filter((s) => SLUG_RE.test(s));
+    const valid = seed.flatMap((s) => {
+      const slug = parseRepoSlug(s);
+      return slug ? [slug.toLowerCase()] : [];
+    });
     return valid.length >= MIN_ROWS ? valid.slice(0, MAX_REPOS) : null;
   });
   const pendingFocusId = useRef<string | null>(null);
@@ -102,16 +103,18 @@ export function CompareBuilder({ apiBase, initialRepos = [] }: Props) {
   function compare(e: React.SubmitEvent<HTMLFormElement>) {
     e.preventDefault();
     setError(null);
-    const cleaned = rows.map((row) => row.value.trim().toLowerCase()).filter(Boolean);
-    if (cleaned.length < MIN_ROWS) {
+    const entered = rows.map((row) => row.value.trim()).filter(Boolean);
+    if (entered.length < MIN_ROWS) {
       setError(`Add at least ${MIN_ROWS} repositories.`);
       return;
     }
-    const bad = cleaned.find((r) => !SLUG_RE.test(r));
+    // A pasted GitHub URL names its repository as surely as a slug does.
+    const bad = entered.find((value) => !parseRepoSlug(value));
     if (bad) {
       setError(`“${bad}” is not a valid owner/repo.`);
       return;
     }
+    const cleaned = entered.map((value) => parseRepoSlug(value)!.toLowerCase());
     const unique = Array.from(new Set(cleaned)).slice(0, MAX_REPOS);
     warmRepos(apiBase, unique, true);
     setActive(unique);

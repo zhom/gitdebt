@@ -3,6 +3,7 @@ import { useRef, useState } from "react";
 import { CAPTION } from "@/components/style-tokens";
 import { Terminator } from "@/components/ui/marks";
 import { isFramed } from "@/lib/embed-mode";
+import { parseRepoSlug } from "@/lib/repo-slug";
 import { cn } from "@/lib/utils";
 
 /**
@@ -26,7 +27,6 @@ import { cn } from "@/lib/utils";
  */
 
 const EXAMPLES = ["facebook/react", "vercel/next.js", "zhom/donutbrowser"];
-const REPO_RE = /^([A-Za-z0-9._-]+)\/([A-Za-z0-9._-]+)$/;
 
 export function LandingRepoLookup() {
   const [input, setInput] = useState("");
@@ -34,13 +34,16 @@ export function LandingRepoLookup() {
   const inputRef = useRef<HTMLInputElement>(null);
 
   function openReport(value: string) {
-    const match = value.trim().match(REPO_RE);
-    if (!match) {
-      setError("Enter a repository as owner/repo.");
+    // A pasted GitHub address is the commonest entry, so it is read as the
+    // repository it names rather than refused for not being a bare slug.
+    const slug = parseRepoSlug(value);
+    if (!slug) {
+      setError("Enter a repository as owner/repo or paste its GitHub URL.");
       inputRef.current?.focus();
       return;
     }
-    const report = `/${encodeURIComponent(match[1].toLowerCase())}/${encodeURIComponent(match[2].toLowerCase())}`;
+    const [owner, repo] = slug.toLowerCase().split("/");
+    const report = `/${encodeURIComponent(owner)}/${encodeURIComponent(repo)}`;
     // Inside X's frame the report would be refused framing; it opens in a tab.
     if (isFramed(window)) window.open(report, "_blank", "noopener");
     else window.location.assign(report);

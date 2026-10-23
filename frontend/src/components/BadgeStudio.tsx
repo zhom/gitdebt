@@ -59,6 +59,7 @@ import {
   type EmbedAsset,
 } from "@/lib/readme-embeds";
 import { useRenderedTheme } from "@/lib/rendered-theme";
+import { parseRepoSlug as parseSlug } from "@/lib/repo-slug";
 import { cn } from "@/lib/utils";
 
 /**
@@ -326,22 +327,8 @@ export function BadgeStudio({
  * The catalog
  * ------------------------------------------------------------------ */
 
-/** `owner/repo`, the only shape every asset route accepts. */
-const SLUG_RE = /^([A-Za-z0-9._-]+)\/([A-Za-z0-9._-]+)$/;
-
 /** Assets whose natural aspect ratio needs the full row to stay legible. */
 const FULL_WIDTH = new Set(["chart", "og", "heatmap", "commit-activity"]);
-
-/** Accepts a slug, a GitHub URL, or a clone URL, and returns `owner/repo`. */
-function parseSlug(value: string): string | null {
-  const cleaned = value
-    .trim()
-    .replace(/^git@github\.com:/i, "")
-    .replace(/^https?:\/\/(?:www\.)?github\.com\//i, "")
-    .replace(/\.git$/i, "")
-    .replace(/\/+$/, "");
-  return SLUG_RE.test(cleaned) ? cleaned : null;
-}
 
 /**
  * The library's copy is written for both a page and a Markdown file, so it
@@ -725,7 +712,10 @@ function CatalogSection({
         </p>
       </div>
       <p className={cn("mt-3", BODY, MEASURE)}>{lead}</p>
-      <div className="mt-8 grid items-stretch gap-6 sm:grid-cols-2">
+      {/* `grid-cols-1` is `minmax(0, 1fr)`: an implicit column is sized by
+          the widest item's minimum, and a code snippet set `nowrap` pushed it
+          past a phone's edge. */}
+      <div className="mt-8 grid grid-cols-1 items-stretch gap-6 sm:grid-cols-2">
         {children}
       </div>
     </section>

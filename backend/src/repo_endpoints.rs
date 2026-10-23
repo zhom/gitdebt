@@ -223,6 +223,36 @@ const NON_BOT_AUTHOR_FILTER: &str = "author_name NOT LIKE '%[bot]%' \
        AND (github_login IS NULL OR github_login NOT LIKE '%[bot]%') \
        AND COALESCE(github_login, '') <> ALL($2::text[])";
 
+/// The non-bot authors of repository `$1`, one row per person rather than one
+/// per email address.
+///
+/// `repo_author_stats` is keyed by author email, and one person routinely
+/// commits from several (work, personal, noreply). Ranking those rows directly
+/// listed the same contributor two or three times and split their commits
+/// across the entries, which made the work look more widely shared than it is
+/// and overstated the bus factor computed from it. Rows merge on the GitHub
+/// login, which enrichment resolved to one account, and otherwise on the
+/// email address. A bare author name is never a merge key: "root" and
+/// "Your Name" are shared by strangers, and merging them would invent a
+/// dominant contributor. `author_email` carries the smallest address so ties
+/// still order deterministically. `$2` binds `BOT_LOGINS`, as for
+/// [`NON_BOT_AUTHOR_FILTER`]; `extra` is appended to the `WHERE` clause.
+fn author_identities_sql(extra: &str) -> String {
+    format!(
+        "SELECT COALESCE(MAX(NULLIF(github_login, '')), MAX(NULLIF(author_name, '')), \
+                         MIN(author_email)) AS label, \
+                MAX(NULLIF(github_login, '')) AS github_login, \
+                MAX(author_name) AS author_name, \
+                (ARRAY_AGG(avatar_url ORDER BY commits DESC, author_email ASC) \
+                    FILTER (WHERE avatar_url IS NOT NULL))[1] AS avatar_url, \
+                SUM(commits)::BIGINT AS commits, \
+                MIN(author_email) AS author_email \
+         FROM repo_author_stats \
+         WHERE repo = $1 AND {NON_BOT_AUTHOR_FILTER}{extra} \
+         GROUP BY COALESCE(LOWER(NULLIF(github_login, '')), LOWER(author_email))"
+    )
+}
+
 /// Read-only stat endpoints. One route, dispatched on
 /// `{name}.{svg|png|webp}` in the filename segment. Public CORS in api.rs.
 pub fn public_router() -> Router<ApiState> {
@@ -309,10 +339,11 @@ async fn repo_stats_json(
         .collect();
 
     let author_sql = format!(
-        "SELECT COALESCE(NULLIF(github_login, ''), NULLIF(author_name, ''), author_email) AS label, \
-                github_login, avatar_url, commits, SUM(commits) OVER ()::BIGINT AS analyzed_total \
-         FROM repo_author_stats WHERE repo = $1 AND {NON_BOT_AUTHOR_FILTER} \
-         ORDER BY commits DESC, author_email ASC LIMIT 32"
+        "WITH identities AS ({}) \
+         SELECT label, github_login, avatar_url, commits, \
+                SUM(commits) OVER ()::BIGINT AS analyzed_total \
+         FROM identities ORDER BY commits DESC, author_email ASC LIMIT 32",
+        author_identities_sql("")
     );
     let author_rows = sqlx::query(sqlx::AssertSqlSafe(author_sql))
         .bind(&full)
@@ -546,12 +577,13 @@ pub(crate) async fn load_repo_health(
     // Ownership. The window functions run before LIMIT, so the totals cover
     // every non-bot author even though only the head of the ranking is read.
     let author_sql = format!(
-        "SELECT commits, \
+        "WITH identities AS ({}) \
+         SELECT commits, \
                 SUM(commits) OVER ()::BIGINT AS attributed_total, \
                 COUNT(*) OVER ()::BIGINT AS contributor_count \
-         FROM repo_author_stats \
-         WHERE repo = $1 AND commits > 0 AND {NON_BOT_AUTHOR_FILTER} \
-         ORDER BY commits DESC, author_email ASC LIMIT {HEALTH_AUTHOR_DEPTH}"
+         FROM identities \
+         ORDER BY commits DESC, author_email ASC LIMIT {HEALTH_AUTHOR_DEPTH}",
+        author_identities_sql(" AND commits > 0")
     );
     let author_rows = sqlx::query(sqlx::AssertSqlSafe(author_sql))
         .bind(repo)
@@ -1578,9 +1610,10 @@ async fn contributor_roster(
         .contributor_roster_cache
         .try_get_with(key, async {
             let sql = format!(
-                "SELECT github_login, author_name, avatar_url, commits FROM repo_author_stats \
-                 WHERE repo = $1 AND {NON_BOT_AUTHOR_FILTER} \
-                 ORDER BY commits DESC, author_email ASC LIMIT {CONTRIBUTOR_RANK_LIMIT}"
+                "WITH identities AS ({}) \
+                 SELECT github_login, author_name, avatar_url, commits FROM identities \
+                 ORDER BY commits DESC, author_email ASC LIMIT {CONTRIBUTOR_RANK_LIMIT}",
+                author_identities_sql("")
             );
             let rows = sqlx::query(sqlx::AssertSqlSafe(sql))
                 .bind(full)
@@ -1713,13 +1746,12 @@ async fn ensure_bus_factor_svg(
         // cast back so sqlx can decode an i64. The `author_email` tie-break
         // keeps the row order (and therefore the SVG bytes) deterministic.
         let sql = format!(
-            "SELECT COALESCE(NULLIF(github_login, ''), NULLIF(author_name, ''), author_email) AS label, \
-                    github_login, avatar_url, \
-                    commits, \
+            "WITH identities AS ({}) \
+             SELECT label, github_login, avatar_url, commits, \
                     SUM(commits) OVER ()::BIGINT AS total \
-             FROM repo_author_stats \
-             WHERE repo = $1 AND {NON_BOT_AUTHOR_FILTER} \
-             ORDER BY commits DESC, author_email ASC LIMIT 500"
+             FROM identities \
+             ORDER BY commits DESC, author_email ASC LIMIT 500",
+            author_identities_sql("")
         );
         let rows = sqlx::query(sqlx::AssertSqlSafe(sql))
             .bind(full)
@@ -1734,7 +1766,9 @@ async fn ensure_bus_factor_svg(
             .into_iter()
             .map(|r| AuthorShare {
                 label: r.try_get("label").unwrap_or_default(),
-                login: r.try_get::<Option<String>, _>("github_login").unwrap_or(None),
+                login: r
+                    .try_get::<Option<String>, _>("github_login")
+                    .unwrap_or(None),
                 avatar_url: r.try_get::<Option<String>, _>("avatar_url").unwrap_or(None),
                 commits: r.try_get("commits").unwrap_or(0),
             })
@@ -1748,7 +1782,12 @@ async fn ensure_bus_factor_svg(
         for (author, avatar) in authors.iter_mut().zip(avatars) {
             author.avatar_url = avatar;
         }
-        Ok(repo_charts::render_bus_factor(full, &authors, total_commits, theme))
+        Ok(repo_charts::render_bus_factor(
+            full,
+            &authors,
+            total_commits,
+            theme,
+        ))
     })
     .await?;
     Ok((cache_key, svg))
@@ -1926,6 +1965,75 @@ mod tests {
                 .await
                 .expect("cleanup health rows");
         }
+    }
+
+    /// One person committing from several addresses is one contributor, and
+    /// two people who only share a name are two. The per-email rows used to
+    /// rank separately, which listed the same person more than once and
+    /// spread their commits across the list.
+    #[tokio::test]
+    async fn repo_health_counts_people_not_email_addresses() {
+        let Some(db) = crate::test_db::shared().await else {
+            eprintln!("skipping: set GITDEBT_TEST_DATABASE_URL to run");
+            return;
+        };
+        let pool = &db.pool;
+        let repo = "gitdebt-test-health/identities";
+        cleanup_health_rows(pool, repo).await;
+
+        sqlx::query(
+            "INSERT INTO repos (repo, star_count, missing, metadata_fetched_at, archived) \
+             VALUES ($1, 10, FALSE, NOW(), FALSE)",
+        )
+        .bind(repo)
+        .execute(pool)
+        .await
+        .expect("seed repo");
+        sqlx::query(
+            "INSERT INTO repo_history (repo, total_commits, last_analyzed_at) \
+             VALUES ($1, 130, NOW())",
+        )
+        .bind(repo)
+        .execute(pool)
+        .await
+        .expect("seed history");
+
+        // `a` twice by login, once with different case; two strangers who
+        // share the name "root" and have no login; `c` once.
+        for (email, name, login, commits) in [
+            ("a-work@example.com", "A", Some("a"), 30),
+            ("a-home@example.com", "A at home", Some("A"), 25),
+            ("root@host-1.example.com", "root", None, 20),
+            ("root@host-2.example.com", "root", None, 15),
+            ("c@example.com", "C", Some("c"), 40),
+        ] {
+            sqlx::query(
+                "INSERT INTO repo_author_stats \
+                    (repo, author_email, author_name, github_login, commits) \
+                 VALUES ($1, $2, $3, $4, $5)",
+            )
+            .bind(repo)
+            .bind(email)
+            .bind(name)
+            .bind(login)
+            .bind(commits as i64)
+            .execute(pool)
+            .await
+            .expect("seed author");
+        }
+
+        let body = load_repo_health(pool, repo)
+            .await
+            .expect("health query")
+            .expect("analyzed repository has a summary");
+        cleanup_health_rows(pool, repo).await;
+
+        assert_eq!(body["attributed_commits"], serde_json::json!(130));
+        // a, c and the two "root" strangers, who stay apart.
+        assert_eq!(body["contributors"], serde_json::json!(4));
+        assert_eq!(body["top_author_commits"], serde_json::json!(55));
+        // 55 of 130 is under half; 55 + 40 passes it.
+        assert_eq!(body["bus_factor"], serde_json::json!(2));
     }
 
     /// The summary is five aggregate queries across five tables. A renamed

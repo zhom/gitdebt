@@ -132,6 +132,15 @@ const NAV_LINK =
       </details>
     </div>
   </div>
+
+  {/* The reading index. On a long sheet the frame line under the header is
+      also a dimension of the page: a tick for every section heading, and a
+      line measured out to where the reader is. It is hidden until a script
+      has measured the page, and it is only ever shown when the page is long
+      enough for a reader to lose their place in it. */}
+  <div class="reading-index" data-reading-index hidden aria-hidden="true">
+    <span class="reading-index-line"></span>
+  </div>
 </header>
 
 <style>
@@ -182,7 +191,115 @@ const NAV_LINK =
       transition-property: opacity;
     }
   }
+
+  .reading-index {
+    position: absolute;
+    inset-inline: 0;
+    bottom: -1px;
+    height: 1px;
+    pointer-events: none;
+  }
+
+  .reading-index-line {
+    position: absolute;
+    inset: 0;
+    background-color: var(--ink);
+    transform: scaleX(var(--read, 0));
+    transform-origin: left center;
+  }
+
+  /* The ticks are created by the script below, so they carry no scope
+     attribute and are reached through `:global`. */
+  .reading-index :global(.reading-index-tick) {
+    position: absolute;
+    bottom: 0;
+    width: 1px;
+    height: 5px;
+    background-color: var(--rule-strong);
+    transition: background-color var(--duration-ui) linear;
+  }
+
+  .reading-index :global(.reading-index-tick[data-passed]) {
+    background-color: var(--ink);
+  }
+
+  @media print {
+    .reading-index {
+      display: none;
+    }
+  }
 </style>
+
+<script>
+  /**
+   * The reading index: the page measured along the header's frame line.
+   *
+   * Every datum is real. A tick stands where a section heading sits in the
+   * page, and the line runs out to the reader's own position. Nothing animates
+   * on a timer: the line moves only as the reader scrolls, which is direct
+   * manipulation, so it follows the page under reduced motion too.
+   */
+  function installReadingIndex(root: HTMLElement) {
+    const line = root.querySelector<HTMLElement>(".reading-index-line");
+    const header = root.closest("header");
+    if (!line || !header) return;
+    let ticks: { el: HTMLElement; at: number }[] = [];
+    let max = 0;
+    let frame = 0;
+
+    const update = () => {
+      frame = 0;
+      const read = max > 0 ? Math.min(1, Math.max(0, window.scrollY / max)) : 0;
+      root.style.setProperty("--read", read.toFixed(4));
+      for (const tick of ticks) tick.el.toggleAttribute("data-passed", tick.at <= read + 0.001);
+    };
+
+    const measure = () => {
+      max = document.documentElement.scrollHeight - window.innerHeight;
+      const long = max > window.innerHeight * 2.5;
+      root.hidden = !long;
+      for (const tick of ticks) tick.el.remove();
+      ticks = [];
+      if (!long) return;
+      const offset = header.getBoundingClientRect().height + 16;
+      for (const heading of document.querySelectorAll<HTMLElement>("main h2")) {
+        const box = heading.getBoundingClientRect();
+        if (box.height === 0 || heading.closest(".sr-only")) continue;
+        const at = Math.min(1, Math.max(0, (box.top + window.scrollY - offset) / max));
+        const el = document.createElement("span");
+        el.className = "reading-index-tick";
+        el.style.left = `calc(${(at * 100).toFixed(3)}% - 0.5px)`;
+        root.append(el);
+        ticks.push({ el, at });
+      }
+      update();
+    };
+
+    let measuring = 0;
+    const remeasure = () => {
+      window.clearTimeout(measuring);
+      measuring = window.setTimeout(measure, 150);
+    };
+
+    window.addEventListener(
+      "scroll",
+      () => {
+        if (!frame) frame = requestAnimationFrame(update);
+      },
+      { passive: true },
+    );
+    window.addEventListener("resize", remeasure, { passive: true });
+    // A report fills in as its sections land, so the page grows after load.
+    if (typeof ResizeObserver === "function") {
+      new ResizeObserver(remeasure).observe(document.body);
+    }
+    measure();
+  }
+
+  document
+    .querySelectorAll<HTMLElement>("[data-reading-index]")
+    .forEach(installReadingIndex);
+</script>
 
 <script>
   const CLOSE_MS = 140;

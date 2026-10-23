@@ -1,6 +1,6 @@
 # syntax=docker/dockerfile:1.7
 
-FROM rust:1.99.0-trixie AS builder
+FROM rust:1.99.1-trixie AS builder
 
 WORKDIR /app
 

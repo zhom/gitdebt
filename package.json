@@ -29,5 +29,10 @@
   "devDependencies": {
     "concurrently": "^10.0.6"
   },
-  "packageManager": "pnpm@12.15.0"
+  "devEngines": {
+    "packageManager": {
+      "name": "pnpm",
+      "version": "^12.15.0"
+    }
+  }
 }

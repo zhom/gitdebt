@@ -44,7 +44,7 @@ jobs:
     steps:
       - uses: actions/checkout@v7
 
-      - uses: dtolnay/rust-toolchain@1.99.1
+      - uses: dtolnay/rust-toolchain@stable
         with:
           components: clippy, rustfmt
       - uses: Swatinem/rust-cache@v2
@@ -85,7 +85,7 @@ jobs:
 
       - uses: actions/setup-node@v7
         with:
-          node-version: 22.23.4
+          node-version: lts/*
           cache: pnpm
 
       - run: pnpm install --frozen-lockfile
@@ -104,7 +104,7 @@ jobs:
 
       - uses: actions/setup-node@v7
         with:
-          node-version: 22.23.4
+          node-version: lts/*
 
       - run: npm --prefix extension ci
       - run: npm --prefix extension run package

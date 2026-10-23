@@ -1,4 +1,4 @@
-import { useMemo, useRef, useState } from "react";
+import { useId, useMemo, useRef, useState } from "react";
 
 import {
   ChartFrame,
@@ -6,6 +6,7 @@ import {
   clamp01,
   fullDate,
   pathData,
+  polylineLength,
   shortDate,
   spanLabel,
   stride,
@@ -316,6 +317,7 @@ function ComparisonPlot({
   logScale: boolean;
   height: number;
 }) {
+  const uid = useId();
   const rootRef = useRef<HTMLDivElement>(null);
   const svgRef = useRef<SVGSVGElement>(null);
   const width = usePlotWidth(rootRef);
@@ -375,6 +377,7 @@ function ComparisonPlot({
         pen: PENS[item.pen],
         points: item.points,
         d: pathData(vertices),
+        length: polylineLength(vertices),
         start: vertices[0],
         end: vertices[vertices.length - 1],
         last: item.points[item.points.length - 1],
@@ -442,8 +445,14 @@ function ComparisonPlot({
     );
   }
 
+  /** The plotter changes pens between series: each one starts a beat after
+   *  the one before, in pen order, and is labelled when it lands. */
+  const PEN_STAGGER = 150;
+  /** A new scale or axis is a new drawing, so the pens draw it again. */
+  const drawing = `${axis}:${logScale}:${minDate}:${maxDate}`;
+
   return (
-    <div ref={rootRef}>
+    <div ref={rootRef} data-draw>
       <svg
         ref={svgRef}
         viewBox={`0 0 ${width} ${height}`}
@@ -518,7 +527,41 @@ function ComparisonPlot({
 
         {/* ── The objects. Pen colour and dash pattern both, so no reading
             depends on telling two hues apart. ──────────────────────────── */}
-        {traces.map((trace) => (
+        {/* A dashed trace cannot ink in by its own dash offset, because its
+            dash IS its identity. So each one is revealed through a mask whose
+            solid twin inks in along the same path, which keeps the reveal on
+            the line's own length rather than wiping the sheet left to right.
+            The mask is complete in the markup; if it never animates, the
+            trace is simply drawn. */}
+        <defs>
+          {traces.map((trace, index) => (
+            <mask
+              key={`${drawing}:${trace.slug}`}
+              id={`${uid}-ink-${index}`}
+              maskUnits="userSpaceOnUse"
+              x="0"
+              y="0"
+              width={width}
+              height={height}
+            >
+              <path
+                d={trace.d}
+                fill="none"
+                stroke="white"
+                strokeWidth="7"
+                strokeLinejoin="round"
+                strokeLinecap="round"
+                className="inks-in"
+                style={{
+                  ["--draw-length" as string]: String(trace.length),
+                  ["--draw-delay" as string]: `${index * PEN_STAGGER}ms`,
+                }}
+              />
+            </mask>
+          ))}
+        </defs>
+
+        {traces.map((trace, index) => (
           <path
             key={trace.slug}
             d={trace.d}
@@ -529,7 +572,23 @@ function ComparisonPlot({
             strokeLinejoin="round"
             strokeLinecap="round"
             vectorEffect="non-scaling-stroke"
+            mask={`url(#${uid}-ink-${index})`}
           />
+        ))}
+
+        {traces.map((trace, index) => (
+          <g
+            key={`${drawing}:${trace.slug}`}
+            className="pen"
+            style={{
+              offsetPath: `path("${trace.d}")`,
+              ["--draw-delay" as string]: `${index * PEN_STAGGER}ms`,
+            }}
+            aria-hidden="true"
+          >
+            <circle r="5" fill="var(--paper)" stroke={trace.pen.stroke} strokeWidth="1" />
+            <circle r="1.75" fill={trace.pen.stroke} />
+          </g>
         ))}
 
         {/* ── The section line: where the sheet is being read. It terminates
@@ -555,7 +614,7 @@ function ComparisonPlot({
         )}
 
         {/* ── Every series labelled at its own line end, on a leader. ───── */}
-        {readings.map(({ trace, reading }) => {
+        {readings.map(({ trace, reading }, index) => {
           const y = labelY.get(trace.slug) ?? trace.end.y;
           // With no reading the pointer is left of where this series begins,
           // so the leader lands on its first plotted point — the nearest thing
@@ -574,21 +633,32 @@ function ComparisonPlot({
                 : Math.min(probeX, trace.end.x);
           return (
             <g key={trace.slug}>
-              <path
-                d={`M${markX.toFixed(2)} ${markY.toFixed(2)} L${(plotR + 8).toFixed(2)} ${y.toFixed(2)} L${(plotR + 13).toFixed(2)} ${y.toFixed(2)}`}
-                fill="none"
-                stroke={trace.pen.stroke}
-                strokeWidth="1"
-                strokeLinecap="round"
-                strokeLinejoin="round"
-                opacity="0.75"
-              />
-              <circle
-                cx={Number(markX.toFixed(2))}
-                cy={Number(markY.toFixed(2))}
-                r="2.5"
-                fill={trace.pen.stroke}
-              />
+              {/* The leader is notation: it is drawn when this series' pen
+                  lands. The name and the value are content and are lettered
+                  at first paint. */}
+              <g
+                key={drawing}
+                className="measures"
+                style={{
+                  ["--draw-delay" as string]: `calc(${index * PEN_STAGGER}ms + var(--duration-draw))`,
+                }}
+              >
+                <path
+                  d={`M${markX.toFixed(2)} ${markY.toFixed(2)} L${(plotR + 8).toFixed(2)} ${y.toFixed(2)} L${(plotR + 13).toFixed(2)} ${y.toFixed(2)}`}
+                  fill="none"
+                  stroke={trace.pen.stroke}
+                  strokeWidth="1"
+                  strokeLinecap="round"
+                  strokeLinejoin="round"
+                  opacity="0.75"
+                />
+                <circle
+                  cx={Number(markX.toFixed(2))}
+                  cy={Number(markY.toFixed(2))}
+                  r="2.5"
+                  fill={trace.pen.stroke}
+                />
+              </g>
               <text
                 x={plotR + 17}
                 y={y}

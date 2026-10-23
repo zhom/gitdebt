@@ -149,6 +149,7 @@ export function ThemeEmbedPreview() {
     <figure
       className="border border-rule-strong bg-paper"
       aria-labelledby="theme-preview-caption"
+      data-draw
     >
       <figcaption
         id="theme-preview-caption"

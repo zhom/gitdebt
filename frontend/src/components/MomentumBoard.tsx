@@ -16,12 +16,13 @@ export type { MomentumRow, Trend };
  * scale. A short heavy line past a long hairline is a repository spiking today;
  * a hairline with almost no heavy line over it is one coasting on last week.
  *
- * It is SVG, not a canvas, and it does not animate. What was here before was a
- * single canvas painting fifty rippling textured bars at sixty frames a second,
- * which meant the entire ranking was invisible to a screen reader, to an agent,
- * and to any browser that had not run the script yet. The numbers now sit in
- * the markup, the bars are drawn from the same numbers, and nothing on this
- * board waits for JavaScript to exist.
+ * It is SVG, not a canvas. What was here before was a single canvas painting
+ * fifty rippling textured bars at sixty frames a second, which meant the entire
+ * ranking was invisible to a screen reader, to an agent, and to any browser
+ * that had not run the script yet. The numbers now sit in the markup, the bars
+ * are drawn from the same numbers, and nothing on this board waits for
+ * JavaScript to exist. The only motion is the measurement itself: each row's
+ * extents run out from the datum in rank order, over bars already drawn.
  */
 export type MomentumVariant = "full" | "compact";
 
@@ -111,11 +112,12 @@ function TrendMark({ trend }: { trend: Trend }) {
  * the board is measured from, which is what makes fifty rows comparable at a
  * glance; the tick at the end of the hairline is that measurement's terminator.
  */
-function PaceBar({ band }: { band: Band }) {
+function PaceBar({ band, delay }: { band: Band; delay: number }) {
   const body = Math.max(0.6, band.share * 100);
   const head = band.head * 100;
   return (
     <svg
+      style={{ ["--draw-delay" as string]: `${delay}ms` }}
       viewBox="0 0 100 12"
       preserveAspectRatio="none"
       width="100%"
@@ -145,6 +147,7 @@ function PaceBar({ band }: { band: Band }) {
           stroke="var(--ink-3)"
           strokeWidth="1"
           vectorEffect="non-scaling-stroke"
+          className="extends"
         />
         <line
           x1={body}
@@ -154,6 +157,8 @@ function PaceBar({ band }: { band: Band }) {
           stroke="var(--rule-strong)"
           strokeWidth="1"
           vectorEffect="non-scaling-stroke"
+          className="measures"
+          style={{ animationDelay: "calc(var(--draw-delay) + var(--duration-measure))" }}
         />
         {head > 0.6 && (
           <line
@@ -164,6 +169,8 @@ function PaceBar({ band }: { band: Band }) {
             stroke="var(--ink)"
             strokeWidth="2"
             vectorEffect="non-scaling-stroke"
+            className="extends"
+            style={{ animationDelay: "calc(var(--draw-delay) + 90ms)" }}
           />
         )}
       </g>
@@ -198,7 +205,7 @@ export function MomentumBoard({ rows, variant = "full" }: MomentumBoardProps) {
   const head = cn(FIELD, "px-2 py-2 text-right");
 
   return (
-    <div className="border border-rule-strong bg-paper">
+    <div className="border border-rule-strong bg-paper" data-draw>
       <div className={cn(grid, "items-center border-b border-rule-strong")}>
         <span className={cn(head, "text-left")}>#</span>
         <span className={cn(head, "hidden text-left sm:block")}>
@@ -225,7 +232,7 @@ export function MomentumBoard({ rows, variant = "full" }: MomentumBoardProps) {
               >
                 <span className={cn(DATUM, "px-2 text-ink-3")}>{index + 1}</span>
                 <span className="hidden px-2 sm:block">
-                  <PaceBar band={bands[index]} />
+                  <PaceBar band={bands[index]} delay={Math.min(index, 14) * 45} />
                 </span>
                 <span className="flex min-w-0 items-center gap-2 px-2">
                   <TrendMark trend={trend} />

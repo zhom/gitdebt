@@ -35,7 +35,10 @@ change can silently break.
   waiting for JavaScript, a timeline, or an observer. Charts render as
   server-side SVG plus a screen-reader table, so the data is in the markup
   before any script runs. Motion is the pen travelling over a finished drawing,
-  and every animation resolves instantly under `prefers-reduced-motion`.
+  and every animation resolves instantly under `prefers-reduced-motion`. The
+  one rewind is `lib/draw-on-view.ts`: a `[data-draw]` drawing replays as it
+  scrolls into view, rewound only after a person has scrolled and only while
+  it is wholly off-screen, so nothing visible is ever hidden.
 - The site's `globals.css` holds the palette in oklch and `backend/src/theme.rs`
   holds the same colours as hex. They must not drift: if they do, a chart stops
   belonging to the page that embeds it.

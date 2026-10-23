@@ -1,6 +1,8 @@
 import {
   useEffect,
   useId,
+  useLayoutEffect,
+  useRef,
   useState,
   type ReactNode,
   type RefObject,
@@ -10,6 +12,7 @@ import { FIELD, PANEL } from "@/components/style-tokens";
 import { Button } from "@/components/ui/button";
 import { CONTROL, Segmented, Separator } from "@/components/ui/controls";
 import { Terminator } from "@/components/ui/marks";
+import { SPRING } from "@/lib/motion";
 import { cn } from "@/lib/utils";
 
 /**
@@ -215,6 +218,82 @@ export function usePlotWidth(
   }, [ref]);
 
   return width;
+}
+
+/**
+ * The leader follows the pointer the way a hand moves a pen: it travels to the
+ * next datum instead of teleporting there.
+ *
+ * React renders the leader at its target, so the markup, the first paint and
+ * the settled state are always the true reading. When the target moves, this
+ * puts the drawn leader back where it was before that frame paints and springs
+ * it to the target, writing attributes directly so a 240-row table is not
+ * re-rendered sixty times a second. The last frame writes exactly what React
+ * rendered, so the two agree the moment it settles. Reduced motion jumps.
+ */
+export function useLeaderFollow(
+  x: number,
+  y: number,
+  draw: (x: number, y: number) => void,
+  /** Changes when the sheet itself is redrawn (a resize, a new range). The
+   *  leader then moves with the drawing instead of chasing it. */
+  layoutKey: string | number = "",
+) {
+  const state = useRef<{ x: number; y: number; vx: number; vy: number } | null>(
+    null,
+  );
+  const layout = useRef(layoutKey);
+  const drawRef = useRef(draw);
+  drawRef.current = draw;
+
+  useLayoutEffect(() => {
+    const current = state.current;
+    const relaid = layout.current !== layoutKey;
+    layout.current = layoutKey;
+    const reduced =
+      typeof window.matchMedia === "function" &&
+      window.matchMedia("(prefers-reduced-motion: reduce)").matches;
+    if (!current || reduced || relaid) {
+      state.current = { x, y, vx: 0, vy: 0 };
+      // A spring cut short leaves attributes React will not rewrite, because
+      // their props did not change. Put every drawn part on the target.
+      drawRef.current(x, y);
+      return;
+    }
+    if (current.x === x && current.y === y) return;
+
+    drawRef.current(current.x, current.y);
+    const { stiffness, damping, mass } = SPRING.follow;
+    let frame = 0;
+    let last = performance.now();
+    const step = (now: number) => {
+      let remaining = Math.min(0.05, (now - last) / 1000);
+      last = now;
+      // Semi-implicit Euler in small steps: stable for this stiffness at any
+      // frame rate a browser actually delivers.
+      while (remaining > 0) {
+        const dt = Math.min(remaining, 1 / 240);
+        remaining -= dt;
+        current.vx += ((-stiffness * (current.x - x) - damping * current.vx) / mass) * dt;
+        current.vy += ((-stiffness * (current.y - y) - damping * current.vy) / mass) * dt;
+        current.x += current.vx * dt;
+        current.y += current.vy * dt;
+      }
+      const settled =
+        Math.abs(current.x - x) < 0.05 &&
+        Math.abs(current.y - y) < 0.05 &&
+        Math.abs(current.vx) + Math.abs(current.vy) < 1;
+      if (settled) {
+        Object.assign(current, { x, y, vx: 0, vy: 0 });
+        drawRef.current(x, y);
+        return;
+      }
+      drawRef.current(current.x, current.y);
+      frame = requestAnimationFrame(step);
+    };
+    frame = requestAnimationFrame(step);
+    return () => cancelAnimationFrame(frame);
+  }, [x, y, layoutKey]);
 }
 
 /* ── The sheet ───────────────────────────────────────────────────────────── */

@@ -3,8 +3,10 @@ export const prerender = true;
 
 import Sheet from "@/layouts/Sheet.astro";
 import { ButtonLink } from "@/components/ButtonLink";
+import { ComparisonSheet } from "@/components/ComparisonSheet";
 import { LandingRepoLookup } from "@/components/LandingRepoLookup";
 import { MomentumBoard } from "@/components/MomentumBoard";
+import { CommitColumns, Measure } from "@/components/RepoHealthScorecard";
 import { StarSheet } from "@/components/StarSheet";
 import { ThemeEmbedPreview } from "@/components/ThemeEmbedPreview";
 import { WarmRepos } from "@/components/WarmRepos";
@@ -23,6 +25,11 @@ import {
 import { CATEGORIES } from "@/data/categories";
 import { loadBuildRepoSnapshot } from "@/lib/build-repo-snapshot";
 import { heroMomentumRows, type LeaderboardResponse } from "@/lib/hero-momentum";
+import {
+  commitMonthPoints,
+  healthReadings,
+  type RepoHealth,
+} from "@/lib/repo-health";
 import {
   coverageLabel,
   historyFreshness,
@@ -108,7 +115,7 @@ const fetchBoard = (days: 1 | 7 | 30) =>
  */
 const HERO_REPO = "facebook/react";
 
-const [analyzedRepos, monthBoard, weekBoard, dayBoard, heroSnapshot] =
+const [analyzedRepos, monthBoard, weekBoard, dayBoard, heroSnapshot, heroHealth] =
   await Promise.all([
     (async () => {
       const result = await fetchJson<{ total?: number }>(
@@ -120,6 +127,7 @@ const [analyzedRepos, monthBoard, weekBoard, dayBoard, heroSnapshot] =
     fetchBoard(7),
     fetchBoard(1),
     loadBuildRepoSnapshot(HERO_REPO),
+    fetchJson<RepoHealth>(`${apiBase}/api/repos/${HERO_REPO}/health.json`),
   ]);
 
 const heroData = heroSnapshot.data;
@@ -165,9 +173,42 @@ const featuredCategories = [
   const category = CATEGORIES.find((c) => c.slug === slug);
   return category ? [category] : [];
 });
+
+/**
+ * The comparison is shown, not described: the first featured category drawn
+ * from the same build snapshots its own page uses, so this costs no extra
+ * request. Each series is thinned to the resolution the sheet can plot, which
+ * keeps the island's props small without inventing a single reading.
+ */
+const SPECIMEN_POINTS = 200;
+const specimenCategory = featuredCategories[0];
+const specimenSnapshots = specimenCategory
+  ? await Promise.all(specimenCategory.repos.map((slug) => loadBuildRepoSnapshot(slug)))
+  : [];
+const specimenSeries = (specimenCategory?.repos ?? []).flatMap((slug, index) => {
+  const history = specimenSnapshots[index]?.data?.history ?? [];
+  if (history.length < 2) return [];
+  const step = Math.max(1, (history.length - 1) / (SPECIMEN_POINTS - 1));
+  const points =
+    history.length <= SPECIMEN_POINTS
+      ? history
+      : Array.from({ length: SPECIMEN_POINTS }, (_, i) => history[Math.round(i * step)]);
+  return [{ slug, points }];
+});
 const landingWarmRepos = Array.from(
   new Set(featuredCategories.flatMap((c) => c.repos)),
 );
+
+/**
+ * The same four readings taken on the hero's repository, so the section shows
+ * the measurement instead of only naming it. Absent when the build could not
+ * read the health endpoint; the definitions then stand on their own.
+ */
+const heroReadings =
+  heroHealth?.ready === true ? healthReadings(heroHealth) : [];
+const heroMonths = heroHealth?.ready === true ? commitMonthPoints(heroHealth) : [];
+const heroMonthCommits = heroMonths.reduce((total, point) => total + point.value, 0);
+const heroBusiestMonth = Math.max(0, ...heroMonths.map((point) => point.value));
 
 /** The four readings the commit history yields. Real, and named exactly. */
 const readings = [
@@ -275,19 +316,62 @@ const readings = [
         do.
       </p>
 
-      <dl class="mt-10 grid grid-cols-1 border border-rule-strong bg-paper sm:grid-cols-2 lg:grid-cols-4 divide-y sm:divide-y-0 lg:divide-x divide-rule">
+      {/* Each cell states what the reading is, then takes it on the hero's
+          repository. The grid rows are shared, so every verdict, every
+          measure and every note lands on one line across the row whatever
+          the copy above it says. */}
+      <dl
+        class="mt-10 grid grid-cols-1 border border-rule-strong bg-paper sm:grid-cols-2 lg:grid-cols-4 divide-y sm:divide-y-0 lg:divide-x divide-rule"
+        data-draw
+      >
         {
-          readings.map((reading) => (
-            <div class="p-5">
-              <dt class={FIELD}>{reading.field}</dt>
-              <dd class="mt-2.5 font-draft text-[1.0625rem] text-ink">
-                {reading.value}
-              </dd>
-              <dd class:list={["mt-2", CAPTION]}>{reading.note}</dd>
-            </div>
-          ))
+          readings.map((reading, index) => {
+            const taken = heroReadings[index];
+            return (
+              <div class="row-span-7 grid grid-rows-subgrid gap-y-0 p-5">
+                <dt class={FIELD}>{reading.field}</dt>
+                <dd class="mt-2.5 font-draft text-[1.0625rem] text-ink">
+                  {reading.value}
+                </dd>
+                <dd class:list={["mt-2", CAPTION]}>{reading.note}</dd>
+                {taken ? (
+                  <>
+                    <dd class="mt-5 border-t border-rule pt-4">
+                      <span class={FIELD}>{HERO_REPO}</span>
+                    </dd>
+                    <dd class="mt-2 font-draft text-[1.0625rem] leading-tight text-ink">
+                      {taken.verdict}
+                    </dd>
+                    <dd class="mt-3">
+                      <Measure
+                        ratio={taken.ratio}
+                        warn={taken.tone === "risk"}
+                        delay={180 + index * 110}
+                      />
+                    </dd>
+                    <dd class:list={["mt-2.5", CAPTION]}>{taken.detail}</dd>
+                  </>
+                ) : null}
+              </div>
+            );
+          })
         }
       </dl>
+
+      {heroMonthCommits > 0 && (
+        <figure class="mt-6 border border-rule-strong bg-paper">
+          <figcaption class="flex flex-wrap items-baseline justify-between gap-x-6 gap-y-1 border-b border-rule px-5 py-3">
+            <span class={FIELD}>Commits per month — {HERO_REPO}</span>
+            <span class={CAPTION}>
+              {nf.format(heroMonthCommits)} commits in the last {heroMonths.length} months
+              · busiest month {nf.format(heroBusiestMonth)}
+            </span>
+          </figcaption>
+          <div class="px-5 py-4">
+            <CommitColumns points={heroMonths} height={96} />
+          </div>
+        </figure>
+      )}
 
       <div class="mt-8">
         <ButtonLink href={`/${HERO_REPO}`} variant="primary">
@@ -329,6 +413,21 @@ const readings = [
         time and equal-start growth, so a project launched last year can be read
         against one launched in 2015.
       </p>
+
+      {specimenCategory && specimenSeries.length >= 2 && (
+        <div class="mt-8 min-w-0">
+          <ComparisonSheet
+            client:visible
+            apiBase={apiBase}
+            path={`/api/chart.svg?repos=${encodeURIComponent(specimenCategory.repos.join(","))}`}
+            caption={`${specimenCategory.name} — star history`}
+            embedLink={`${site}/compare/${specimenCategory.slug}`}
+            label={specimenCategory.name}
+            series={specimenSeries}
+            height={420}
+          />
+        </div>
+      )}
 
       <ul role="list" class="mt-8 grid gap-px border border-rule-strong bg-rule sm:grid-cols-2 lg:grid-cols-4">
         {

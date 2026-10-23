@@ -207,11 +207,21 @@ function Placeholder({
  * bar. The tick at its end is the terminator, and the tick at the origin is the
  * datum the reading is taken from.
  */
-function Measure({ ratio, warn }: { ratio: number; warn: boolean }) {
+export function Measure({
+  ratio,
+  warn,
+  delay = 0,
+}: {
+  ratio: number;
+  warn: boolean;
+  /** When this reading is measured, after the ones before it. */
+  delay?: number;
+}) {
   const extent = Math.min(100, Math.max(0, ratio * 100));
   const ink = warn ? "var(--signal)" : "var(--ink)";
   return (
     <svg
+      style={{ ["--draw-delay" as string]: `${delay}ms` }}
       viewBox="0 0 100 10"
       preserveAspectRatio="none"
       width="100%"
@@ -248,6 +258,7 @@ function Measure({ ratio, warn }: { ratio: number; warn: boolean }) {
             stroke={ink}
             strokeWidth="2"
             vectorEffect="non-scaling-stroke"
+            className="extends"
           />
         )}
         <line
@@ -258,6 +269,8 @@ function Measure({ ratio, warn }: { ratio: number; warn: boolean }) {
           stroke={ink}
           strokeWidth="1"
           vectorEffect="non-scaling-stroke"
+          className="measures"
+          style={{ animationDelay: "calc(var(--draw-delay) + var(--duration-measure))" }}
         />
       </g>
     </svg>
@@ -271,10 +284,14 @@ function Measure({ ratio, warn }: { ratio: number; warn: boolean }) {
  * measured continuously, and the sheet already carries the trace grammar for
  * the things that are.
  */
-function CommitColumns({
+/** Each month's column is measured up from the baseline in turn, oldest
+ *  first, so the window reads left to right the way it was lived. */
+export function CommitColumns({
   points,
+  height = 150,
 }: {
   points: { date: string; value: number }[];
+  height?: number;
 }) {
   const max = Math.max(1, ...points.map((point) => point.value));
   const width = Math.max(1, points.length);
@@ -283,25 +300,32 @@ function CommitColumns({
       viewBox={`0 0 ${width} 100`}
       preserveAspectRatio="none"
       width="100%"
-      height="150"
+      height={height}
       aria-hidden="true"
       focusable="false"
       className="block"
+      data-draw
     >
       {points.map((point, index) => {
-        const height = (point.value / max) * 88;
-        if (height <= 0) return null;
+        const extent = (point.value / max) * 88;
+        if (extent <= 0) return null;
         return (
           <line
             key={point.date}
             x1={index + 0.5}
             y1={99}
             x2={index + 0.5}
-            y2={99 - height}
+            y2={99 - extent}
             stroke="var(--ink-2)"
             strokeWidth="3"
             strokeLinecap="butt"
             vectorEffect="non-scaling-stroke"
+            className="rises"
+            style={{
+              // Host pixels: the sheet is `height` px tall over 100 units.
+              ["--draw-length" as string]: String(Math.ceil((extent * height) / 100) + 1),
+              ["--draw-delay" as string]: `${index * 22}ms`,
+            }}
           />
         );
       })}
@@ -318,7 +342,13 @@ function CommitColumns({
   );
 }
 
-function Reading({ reading }: { reading: HealthReading }) {
+function Reading({
+  reading,
+  delay = 0,
+}: {
+  reading: HealthReading;
+  delay?: number;
+}) {
   return (
     <section className={FIELD_CELL}>
       <h4 className={FIELD}>{reading.label}</h4>
@@ -326,7 +356,11 @@ function Reading({ reading }: { reading: HealthReading }) {
         {reading.verdict}
       </p>
       <div className="mt-3">
-        <Measure ratio={reading.ratio} warn={reading.tone === "risk"} />
+        <Measure
+          ratio={reading.ratio}
+          warn={reading.tone === "risk"}
+          delay={delay}
+        />
       </div>
       <div className="mt-2.5">
         <p className={CAPTION}>{reading.detail}</p>
@@ -368,9 +402,12 @@ function Scorecard({ health }: { health: RepoHealth }) {
 
       {/* Four readings, four rows, one grid: no verdict's length can move the
           bar or the note in the cell beside it. */}
-      <div className="mt-8 grid grid-rows-[auto_auto_auto_auto] gap-x-10 gap-y-8 sm:grid-cols-2">
-        {readings.map((reading) => (
-          <Reading key={reading.key} reading={reading} />
+      <div
+        className="mt-8 grid grid-rows-[auto_auto_auto_auto] gap-x-10 gap-y-8 sm:grid-cols-2"
+        data-draw
+      >
+        {readings.map((reading, index) => (
+          <Reading key={reading.key} reading={reading} delay={index * 90} />
         ))}
       </div>
 

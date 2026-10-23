@@ -5,7 +5,8 @@ import {
   formatFullDate,
   formatMonthYear,
 } from "@/lib/star-insights";
-import { usePlotWidth } from "@/components/ChartFrame";
+import { useLeaderFollow, usePlotWidth } from "@/components/ChartFrame";
+import { traceMilestones, type Box } from "@/lib/trace-marks";
 
 /**
  * The signature artifact: a repository's star history drawn as a dimensioned
@@ -122,6 +123,11 @@ export function StarSheet({
   const uid = useId();
   const svgRef = useRef<SVGSVGElement>(null);
   const frameRef = useRef<HTMLElement>(null);
+  const dropRef = useRef<SVGLineElement>(null);
+  const leaderRef = useRef<SVGLineElement>(null);
+  const headRef = useRef<SVGGElement>(null);
+  const valueRef = useRef<SVGTextElement>(null);
+  const stampRef = useRef<SVGTextElement>(null);
   const viewW = usePlotWidth(frameRef, FALLBACK_W);
   const narrow = viewW < NARROW;
   /**
@@ -214,7 +220,47 @@ export function StarSheet({
     [geometry, viewW],
   );
 
-  if (!geometry) {
+  const marks = useMemo(() => {
+    if (!geometry) return [];
+    const { points, baselineY, first } = geometry;
+    const stampWidth = stampDate(first.date).length * dateSize * 0.56;
+    const reserved: Box[] = [
+      // The origin stamp and its dot.
+      {
+        x0: first.x - 4,
+        y0: first.y - 12 - dateSize,
+        x1: first.x + stampWidth + 4,
+        y1: first.y + 4,
+      },
+      // The value column at the right margin.
+      { x0: viewW - padR - 6, y0: 0, x1: viewW, y1: height },
+    ];
+    return traceMilestones(
+      points.map((p) => ({ x: p.x, y: p.y, value: p.stars })),
+      { baselineY, fontSize: dateSize, avoid: reserved },
+    );
+  }, [geometry, dateSize, viewW, padR, height]);
+
+  const active = geometry
+    ? probe === null
+      ? geometry.last
+      : geometry.points[probe]
+    : null;
+
+  useLeaderFollow(active?.x ?? 0, active?.y ?? 0, (x, y) => {
+    const base = geometry?.baselineY ?? 0;
+    dropRef.current?.setAttribute("x1", String(x));
+    dropRef.current?.setAttribute("x2", String(x));
+    dropRef.current?.setAttribute("y1", String(y));
+    leaderRef.current?.setAttribute("x1", String(x));
+    leaderRef.current?.setAttribute("y1", String(y));
+    leaderRef.current?.setAttribute("y2", String(y));
+    headRef.current?.setAttribute("transform", `translate(${x} ${y})`);
+    valueRef.current?.setAttribute("y", String(y));
+    stampRef.current?.setAttribute("y", String(Math.min(base + 6, y + 15)));
+  }, `${viewW}:${height}`);
+
+  if (!geometry || !active) {
     return (
       <p className="text-[0.8125rem] text-ink-3">
         Not enough history to draw {repo}.
@@ -223,12 +269,11 @@ export function StarSheet({
   }
 
   const { points, d, length, baselineY, first, last } = geometry;
-  const active = probe === null ? points[points.length - 1] : points[probe];
   const isProbing = probe !== null;
   const span = spanLabel(first.date, last.date);
 
   return (
-    <figure ref={frameRef} className={className}>
+    <figure ref={frameRef} className={className} data-draw>
       <svg
         ref={svgRef}
         viewBox={`0 0 ${viewW} ${height}`}
@@ -309,6 +354,66 @@ export function StarSheet({
           vectorEffect="non-scaling-stroke"
         />
 
+        {/* ── Milestones. Each round number the trace crosses is projected
+            onto the baseline the moment the pen reaches it: the drop line
+            falls from the datum and the datum is marked. The figure is
+            lettered at first paint; only the notation waits for the pen. ── */}
+        {marks.map((mark) => (
+          <g
+            key={mark.threshold}
+            style={{ ["--draw-delay" as string]: `${mark.delay}ms` }}
+          >
+            <line
+              x1={mark.x}
+              y1={mark.y}
+              x2={mark.x}
+              y2={baselineY}
+              stroke="var(--ink-3)"
+              strokeWidth="0.75"
+              strokeDasharray="2 3"
+              className="drops"
+            />
+            <circle
+              cx={mark.x}
+              cy={mark.y}
+              r="2.75"
+              fill="var(--paper)"
+              stroke="var(--ink)"
+              strokeWidth="1"
+              className="settles"
+            />
+            <text
+              x={mark.labelX}
+              y={mark.labelY}
+              textAnchor="end"
+              className="font-draft"
+              fontSize={dateSize}
+              letterSpacing="0.08em"
+              fill="var(--ink-2)"
+            >
+              <tspan
+                stroke="var(--paper)"
+                strokeWidth="4"
+                paintOrder="stroke"
+                strokeLinejoin="round"
+              >
+                {mark.label}
+              </tspan>
+            </text>
+          </g>
+        ))}
+
+        {/* ── The pen. It rides the leading edge of the ink on the trace's
+            own path and lifts when the trace is finished. ─────────────── */}
+        <g
+          className="pen"
+          style={{ offsetPath: `path("${d}")` }}
+          aria-hidden="true"
+        >
+          <circle r="6" fill="var(--paper)" stroke="var(--ink)" strokeWidth="1" />
+          <circle r="2" fill="var(--signal)" />
+        </g>
+
         {/* ── The measured value. A leader drops from the datum to the
             baseline and a second runs out to the value at the right margin.
             Both terminate on real points. ───────────────────────────────── */}
@@ -327,6 +432,7 @@ export function StarSheet({
             style={{ ["--draw-delay" as string]: "var(--duration-draw)" }}
           >
             <line
+              ref={dropRef}
               x1={active.x}
               y1={active.y}
               x2={active.x}
@@ -338,6 +444,7 @@ export function StarSheet({
               opacity={isProbing ? 1 : 0.55}
             />
             <line
+              ref={leaderRef}
               x1={active.x}
               y1={active.y}
               x2={viewW - padR + 10}
@@ -348,16 +455,16 @@ export function StarSheet({
               opacity={isProbing ? 1 : 0.55}
             />
             {/* The terminator: a filled arrowhead landing on the datum. */}
-            <path
-              d={`M${active.x} ${active.y} l-5 -3.2 l0 6.4 z`}
-              fill="var(--signal)"
-            />
-            <circle cx={active.x} cy={active.y} r="2.5" fill="var(--signal)" />
+            <g ref={headRef} transform={`translate(${active.x} ${active.y})`}>
+              <path d="M0 0 l-5 -3.2 l0 6.4 z" fill="var(--signal)" />
+              <circle r="2.5" fill="var(--signal)" />
+            </g>
           </g>
 
           {/* The value is content, so it is lettered at first paint and is
               never inside the group above. */}
           <text
+            ref={valueRef}
             x={viewW - padR + 14}
             y={active.y}
             dy="0.32em"
@@ -369,8 +476,9 @@ export function StarSheet({
             {formatCompact(active.stars)}
           </text>
           <text
+            ref={stampRef}
             x={viewW - padR + 14}
-            y={active.y + 15}
+            y={Math.min(baselineY + 6, active.y + 15)}
             className="font-draft"
             fontSize={dateSize}
             letterSpacing="0.08em"

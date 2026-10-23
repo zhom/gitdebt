@@ -101,7 +101,10 @@ function Plot({
   return (
     <section
       className={cn(
-        "cut-edge p-4 [--pad-x:1rem] [--pad-y:1rem]",
+        // A grid item's minimum width is its content's by default, and a
+        // long file path set `nowrap` is wide content: without `min-w-0` the
+        // panel outgrew a phone and clipped its own values and action.
+        "cut-edge min-w-0 p-4 [--pad-x:1rem] [--pad-y:1rem]",
         className,
       )}
     >
@@ -156,12 +159,18 @@ type BarRow = { label: string; value: number; formatted?: string; hint?: string 
 function BarList({ rows }: { rows: BarRow[] }) {
   const max = Math.max(1, ...rows.map((row) => row.value));
   return (
-    <ul role="list" className="space-y-3.5">
-      {rows.map((row) => {
+    <ul role="list" className="space-y-3.5" data-draw>
+      {rows.map((row, index) => {
         const peak = row.value === max;
         const pct = Math.max(0, Math.min(1, row.value / max)) * 100;
         return (
-          <li key={row.label} title={row.hint ?? `${row.label}: ${row.value}`}>
+          <li
+            key={row.label}
+            title={row.hint ?? `${row.label}: ${row.value}`}
+            // Each extent is measured in turn, down the list, and its
+            // terminator lands as the extent reaches it.
+            style={{ ["--draw-delay" as string]: `${120 + index * 55}ms` }}
+          >
             <div className="flex items-baseline justify-between gap-4">
               <span className="min-w-0 truncate font-mono text-[0.75rem] text-ink-2">
                 {row.label}
@@ -179,17 +188,21 @@ function BarList({ rows }: { rows: BarRow[] }) {
               <span className="absolute inset-x-0 top-1/2 h-px -translate-y-1/2 bg-rule" />
               <span
                 className={cn(
-                  "absolute top-1/2 left-0 h-[2px] -translate-y-1/2",
+                  "extends absolute top-1/2 left-0 h-[2px] -translate-y-1/2",
                   peak ? "bg-signal" : "bg-ink",
                 )}
                 style={{ width: `${pct}%` }}
               />
               <span
                 className={cn(
-                  "absolute inset-y-0 w-px",
+                  "lands absolute inset-y-0 w-px",
                   peak ? "bg-signal" : "bg-ink",
                 )}
-                style={{ left: `max(0px, calc(${pct}% - 1px))` }}
+                style={{
+                  left: `max(0px, calc(${pct}% - 1px))`,
+                  animationDelay:
+                    "calc(var(--draw-delay) + var(--duration-measure) - var(--duration-land))",
+                }}
               />
             </div>
           </li>
@@ -480,8 +493,8 @@ export function InteractiveRepoSignals(props: Props) {
               role="list"
               className="row-span-3 flex flex-wrap content-start items-center gap-1.5"
             >
-              {majorAuthors.map((author) => (
-                <li key={`${author.login}-${author.label}`}>
+              {majorAuthors.map((author, index) => (
+                <li key={`${index}:${author.login ?? author.label}`}>
                   <Contributor author={author} />
                 </li>
               ))}
@@ -530,9 +543,9 @@ export function InteractiveRepoSignals(props: Props) {
             role="list"
             className="grid grid-cols-[repeat(auto-fill,minmax(5rem,1fr))] gap-x-3 gap-y-5"
           >
-            {stats.authors.map((author) => (
+            {stats.authors.map((author, index) => (
               <li
-                key={`${author.login}-${author.label}`}
+                key={`${index}:${author.login ?? author.label}`}
                 className="flex min-w-0 flex-col items-center gap-2 text-center"
               >
                 <Contributor author={author} large />

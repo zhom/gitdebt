@@ -15,8 +15,9 @@
  *   readme  a sheet with the drawing placed in it, below the prose.
  *
  * They are illustrative and they say so at the call site; no figure here is a
- * repository's value. They are also completely static: there is no animation to
- * gate, no observer to run, and nothing that is invisible before a script does.
+ * repository's value. Each one draws itself the way the real asset does — the
+ * trace inks in, the gauges extend, the terminators land — over a drawing that
+ * is complete in the markup, so nothing waits for a script or an observer.
  */
 
 type Kind = "stars" | "health" | "readme";
@@ -49,11 +50,39 @@ const TRACE_D = TRACE.map(
   ([x, y], i) => `${i === 0 ? "M" : "L"}${x} ${y}`,
 ).join(" ");
 
+/** Summed from the points, never measured from the DOM. */
+const TRACE_LENGTH = Math.ceil(
+  TRACE.slice(1).reduce(
+    (total, [x, y], i) => total + Math.hypot(x - TRACE[i][0], y - TRACE[i][1]),
+    0,
+  ),
+);
+
+const DOC_TRACE = [
+  [27, 49],
+  [57, 46],
+  [86, 41],
+  [116, 40],
+  [149, 37],
+] as const;
+const DOC_TRACE_LENGTH = Math.ceil(
+  DOC_TRACE.slice(1).reduce(
+    (total, [x, y], i) =>
+      total + Math.hypot(x - DOC_TRACE[i][0], y - DOC_TRACE[i][1]),
+    0,
+  ),
+);
+
+const delay = (ms: number | string) => ({
+  ["--draw-delay" as string]: typeof ms === "number" ? `${ms}ms` : ms,
+});
+
 export function ReportLayerGraphic({ kind }: { kind: Kind }) {
   const last = TRACE[TRACE.length - 1];
 
   return (
     <svg
+      data-draw
       viewBox="0 0 176 72"
       role="img"
       aria-label={LABEL[kind]}
@@ -75,21 +104,26 @@ export function ReportLayerGraphic({ kind }: { kind: Kind }) {
             strokeWidth="1.5"
             strokeLinejoin="round"
             strokeLinecap="round"
+            className="inks-in"
+            style={{ ["--draw-length" as string]: String(TRACE_LENGTH) }}
           />
           <circle cx={TRACE[0][0]} cy={TRACE[0][1]} r="1.6" fill="var(--ink-3)" />
           {/* The measured value: a leader drops from the last real datum to the
-              baseline, and the terminator lands on the datum itself. */}
-          <path
-            d={`M${last[0]} ${last[1]}V62`}
-            stroke="var(--signal)"
-            strokeWidth="1"
-            strokeDasharray="3 3"
-            strokeLinecap="round"
-          />
-          <path
-            d={`M${last[0]} ${last[1]} l-4.5 -2.8 l0 5.6 z`}
-            fill="var(--signal)"
-          />
+              baseline, and the terminator lands on the datum itself — once the
+              trace has reached it. */}
+          <g className="measures" style={delay("var(--duration-draw)")}>
+            <path
+              d={`M${last[0]} ${last[1]}V62`}
+              stroke="var(--signal)"
+              strokeWidth="1"
+              strokeDasharray="3 3"
+              strokeLinecap="round"
+            />
+            <path
+              d={`M${last[0]} ${last[1]} l-4.5 -2.8 l0 5.6 z`}
+              fill="var(--signal)"
+            />
+          </g>
         </g>
       )}
 
@@ -116,10 +150,14 @@ export function ReportLayerGraphic({ kind }: { kind: Kind }) {
                 stroke={index === 0 ? "var(--signal)" : "var(--ink)"}
                 strokeWidth="1.5"
                 strokeLinecap="round"
+                className="extends"
+                style={delay(index * 110)}
               />
               <path
                 d={`M${gauge.to} ${gauge.y} l-5 -3 l0 6 z`}
                 fill={index === 0 ? "var(--signal)" : "var(--ink)"}
+                className="lands"
+                style={delay(index * 110 + 200)}
               />
             </g>
           ))}
@@ -159,13 +197,25 @@ export function ReportLayerGraphic({ kind }: { kind: Kind }) {
             strokeLinecap="round"
           />
           <path
-            d="M27 49 L57 46 L86 41 L116 40 L149 37"
+            d={DOC_TRACE.map(([x, y], i) => `${i === 0 ? "M" : "L"}${x} ${y}`).join(" ")}
             stroke="var(--ink)"
             strokeWidth="1.5"
             strokeLinejoin="round"
             strokeLinecap="round"
+            className="inks-in"
+            style={{
+              ["--draw-length" as string]: String(DOC_TRACE_LENGTH),
+              ...delay(240),
+            }}
           />
-          <circle cx="149" cy="37" r="1.8" fill="var(--signal)" />
+          <circle
+            cx="149"
+            cy="37"
+            r="1.8"
+            fill="var(--signal)"
+            className="settles"
+            style={delay("calc(240ms + var(--duration-draw))")}
+          />
         </g>
       )}
     </svg>

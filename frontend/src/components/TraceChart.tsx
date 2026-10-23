@@ -9,11 +9,13 @@ import {
   shortDate,
   spanLabel,
   stride,
+  useLeaderFollow,
   usePlotWidth,
   valueFraction,
   type ChartAxis,
 } from "@/components/ChartFrame";
 import { formatCompact } from "@/lib/star-insights";
+import { traceMilestones } from "@/lib/trace-marks";
 
 /**
  * One measured series, drawn as a dimensioned trace.
@@ -53,6 +55,8 @@ type Props = {
   valueFormatter?: (value: number) => string;
   /** False draws the sheet at its latest reading and ignores the pointer. */
   interactive?: boolean;
+  /** Mark round-number crossings. Only a cumulative series has them. */
+  milestones?: boolean;
   className?: string;
 };
 
@@ -78,11 +82,17 @@ export function TraceChart({
   valueLabel = "stars",
   valueFormatter = (value) => Math.round(value).toLocaleString(),
   interactive = true,
+  milestones = false,
   className,
 }: Props) {
   const uid = useId();
   const rootRef = useRef<HTMLDivElement>(null);
   const svgRef = useRef<SVGSVGElement>(null);
+  const dropRef = useRef<SVGLineElement>(null);
+  const leaderRef = useRef<SVGLineElement>(null);
+  const headRef = useRef<SVGGElement>(null);
+  const valueRef = useRef<SVGTextElement>(null);
+  const stampRef = useRef<SVGTextElement>(null);
   const width = usePlotWidth(rootRef);
   /** Fraction of the plot the pointer is measuring. `null` means the drawing
    *  states its own latest reading, which is what it must say untouched. */
@@ -152,10 +162,70 @@ export function TraceChart({
     [plotW, width],
   );
 
+  const marks = useMemo(() => {
+    if (!geometry || !milestones) return [];
+    const { first } = geometry;
+    const stampWidth = shortDate(first.at).length * 10.5 * 0.56;
+    return traceMilestones(geometry.vertices, {
+      baselineY,
+      fontSize: 10.5,
+      avoid: [
+        // The origin stamp, offset clear of the value extension.
+        {
+          x0: first.x,
+          y0: Math.max(PAD_T + 12, first.y - 11) - 10.5,
+          x1: first.x + 6 + stampWidth + 4,
+          y1: Math.max(PAD_T + 12, first.y - 11) + 3,
+        },
+        // The scale label over the value extension.
+        { x0: 0, y0: 0, x1: PAD_L + 140, y1: PAD_T },
+        // The value column at the right margin.
+        { x0: plotR - 4, y0: 0, x1: width, y1: height },
+      ],
+    });
+  }, [geometry, milestones, baselineY, plotR, width, height]);
+
+  // The reading the sheet is currently stating. Untouched, it states its own
+  // latest value; under the pointer it states the reading there, and says so
+  // with "≈" when that reading falls between two recorded ones.
+  const reading = !geometry
+    ? null
+    : probe === null || !interactive
+      ? { at: geometry.last.at, value: geometry.last.value, approximate: false }
+      : sampleAt(parsed, probe, axis);
+  const activeX = !geometry
+    ? 0
+    : probe === null || !interactive
+      ? geometry.last.x
+      : PAD_L + probe * plotW;
+  const activeY =
+    !geometry || !reading
+      ? 0
+      : PAD_T +
+        plotH -
+        valueFraction(reading.value, geometry.max, logScale) * plotH;
+
+  useLeaderFollow(
+    activeX,
+    activeY,
+    (x, y) => {
+      dropRef.current?.setAttribute("x1", String(x));
+      dropRef.current?.setAttribute("x2", String(x));
+      dropRef.current?.setAttribute("y1", String(y));
+      leaderRef.current?.setAttribute("x1", String(x));
+      leaderRef.current?.setAttribute("y1", String(y));
+      leaderRef.current?.setAttribute("y2", String(y));
+      headRef.current?.setAttribute("transform", `translate(${x} ${y})`);
+      valueRef.current?.setAttribute("y", String(y));
+      stampRef.current?.setAttribute("y", String(Math.min(height - 8, y + 15)));
+    },
+    `${width}:${height}:${axis}:${logScale}:${geometry?.first.at}:${geometry?.last.at}`,
+  );
+
   // The wrapper is rendered either way, so the width measurement is attached
   // before the series has any readings and is already correct on the render
   // where the first two arrive.
-  if (!geometry) {
+  if (!geometry || !reading) {
     return (
       <div ref={rootRef} className={className}>
         <p className="py-6 text-[0.8125rem] text-ink-3">
@@ -166,19 +236,9 @@ export function TraceChart({
   }
 
   const { max, d, length, first, last, span } = geometry;
-
-  // The reading the sheet is currently stating. Untouched, it states its own
-  // latest value; under the pointer it states the reading there, and says so
-  // with "≈" when that reading falls between two recorded ones.
-  const reading =
-    probe === null || !interactive
-      ? { at: last.at, value: last.value, approximate: false }
-      : sampleAt(parsed, probe, axis);
-  const activeX =
-    probe === null || !interactive ? last.x : PAD_L + probe * plotW;
-  const activeY =
-    PAD_T + plotH - valueFraction(reading.value, max, logScale) * plotH;
   const isProbing = probe !== null && interactive;
+  /** A new scale, axis or range is a new drawing, so the pen draws it. */
+  const drawing = `${axis}:${logScale}:${first.at}:${last.at}`;
 
   const scaleLabel = `${formatCompact(max)} ${valueLabel.toUpperCase()}${
     logScale ? " · LOG" : ""
@@ -186,7 +246,7 @@ export function TraceChart({
   const rows = stride(parsed, MAX_ROWS);
 
   return (
-    <div ref={rootRef} className={className}>
+    <div ref={rootRef} className={className} data-draw>
       <svg
         ref={svgRef}
         viewBox={`0 0 ${width} ${height}`}
@@ -270,51 +330,121 @@ export function TraceChart({
 
         {/* ── The object: the trace. Emitted complete; the dash offset is the
             only thing that moves. ───────────────────────────────────────── */}
-        <path
-          d={d}
-          fill="none"
-          stroke="var(--ink)"
-          strokeWidth="1.75"
-          strokeLinejoin="round"
-          strokeLinecap="round"
-          className="inks-in"
-          style={{ ["--draw-length" as string]: String(length) }}
-          vectorEffect="non-scaling-stroke"
-        />
+        <g key={drawing}>
+          <path
+            d={d}
+            fill="none"
+            stroke="var(--ink)"
+            strokeWidth="1.75"
+            strokeLinejoin="round"
+            strokeLinecap="round"
+            className="inks-in"
+            style={{ ["--draw-length" as string]: String(length) }}
+            vectorEffect="non-scaling-stroke"
+          />
+
+          {/* Round-number crossings, projected onto the baseline as the pen
+              reaches each one. The figure is lettered at first paint. */}
+          {marks.map((mark) => (
+            <g
+              key={mark.threshold}
+              style={{ ["--draw-delay" as string]: `${mark.delay}ms` }}
+            >
+              <line
+                x1={mark.x}
+                y1={mark.y}
+                x2={mark.x}
+                y2={baselineY}
+                stroke="var(--ink-3)"
+                strokeWidth="0.75"
+                strokeDasharray="2 3"
+                className="drops"
+              />
+              <circle
+                cx={mark.x}
+                cy={mark.y}
+                r="2.75"
+                fill="var(--paper)"
+                stroke="var(--ink)"
+                strokeWidth="1"
+                className="settles"
+              />
+              <text
+                x={mark.labelX}
+                y={mark.labelY}
+                textAnchor="end"
+                className="font-draft tnum"
+                fontSize="10.5"
+                letterSpacing="0.08em"
+                fill="var(--ink-2)"
+              >
+                <tspan
+                  stroke="var(--paper)"
+                  strokeWidth="4"
+                  paintOrder="stroke"
+                  strokeLinejoin="round"
+                >
+                  {mark.label}
+                </tspan>
+              </text>
+            </g>
+          ))}
+
+          {/* The pen rides the leading edge of the ink and lifts at the end. */}
+          <g
+            className="pen"
+            style={{ offsetPath: `path("${d}")` }}
+            aria-hidden="true"
+          >
+            <circle r="6" fill="var(--paper)" stroke="var(--ink)" strokeWidth="1" />
+            <circle r="2" fill="var(--signal)" />
+          </g>
+        </g>
 
         {/* ── The measured value. A leader drops from the datum to the
             baseline and a second runs out to the value at the right margin.
             Both terminate on real points. ───────────────────────────────── */}
         <g>
-          <line
-            x1={activeX}
-            y1={activeY}
-            x2={activeX}
-            y2={baselineY}
-            stroke="var(--signal)"
-            strokeWidth="1"
-            strokeDasharray="3 3"
-            strokeLinecap="round"
-            opacity={isProbing ? 1 : 0.55}
-          />
-          <line
-            x1={activeX}
-            y1={activeY}
-            x2={plotR + 8}
-            y2={activeY}
-            stroke="var(--signal)"
-            strokeWidth="1"
-            strokeLinecap="round"
-            opacity={isProbing ? 1 : 0.55}
-          />
-          {/* The terminator: a filled arrowhead landing on the datum. */}
-          <path
-            d={`M${activeX.toFixed(2)} ${activeY.toFixed(2)} l-5 -3.2 l0 6.4 z`}
-            fill="var(--signal)"
-          />
-          <circle cx={activeX} cy={activeY} r="2.5" fill="var(--signal)" />
+          {/* The notation waits for the trace: until the pen reaches the
+              latest reading there is nothing there to measure. Keyed to the
+              drawing, so a redrawn trace is measured again when it lands. */}
+          <g
+            key={drawing}
+            className="measures"
+            style={{ ["--draw-delay" as string]: "var(--duration-draw)" }}
+          >
+            <line
+              ref={dropRef}
+              x1={activeX}
+              y1={activeY}
+              x2={activeX}
+              y2={baselineY}
+              stroke="var(--signal)"
+              strokeWidth="1"
+              strokeDasharray="3 3"
+              strokeLinecap="round"
+              opacity={isProbing ? 1 : 0.55}
+            />
+            <line
+              ref={leaderRef}
+              x1={activeX}
+              y1={activeY}
+              x2={plotR + 8}
+              y2={activeY}
+              stroke="var(--signal)"
+              strokeWidth="1"
+              strokeLinecap="round"
+              opacity={isProbing ? 1 : 0.55}
+            />
+            {/* The terminator: a filled arrowhead landing on the datum. */}
+            <g ref={headRef} transform={`translate(${activeX} ${activeY})`}>
+              <path d="M0 0 l-5 -3.2 l0 6.4 z" fill="var(--signal)" />
+              <circle r="2.5" fill="var(--signal)" />
+            </g>
+          </g>
 
           <text
+            ref={valueRef}
             x={plotR + 12}
             y={activeY}
             dy="0.32em"
@@ -325,6 +455,7 @@ export function TraceChart({
             {`${reading.approximate ? "≈" : ""}${formatCompact(reading.value)}`}
           </text>
           <text
+            ref={stampRef}
             x={plotR + 12}
             y={Math.min(height - 8, activeY + 15)}
             className="font-draft tnum"

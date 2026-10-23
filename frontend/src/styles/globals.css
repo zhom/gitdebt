@@ -24,13 +24,20 @@
    letterform of the industrial standard sheet, drawn by a machine rather than
    corrected by an eye. It is the drawing's own hand, so it letters the
    drawing's own words — headings, measured values, the title block — and
-   never body prose, which it was not cut for. One weight, 11.7 KB. */
+   never body prose, which it was not cut for. One weight, 11.7 KB.
+
+   The face sets its full stop and its middle dot as open rings. In a heading
+   that is only a reason to drop terminal punctuation, but in a measured value
+   it is a misreading: "2.8K" lettered as "2∘8K" reads as a degree sign. So the
+   face does not supply those two characters, and the next face in the stack
+   letters them as plain points. */
 @font-face {
   font-family: "Format 1452";
   src: url("../fonts/format-1452.woff2") format("woff2");
   font-weight: 400;
   font-style: normal;
   font-display: swap;
+  unicode-range: U+0000-002D, U+002F-00B6, U+00B8-10FFFF;
 }
 
 @theme inline {
@@ -417,6 +424,48 @@
   }
 }
 
+/* A drop line falls from the datum it projects onto the baseline. */
+@keyframes extend-y {
+  from {
+    transform: scaleY(0);
+  }
+  to {
+    transform: scaleY(1);
+  }
+}
+
+/* A point is marked: the dot arrives, overshoots by a fraction, and sits. */
+@keyframes settle {
+  0% {
+    transform: scale(0);
+  }
+  70% {
+    transform: scale(1.3);
+  }
+  100% {
+    transform: scale(1);
+  }
+}
+
+/* The pen travels the trace it is drawing and lifts at the end. It is the one
+   mark on the site that exists only while it moves, because a pen at rest on a
+   finished drawing would be a mark that measures nothing. Its keyframes carry
+   `offset-distance` on 0% and 100% only, so its travel is eased exactly as the
+   dash offset is and it stays on the leading edge of the ink. */
+@keyframes pen-travel {
+  0% {
+    offset-distance: 0%;
+    opacity: 1;
+  }
+  94% {
+    opacity: 1;
+  }
+  100% {
+    offset-distance: 100%;
+    opacity: 0;
+  }
+}
+
 /* A trace inks in along its own length. The element is in the DOM and its
    geometry is final before this runs; if the animation never fires, the path
    is simply drawn. */
@@ -483,6 +532,56 @@
   animation-delay: var(--draw-delay, 0ms);
 }
 
+/* A drop line projects a datum onto the baseline: it falls from the point. */
+@utility drops {
+  transform-box: fill-box;
+  transform-origin: center top;
+  animation: extend-y var(--duration-measure) var(--ease-draw) both;
+  animation-delay: var(--draw-delay, 0ms);
+}
+
+/* A column is drawn up from the baseline it stands on.
+
+   It is a dash, not a transform. A column lives on a sheet stretched along x
+   (`preserveAspectRatio="none"`), and Chrome paints a transformed element of
+   such a sheet at user-space resolution and scales the bitmap up, which turned
+   a 3px column into a soft grey smear 40 times its own width. The column keeps
+   `vector-effect: non-scaling-stroke`, so its dash is measured in host space,
+   and the caller passes the HOST length: exact for a vertical line, because the
+   sheet's vertical scale is its own fixed height over its viewBox height. */
+@utility rises {
+  stroke-dasharray: var(--draw-length, 1000);
+  animation: draw-stroke var(--duration-measure) var(--ease-draw) both;
+  animation-delay: var(--draw-delay, 0ms);
+}
+
+/* A datum is marked the moment the pen reaches it. */
+@utility settles {
+  transform-box: fill-box;
+  transform-origin: center;
+  animation: settle var(--duration-measure) var(--ease-land) both;
+  animation-delay: var(--draw-delay, 0ms);
+}
+
+/* The plotter pen. Its path is the trace's own `d`, set as `offset-path`, and
+   it is drawn around its own origin so that origin rides the line. The base
+   rule hides it: the pen is not content, and the animation is the only time
+   it exists. */
+@utility pen {
+  opacity: 0;
+  pointer-events: none;
+  offset-rotate: 0deg;
+  /* `forwards`, not `both`: a pen waiting for its turn is not drawn. */
+  animation: pen-travel var(--duration-draw) var(--ease-draw) forwards;
+  animation-delay: var(--draw-delay, 0ms);
+}
+
+@media print {
+  .pen {
+    display: none;
+  }
+}
+
 @media (prefers-reduced-motion: reduce) {
   html {
     scroll-behavior: auto;
@@ -493,8 +592,13 @@
   .inks-in,
   .extends,
   .lands,
-  .measures {
-    animation-duration: 1ms;
-    animation-delay: 0ms;
+  .measures,
+  .drops,
+  .rises,
+  .settles,
+  .pen {
+    /* Important, because a staggered mark carries its offset inline. */
+    animation-duration: 1ms !important;
+    animation-delay: 0ms !important;
   }
 }

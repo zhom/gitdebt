@@ -38,6 +38,11 @@ const VIEW_H = 340;
 const PAD_X = 56;
 const PAD_Y = 34;
 
+/** The drawing order: files are placed, then the co-changes between them are
+ *  drawn, then the one relationship being read is dimensioned. */
+const EDGES_AT = 180;
+const MEASURED_AT = 760;
+
 const compact = (value: number) =>
   new Intl.NumberFormat("en", {
     notation: "compact",
@@ -271,7 +276,7 @@ export function FileCouplingNetwork({
   })();
 
   return (
-    <figure className={cn("min-w-0", className)}>
+    <figure className={cn("min-w-0", className)} data-draw>
       <div className="overflow-x-auto p-4">
         <svg
           viewBox={`0 0 ${VIEW_W} ${VIEW_H}`}
@@ -313,7 +318,7 @@ export function FileCouplingNetwork({
                   className="inks-in"
                   style={{
                     ["--draw-length" as string]: String(span),
-                    ["--draw-delay" as string]: `${Math.min(edgeIndex, 8) * 45}ms`,
+                    ["--draw-delay" as string]: `${EDGES_AT + Math.min(edgeIndex, 8) * 45}ms`,
                   }}
                 />
               );
@@ -322,7 +327,11 @@ export function FileCouplingNetwork({
           {/* The measured relationship. Extension lines spring from both files,
               the dimension line spans them, and it carries the count. */}
           {dimension && a && b && (
-            <g>
+            <g
+              key={index}
+              className="measures"
+              style={{ ["--draw-delay" as string]: `${MEASURED_AT}ms` }}
+            >
               <line
                 x1={a.x}
                 y1={a.y}
@@ -350,6 +359,34 @@ export function FileCouplingNetwork({
               {dimension.heads.map((head) => (
                 <path key={head} d={head} fill="var(--signal)" />
               ))}
+            </g>
+          )}
+
+          {layout.nodes.map((node, nodeIndex) => {
+            const point = placed.get(node.id);
+            if (!point) return null;
+            const selected =
+              node.id === active.source || node.id === active.target;
+            return (
+              <rect
+                key={node.id}
+                x={point.x - point.size / 2}
+                y={point.y - point.size / 2}
+                width={point.size}
+                height={point.size}
+                fill={selected ? "var(--signal)" : "var(--ink-2)"}
+                className="settles"
+                style={{
+                  ["--draw-delay" as string]: `${Math.min(nodeIndex, 12) * 25}ms`,
+                }}
+              />
+            );
+          })}
+
+          {/* The measured value is lettered after the files are placed, so a
+              file square can never be painted over its own count. */}
+          {dimension && a && b && (
+            <g>
               <text
                 x={dimension.label.x}
                 y={dimension.label.y}
@@ -389,23 +426,6 @@ export function FileCouplingNetwork({
               </text>
             </g>
           )}
-
-          {layout.nodes.map((node) => {
-            const point = placed.get(node.id);
-            if (!point) return null;
-            const selected =
-              node.id === active.source || node.id === active.target;
-            return (
-              <rect
-                key={node.id}
-                x={point.x - point.size / 2}
-                y={point.y - point.size / 2}
-                width={point.size}
-                height={point.size}
-                fill={selected ? "var(--signal)" : "var(--ink-2)"}
-              />
-            );
-          })}
 
           {/* Only the two files being measured are named. Naming all fourteen
               at once is how a drawing turns into a word cloud. The slots come

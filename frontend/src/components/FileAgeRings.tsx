@@ -168,7 +168,7 @@ export function FileAgeRings({ bands, className }: FileAgeRingsProps) {
   );
 
   return (
-    <figure className={cn("min-w-0", className)}>
+    <figure className={cn("min-w-0", className)} data-draw>
       <div className="overflow-x-auto p-4">
         <svg
           viewBox={`0 0 ${VIEW_W} ${VIEW_H}`}

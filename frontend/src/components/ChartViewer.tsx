@@ -239,6 +239,7 @@ function InteractiveChart({
         logScale={logScale}
         height={440}
         valueLabel="stars"
+        milestones
       />
     );
   }

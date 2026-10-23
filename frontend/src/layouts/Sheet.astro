@@ -109,5 +109,10 @@ const allJsonLd = [organizationJsonLd(site), ...pageJsonLd];
       <SiteFooter embed={embed} />
     </div>
     {embed && <EmbedMode />}
+    <script>
+      import { installDrawOnView } from "@/lib/draw-on-view";
+
+      installDrawOnView();
+    </script>
   </body>
 </html>

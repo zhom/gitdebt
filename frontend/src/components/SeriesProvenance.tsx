@@ -155,6 +155,7 @@ function SeriesSpecimen({ freshness, fill, length, className }: SpecimenProps) {
 
   return (
     <svg
+      data-draw
       viewBox={`0 0 ${length} 12`}
       width={length}
       height="12"

@@ -97,6 +97,9 @@ Three voices, and there is no fourth.
 stop as an open ring, which is authentic to a modular face and unmistakable for
 a CJK full stop at the end of a sentence. A line break separates display
 clauses instead. Prose keeps normal punctuation because prose is system-ui.
+In a figure the ring was a misreading ("2.8K" read as "2∘8K"), so the
+`@font-face` `unicode-range` leaves the full stop and the middle dot to the
+next face in the stack.
 
 Choosing a voice is choosing what a string **is**, not how large it should look.
 A caption is prose set small (`CAPTION`); a field label is the drawing's hand
@@ -140,10 +143,42 @@ both. `cut` remains, separately, for solid-filled things that clip themselves.
 - `extends` — a dimension line growing from its datum.
 - `lands` — a terminator arriving with a half-pixel overshoot.
 
+- `drops`, `rises` — a drop line falling from a datum to the baseline, and a
+  column drawn up from the baseline it stands on. `rises` is a dash, never a
+  transform: Chrome paints a transformed element of a stretched viewBox at
+  user-space resolution and smears it.
+- `settles` — a datum marked the moment the pen reaches it.
+- `pen` — the plotter pen riding the leading edge of a trace on the trace's own
+  `offset-path`, lifting when the trace is finished. It is the one mark that
+  exists only while it moves; a pen at rest would measure nothing.
+
+Marks on a trace wait for the pen. `traceMilestones` places the 100, 1K, 10K,
+100K and 1M crossings of a cumulative series and `drawDelayAt` solves the draw
+easing for the moment the pen reaches each one, so the drop line falls exactly
+as the ink arrives. A dashed series inks in through a mask whose solid twin
+draws along the same path, because its dash is its identity. A comparison
+changes pens in order, 150ms apart, and each series is labelled when it lands.
+A new scale, axis or range is a new drawing and is drawn again.
+
+The leader follows the pointer as a hand moves a pen (`useLeaderFollow`): it
+springs to the next datum, writing attributes directly, and its last frame is
+exactly what React rendered.
+
 The absolute rule: **nothing is invisible until an animation runs.** No
 `opacity: 0` initial state, anywhere. Content is in the markup and painted at
 first paint; the motion happens over a finished drawing. Reduced motion removes
 the travel and keeps the mark.
+
+Below the fold the drawing draws when the reader reaches it
+(`lib/draw-on-view.ts`). A `[data-draw]` drawing is rewound only after a person
+has scrolled (wheel, touch or keyboard), only while it is wholly off-screen,
+and never under reduced motion; it plays again as it enters the viewport and
+printing finishes it. A crawler, a screenshot pass or a reader who never
+scrolls sees every drawing finished.
+
+The reading index is the one motion not on a timer: on a long page the
+header's frame line carries a tick per section heading and is measured out to
+the reader's position as they scroll.
 
 Charts letter at 1:1 — the viewBox width is the **measured** width
 (`usePlotWidth`). A fixed viewBox stretched to fit condenses every label to a

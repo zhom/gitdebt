@@ -7,20 +7,16 @@
   "type": "module",
   "description": "gitdebt browser extension \u2014 star history & repo-debt analytics on GitHub repo pages. Chrome + Firefox (MV3).",
   "engines": {
-    "node": ">=20"
+    "node": ">=20.15.0"
   },
   "scripts": {
-    "lint": "web-ext lint --source-dir=. --ignore-files package.json package-lock.json node_modules build.mjs dist README.md PRIVACY.md .gitignore web-ext-artifacts test",
-    "start:firefox": "web-ext run --source-dir=. --target=firefox-desktop --ignore-files package.json package-lock.json node_modules build.mjs dist README.md PRIVACY.md .gitignore web-ext-artifacts test",
-    "start:chrome": "web-ext run --source-dir=. --target=chromium --ignore-files package.json package-lock.json node_modules build.mjs dist README.md PRIVACY.md .gitignore web-ext-artifacts test",
+    "lint": "node build.mjs --lint",
+    "start:firefox": "npx --yes web-ext@10 run --source-dir=. --target=firefox-desktop --ignore-files package.json package-lock.json node_modules build.mjs dist README.md PRIVACY.md .gitignore web-ext-artifacts test",
+    "start:chrome": "npx --yes web-ext@10 run --source-dir=. --target=chromium --ignore-files package.json package-lock.json node_modules build.mjs dist README.md PRIVACY.md .gitignore web-ext-artifacts test",
     "package": "npm test && npm run lint && node build.mjs",
     "test": "node --test test/*.test.mjs"
   },
   "devDependencies": {
-    "web-ext": "^10.8.0"
-  },
-  "overrides": {
-    "adm-zip": "0.6.1",
-    "shell-quote": "1.12.0"
+    "addons-linter": "^10.14.0"
   }
 }

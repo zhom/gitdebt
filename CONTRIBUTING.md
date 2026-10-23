@@ -83,7 +83,7 @@ This runs:
   database from `scripts/db.sh up`)
 - **test:seo**: static-routing, sitemap, and SEO audits
 - **Astro build**: warning-free static production build
-- **Extension package**: extension tests plus `web-ext lint`, then writes the
+- **Extension package**: extension tests plus `addons-linter`, then writes the
   store archives to `extension/dist/`
 
 ## Key Rules

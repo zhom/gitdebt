@@ -46,7 +46,8 @@ change.
 npm run package
 ```
 
-Packaging runs tests and `web-ext lint`, then writes:
+Packaging runs tests and lints the staged extension with `addons-linter`
+(the linter behind `web-ext lint`, with the same options), then writes:
 
 ```text
 dist/gitdebt-chrome-<version>.zip

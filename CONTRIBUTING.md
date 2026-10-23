@@ -24,7 +24,7 @@ contributions elsewhere.
 Requirements:
 
 - Rust 1.99 (see `rust-toolchain.toml`)
-- Node.js 22.13+
+- Node.js 22.23.4+ (Astro 7.4 minimum)
 - pnpm
 - Docker
 - git

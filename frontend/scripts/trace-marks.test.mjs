@@ -4,6 +4,7 @@ import { test } from "node:test";
 import {
   arcFractions,
   calendarEasing,
+  crossingTime,
   drawDelayAt,
   segmentAtX,
   thresholdLabel,
@@ -178,4 +179,17 @@ test("at most `limit` crossings, spaced apart, highest first", () => {
   const crossings = traceCrossings([a, b], { baselineY: 300, plotH: 280, xMax: 700, limit: 2 });
   assert.equal(crossings.length, 2);
   assert.ok(crossings[1].x - crossings[0].x >= 90);
+});
+
+test("a crossing is dated from the readings, not the drawn path", () => {
+  const DAY = 86_400_000;
+  // `a` passes `b` exactly on day 100.
+  const a = [{ at: 0, value: 0 }, { at: 200 * DAY, value: 200 }];
+  const b = [{ at: 0, value: 50 }, { at: 200 * DAY, value: 150 }];
+  const at = crossingTime(a, b, 92 * DAY, 30 * DAY);
+  assert.ok(Math.abs(at - 100 * DAY) < DAY);
+  // The same crossing from a different estimate is the same day.
+  assert.ok(Math.abs(crossingTime(a, b, 107 * DAY, 30 * DAY) - at) < 1);
+  // No crossing inside the window.
+  assert.equal(crossingTime(a, b, 20 * DAY, 10 * DAY), null);
 });

@@ -10,6 +10,7 @@ import {
   polylineLength,
   shortDate,
   spanLabel,
+  stillDrawing,
   stride,
   usePlotWidth,
   valueFraction,
@@ -20,7 +21,7 @@ import { EmbedSnippet } from "@/components/EmbedSnippet";
 import { CAPTION } from "@/components/style-tokens";
 import { comparisonPenIndices } from "@/lib/pens";
 import { formatCompact } from "@/lib/star-insights";
-import { calendarEasing, traceCrossings } from "@/lib/trace-marks";
+import { calendarEasing, crossingTime, traceCrossings } from "@/lib/trace-marks";
 
 /**
  * Several series on one sheet, drawn as an overlay of plotted traces.
@@ -381,16 +382,39 @@ function ComparisonPlot({
 
   // Crossings are dates, so they are marked on the calendar axis only: on the
   // timeline axis two lines meeting say nothing about when anything happened.
-  const crossings = useMemo(
-    () =>
-      axis === "date"
-        ? traceCrossings(
-            traces.map((trace) => trace.vertices),
-            { baselineY, plotH, xMax: plotR },
-          )
-        : [],
-    [axis, traces, baselineY, plotH, plotR],
-  );
+  // Which lines cross is decided on the data alone, on a fixed virtual sheet,
+  // and the full readings then say WHEN. Measured on the drawn paths instead,
+  // the answer moved with the sheet's width: the static page and the hydrated
+  // one lettered the same overtake in different months.
+  const crossings = useMemo(() => {
+    if (axis !== "date") return [];
+    const SHEET = 1000;
+    const virtual = parsed.map((item) =>
+      stride(item.points, MAX_DRAWN_VERTICES).map((point) => ({
+        x: ((point.at - minDate) / dateSpan) * SHEET,
+        y: SHEET - valueFraction(point.value, maxValue, logScale) * SHEET,
+      })),
+    );
+    return traceCrossings(virtual, {
+      baselineY: SHEET,
+      plotH: SHEET,
+      xMax: SHEET,
+    }).map((crossing) => {
+      const estimate = minDate + (crossing.x / SHEET) * dateSpan;
+      const a = parsed[crossing.a].points;
+      const b = parsed[crossing.b].points;
+      const at = crossingTime(a, b, estimate, dateSpan / 40) ?? estimate;
+      const reading = sampleDate(a, at);
+      return {
+        ...crossing,
+        at,
+        x: PAD_L + ((at - minDate) / dateSpan) * plotW,
+        y: reading
+          ? PAD_T + plotH - valueFraction(reading.value, maxValue, logScale) * plotH
+          : PAD_T + plotH - (1 - crossing.y / SHEET) * plotH,
+      };
+    });
+  }, [axis, parsed, plotH, plotW, minDate, dateSpan, maxValue, logScale]);
 
   const labelY = spreadLabels(
     traces.map((trace) => ({ key: trace.slug, y: trace.end.y })),
@@ -415,7 +439,7 @@ function ComparisonPlot({
 
   function onPointer(event: React.PointerEvent<SVGSVGElement>) {
     const svg = svgRef.current;
-    if (!svg) return;
+    if (!svg || stillDrawing(svg)) return;
     const box = svg.getBoundingClientRect();
     if (box.width === 0) return;
     const vx = ((event.clientX - box.left) / box.width) * width;
@@ -610,7 +634,7 @@ function ComparisonPlot({
             datum on two series, not the reading the sheet delivers. ────── */}
         {crossings.map((crossing) => {
           const at = ((crossing.x - PAD_L) / plotW) * RACE_MS;
-          const month = shortDate(minDate + ((crossing.x - PAD_L) / plotW) * dateSpan);
+          const month = shortDate(crossing.at);
           return (
             <g
               key={`${drawing}:${crossing.a}:${crossing.b}:${Math.round(crossing.x)}`}

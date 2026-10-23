@@ -304,6 +304,24 @@ export function useLeaderFollow(
   }, [x, layoutKey]);
 }
 
+/**
+ * True while a sheet's trace is still inking in, or is rewound waiting for the
+ * reader to scroll to it. The pointer is ignored then: a leader standing over
+ * a plot the pen has not reached yet measures nothing.
+ */
+export function stillDrawing(svg: SVGSVGElement | null): boolean {
+  if (!svg || typeof svg.getAnimations !== "function") return false;
+  return svg
+    .getAnimations({ subtree: true })
+    .some(
+      (animation) =>
+        typeof CSSAnimation !== "undefined" &&
+        animation instanceof CSSAnimation &&
+        animation.animationName === "draw-stroke" &&
+        animation.playState !== "finished",
+    );
+}
+
 /** Replace the text of a `<text>` whose only child is the string React
  *  rendered. Writing the node React owns, never `textContent`, keeps React's
  *  reference to it alive for its next update. */

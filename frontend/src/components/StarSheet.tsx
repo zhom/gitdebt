@@ -8,6 +8,7 @@ import {
 import {
   MAX_DRAWN_VERTICES,
   setTextNode,
+  stillDrawing,
   useLeaderFollow,
   usePlotWidth,
 } from "@/components/ChartFrame";
@@ -218,7 +219,7 @@ export function StarSheet({
   const onPointer = useCallback(
     (event: React.PointerEvent<SVGSVGElement>) => {
       const svg = svgRef.current;
-      if (!svg || !geometry) return;
+      if (!svg || !geometry || stillDrawing(svg)) return;
       const box = svg.getBoundingClientRect();
       if (box.width === 0) return;
       const vx = ((event.clientX - box.left) / box.width) * viewW;

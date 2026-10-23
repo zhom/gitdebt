@@ -307,3 +307,58 @@ export function traceCrossings(
   }
   return kept.sort((p, q) => p.x - q.x);
 }
+
+type Reading = { at: number; value: number };
+
+function readingAt(points: Reading[], at: number): number | null {
+  if (points.length === 0 || at < points[0].at || at > points[points.length - 1].at) {
+    return null;
+  }
+  let lo = 0;
+  let hi = points.length - 1;
+  while (hi - lo > 1) {
+    const mid = (lo + hi) >> 1;
+    if (points[mid].at <= at) lo = mid;
+    else hi = mid;
+  }
+  const span = points[hi].at - points[lo].at;
+  const f = span > 0 ? (at - points[lo].at) / span : 0;
+  return points[lo].value + (points[hi].value - points[lo].value) * f;
+}
+
+/**
+ * The moment two series cross, read from their full readings.
+ *
+ * A crossing found on a drawn path is only as precise as that path's thinning,
+ * which depends on the sheet's width and on how the series reached the page,
+ * so the same overtake could be lettered in two different months. This scans
+ * the readings themselves, a day at a time within `window` of the estimate,
+ * and returns the sign change nearest to it (null when there is none).
+ */
+export function crossingTime(
+  a: Reading[],
+  b: Reading[],
+  estimate: number,
+  window: number,
+  step = 86_400_000,
+): number | null {
+  let best: number | null = null;
+  let prev: { at: number; gap: number } | null = null;
+  for (let at = estimate - window; at <= estimate + window; at += step) {
+    const va = readingAt(a, at);
+    const vb = readingAt(b, at);
+    if (va === null || vb === null) {
+      prev = null;
+      continue;
+    }
+    const gap = va - vb;
+    if (prev && gap !== 0 && prev.gap !== 0 && Math.sign(gap) !== Math.sign(prev.gap)) {
+      const cross = prev.at + (at - prev.at) * (prev.gap / (prev.gap - gap));
+      if (best === null || Math.abs(cross - estimate) < Math.abs(best - estimate)) {
+        best = cross;
+      }
+    }
+    if (gap !== 0) prev = { at, gap };
+  }
+  return best;
+}

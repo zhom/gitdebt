@@ -10,6 +10,7 @@ import {
   shortDate,
   spanLabel,
   setTextNode,
+  stillDrawing,
   stride,
   useLeaderFollow,
   usePlotWidth,
@@ -163,7 +164,7 @@ export function TraceChart({
   const onPointer = useCallback(
     (event: React.PointerEvent<SVGSVGElement>) => {
       const svg = svgRef.current;
-      if (!svg) return;
+      if (!svg || stillDrawing(svg)) return;
       const box = svg.getBoundingClientRect();
       if (box.width === 0) return;
       const vx = ((event.clientX - box.left) / box.width) * width;

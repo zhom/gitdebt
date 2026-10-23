@@ -40,8 +40,10 @@ export type MomentumBoardProps = {
  */
 const GRID: Record<MomentumVariant, string> = {
   full: "grid grid-cols-[2.5rem_minmax(0,1fr)_3.75rem_3.75rem_3.75rem_4.25rem] sm:grid-cols-[2.75rem_8rem_minmax(0,1fr)_4rem_4rem_4rem_4.5rem]",
+  // The pace column is wide enough for its extents to read as a ranking
+  // being measured out, not as a row of stubs.
   compact:
-    "grid grid-cols-[2.5rem_minmax(0,1fr)_4rem_4.25rem] sm:grid-cols-[2.75rem_5.5rem_minmax(0,1fr)_4.25rem_4.5rem]",
+    "grid grid-cols-[2.5rem_minmax(0,1fr)_4rem_4.25rem] sm:grid-cols-[2.75rem_9rem_minmax(0,1fr)_4.25rem_4.5rem]",
 };
 
 const TREND_LABEL: Record<Trend, string> = {

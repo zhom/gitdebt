@@ -637,7 +637,10 @@ function ComparisonPlot({
           const month = shortDate(crossing.at);
           return (
             <g
-              key={`${drawing}:${crossing.a}:${crossing.b}:${Math.round(crossing.x)}`}
+              // Keyed by the overtake itself, never by where it is drawn: a
+              // live read that adds a day moves x by a pixel, and a key that
+              // moved with it rebuilt the mark and replayed it after the race.
+              key={`${drawing}:${crossing.a}:${crossing.b}:${month}`}
               style={{ ["--draw-delay" as string]: `${Math.round(at)}ms` }}
               aria-hidden="true"
             >

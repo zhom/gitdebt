@@ -428,18 +428,18 @@ export function StarSheet({
               y1={mark.y}
               x2={mark.x}
               y2={baselineY}
-              stroke="var(--ink-3)"
-              strokeWidth="0.75"
-              strokeDasharray="2 3"
+              stroke="var(--ink-2)"
+              strokeWidth="1"
+              strokeDasharray="3 3"
               className="drops"
             />
             <circle
               cx={mark.x}
               cy={mark.y}
-              r="2.75"
+              r="3.25"
               fill="var(--paper)"
               stroke="var(--ink)"
-              strokeWidth="1"
+              strokeWidth="1.5"
               className="settles"
             />
             <text

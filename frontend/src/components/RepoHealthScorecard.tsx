@@ -324,7 +324,9 @@ export function CommitColumns({
               y1={99}
               x2={index + 0.5}
               y2={99 - extent}
-              stroke="var(--ink-2)"
+              // The busiest month is the reading this plot delivers, so its
+              // column is drawn in full ink under its measured value.
+              stroke={index === peak ? "var(--ink)" : "var(--ink-2)"}
               strokeWidth="3"
               strokeLinecap="butt"
               vectorEffect="non-scaling-stroke"

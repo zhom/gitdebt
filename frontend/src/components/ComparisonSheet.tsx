@@ -500,7 +500,11 @@ function ComparisonPlot({
 
         {dimensionLabel && (
           <>
-            <g className="extends" style={{ ["--draw-delay" as string]: "540ms" }}>
+            {/* The span is measured as the race finishes, not before it. */}
+            <g
+              className="extends"
+              style={{ ["--draw-delay" as string]: `${RACE_MS - 280}ms` }}
+            >
               <line
                 x1={PAD_L}
                 y1={baselineY + 22}
@@ -640,9 +644,11 @@ function ComparisonPlot({
                 fontSize="10"
                 fill="var(--ink-3)"
               >
+                {/* A wide paper halo: the overtaking line climbs steeply
+                    through exactly this spot. */}
                 <tspan
                   stroke="var(--paper)"
-                  strokeWidth="4"
+                  strokeWidth="6"
                   paintOrder="stroke"
                   strokeLinejoin="round"
                 >
@@ -761,25 +767,29 @@ function ComparisonPlot({
           .join(" ")}
       </p>
 
-      {traces.map((trace) => (
-        <table className="sr-only" key={trace.slug}>
-          <caption>{`Star history for ${trace.slug}`}</caption>
-          <thead>
-            <tr>
-              <th scope="col">Date</th>
-              <th scope="col">Stars</th>
-            </tr>
-          </thead>
-          <tbody>
-            {stride(trace.points, MAX_ROWS).map((point) => (
-              <tr key={point.date}>
-                <td>{fullDate(point.at)}</td>
-                <td>{point.value}</td>
+      {/* `sr-only` sits on a wrapper, not on each table: Firefox clips a
+          table's inner box but paints its caption, so the captions showed. */}
+      <div className="sr-only">
+        {traces.map((trace) => (
+          <table key={trace.slug}>
+            <caption>{`Star history for ${trace.slug}`}</caption>
+            <thead>
+              <tr>
+                <th scope="col">Date</th>
+                <th scope="col">Stars</th>
               </tr>
-            ))}
-          </tbody>
-        </table>
-      ))}
+            </thead>
+            <tbody>
+              {stride(trace.points, MAX_ROWS).map((point) => (
+                <tr key={point.date}>
+                  <td>{fullDate(point.at)}</td>
+                  <td>{point.value}</td>
+                </tr>
+              ))}
+            </tbody>
+          </table>
+        ))}
+      </div>
     </div>
   );
 }

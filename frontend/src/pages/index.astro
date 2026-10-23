@@ -177,23 +177,17 @@ const featuredCategories = [
 /**
  * The comparison is shown, not described: the first featured category drawn
  * from the same build snapshots its own page uses, so this costs no extra
- * request. Each series is thinned to the resolution the sheet can plot, which
- * keeps the island's props small without inventing a single reading.
+ * request. The series are passed whole, as that page passes them, so a
+ * crossing is dated identically on both and a reader comparing them finds the
+ * same month.
  */
-const SPECIMEN_POINTS = 200;
 const specimenCategory = featuredCategories[0];
 const specimenSnapshots = specimenCategory
   ? await Promise.all(specimenCategory.repos.map((slug) => loadBuildRepoSnapshot(slug)))
   : [];
 const specimenSeries = (specimenCategory?.repos ?? []).flatMap((slug, index) => {
   const history = specimenSnapshots[index]?.data?.history ?? [];
-  if (history.length < 2) return [];
-  const step = Math.max(1, (history.length - 1) / (SPECIMEN_POINTS - 1));
-  const points =
-    history.length <= SPECIMEN_POINTS
-      ? history
-      : Array.from({ length: SPECIMEN_POINTS }, (_, i) => history[Math.round(i * step)]);
-  return [{ slug, points }];
+  return history.length >= 2 ? [{ slug, points: history }] : [];
 });
 const landingWarmRepos = Array.from(
   new Set(featuredCategories.flatMap((c) => c.repos)),

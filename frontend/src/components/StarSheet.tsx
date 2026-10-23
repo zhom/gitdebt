@@ -353,7 +353,11 @@ export function StarSheet({
 
         {/* The span dimension, drawn below the baseline between the two
             extension ticks, with the measured value lettered on it. */}
-        <g className="extends" style={{ ["--draw-delay" as string]: "620ms" }}>
+        <g
+          className="extends"
+          // Measured as the trace finishes, whatever its draw length.
+          style={{ ["--draw-delay" as string]: "calc(var(--duration-draw) - 280ms)" }}
+        >
           <line
             x1={PAD_L}
             y1={baselineY + 22}
@@ -593,23 +597,27 @@ export function StarSheet({
       {/* The reading behind the drawing. A chart that only exists as a picture
           is unreadable to a screen reader and to an agent; the numbers are on
           the page either way. */}
-      <table className="sr-only">
-        <caption>{`Star history for ${repo}`}</caption>
-        <thead>
-          <tr>
-            <th scope="col">Date</th>
-            <th scope="col">Stars</th>
-          </tr>
-        </thead>
-        <tbody>
-          {points.map((p) => (
-            <tr key={p.date}>
-              <td>{formatFullDate(p.date)}</td>
-              <td>{p.stars}</td>
+      {/* `sr-only` sits on a wrapper, not on the table: Firefox clips a table's
+          inner box but paints its caption, so the caption showed on the sheet. */}
+      <div className="sr-only">
+        <table>
+          <caption>{`Star history for ${repo}`}</caption>
+          <thead>
+            <tr>
+              <th scope="col">Date</th>
+              <th scope="col">Stars</th>
             </tr>
-          ))}
-        </tbody>
-      </table>
+          </thead>
+          <tbody>
+            {points.map((p) => (
+              <tr key={p.date}>
+                <td>{formatFullDate(p.date)}</td>
+                <td>{p.stars}</td>
+              </tr>
+            ))}
+          </tbody>
+        </table>
+      </div>
     </figure>
   );
 }

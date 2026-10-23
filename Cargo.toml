@@ -12,9 +12,9 @@ repository = "https://github.com/zhom/gitdebt"
 
 [workspace.dependencies]
 tokio = { version = "1", features = ["full"] }
-axum = "0.8"
+axum = { git = "https://github.com/tokio-rs/axum" }
 tower = { version = "0.5", features = ["load-shed", "limit", "util"] }
-tower-http = { version = "0.7", features = ["cors", "trace", "timeout", "limit", "compression-gzip", "compression-br"] }
+tower-http = { version = "0.7", features = ["cors", "trace", "timeout", "limit", "compression-gzip"] }
 serde = { version = "1", features = ["derive"] }
 serde_json = "1"
 reqwest = { version = "0.13", default-features = false, features = ["json", "form", "rustls", "gzip"] }
@@ -26,12 +26,12 @@ tracing-subscriber = { version = "0.3", features = ["env-filter"] }
 dotenvy = "0.15"
 url = "2"
 futures = "0.3"
-sqlx = { version = "0.9", default-features = false, features = ["postgres", "runtime-tokio", "tls-rustls-aws-lc-rs", "chrono", "json"] }
+sqlx = { git = "https://github.com/transact-rs/sqlx", default-features = false, features = ["postgres", "runtime-tokio", "tls-rustls-aws-lc-rs", "chrono", "json"] }
 sha2 = "0.11"
 hex = "0.4"
 async-trait = "0.1"
 moka = { version = "0.12", features = ["future"] }
-axum-extra = { version = "0.12", features = ["cookie"] }
+axum-extra = { git = "https://github.com/tokio-rs/axum", features = ["cookie"] }
 hmac = "0.13"
 rand = "0.10"
 cookie = "0.18"

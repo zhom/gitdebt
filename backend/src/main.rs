@@ -64,7 +64,7 @@ async fn main() -> Result<()> {
         router(api_state).into_make_service_with_connect_info::<SocketAddr>(),
     )
     .with_graceful_shutdown(bootstrap::shutdown_signal())
-    .await?;
+    .await;
     tracing::info!("server shut down cleanly");
     Ok(())
 }

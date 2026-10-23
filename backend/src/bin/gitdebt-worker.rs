@@ -164,7 +164,7 @@ async fn main() -> Result<()> {
     tracing::info!(%addr, "gitdebt-worker health server listening");
     axum::serve(listener, app)
         .with_graceful_shutdown(bootstrap::shutdown_signal())
-        .await?;
+        .await;
     // The analysis pool is about to stop existing, and only this process knows
     // that. Waiting for the two-minute lease to expire instead handed the
     // incoming deployment a queue whose in-progress rows described workers

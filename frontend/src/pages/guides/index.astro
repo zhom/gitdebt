@@ -1,0 +1,136 @@
+---
+export const prerender = true;
+
+import Sheet from "@/layouts/Sheet.astro";
+import {
+  BODY,
+  BREADCRUMB,
+  CRUMB,
+  FIELD,
+  LEAD,
+  MEASURE,
+  TITLE,
+} from "@/components/style-tokens";
+import { allGuides } from "@/lib/guides";
+import { staticApiBase } from "@/lib/static-api-base";
+
+/**
+ * The guide index: a flat register of every task guide, in reading order.
+ *
+ * Each row is one job a reader came to do. The register carries no dates and
+ * no tags because a guide has one of each and the index would only repeat it.
+ */
+
+const apiBase = staticApiBase();
+const site = (Astro.site ?? new URL("https://gitdebt.com")).href.replace(
+  /\/$/,
+  "",
+);
+
+const guides = await allGuides();
+
+const title = "Guides · gitdebt";
+const description =
+  "Step-by-step guides for README star history charts, badges, contributor grids, profile stats and star history exports for public GitHub repositories.";
+const ogImage = `${apiBase}/api/og.png`;
+const canonical = `${site}/guides`;
+const lastUpdated = guides
+  .map((guide) => guide.data.updatedDate)
+  .sort()
+  .at(-1);
+
+const jsonLd: Record<string, unknown>[] = [
+  {
+    "@context": "https://schema.org",
+    "@type": "CollectionPage",
+    "@id": `${canonical}#guides`,
+    name: "gitdebt guides",
+    url: canonical,
+    description,
+    inLanguage: "en",
+    ...(lastUpdated ? { dateModified: lastUpdated } : {}),
+    publisher: { "@type": "Organization", name: "gitdebt", url: `${site}/` },
+    mainEntity: {
+      "@type": "ItemList",
+      numberOfItems: guides.length,
+      itemListElement: guides.map((guide, index) => ({
+        "@type": "ListItem",
+        position: index + 1,
+        name: guide.data.title,
+        url: `${site}/guides/${guide.id}`,
+      })),
+    },
+  },
+  {
+    "@context": "https://schema.org",
+    "@type": "BreadcrumbList",
+    itemListElement: [
+      { "@type": "ListItem", position: 1, name: "gitdebt", item: `${site}/` },
+      { "@type": "ListItem", position: 2, name: "Guides", item: canonical },
+    ],
+  },
+];
+---
+
+<Sheet
+  title={title}
+  description={description}
+  canonicalPath="/guides"
+  ogImage={ogImage}
+  jsonLd={jsonLd}
+>
+  {/* ── The title block ──────────────────────────────────────────────────── */}
+  <section class="registered border-b border-rule bg-paper">
+    <div class="mx-auto w-full max-w-6xl px-6 pt-8 pb-14">
+      <nav aria-label="Breadcrumb" class={BREADCRUMB}>
+        <a href="/" class={CRUMB}>gitdebt</a>
+        <span class="px-1.5 text-rule-strong" aria-hidden="true">/</span>
+        <span class="text-ink">guides</span>
+      </nav>
+
+      <div
+        class="mt-6 grid gap-x-12 gap-y-6 lg:grid-cols-[minmax(0,1fr)_auto] lg:items-end"
+      >
+        <h1 class={TITLE}>Guides</h1>
+        <div class="lg:text-right">
+          <p class={FIELD}>Guides</p>
+          <p class="mt-2 font-mono text-[0.8125rem] tabular-nums text-ink">
+            {guides.length}
+          </p>
+        </div>
+      </div>
+
+      <p class:list={["mt-6", LEAD, MEASURE]}>
+        Each guide covers one job for a public GitHub repository, step by
+        step, with the exact URLs and commands. gitdebt itself needs no
+        account or API key.
+      </p>
+    </div>
+  </section>
+
+  {/* ── The register ─────────────────────────────────────────────────────── */}
+  <section class="bg-table">
+    <div class="mx-auto w-full max-w-6xl px-6 py-16">
+      <h2 class="sr-only">All guides</h2>
+      <ol role="list" class="grid gap-px border border-rule-strong bg-rule">
+        {
+          guides.map((guide) => (
+            <li class="bg-paper">
+              <a
+                href={`/guides/${guide.id}`}
+                class="block p-5 text-ink-2 outline-none transition-colors duration-[--duration-ui] hover:bg-table hover:text-ink focus-visible:outline-2 focus-visible:-outline-offset-2 focus-visible:outline-signal sm:p-6"
+              >
+                <h3 class="font-draft text-[1.0625rem] leading-[1.2] text-ink">
+                  {guide.data.title}
+                </h3>
+                <p class:list={["mt-2.5", BODY, MEASURE]}>
+                  {guide.data.description}
+                </p>
+              </a>
+            </li>
+          ))
+        }
+      </ol>
+    </div>
+  </section>
+</Sheet>

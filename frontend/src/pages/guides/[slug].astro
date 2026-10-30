@@ -1,0 +1,222 @@
+---
+export const prerender = true;
+
+import { render } from "astro:content";
+import Sheet from "@/layouts/Sheet.astro";
+import ArticleBody from "@/components/ArticleBody.astro";
+import {
+  BODY,
+  BREADCRUMB,
+  CAPTION,
+  CRUMB,
+  FIELD,
+  HEADING,
+  MEASURE,
+  SECTION_ACTION,
+  TITLE,
+} from "@/components/style-tokens";
+import { postDay } from "@/lib/blog";
+import { allGuides, type Guide } from "@/lib/guides";
+import { staticApiBase } from "@/lib/static-api-base";
+
+/**
+ * One task guide, from `src/content/guides/{slug}.md`.
+ *
+ * The title block states the task and the day the steps were last checked;
+ * the body is the guide's Markdown, set as prose by the same component the
+ * blog uses. Related guides and the previous/next pair come from the
+ * collection, so a renamed guide can never leave a dead link behind.
+ */
+
+export async function getStaticPaths() {
+  const guides = await allGuides();
+  return guides.map((guide, index) => ({
+    params: { slug: guide.id },
+    props: {
+      guide,
+      previous: guides[index - 1] ?? null,
+      next: guides[index + 1] ?? null,
+      related: guide.data.related.map((slug) => {
+        const match = guides.find((candidate) => candidate.id === slug);
+        if (!match) {
+          throw new Error(`Guide ${guide.id} names an unknown related guide: ${slug}`);
+        }
+        return match;
+      }),
+    },
+  }));
+}
+
+interface Props {
+  guide: Guide;
+  previous: Guide | null;
+  next: Guide | null;
+  related: Guide[];
+}
+
+const { guide, previous, next, related } = Astro.props;
+const { Content } = await render(guide);
+const { data } = guide;
+
+const apiBase = staticApiBase();
+const site = (Astro.site ?? new URL("https://gitdebt.com")).href.replace(
+  /\/$/,
+  "",
+);
+
+const canonicalPath = `/guides/${guide.id}`;
+const canonical = `${site}${canonicalPath}`;
+const ogImage = `${apiBase}/api/og.png`;
+const updated = data.updatedDate;
+
+const jsonLd: Record<string, unknown>[] = [
+  {
+    "@context": "https://schema.org",
+    "@type": "TechArticle",
+    "@id": `${canonical}#article`,
+    headline: data.title,
+    description: data.description,
+    url: canonical,
+    mainEntityOfPage: { "@type": "WebPage", "@id": canonical },
+    datePublished: updated,
+    dateModified: updated,
+    inLanguage: "en",
+    image: ogImage,
+    author: { "@type": "Organization", name: "gitdebt", url: `${site}/` },
+    publisher: {
+      "@type": "Organization",
+      name: "gitdebt",
+      url: `${site}/`,
+      logo: { "@type": "ImageObject", url: `${site}/icon-512.png` },
+    },
+    isPartOf: {
+      "@type": "CollectionPage",
+      "@id": `${site}/guides#guides`,
+      name: "gitdebt guides",
+      url: `${site}/guides`,
+    },
+  },
+  {
+    "@context": "https://schema.org",
+    "@type": "BreadcrumbList",
+    itemListElement: [
+      { "@type": "ListItem", position: 1, name: "gitdebt", item: `${site}/` },
+      { "@type": "ListItem", position: 2, name: "Guides", item: `${site}/guides` },
+      { "@type": "ListItem", position: 3, name: data.title, item: canonical },
+    ],
+  },
+];
+
+const stepLinks = [
+  previous && { label: "Previous guide", guide: previous },
+  next && { label: "Next guide", guide: next },
+].filter((link): link is { label: string; guide: Guide } => Boolean(link));
+---
+
+<Sheet
+  title={`${data.metaTitle} · gitdebt`}
+  description={data.description}
+  canonicalPath={canonicalPath}
+  ogImage={ogImage}
+  ogType="article"
+  jsonLd={jsonLd}
+>
+  <Fragment slot="head">
+    <meta property="article:modified_time" content={updated} />
+  </Fragment>
+
+  <article>
+    {/* ── The title block ────────────────────────────────────────────────── */}
+    <header class="registered border-b border-rule bg-paper">
+      <div class="mx-auto w-full max-w-6xl px-6 pt-8 pb-14">
+        <nav aria-label="Breadcrumb" class={BREADCRUMB}>
+          <a href="/" class={CRUMB}>gitdebt</a>
+          <span class="px-1.5 text-rule-strong" aria-hidden="true">/</span>
+          <a href="/guides" class={CRUMB}>guides</a>
+          <span class="px-1.5 text-rule-strong" aria-hidden="true">/</span>
+          <span class="break-all text-ink">{guide.id}</span>
+        </nav>
+
+        <div
+          class="mt-6 grid gap-x-12 gap-y-6 lg:grid-cols-[minmax(0,1fr)_auto] lg:items-end"
+        >
+          <h1 class:list={[TITLE, "break-words"]}>{data.title}</h1>
+          <dl class="lg:text-right">
+            <dt class={FIELD}>Last updated</dt>
+            <dd class="mt-2 font-mono text-[0.8125rem] tabular-nums text-ink">
+              <time datetime={updated}>{postDay(updated)}</time>
+            </dd>
+          </dl>
+        </div>
+      </div>
+    </header>
+
+    {/* ── The steps ──────────────────────────────────────────────────────── */}
+    <div class="border-b border-rule bg-paper">
+      <div class="mx-auto w-full max-w-6xl px-6 py-14">
+        <ArticleBody title={data.title} class={MEASURE}>
+          <Content />
+        </ArticleBody>
+      </div>
+    </div>
+  </article>
+
+  {/* ── Related guides ──────────────────────────────────────────────────── */}
+  <section
+    aria-labelledby="related-guides-heading"
+    class="border-b border-rule bg-table"
+  >
+    <div class="mx-auto w-full max-w-6xl px-6 py-16">
+      <h2 id="related-guides-heading" class={HEADING}>Related guides</h2>
+      <ul role="list" class="mt-8 grid gap-px border border-rule-strong bg-rule">
+        {
+          related.map((item) => (
+            <li class="bg-paper">
+              <a
+                href={`/guides/${item.id}`}
+                class="block p-5 text-ink-2 outline-none transition-colors duration-[--duration-ui] hover:bg-table hover:text-ink focus-visible:outline-2 focus-visible:-outline-offset-2 focus-visible:outline-signal sm:p-6"
+              >
+                <span class="font-draft text-[1.0625rem] leading-[1.2] text-ink">
+                  {item.data.title}
+                </span>
+                <span class:list={["mt-2 block", BODY, MEASURE]}>
+                  {item.data.description}
+                </span>
+              </a>
+            </li>
+          ))
+        }
+      </ul>
+    </div>
+  </section>
+
+  {/* ── Previous and next ───────────────────────────────────────────────── */}
+  <nav aria-label="Guides" class="bg-paper">
+    <div class="mx-auto w-full max-w-6xl px-6 py-10">
+      <ul
+        role="list"
+        class="grid gap-px border border-rule-strong bg-rule sm:grid-cols-2"
+      >
+        {
+          stepLinks.map((link) => (
+            <li class="bg-paper">
+              <a
+                href={`/guides/${link.guide.id}`}
+                rel={link.label === "Next guide" ? "next" : "prev"}
+                class="block h-full p-5 text-ink-2 outline-none transition-colors duration-[--duration-ui] hover:bg-table hover:text-ink focus-visible:outline-2 focus-visible:-outline-offset-2 focus-visible:outline-signal"
+              >
+                <span class:list={[CAPTION, "block"]}>{link.label}</span>
+                <span class="mt-2 block text-[0.9375rem] leading-[1.4] text-ink">
+                  {link.guide.data.title}
+                </span>
+              </a>
+            </li>
+          ))
+        }
+      </ul>
+      <p class="mt-8">
+        <a href="/guides" class={SECTION_ACTION}>All guides</a>
+      </p>
+    </div>
+  </nav>
+</Sheet>

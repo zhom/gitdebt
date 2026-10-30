@@ -127,4 +127,28 @@ const blog = defineCollection({
   }),
 });
 
-export const collections = { blog };
+/**
+ * Task guides: one Markdown file per job, written in this repository.
+ *
+ * `src/content/guides/{slug}.md` is published at `/guides/{slug}`. Unlike the
+ * blog, the folder is never empty and nothing outside the repository writes
+ * to it, so the schema is strict: a misspelled key is a build error rather
+ * than a silently ignored field. `title` is the page's H1; `metaTitle` is the
+ * shorter `<title>` text, because the H1 states the whole task and the tab has
+ * to fit it beside " · gitdebt". `order` places the guide in the index and in
+ * the previous/next links, and `related` names two to four other guides.
+ * `scripts/guides.test.mjs` holds the length and link rules.
+ */
+const guides = defineCollection({
+  loader: glob({ base: "./src/content/guides", pattern: "*.md" }),
+  schema: z.strictObject({
+    title: z.string(),
+    metaTitle: z.string(),
+    description: z.string(),
+    updatedDate: postDate,
+    order: z.number().int().positive(),
+    related: z.array(z.string()).min(2).max(4),
+  }),
+});
+
+export const collections = { blog, guides };

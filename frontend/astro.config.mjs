@@ -54,6 +54,7 @@ function pagesRedirects(apiBase) {
 /badges/ /badges 301
 /blog/ /blog 301
 /compare/ /compare 301
+/guides/ /guides 301
 /in-tweet/ /in-tweet 301
 /leaderboard/ /leaderboard 301
 /report/ /report 301

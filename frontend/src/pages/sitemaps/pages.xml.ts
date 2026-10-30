@@ -1,6 +1,7 @@
 import type { APIRoute } from "astro";
 import { CATEGORIES } from "@/data/categories";
 import { postDay, publishedPosts } from "@/lib/blog";
+import { allGuides } from "@/lib/guides";
 import {
   staticComparisonPaths,
   staticLogins,
@@ -61,7 +62,26 @@ export const GET: APIRoute = async ({ site }) => {
     priority: "0.6",
     lastmod: postDay(post.data.updatedDate ?? post.data.publishDate),
   }));
-  const pages: SitemapPage[] = [...PAGES, ...postPages, ...loginPages];
+  const guides = await allGuides();
+  const guidePages: SitemapPage[] = guides.map((guide) => ({
+    path: `/guides/${guide.id}`,
+    changefreq: "monthly",
+    priority: "0.7",
+    lastmod: postDay(guide.data.updatedDate),
+  }));
+  const guideIndex: SitemapPage = {
+    path: "/guides",
+    changefreq: "monthly",
+    priority: "0.7",
+    lastmod: guidePages.map((page) => page.lastmod ?? "").sort().at(-1),
+  };
+  const pages: SitemapPage[] = [
+    ...PAGES,
+    guideIndex,
+    ...guidePages,
+    ...postPages,
+    ...loginPages,
+  ];
 
   const urls = pages.map(
     (p) => `  <url>

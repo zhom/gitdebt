@@ -27,6 +27,23 @@ Gitdebt analyzes public repositories only. Private repositories are ignored and 
 - https://gitdebt.com/badges
 - https://gitdebt.com/about
 
+## Guides
+
+Step-by-step task guides. These pages are HTML only: the API serves no Markdown for them yet.
+
+- https://gitdebt.com/guides
+- https://gitdebt.com/guides/add-star-history-chart-to-readme: How to add a star history chart to your GitHub README
+- https://gitdebt.com/guides/fix-star-history-chart: How to fix a star history chart that stopped updating
+- https://gitdebt.com/guides/readme-dark-mode-images: How to show light and dark mode images in a GitHub README
+- https://gitdebt.com/guides/show-contributors-in-readme: How to show contributors in your GitHub README
+- https://gitdebt.com/guides/commit-activity-graph-readme: How to add a commit activity graph to a repository README
+- https://gitdebt.com/guides/actively-maintained-badge: How to add an actively maintained badge to your README
+- https://gitdebt.com/guides/contributor-ready-repository: How to make a GitHub repository ready for contributors
+- https://gitdebt.com/guides/github-profile-readme-stats: How to add stats to your GitHub profile README
+- https://gitdebt.com/guides/count-github-stars: How to count the total stars of a GitHub user or organization
+- https://gitdebt.com/guides/export-star-history: How to export GitHub star history to CSV or JSON
+- https://gitdebt.com/guides/repository-stats-api: How to get GitHub repository stats as JSON
+
 ## More detail
 
 - https://gitdebt.com/llms-full.txt

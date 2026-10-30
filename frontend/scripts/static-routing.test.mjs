@@ -71,6 +71,7 @@ function validOutput(directory, redirects = null) {
     "badges",
     "blog",
     "compare",
+    "guides",
     "leaderboard",
     "privacy",
     "profile",
@@ -118,6 +119,7 @@ function validOutput(directory, redirects = null) {
 /badges/ /badges 301
 /blog/ /blog 301
 /compare/ /compare 301
+/guides/ /guides 301
 /in-tweet/ /in-tweet 301
 /leaderboard/ /leaderboard 301
 /report/ /report 301
@@ -214,6 +216,7 @@ test("application, legal, malformed, and non-repo routes stay on the 404", () =>
     "/terms/archive",
     "/compare/frontend-frameworks",
     "/blog/some-article",
+    "/guides/some-guide",
     "/u/zhom",
     "/vs/a/b/c/d",
     "/only-one-segment",
@@ -243,6 +246,7 @@ test("reserved first segments are never published or resolved as profiles", () =
     "badges",
     "blog",
     "compare",
+    "guides",
     "in-tweet",
     "leaderboard",
     "privacy",

@@ -38,7 +38,7 @@ cookie = "0.18"
 walkdir = "2"
 md-5 = "0.11"
 tempfile = "3"
-resvg = { version = "0.48", default-features = false, features = ["text", "raster-images"] }
+resvg = { version = "0.49", default-features = false, features = ["text", "raster-images"] }
 image = { version = "0.25", default-features = false, features = ["gif", "webp"] }
 aes-gcm = "0.11"
 base64 = "0.23"

@@ -17,6 +17,6 @@
     "test": "node --test test/*.test.mjs"
   },
   "devDependencies": {
-    "addons-linter": "^10.14.0"
+    "addons-linter": "^10.15.0"
   }
 }

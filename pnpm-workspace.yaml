@@ -4,3 +4,8 @@ allowBuilds:
   esbuild: true
   sharp: true
   workerd: true
+# astro2tsx pins @emnapi/core but not the runtime it must match.
+packageExtensions:
+  '@astrojs/astro2tsx':
+    dependencies:
+      '@emnapi/runtime': 1.11.3
